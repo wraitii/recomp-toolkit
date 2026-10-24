@@ -18,8 +18,13 @@ store_hooks = false
 passthrough = ["PYTHONVERBOSE"]
 
 [translate]
+dispatch = { shift = 2, max_probe = 2 }
 code_map = "metadata"
+analysis_facts = "metadata/analysis-facts.json"
 native = { header = "native/civ4_native.h", sources = ["native/effect_state_manager.c", "native/voice_capture.c"] }
+
+[analysis]
+guest_bounds = true
 
 [settings]
 presentation_filter = "nearest"

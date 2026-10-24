@@ -1,10 +1,8 @@
 format=recomp-code-map-v3
 status=complete
-provenance=provisional-sweep
-emitter=decoded
-trap_instructions=
+provenance=empty
 executable_sha256=8094af5ee310714caebccaeee7769ffb08048503ba478b879edfef5f1a24fefe
 image_base=10000000
-functions=1453
-instructions=79823
-instruction_bytes=232409
+functions=0
+instructions=0
+instruction_bytes=0
