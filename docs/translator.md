@@ -155,11 +155,24 @@ disables the assumption for the listed function owners in the main image, includ
 their compiled variants. `DIVERGENCE(original):` newly allocated, unescaped frame
 storage is assumed inaccessible through pointers independent of entry ESP, including
 pre-existing pointers and wrapping arithmetic. Explicit ESP-derived accesses still
-alias normally. The current implementation requires a single entry, no calls,
-opaque effects or escaping branches, and no ESP-derived value stored to memory.
+alias normally. Load forwarding requires a single entry, no calls, opaque effects
+or escaping branches, and no ESP-derived value stored to memory.
 Each exempted write needs a proved current ESP below the entire negative-offset
-slot; arguments and the return address remain conservative. Guest stores remain,
-and original-code analysis summaries do not use this assumption.
+slot; arguments and the return address remain conservative. Forwarding retains
+guest stores, and original-code analysis summaries do not use this assumption.
+
+`[translate] lazy_stack_writes` defaults to true when the private-stack assumption
+is enabled, fault state is relaxed, and store hooks are disabled. Exact negative
+frame slots carry pending values through ordinary SSA phis. A backward pass keeps
+a store eager unless it can be overwritten across an access separated by the
+private-stack assumption. Calls flush and clear pending writes; actual ESP changes
+flush before subsequent effects. Publication requires a pending write on every
+incoming path; mixed paths retain eager stores instead of runtime dirty guards.
+Overlapping candidate slots, unknown effects, alternate entries, stored frame
+addresses, and calls exposing a frame-derived register retain eager writes. `DIVERGENCE(original):` eligible
+private-frame writes are delayed; final bytes are preserved and no expired writes
+are discarded. Set `lazy_stack_writes = false` to retain forwarding with eager
+stores; `exposed_stack_functions` disables both optimizations for an owner.
 
 `[translate] stack_memory` enables additional original-code summaries for offline
 inference; it defaults to false. Ghost Recon enables it with the explicit premise

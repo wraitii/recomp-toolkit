@@ -190,16 +190,25 @@ fn identified(range: Range) -> bool {
 }
 
 #[derive(Default)]
-struct PrivateFrame {
+pub(crate) struct PrivateFrame {
+    pub(crate) eligible: bool,
     independent: Lookup<ValueId, i32>,
 }
 
 impl PrivateFrame {
-    fn new(s: &Ssa, accesses: &BTreeMap<ValueId, Access>) -> Self {
+    pub(crate) fn new(
+        s: &Ssa,
+        accesses: &BTreeMap<ValueId, Access>,
+        calls_are_barriers: bool,
+    ) -> Self {
         if !s.assume_private_stack
             || s.entries.len() != 1
             || s.entries[0].addr != s.addr
-            || accesses.values().any(|access| access.location.is_none())
+            || accesses.iter().any(|(&id, access)| {
+                access.location.is_none()
+                    && !(calls_are_barriers
+                        && matches!(s.value(id).op, Op::Call { .. } | Op::CallInd))
+            })
         {
             return Self::default();
         }
@@ -207,6 +216,7 @@ impl PrivateFrame {
             for &id in &block.ops {
                 let op = s.value(id).op;
                 if rk_ir::properties(op).opaque
+                    && !(calls_are_barriers && matches!(op, Op::Call { .. } | Op::CallInd))
                     || matches!(
                         op,
                         Op::Seh(_)
@@ -252,6 +262,21 @@ impl PrivateFrame {
         {
             return Self::default();
         }
+        if calls_are_barriers
+            && s.blocks.iter().flat_map(|block| &block.ops).any(|&id| {
+                matches!(s.value(id).op, Op::Call { .. } | Op::CallInd)
+                    && s.boundary(id).is_some_and(|state| {
+                        state.iter().any(|&(key, value)| {
+                            s.field(key).is_some_and(|field| {
+                                field != Field::Esp
+                                    && !rk_core::contract::Fields::FLAGS.contains(field)
+                            }) && derived[value as usize]
+                        })
+                    })
+            })
+        {
+            return Self::default();
+        }
         let mut addresses = Addresses::new(s);
         let mut independent = Lookup::default();
         for (&id, access) in accesses {
@@ -269,10 +294,13 @@ impl PrivateFrame {
                 }
             }
         }
-        Self { independent }
+        Self {
+            eligible: true,
+            independent,
+        }
     }
 
-    fn disjoint(&self, effect: ValueId, range: Range) -> bool {
+    pub(crate) fn disjoint(&self, effect: ValueId, range: Range) -> bool {
         let Address::Known {
             base: Base::Frame,
             offset,
@@ -297,7 +325,7 @@ pub fn partition(s: &mut Ssa, facts: Option<&dyn CallFacts>) -> bool {
         return true;
     }
     let accesses = accesses(s, facts);
-    let private_frame = PrivateFrame::new(s, &accesses);
+    let private_frame = PrivateFrame::new(s, &accesses, false);
     let mut ranges: BTreeSet<Range> = accesses
         .values()
         .filter_map(|access| access.location)

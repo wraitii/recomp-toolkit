@@ -141,6 +141,7 @@ fn shape(s: &Ssa, id: ValueId) -> bool {
             BranchInd | Return => n == 1 && z == 0 && size(0) == 4,
             CallInd | CallOther | Unknown => n == 1 && size(0) == 0 && z == 0,
         },
+        Op::StackBoundary => n == 2 && z == 0 && size(0) == 4 && size(1) == 4,
         Op::Input(key) => n == 0 && state_width(key, z),
         Op::Const(_) => n == 0 && z > 0,
         Op::Target(_) => n == 0 && z == 4,

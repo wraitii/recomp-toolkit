@@ -76,19 +76,24 @@ impl Default for BuildOptions<'static> {
 }
 
 pub fn build(cg: &CgFunction, opts: &BuildOptions) -> Result<Ssa, Diagnostic> {
-    build_with_faults(cg, opts, FaultState::Exact)
+    build_with_faults(cg, opts, FaultState::Exact, false)
 }
 
 pub(crate) fn build_with_faults(
     cg: &CgFunction,
     opts: &BuildOptions,
     fault_state: FaultState,
+    lazy_stack_writes: bool,
 ) -> Result<Ssa, Diagnostic> {
-    Builder::new(cg, opts, fault_state)?.run(cg)
+    let mut builder = Builder::new(cg, opts, fault_state)?;
+    builder.lazy_stack_writes = lazy_stack_writes;
+    builder.run(cg)
 }
 
 struct Builder<'a> {
     opts: &'a BuildOptions<'a>,
+    lazy_stack_writes: bool,
+    stack_states: BTreeMap<ValueId, [ValueId; 4]>,
     keys: Vec<StateKey>,
     key_index: Lookup<StateKey, usize>,
     field_of: Vec<Option<Field>>,
@@ -249,6 +254,8 @@ impl<'a> Builder<'a> {
         let keys_len = keys.len();
         Ok(Self {
             opts,
+            lazy_stack_writes: false,
+            stack_states: BTreeMap::new(),
             keys,
             key_index,
             field_of: fields,
@@ -480,6 +487,17 @@ impl<'a> Builder<'a> {
                         ));
                     }
                     self.current_addr = insn.addr;
+                    let esp = Registers::get().require("ESP");
+                    let stack_before = if self.lazy_stack_writes
+                        && cg_op.output.is_some_and(|output| {
+                            output.space == esp.space
+                                && output.offset < esp.offset + esp.size as u64
+                                && esp.offset < output.offset + output.size as u64
+                        }) {
+                        Some(self.read(&esp, &mut state, &mut temps, block_id)?)
+                    } else {
+                        None
+                    };
                     if let Err(mut diagnostic) = self.apply_op(
                         cg_op,
                         insn.addr,
@@ -493,6 +511,10 @@ impl<'a> Builder<'a> {
                             diagnostic.addr = insn.addr;
                         }
                         return Err(diagnostic);
+                    }
+                    if let Some(before) = stack_before {
+                        let after = self.read(&esp, &mut state, &mut temps, block_id)?;
+                        ops.push(self.value(Op::StackBoundary, 0, &[before, after]));
                     }
                 }
                 if let Some((a, b)) = insn.flag_operands {
@@ -547,6 +569,7 @@ impl<'a> Builder<'a> {
             flags: self.flags,
             loc: self.loc,
             value_addr: self.value_addr,
+            stack_states: self.stack_states,
             memory_partitioned: false,
             assume_private_stack: false,
             phi_key: self.phi_key,
@@ -989,6 +1012,14 @@ impl<'a> Builder<'a> {
                 }
                 let size = cg_op.output.map_or(0, |v| v.size as u8);
                 let value = self.value(cg_op.op, size, &args);
+                if self.lazy_stack_writes {
+                    let mut lanes = [0; 4];
+                    for (lane, key) in rk_ir::lanes(Field::Esp).iter().enumerate() {
+                        lanes[lane] =
+                            self.state_slot(state, *self.key_index.get(key).unwrap(), block)?;
+                    }
+                    self.stack_states.insert(value, lanes);
+                }
                 if self.relaxed_memory() {
                     if cg_op.op == Op::P(OpCode::Store) {
                         self.boundary(value, state, block, true)?;
@@ -1091,6 +1122,7 @@ impl<'a> Builder<'a> {
             | Op::Byte(_)
             | Op::Pack
             | Op::Memory
+            | Op::StackBoundary
             | Op::StateReload(_)
             | Op::StateKeep(_)
             | Op::CcKind(_) => {

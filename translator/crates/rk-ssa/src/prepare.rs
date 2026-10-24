@@ -20,6 +20,7 @@ pub struct PrepareOptions<'a> {
     pub fault_state: FaultState,
     pub coalesce_roots: bool,
     pub assume_private_stack: bool,
+    pub lazy_stack_writes: bool,
 }
 
 impl Default for PrepareOptions<'static> {
@@ -40,6 +41,7 @@ impl<'a> PrepareOptions<'a> {
             fault_state: FaultState::Relaxed,
             coalesce_roots: true,
             assume_private_stack: false,
+            lazy_stack_writes: false,
         }
     }
 }
@@ -58,14 +60,22 @@ pub fn prepare_with_publications(
         allow_slow: opts.allow_slow,
         value_budget: opts.value_budget,
     };
-    let mut ssa = crate::build::build_with_faults(cg, &build_options, opts.fault_state)
-        .map_err(rk_core::Error::Diagnostic)?;
+    let lazy_stack_writes = opts.lazy_stack_writes
+        && opts.assume_private_stack
+        && opts.policy == Policy::Optimizing
+        && opts.fault_state == FaultState::Relaxed;
+    let mut ssa =
+        crate::build::build_with_faults(cg, &build_options, opts.fault_state, lazy_stack_writes)
+            .map_err(rk_core::Error::Diagnostic)?;
     crate::validate(&ssa)?;
     ssa.assume_private_stack = opts.assume_private_stack && opts.policy == Policy::Optimizing;
     canonicalize(&mut ssa, opts.signed_sub);
     forward(&mut ssa, Some(opts.call_facts));
     if opts.policy == Policy::Optimizing && opts.fault_state == FaultState::Relaxed {
         crate::memory::eliminate_dead_stores(&mut ssa, Some(opts.call_facts));
+    }
+    if lazy_stack_writes {
+        crate::stack::promote(&mut ssa);
     }
     crate::flags::build_joins(&mut ssa);
     crate::coalesce::coalesce(&mut ssa, opts.coalesce_roots);

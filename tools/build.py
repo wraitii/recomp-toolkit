@@ -357,6 +357,7 @@ def translation_input(cfg):
             "exe": str(cfg["developer_exe_path"]),
             "code_map": str(cfg["code_map_path"]) if cfg.get("code_map_path") else None,
             "image_base": cfg["game"]["image_base"], "sha256": cfg["game"]["sha256"],
+            "store_hooks": cfg["game"]["store_hooks"],
             "translate": stable(cfg["translate"]), "globals": stable(cfg["globals"]),
             "curated": stable(cfg["curated"]), "aux_modules": stable(cfg["aux_modules"]),
             "reloc": str(reloc["manifest_path"]) if reloc else None}

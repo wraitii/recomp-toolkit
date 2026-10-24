@@ -90,6 +90,7 @@ pub enum Op {
     Byte(u8),
     Pack,
     Memory,
+    StackBoundary,
     StateReload(StateKey),
     StateKeep(StateKey),
     CcKind(CcKind),
@@ -235,6 +236,10 @@ pub fn properties(op: Op) -> Properties {
                 faults: true,
                 ..Properties::new()
             },
+        },
+        Op::StackBoundary => Properties {
+            synthetic: true,
+            ..Properties::new()
         },
         Op::Call { .. } | Op::CallInd => Properties::effect(),
         Op::Div { .. } | Op::Idiv { .. } | Op::String(_) => Properties::effect(),

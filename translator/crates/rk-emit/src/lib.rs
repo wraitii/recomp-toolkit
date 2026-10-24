@@ -934,7 +934,7 @@ impl<'a> Emitter<'a> {
             self.write_x87(lines);
         }
         match item.op {
-            Op::Memory => Ok(true),
+            Op::Memory | Op::StackBoundary => Ok(true),
             Op::X87(op) => {
                 if op.touches_memory() || matches!(op, rk_ir::x87::X87Op::Conditional(..)) {
                     self.publish(value)?;

@@ -20,6 +20,7 @@ mod forward;
 mod liveness;
 pub mod memory;
 mod prepare;
+mod stack;
 mod validate;
 pub use validate::validate;
 
@@ -140,6 +141,7 @@ pub struct Ssa {
     pub flags: Vec<FlagRecord>,
     pub loc: Vec<Option<InsnLoc>>,
     pub value_addr: Vec<Addr>,
+    pub(crate) stack_states: BTreeMap<ValueId, [ValueId; 4]>,
     pub(crate) memory_partitioned: bool,
     pub(crate) assume_private_stack: bool,
     pub(crate) phi_key: Lookup<ValueId, usize>,

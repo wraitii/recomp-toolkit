@@ -60,6 +60,11 @@ impl<'a> Addresses<'a> {
     }
 
     pub fn state(&mut self, site: ValueId, field: Field) -> Address {
+        if field == Field::Esp {
+            if let Some(lanes) = self.ssa.stack_states.get(&site) {
+                return self.packed(lanes);
+            }
+        }
         let Some(state) = self.ssa.boundary(site) else {
             return Address::Unknown;
         };

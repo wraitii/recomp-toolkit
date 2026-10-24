@@ -240,6 +240,7 @@ struct BodyContext<'a> {
     x87_options: rk_x87::Options,
     fault_state: rk_core::settings::FaultState,
     assume_private_stack: bool,
+    lazy_stack_writes: bool,
     exposed_stack_functions: &'a BTreeSet<Addr>,
     known_entries: &'a BTreeSet<Addr>,
     setjmp_targets: &'a BTreeSet<Addr>,
@@ -293,6 +294,7 @@ fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::
             private_targets: ctx.private_targets,
             descriptors: ctx.switches.descriptors,
             coalesce_roots: ctx.switches.coalesce_roots,
+            lazy_stack_writes: ctx.lazy_stack_writes,
             assume_private_stack: ctx.assume_private_stack
                 && !ctx.exposed_stack_functions.contains(&ir.addr),
         },
@@ -531,6 +533,7 @@ fn build_bodies(
         },
         fault_state: settings.fault_state,
         assume_private_stack: settings.assume_private_stack,
+        lazy_stack_writes: settings.lazy_stack_writes,
         exposed_stack_functions: &settings.exposed_stack_functions,
         known_entries: &known_entries,
         setjmp_targets: &setjmp_targets,
@@ -811,6 +814,7 @@ fn dump_ssa(
         if prepared {
             let options = rk_ssa::PrepareOptions {
                 coalesce_roots: switches.coalesce_roots,
+                lazy_stack_writes: settings.lazy_stack_writes,
                 assume_private_stack: settings.assume_private_stack
                     && !settings.exposed_stack_functions.contains(&owner),
                 ..Default::default()

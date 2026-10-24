@@ -62,6 +62,11 @@ pub(crate) fn rewrite_aliases(s: &mut Ssa, alias: &impl Aliases) {
             *arg = resolve_alias(alias, *arg);
         }
     }
+    for (_, lanes) in s.stack_states.iter_mut() {
+        for value in lanes {
+            *value = resolve_alias(alias, *value);
+        }
+    }
     for (_, value) in &mut s.state {
         *value = resolve_alias(alias, *value);
     }

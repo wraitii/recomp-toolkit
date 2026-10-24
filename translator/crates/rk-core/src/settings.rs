@@ -21,6 +21,8 @@ struct Input {
     reloc: Option<PathBuf>,
     translate: Translate,
     #[serde(default)]
+    store_hooks: Option<bool>,
+    #[serde(default)]
     globals: BTreeMap<String, Global>,
     #[serde(default)]
     curated: Curated,
@@ -37,6 +39,7 @@ pub struct Translate {
     pub call_contracts: bool,
     pub stack_memory: bool,
     pub assume_private_stack: Option<bool>,
+    pub lazy_stack_writes: Option<bool>,
     pub exposed_stack_functions: Vec<Addr>,
     pub x87_cw_clone: bool,
     pub private_leaf_contracts: bool,
@@ -269,6 +272,7 @@ pub struct Settings {
     pub call_contracts: bool,
     pub stack_memory: bool,
     pub assume_private_stack: bool,
+    pub lazy_stack_writes: bool,
     pub exposed_stack_functions: BTreeSet<Addr>,
     pub private_leaf_contracts: bool,
     pub private_input_arguments: bool,
@@ -437,6 +441,8 @@ impl Settings {
             call_contracts: t.call_contracts,
             stack_memory: t.stack_memory,
             assume_private_stack: t.assume_private_stack.unwrap_or(true),
+            lazy_stack_writes: t.lazy_stack_writes.unwrap_or(true)
+                && !input.store_hooks.unwrap_or(true),
             exposed_stack_functions: only_main(&t.exposed_stack_functions),
             private_leaf_contracts: t.private_leaf_contracts && main,
             private_input_arguments: t.private_input_arguments && main,
