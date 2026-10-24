@@ -1,6 +1,6 @@
 use rk_core::ir::OpCode;
 use rk_core::{Lookup, LookupSet};
-use rk_ir::x87::MemoryEffect;
+use rk_ir::x87::{MemoryEffect, X87Op};
 use rk_ir::Op;
 
 use crate::address::Addresses;
@@ -11,12 +11,16 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
     crate::memory::partition(s, call_facts);
     let mut addresses = Addresses::new(s);
     let mut alias: Lookup<ValueId, ValueId> = Lookup::default();
+    let mut integers = Vec::new();
     for block in &s.blocks {
         for &load in &block.ops {
-            if s.value(load).op != Op::P(OpCode::Load) {
-                continue;
-            }
-            let width = s.value(load).size;
+            let width = match s.value(load).op {
+                Op::P(OpCode::Load) => s.value(load).size,
+                Op::X87(X87Op::PushInteger {
+                    bits: bits @ (16 | 32 | 64),
+                }) => (bits / 8) as u8,
+                _ => continue,
+            };
             let target = addresses.get(s.args(load)[1]);
             if !target.is_exact() {
                 continue;
@@ -86,13 +90,21 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
             }
             if !failed {
                 if let Some(saved) = saved {
-                    alias.insert(load, saved);
+                    if matches!(s.value(load).op, Op::X87(_)) {
+                        integers.push((load, saved, width));
+                    } else {
+                        alias.insert(load, saved);
+                    }
                 }
             }
         }
     }
-    if alias.is_empty() {
+    if alias.is_empty() && integers.is_empty() {
         return false;
+    }
+    let mut forwarded: LookupSet<ValueId> = LookupSet::default();
+    for &(load, _, _) in &integers {
+        forwarded.insert(load);
     }
     for index in 0..s.values.len() {
         if s.values[index].op != Op::Memory {
@@ -102,13 +114,23 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
         let Some(&effect) = args.first() else {
             continue;
         };
-        if alias.contains_key(&effect) {
+        if alias.contains_key(&effect) || forwarded.contains(&effect) {
             let memory = args.get(1).copied().unwrap_or(s.args(effect)[0]);
             alias.insert(index as ValueId, memory);
             let start = s.values[index].args_start as usize;
             s.args[start] = memory;
             s.values[index].args_len = 1;
         }
+    }
+    for (load, saved, width) in integers {
+        let start = s.args.len() as u32;
+        s.args.push(saved);
+        let value = &mut s.values[load as usize];
+        value.op = Op::X87(X87Op::PushIntegerValue {
+            bits: width as u16 * 8,
+        });
+        value.args_start = start;
+        value.args_len = 1;
     }
     rewrite_aliases(s, &alias);
     canonicalize(s, true);

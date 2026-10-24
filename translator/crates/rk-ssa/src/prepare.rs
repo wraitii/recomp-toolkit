@@ -61,6 +61,9 @@ pub fn prepare_with_publications(
     crate::validate(&ssa)?;
     canonicalize(&mut ssa, opts.signed_sub);
     forward(&mut ssa, Some(opts.call_facts));
+    if opts.policy == Policy::Optimizing && opts.fault_state == FaultState::Relaxed {
+        crate::memory::eliminate_dead_stores(&mut ssa, Some(opts.call_facts));
+    }
     crate::flags::build_joins(&mut ssa);
     crate::coalesce::coalesce(&mut ssa, opts.coalesce_roots);
     canonicalize(&mut ssa, opts.signed_sub);

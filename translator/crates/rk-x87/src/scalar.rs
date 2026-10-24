@@ -717,9 +717,21 @@ impl Scalar {
                     self.set(0, value, &mut events, None, None, None, bits == 32);
                 }
             }
-            X87Op::PushInteger { bits } => {
-                let address = address.expect("x87 integer load address");
-                let value = load(bits, address, true);
+            X87Op::PushInteger { bits } | X87Op::PushIntegerValue { bits } => {
+                let input = address.expect("x87 integer input");
+                let value = if matches!(op, X87Op::PushIntegerValue { .. }) {
+                    cast(
+                        match bits {
+                            16 => Type::I16,
+                            32 => Type::I32,
+                            64 => Type::I64,
+                            _ => unreachable!(),
+                        },
+                        input,
+                    )
+                } else {
+                    load(bits, input, true)
+                };
                 self.move_top(-1);
                 self.set(
                     0,

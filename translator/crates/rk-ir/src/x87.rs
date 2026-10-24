@@ -90,6 +90,9 @@ pub enum X87Op {
     PushInteger {
         bits: u16,
     },
+    PushIntegerValue {
+        bits: u16,
+    },
     Store {
         dst: Option<u8>,
         bits: u16,

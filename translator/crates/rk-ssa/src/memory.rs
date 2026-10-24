@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rk_core::ir::OpCode;
 use rk_core::memory::{Address, Base, Effects, Footprint, Range};
 use rk_core::{Lookup, LookupSet};
+use rk_ir::x87::{MemoryEffect, X87Op};
 use rk_ir::Op;
 
 use crate::address::Addresses;
@@ -39,6 +40,34 @@ pub fn accesses(s: &Ssa, facts: Option<&dyn CallFacts>) -> BTreeMap<ValueId, Acc
                     let range = Range::new(addresses.get(args[1]), size as u32);
                     let effect = footprint(range);
                     if op == Op::P(OpCode::Load) {
+                        Access {
+                            reads: effect,
+                            writes: empty,
+                            location: Some(range),
+                        }
+                    } else {
+                        Access {
+                            reads: empty,
+                            writes: effect,
+                            location: Some(range),
+                        }
+                    }
+                }
+                Op::X87(
+                    op @ (X87Op::PushInteger { bits: 16 | 32 | 64 }
+                    | X87Op::Store {
+                        dst: None,
+                        bits: 16 | 32 | 64 | 80,
+                        ..
+                    }),
+                ) => {
+                    let bits = match op {
+                        X87Op::PushInteger { bits } | X87Op::Store { bits, .. } => bits,
+                        _ => unreachable!(),
+                    };
+                    let range = Range::new(addresses.get(args[1]), u32::from(bits / 8));
+                    let effect = footprint(range);
+                    if op.memory() == Some(MemoryEffect::Read) {
                         Access {
                             reads: effect,
                             writes: empty,
@@ -95,6 +124,57 @@ pub fn accesses(s: &Ssa, facts: Option<&dyn CallFacts>) -> BTreeMap<ValueId, Acc
         }
     }
     result
+}
+
+pub(crate) fn eliminate_dead_stores(s: &mut Ssa, facts: Option<&dyn CallFacts>) {
+    let accesses = accesses(s, facts);
+    let mut aliases = Lookup::default();
+    for block in &s.blocks {
+        let mut overwritten = BTreeSet::new();
+        for &id in block.ops.iter().rev() {
+            let op = s.value(id).op;
+            if s.boundary(id).is_some() && op != Op::P(OpCode::Store) {
+                overwritten.clear();
+                continue;
+            }
+            let Some(access) = accesses.get(&id) else {
+                if rk_ir::properties(op).observes && !matches!(op, Op::X87(_)) {
+                    overwritten.clear();
+                }
+                continue;
+            };
+            if op == Op::P(OpCode::Store)
+                && access
+                    .location
+                    .is_some_and(|range| overwritten.contains(&range))
+            {
+                aliases.insert(id, s.args(id)[0]);
+                continue;
+            }
+            overwritten.retain(|range| access.reads.disjoint(*range));
+            if let Some(range) = access.location.filter(|range| range.address.is_exact()) {
+                if !access.writes.ranges.is_empty() && !access.writes.opaque {
+                    overwritten.insert(range);
+                }
+            }
+        }
+    }
+    if aliases.is_empty() {
+        return;
+    }
+    for index in 0..s.values.len() {
+        if s.values[index].op != Op::Memory {
+            continue;
+        }
+        let args = s.args(index as ValueId);
+        if args
+            .first()
+            .is_some_and(|effect| aliases.contains_key(effect))
+        {
+            aliases.insert(index as ValueId, s.args(args[0])[0]);
+        }
+    }
+    crate::canonical::rewrite_aliases(s, &aliases);
 }
 
 fn identified(range: Range) -> bool {

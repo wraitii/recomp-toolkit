@@ -177,6 +177,9 @@ fn shape(s: &Ssa, id: ValueId) -> bool {
                 && size(3) == 4
                 && z == 8
         }
+        Op::X87(rk_ir::x87::X87Op::PushIntegerValue { bits }) => {
+            n == 1 && z == 0 && matches!(bits, 16 | 32 | 64) && u16::from(size(0)) * 8 == bits
+        }
         Op::X87(op) => {
             let memory = usize::from(op.touches_memory());
             let address =
