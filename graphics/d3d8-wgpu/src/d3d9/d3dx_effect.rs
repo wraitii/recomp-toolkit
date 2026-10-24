@@ -56,6 +56,7 @@ const K_PASS: u32 = 2;
 const K_ANNOT: u32 = 3;
 const K_ELEM: u32 = 4;
 
+const FXS_FVF: u32 = 122;
 const FXS_VERTEXSHADER: u32 = 146;
 const FXS_PIXELSHADER: u32 = 147;
 const FXS_SAMPLER_TEXTURE: u32 = 164;
@@ -268,7 +269,7 @@ struct ParamShape {
     rows: u32,
     cols: u32,
     elements: u32,
-    semantic: Vec<u8>,
+    bytes: u32,
     members: Vec<ParamShape>,
 }
 
@@ -280,18 +281,27 @@ impl ParamShape {
             rows: t.rows,
             cols: t.cols,
             elements: t.elements,
-            semantic: t.semantic.clone(),
+            bytes: t.bytes,
             members: t.members.iter().map(ParamShape::of).collect(),
         }
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "type {} class {} rows {} cols {} elements {} members {}",
+            self.type_,
+            self.class,
+            self.rows,
+            self.cols,
+            self.elements,
+            self.members.len()
+        )
     }
 
     fn matches(&self, t: &EfxType) -> bool {
         self.type_ == t.type_
             && self.class == t.class
-            && self.rows == t.rows
-            && self.cols == t.cols
-            && self.elements == t.elements
-            && self.semantic == t.semantic
+            && (self.class == FXC_VECTOR || (self.rows == t.rows && self.cols == t.cols))
             && self.members.len() == t.members.len()
             && self
                 .members
@@ -1456,10 +1466,29 @@ pub fn d3dx_effect_join_pool(
         let shape = ParamShape::of(&effect.params[index].type_);
         if let Some(entry) = state.entries.get_mut(&name) {
             if entry.shape != shape {
-                return status(
-                    StatusCode::InvalidArgument,
-                    "shared parameter shape does not match the pool",
+                if !entry.shape.matches(&effect.params[index].type_) {
+                    return status(
+                        StatusCode::InvalidArgument,
+                        format!(
+                            "shared parameter '{}' shape does not match the pool (effect {}; pool {})",
+                            String::from_utf8_lossy(&name),
+                            shape.describe(),
+                            entry.shape.describe()
+                        ),
+                    );
+                }
+                eprintln!(
+                    "d3d9: shared parameter '{}' differs in shape (effect {}; pool {}); sharing the common bytes",
+                    String::from_utf8_lossy(&name),
+                    shape.describe(),
+                    entry.shape.describe()
                 );
+                if entry.value.len() < shape.bytes as usize {
+                    entry.value.resize(shape.bytes as usize, 0);
+                }
+                if shape.bytes > entry.shape.bytes {
+                    entry.shape = shape.clone();
+                }
             }
             match &mut effect.params[index].value {
                 EfxValue::Numeric(bytes) => {
@@ -2417,6 +2446,9 @@ fn technique_supported(effect: &D3dxEffect, technique: &EfxTechnique) -> Result<
                 validate_state_references(effect, state, technique)?;
                 continue;
             }
+            if state.op == FXS_FVF {
+                continue;
+            }
             return Err(unsupported(
                 "ValidateTechnique",
                 format!("effect state operation {} is unsupported", state.op),
@@ -2987,6 +3019,30 @@ impl StateSink<'_> {
         }
     }
 
+    fn fvf(&mut self, format: u32) -> Result<(), RenderError> {
+        match self {
+            StateSink::Device(device) => {
+                if format == 0 {
+                    device.state.set_declaration(0, 0);
+                    return Ok(());
+                }
+                let result = crate::d3d9::d3d9_create_fvf_declaration(device, format);
+                if result.status.code != StatusCode::Ok {
+                    return Err(invalid_data(result.status.message));
+                }
+                let status = crate::d3d9::d3d9_set_fvf_binding(device, result.value, format);
+                if status.code != StatusCode::Ok {
+                    return Err(invalid_data(status.message));
+                }
+                Ok(())
+            }
+            StateSink::Commands(commands, values_out) => {
+                commands.push(effect_command(D3dxEffectCommandKind::SetFVF, 0, 0, format));
+                Ok(())
+            }
+        }
+    }
+
     fn transform(&mut self, state: u32, matrix: [f32; 16]) -> Result<(), RenderError> {
         match self {
             StateSink::Device(device) => device
@@ -3536,6 +3592,7 @@ fn apply_state(
             let value = numeric_value(effect, state)?;
             sink.texture_stage_state(state.index, tss, value)?;
         }
+        FXS_FVF => sink.fvf(numeric_value(effect, state)?)?,
         126 => {
             let matrix = transform_value(effect, state)?;
             sink.transform(D3DTS_TEXTURE0 + state.index, matrix)?;

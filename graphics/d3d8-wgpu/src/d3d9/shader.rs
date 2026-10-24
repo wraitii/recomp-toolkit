@@ -346,9 +346,11 @@ fn register_operand_count(op: u32, params: u16) -> u16 {
 
 fn version_supported(pixel: bool, major: u32, minor: u32) -> bool {
     if pixel {
-        (major == 1 && (1..=4).contains(&minor)) || (major == 2 && minor <= 1)
+        (major == 1 && (1..=4).contains(&minor))
+            || (major == 2 && minor <= 1)
+            || (major == 3 && minor == 0)
     } else {
-        (major == 1 && minor == 1) || (major == 2 && minor <= 1)
+        (major == 1 && minor == 1) || (major == 2 && minor <= 1) || (major == 3 && minor == 0)
     }
 }
 

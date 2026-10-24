@@ -9,6 +9,7 @@
 #include "d3d_bridge_helpers.h"
 #include "d3dx9shader_shim.h"
 #include "d3dx9effect_shim.h"
+#include "d3dx9tex.h"
 #include "../runtime/win32.h"
 #include "../platform/os.h"
 #include "../runtime/display_seam.h"
@@ -87,6 +88,8 @@ static ComObj *level_owner(ComObj *o, uint32_t *face, uint32_t *level, bool *vol
 
 // One scratch block for structures a method fills in for the guest.
 static uint32_t g_scratch = 0, g_scratch_size = 0;
+static float d3dx_rf(uint32_t addr);
+static void d3dx_wf(uint32_t addr, float value);
 
 static ComObj *this_d3d9(X86 *c) {
     ComObj *o = com_this_arg(c);
@@ -708,6 +711,13 @@ void D9_CreateDevice(X86 *c) {
 
 static ComObj *device_backbuffer(ComObj *dev);
 static ComObj *device_depthbuffer(ComObj *dev);
+
+// DIVERGENCE(original): accept gamma updates without changing host output.
+void Dev_SetGammaRamp(X86 *c) {
+    log_once("d3d9.device.SetGammaRamp",
+             "d3d9: SetGammaRamp ignored; gamma correction is not implemented");
+    com_ret(c, 0);
+}
 
 // (this, pRect)
 void Dev_SetScissorRect(X86 *c) {
@@ -1706,6 +1716,111 @@ void X_D3DXCreateVolumeTextureFromFileInMemory(X86 *c) {
     d3dx_create_from_memory(c, recomp::d3d::D3d9TextureKind::Volume);
 }
 
+static uint8_t d3dx_fill_byte(float value) {
+    if (!(value > 0.0f))
+        return 0;
+    if (value >= 1.0f)
+        return 255;
+    return (uint8_t)(value * 255.0f + 0.5f);
+}
+
+static uint32_t d3dx_fill_pixel(uint32_t format, const float c[4], uint8_t out[4]) {
+    uint8_t r = d3dx_fill_byte(c[0]), g = d3dx_fill_byte(c[1]), b = d3dx_fill_byte(c[2]),
+            a = d3dx_fill_byte(c[3]);
+    auto put = [out](std::initializer_list<uint8_t> v) {
+        std::copy(v.begin(), v.end(), out);
+        return (uint32_t)v.size();
+    };
+    switch (format) {
+    case 20:
+        return put({b, g, r});
+    case 21:
+        return put({b, g, r, a});
+    case 22:
+        return put({b, g, r, 255});
+    case 28:
+        return put({a});
+    case 32:
+        return put({r, g, b, a});
+    case 33:
+        return put({r, g, b, 255});
+    case 50:
+        return put({r});
+    case 51:
+        return put({r, a});
+    default:
+        return 0;
+    }
+}
+
+void X_D3DXFillVolumeTexture(X86 *c) {
+    ComObj *tex = com_this(arg(c, 0), IF_D3DVOLUMETEXTURE9);
+    uint32_t callback = arg(c, 1), user = arg(c, 2);
+    if (!tex || !tex->d3d9_resource || !callback) {
+        com_ret(c, D3DERR_INVALIDCALL);
+        return;
+    }
+    recomp::d3d::D3d9TextureDescriptorResult td = tex->d3d9_resource->texture_descriptor();
+    if (td.status.code != recomp::d3d::StatusCode::Ok) {
+        com_ret(c, bridge_result(c, td.status));
+        return;
+    }
+    const float zero[4] = {};
+    uint8_t pixel[4];
+    uint32_t bytes = d3dx_fill_pixel(td.descriptor.format, zero, pixel);
+    if (!bytes) {
+        LOGW("d3dx9: D3DXFillVolumeTexture: unsupported format %u", td.descriptor.format);
+        com_ret(c, D3DERR_INVALIDCALL);
+        return;
+    }
+    uint32_t scratch = heap_alloc(64, true, 16);
+    if (!scratch) {
+        com_ret(c, E_OUTOFMEMORY);
+        return;
+    }
+    uint32_t out = scratch, coord = scratch + 16, texel = scratch + 28, lock = scratch + 40;
+    uint32_t result = D3D_OK9;
+    for (uint32_t level = 0; level < td.descriptor.levels; ++level) {
+        recomp::d3d::D3d9LevelDescriptorResult ld =
+            tex->d3d9_resource->texture_volume_descriptor(level);
+        if (ld.status.code != recomp::d3d::StatusCode::Ok) {
+            result = bridge_result(c, ld.status);
+            break;
+        }
+        level_lock_wgpu(c, tex, 0, level, true, 0, 0, 0, lock, true);
+        result = c->r[0];
+        if (result != D3D_OK9)
+            break;
+        uint32_t pitch = rd32(lock), slice_pitch = rd32(lock + 4), bits = rd32(lock + 8);
+        uint32_t w = ld.descriptor.width, h = ld.descriptor.height, d = ld.descriptor.depth;
+        for (uint32_t z = 0; z < d; ++z) {
+            for (uint32_t y = 0; y < h; ++y) {
+                for (uint32_t x = 0; x < w; ++x) {
+                    memset(gm_ptr(out), 0, 16);
+                    d3dx_wf(coord, ((float)x + 0.5f) / (float)w);
+                    d3dx_wf(coord + 4, ((float)y + 0.5f) / (float)h);
+                    d3dx_wf(coord + 8, ((float)z + 0.5f) / (float)d);
+                    d3dx_wf(texel, 1.0f / (float)w);
+                    d3dx_wf(texel + 4, 1.0f / (float)h);
+                    d3dx_wf(texel + 8, 1.0f / (float)d);
+                    guest_call(c, callback, out, coord, texel, user);
+                    float color[4] = {d3dx_rf(out), d3dx_rf(out + 4), d3dx_rf(out + 8),
+                                      d3dx_rf(out + 12)};
+                    d3dx_fill_pixel(td.descriptor.format, color, pixel);
+                    memcpy(gm_ptr(bits + z * slice_pitch + y * pitch + x * bytes), pixel, bytes);
+                }
+            }
+        }
+        level_unlock_wgpu(c, tex, 0, level);
+        if (c->r[0] != D3D_OK9) {
+            result = c->r[0];
+            break;
+        }
+    }
+    heap_free(scratch);
+    com_ret(c, result);
+}
+
 static bool d3dx_rect(uint32_t addr, recomp::d3d::D3d9Rect &rect, bool &present) {
     present = false;
     rect.left = rect.top = rect.right = rect.bottom = 0;
@@ -2514,6 +2629,7 @@ static const uint32_t EFX_MANAGER_SET_RENDER_STATE = 7 * 4;
 static const uint32_t EFX_MANAGER_SET_TEXTURE = 8 * 4;
 static const uint32_t EFX_MANAGER_SET_TEXTURE_STAGE_STATE = 9 * 4;
 static const uint32_t EFX_MANAGER_SET_SAMPLER_STATE = 10 * 4;
+static const uint32_t EFX_MANAGER_SET_FVF = 12 * 4;
 static const uint32_t EFX_MANAGER_SET_VERTEX_SHADER = 13 * 4;
 static const uint32_t EFX_MANAGER_SET_VERTEX_SHADER_CONSTANT_F = 14 * 4;
 static const uint32_t EFX_MANAGER_SET_PIXEL_SHADER = 17 * 4;
@@ -3509,6 +3625,9 @@ static uint32_t efx_dispatch_commands(X86 *c, ComObj *fx, ComObj *dev,
         case recomp::d3d::D3dxEffectCommandKind::SetTexture:
             result =
                 invoke(EFX_MANAGER_SET_TEXTURE, "SetTexture", {manager, cmd.index, resolved[i]});
+            break;
+        case recomp::d3d::D3dxEffectCommandKind::SetFVF:
+            result = invoke(EFX_MANAGER_SET_FVF, "SetFVF", {manager, cmd.value});
             break;
         case recomp::d3d::D3dxEffectCommandKind::SetVertexShader:
             result =

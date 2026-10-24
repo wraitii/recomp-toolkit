@@ -581,6 +581,7 @@ pub mod ffi {
         SetPixelShader = 6,
         SetVertexShaderConstantF = 7,
         SetPixelShaderConstantF = 8,
+        SetFVF = 9,
     }
 
     struct D3dxEffectCommand {

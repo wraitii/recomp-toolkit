@@ -61,6 +61,8 @@ const OP_DEFI: u32 = 48;
 const OP_TEXCOORD: u32 = 64;
 const OP_TEXKILL: u32 = 65;
 const OP_TEX: u32 = 66;
+const OP_TEXREG2AR: u32 = 69;
+const OP_TEXREG2GB: u32 = 70;
 const OP_EXPP: u32 = 78;
 const OP_LOGP: u32 = 79;
 const OP_CND: u32 = 80;
@@ -68,6 +70,8 @@ const OP_DEF: u32 = 81;
 const OP_TEXDP3: u32 = 85;
 const OP_CMP: u32 = 88;
 const OP_DP2ADD: u32 = 90;
+const OP_DSX: u32 = 91;
+const OP_DSY: u32 = 92;
 const OP_PHASE: u32 = 0xfffd;
 const OP_COMMENT: u32 = 0xfffe;
 const OP_END: u32 = 0xffff;
@@ -123,6 +127,7 @@ pub struct Program {
     pub minor: u32,
     pub code: Vec<Inst>,
     pub inputs: Vec<DclIn>,
+    pub outputs: Vec<DclIn>,
     pub samplers: BTreeMap<u32, u32>,
     pub defs: BTreeMap<u32, [f32; 4]>,
     pub idefs: BTreeMap<u32, [i32; 4]>,
@@ -154,7 +159,7 @@ fn operand_count(op: u32, major: u32, minor: u32, pixel: bool) -> Option<u32> {
     Some(match op {
         OP_NOP => 0,
         OP_MOV | OP_MOVA | OP_RCP | OP_RSQ | OP_EXP | OP_LOG | OP_LIT | OP_FRC | OP_ABS
-        | OP_NRM | OP_EXPP | OP_LOGP | OP_TEXDP3 => 2,
+        | OP_NRM | OP_EXPP | OP_LOGP | OP_TEXDP3 | OP_DSX | OP_DSY => 2,
         OP_ADD | OP_SUB | OP_MUL | OP_DP3 | OP_DP4 | OP_MIN | OP_MAX | OP_SLT | OP_SGE | OP_DST
         | OP_M4X4 | OP_M4X3 | OP_M3X4 | OP_M3X3 | OP_M3X2 | OP_POW | OP_CRS => 3,
         OP_MAD | OP_LRP | OP_SGN | OP_CND | OP_CMP | OP_DP2ADD => 4,
@@ -166,6 +171,7 @@ fn operand_count(op: u32, major: u32, minor: u32, pixel: bool) -> Option<u32> {
             }
         }
         OP_TEXKILL => 1,
+        OP_TEXREG2AR | OP_TEXREG2GB => 2,
         OP_TEX => {
             if major >= 2 {
                 3
@@ -272,7 +278,11 @@ fn check_reg(
     match ty {
         R_TEMP => {
             let limit = if !pixel {
-                if major == 2 && minor == 1 { 31 } else { 11 }
+                if major >= 3 || (major == 2 && minor == 1) {
+                    31
+                } else {
+                    11
+                }
             } else if major == 1 && minor <= 3 {
                 1
             } else if major == 1 {
@@ -288,7 +298,11 @@ fn check_reg(
             if dest {
                 return Err(invalid("input"));
             }
-            let limit = if pixel { 1 } else { 15 };
+            let limit = if pixel {
+                if major >= 3 { 9 } else { 1 }
+            } else {
+                15
+            };
             if index > limit {
                 return Err(invalid("input"));
             }
@@ -296,6 +310,8 @@ fn check_reg(
         R_CONST => {
             let limit = if !pixel {
                 255
+            } else if major >= 3 {
+                223
             } else if major >= 2 {
                 31
             } else {
@@ -337,8 +353,9 @@ fn check_reg(
             }
         }
         R_TEXCRDOUT => {
-            if pixel || !dest || index > 7 {
-                return Err(invalid("texcoordout"));
+            let limit = if major >= 3 { 11 } else { 7 };
+            if pixel || !dest || index > limit {
+                return Err(invalid("output"));
             }
         }
         R_CONSTINT => {
@@ -465,6 +482,33 @@ impl Program {
                         }
                         if !seen {
                             p.inputs.push(DclIn {
+                                usage: decl & 0x1f,
+                                usage_index: (decl >> 16) & 0xf,
+                                ty: d.ty,
+                                index: d.index,
+                            });
+                        }
+                    }
+                    R_TEXCRDOUT if !p.pixel && p.major >= 3 => {
+                        if decl & 0x1f > 13 {
+                            return Err(fail(format!("declaration usage {}", decl & 0x1f)));
+                        }
+                        check_reg(R_TEXCRDOUT, d.index, p.pixel, p.major, p.minor, true)?;
+                        for existing in &p.outputs {
+                            if existing.index == d.index {
+                                if existing.usage != decl & 0x1f
+                                    || existing.usage_index != (decl >> 16) & 0xf
+                                {
+                                    return Err(fail(format!(
+                                        "output register {} is declared with conflicting semantics",
+                                        d.index
+                                    )));
+                                }
+                                seen = true;
+                            }
+                        }
+                        if !seen {
+                            p.outputs.push(DclIn {
                                 usage: decl & 0x1f,
                                 usage_index: (decl >> 16) & 0xf,
                                 ty: d.ty,
@@ -784,6 +828,13 @@ impl<'a> Gen<'a> {
             4 => format!("(2.0 * {v} - vec4<f32>(1.0))"),
             5 => format!("(-(2.0 * {v} - vec4<f32>(1.0)))"),
             6 => format!("(vec4<f32>(1.0) - {v})"),
+            7 => format!("(2.0 * {v})"),
+            8 => format!("(-(2.0 * {v}))"),
+            9 => format!("d9_dz({v})"),
+            10 => format!("d9_dw({v})"),
+            11 => format!("abs({v})"),
+            12 => format!("(-abs({v}))"),
+            13 => format!("select(vec4<f32>(1.0), vec4<f32>(0.0), {v} != vec4<f32>(0.0))"),
             _ => {
                 self.fail(format!("source modifier {}", s.md));
                 v
@@ -815,11 +866,19 @@ impl<'a> Gen<'a> {
                 }
             },
             R_ATTROUT => format!("od[{}]", d.index),
-            R_TEXCRDOUT => format!("ot[{}]", d.index),
+            R_TEXCRDOUT => {
+                if self.p.major >= 3 {
+                    format!("ov[{}]", d.index)
+                } else {
+                    format!("ot[{}]", d.index)
+                }
+            }
             R_COLOROUT => {
                 if d.index != 0 {
-                    self.fail("multiple color outputs are not implemented");
-                    return "junk".into();
+                    eprintln!(
+                        "d3d9: dropping color output oC{}; multiple render targets are not implemented",
+                        d.index
+                    );
                 }
                 format!("oc[{}]", d.index)
             }
@@ -984,6 +1043,8 @@ impl<'a> Gen<'a> {
                 let c = self.s(inst, 2);
                 format!("vec4<f32>(dot(({a}).xy, ({b}).xy) + ({c}).x)")
             }
+            OP_DSX => format!("dpdx({})", self.s(inst, 0)),
+            OP_DSY => format!("dpdy({})", self.s(inst, 0)),
             OP_RCP => format!("vec4<f32>(1.0 / ({}).x)", self.s(inst, 0)),
             OP_RSQ => format!("vec4<f32>(inverseSqrt(abs(({}).x)))", self.s(inst, 0)),
             OP_FRC => format!("fract({})", self.s(inst, 0)),
@@ -1078,6 +1139,17 @@ impl<'a> Gen<'a> {
         }
     }
 
+    fn texreg(&mut self, inst: &Inst, a: u32, b: u32) {
+        let n = inst.dst.index;
+        let src = self.s(inst, 0);
+        let coord = format!(
+            "vec4<f32>(({src}).{}, ({src}).{}, 0.0, 1.0)",
+            COMP[a as usize] as char, COMP[b as usize] as char
+        );
+        let sampled = self.sample(n, &coord, false, false);
+        self.write(&inst.dst, &sampled);
+    }
+
     fn tex(&mut self, inst: &Inst) {
         if self.p.major >= 2 {
             let sampler = inst.src[1];
@@ -1109,6 +1181,8 @@ impl<'a> Gen<'a> {
             OP_TEXCOORD => self.texcoord(inst),
             OP_TEXKILL => self.texkill(inst),
             OP_TEX => self.tex(inst),
+            OP_TEXREG2AR => self.texreg(inst, 3, 0),
+            OP_TEXREG2GB => self.texreg(inst, 1, 2),
             _ => {
                 if let Some(v) = self.pure(inst) {
                     self.write(&inst.dst, &v);
@@ -1304,7 +1378,7 @@ impl<'a> Gen<'a> {
         s
     }
 
-    fn compose_vertex(&self) -> String {
+    fn compose_vertex(&mut self) -> String {
         let mut inputs = Vec::new();
         for d in &self.p.inputs {
             if d.ty == R_INPUT && !inputs.contains(&d.index) {
@@ -1334,7 +1408,11 @@ impl<'a> Gen<'a> {
         s += "    var ofog = vec4<f32>(1.0);\n";
         s += "    var opsize = vec4<f32>(1.0);\n";
         s += "    var od = array<vec4<f32>, 2>(vec4<f32>(0.0), vec4<f32>(0.0));\n";
-        s += "    var ot: array<vec4<f32>, 8>;\n";
+        if self.p.major >= 3 {
+            s += "    var ov: array<vec4<f32>, 12>;\n";
+        } else {
+            s += "    var ot: array<vec4<f32>, 8>;\n";
+        }
         s += "    var vv: array<vec4<f32>, 16>;\n";
         for i in &inputs {
             let value = if self.variant.raw_inputs & (1 << i) != 0 {
@@ -1346,16 +1424,41 @@ impl<'a> Gen<'a> {
         }
         s += &self.body;
         s += "    var o: V2F;\n";
-        s += "    o.pos = vec4<f32>(opos.xy + vsp.halfpix.xy * opos.w, opos.zw);\n";
-        s += "    o.d0 = od[0];\n    o.d1 = od[1];\n";
-        for i in 0..8 {
-            s += &format!("    o.t{i} = ot[{i}];\n");
+        if self.p.major >= 3 {
+            let mut position = "opos".to_string();
+            for d in &self.p.outputs {
+                let value = format!("ov[{}]", d.index);
+                match d.usage {
+                    0 | 9 => position = value,
+                    4 => {}
+                    5 if d.usage_index < 8 => {
+                        s += &format!("    o.t{} = {value};\n", d.usage_index);
+                    }
+                    10 if d.usage_index < 2 => {
+                        s += &format!("    o.d{} = {value};\n", d.usage_index);
+                    }
+                    11 => s += &format!("    o.fog = {value}.x;\n"),
+                    _ => self.fail(format!("vertex output usage {}", d.usage)),
+                }
+            }
+            s += &format!(
+                "    let d9_pos = vec4<f32>({position}.xy + vsp.halfpix.xy * {position}.w, {position}.zw);\n"
+            );
+            s += "    o.pos = d9_pos;\n";
+            s += "    o.fogz = d9_pos.z;\n";
+        } else {
+            s += "    o.pos = vec4<f32>(opos.xy + vsp.halfpix.xy * opos.w, opos.zw);\n";
+            s += "    o.d0 = od[0];\n    o.d1 = od[1];\n";
+            for i in 0..8 {
+                s += &format!("    o.t{i} = ot[{i}];\n");
+            }
+            s += "    o.fog = ofog.x;\n    o.fogz = opos.z;\n";
         }
-        s += "    o.fog = ofog.x;\n    o.fogz = opos.z;\n    return o;\n}\n";
+        s += "    return o;\n}\n";
         s
     }
 
-    fn compose_pixel(&self) -> String {
+    fn compose_pixel(&mut self) -> String {
         let mut s = String::new();
         s += &self.constants();
         s += "@group(0) @binding(3) var<uniform> psp: PSP;\n";
@@ -1386,7 +1489,27 @@ impl<'a> Gen<'a> {
         s += "    var r: array<vec4<f32>, 32>;\n";
         s += "    var tc = array<vec4<f32>, 8>(vin.t0, vin.t1, vin.t2, vin.t3, vin.t4, vin.t5, vin.t6, vin.t7);\n";
         s += "    var t = tc;\n";
-        s += "    var iv = array<vec4<f32>, 2>(vin.d0, vin.d1);\n";
+        if self.p.major >= 3 {
+            s += "    var iv: array<vec4<f32>, 16>;\n";
+            let inputs = self.p.inputs.clone();
+            for d in &inputs {
+                if d.ty != R_INPUT {
+                    continue;
+                }
+                let value = match (d.usage, d.usage_index) {
+                    (5, i) if i < 8 => format!("vin.t{i}"),
+                    (10, i) if i < 2 => format!("vin.d{i}"),
+                    (11, _) => "vec4<f32>(vin.fog, 0.0, 0.0, 0.0)".to_string(),
+                    _ => {
+                        self.fail(format!("pixel input usage {}", d.usage));
+                        continue;
+                    }
+                };
+                s += &format!("    iv[{}] = {value};\n", d.index);
+            }
+        } else {
+            s += "    var iv = array<vec4<f32>, 2>(vin.d0, vin.d1);\n";
+        }
         s += "    var oc: array<vec4<f32>, 4>;\n";
         s += &self.body;
         if self.p.major >= 2 {
@@ -1398,7 +1521,7 @@ impl<'a> Gen<'a> {
         s
     }
 
-    fn compose(&self) -> String {
+    fn compose(&mut self) -> String {
         let mut s = String::from(PRELUDE);
         if self.p.pixel {
             s += &self.compose_pixel();
@@ -1412,7 +1535,11 @@ impl<'a> Gen<'a> {
 pub fn translate(p: &Program, variant: &Variant) -> Result<String, RenderError> {
     let mut g = Gen::new(p, variant);
     g.generate()?;
-    Ok(g.compose())
+    let source = g.compose();
+    if let Some(cause) = g.failed.take() {
+        return Err(fail(cause));
+    }
+    Ok(source)
 }
 
 pub fn validate(source: &str) -> Result<(), RenderError> {

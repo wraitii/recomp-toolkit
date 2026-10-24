@@ -9,6 +9,7 @@ void X_D3DXCreateVolumeTextureFromFileExA(X86 *c);
 void X_D3DXCreateTextureFromFileInMemory(X86 *c);
 void X_D3DXCreateCubeTextureFromFileInMemory(X86 *c);
 void X_D3DXCreateVolumeTextureFromFileInMemory(X86 *c);
+void X_D3DXFillVolumeTexture(X86 *c);
 void X_D3DXLoadSurfaceFromSurface(X86 *c);
 void X_D3DXSaveSurfaceToFileA(X86 *c);
 void X_D3DXSaveTextureToFileA(X86 *c);

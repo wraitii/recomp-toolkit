@@ -280,7 +280,7 @@ fn parse_raw_dds(op: &'static str, bytes: &[u8]) -> Result<RawDds, RenderError> 
     let width = dword(16);
     let caps2 = dword(112);
     let is_cube = caps2 & 0x200 != 0;
-    let is_volume = caps2 & 0x2_0000 != 0;
+    let is_volume = caps2 & 0x20_0000 != 0;
     if is_cube && is_volume {
         return Err(RenderError::invalid_data(
             op,
@@ -557,7 +557,8 @@ fn decode_dds(op: &'static str, bytes: &[u8]) -> Result<SourceImage, RenderError
             return Err(RenderError::new(
                 op,
                 format!(
-                    "DDS data is {data_len} bytes; only tight ({tight}) and DWORD-mip ({dword}) layouts are supported"
+                    "DDS data is {data_len} bytes for {}x{}x{} with {} levels, format {:#x}, pitch {}; only tight ({tight}) and DWORD-mip ({dword}) layouts are supported",
+                    raw.width, raw.height, raw.depth, raw.levels, raw.format, raw.pitch
                 ),
             ));
         }
@@ -1763,7 +1764,7 @@ fn encode_dds(
     let caps2 = if is_cube {
         0x200u32 | 0x400 | 0x800 | 0x1000 | 0x2000 | 0x4000 | 0x8000
     } else if is_volume {
-        0x2_0000
+        0x20_0000
     } else {
         0
     };
