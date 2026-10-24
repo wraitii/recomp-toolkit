@@ -16,6 +16,29 @@ mod tables;
 
 pub use summary::{Base, Ref, Shape, ShapeKind};
 
+pub(crate) fn com_slots(
+    program: &Program,
+    analysis: &rk_frontend::Analysis,
+    owner: Addr,
+) -> std::result::Result<BTreeMap<Addr, i32>, String> {
+    let result = analysis
+        .ir
+        .get(&owner)
+        .ok_or("COM owner was not analyzed")?;
+    let summary = summary::summarize(program, owner, result, &rk_ssa::ConservativeCallFacts);
+    if let Some(reason) = summary.blocked() {
+        return Err(format!("COM slot analysis blocked: {reason}"));
+    }
+    Ok(summary
+        .sites
+        .into_iter()
+        .filter_map(|shape| {
+            (shape.kind == ShapeKind::Call && matches!(shape.form, summary::ShapeForm::Vptr { .. }))
+                .then_some((shape.site, shape.slot))
+        })
+        .collect())
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     pub bounds: bool,

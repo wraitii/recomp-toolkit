@@ -16,6 +16,7 @@ const INDIRECT_HEADER: &str = "site\tkind\ttargets";
 #[derive(Default)]
 pub struct Facts {
     pub call_targets: BTreeMap<Addr, Vec<Addr>>,
+    pub guest_calls: BTreeSet<Addr>,
     pub jump_targets: BTreeMap<Addr, Vec<Addr>>,
     pub host_calls: BTreeSet<Addr>,
     pub site_effects: BTreeMap<Addr, CallEffect>,
@@ -53,9 +54,13 @@ fn read_analysis_facts(
     let mut call_targets = BTreeMap::new();
     let mut jump_targets = BTreeMap::new();
     let mut host_calls = BTreeSet::new();
+    let mut guest_calls = BTreeSet::new();
     let mut site_effects = BTreeMap::new();
     for (&site, row) in &loaded.sites {
         validate_site(program, analysis, path, site, row)?;
+        if row.prefer_guest || row.kind == TransferKind::Call && row.targets.is_some() {
+            guest_calls.insert(site);
+        }
         if let Some(targets) = &row.targets {
             match row.kind {
                 TransferKind::Call => {
@@ -86,6 +91,7 @@ fn read_analysis_facts(
         .collect();
     Ok(Facts {
         call_targets,
+        guest_calls,
         jump_targets,
         host_calls,
         site_effects,
@@ -115,9 +121,9 @@ fn validate_site(
                     path.display()
                 )));
             }
-            if row.targets.is_some() && !indirect {
+            if (row.targets.is_some() || row.prefer_guest) && !indirect {
                 return Err(Error::input(format!(
-                    "{}: site {site:08x} has a target bound but is not an indirect call",
+                    "{}: site {site:08x} has guest dispatch facts but is not an indirect call",
                     path.display()
                 )));
             }
@@ -252,6 +258,7 @@ fn read_legacy_targets(
         .map(Vec::len)
         .sum();
     Ok(Facts {
+        guest_calls: call_targets.keys().copied().collect(),
         call_targets,
         jump_targets,
         host_calls: BTreeSet::new(),

@@ -201,7 +201,12 @@ V2 retains V1 shared `targets`, `effects`, `sites`, `imports` and `evidence`, an
 symbolic `methods` (site key `m`), assumption provenance and input digests. `regs` accepts
 `abi`, `unknown`, or explicit `reads`/`kills`/`writes`/`preserves` lists containing GPR and
 arithmetic-flag names. CW effects use `preserved`/`known`/`value` masks. Method identities
-are not exhaustive target bounds. Only exhaustive guest target sets feed dispatch
+are not exhaustive target bounds. A call site's `prefer_guest: true` selects the
+guest-preferring dispatch helper when all supplied observations reach guest code,
+including auxiliary modules. Mixed or unknown observations leave the site generic.
+The preference requires no vtable shape or target bound and grants no register,
+stack or effect guarantees; unresolved targets retain the helper's normal slow
+fallback. Only exhaustive guest target sets feed dispatch
 bounds; sites are instruction addresses, `k` defaults to `call`, and `jump` means a tail
 JMP. Explicit unknown effects stay conservative. Rust recomputes function preservation
 and CW summaries. V1 remains supported; legacy `indirect_targets` and `call_effects`

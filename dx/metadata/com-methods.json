@@ -1,6 +1,6 @@
 {
   "format": "recomp-com-methods-v1",
-  "reference_sha256": "e03c863023535cdb80a7adf97f274da6d74c23ec78e20a3cc2447451c572f89b",
+  "reference_sha256": "ae7dbbfc97dedcbf4ef601685c4ee052a5bbd7e03b29c13b16588fa9a3f89bf5",
   "methods": [
     {
       "dll": "d3d8.dll",
@@ -1198,6 +1198,2988 @@
       "method": "GetDesc",
       "slot": 52,
       "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "RegisterSoftwareDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "GetAdapterCount",
+      "slot": 16,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "GetAdapterIdentifier",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "GetAdapterModeCount",
+      "slot": 24,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "EnumAdapterModes",
+      "slot": 28,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "GetAdapterDisplayMode",
+      "slot": 32,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "CheckDeviceType",
+      "slot": 36,
+      "argc": 6
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "CheckDeviceFormat",
+      "slot": 40,
+      "argc": 7
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "CheckDeviceMultiSampleType",
+      "slot": 44,
+      "argc": 7
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "CheckDepthStencilMatch",
+      "slot": 48,
+      "argc": 6
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "CheckDeviceFormatConversion",
+      "slot": 52,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "GetDeviceCaps",
+      "slot": 56,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "GetAdapterMonitor",
+      "slot": 60,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3D9",
+      "method": "CreateDevice",
+      "slot": 64,
+      "argc": 7
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "TestCooperativeLevel",
+      "slot": 12,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetAvailableTextureMem",
+      "slot": 16,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "EvictManagedResources",
+      "slot": 20,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetDirect3D",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetDeviceCaps",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetDisplayMode",
+      "slot": 32,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetCreationParameters",
+      "slot": 36,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetCursorProperties",
+      "slot": 40,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetCursorPosition",
+      "slot": 44,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "ShowCursor",
+      "slot": 48,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateAdditionalSwapChain",
+      "slot": 52,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetSwapChain",
+      "slot": 56,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetNumberOfSwapChains",
+      "slot": 60,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "Reset",
+      "slot": 64,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "Present",
+      "slot": 68,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetBackBuffer",
+      "slot": 72,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetRasterStatus",
+      "slot": 76,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetDialogBoxMode",
+      "slot": 80,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetGammaRamp",
+      "slot": 84,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetGammaRamp",
+      "slot": 88,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateTexture",
+      "slot": 92,
+      "argc": 9
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateVolumeTexture",
+      "slot": 96,
+      "argc": 10
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateCubeTexture",
+      "slot": 100,
+      "argc": 8
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateVertexBuffer",
+      "slot": 104,
+      "argc": 7
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateIndexBuffer",
+      "slot": 108,
+      "argc": 7
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateRenderTarget",
+      "slot": 112,
+      "argc": 9
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateDepthStencilSurface",
+      "slot": 116,
+      "argc": 9
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "UpdateSurface",
+      "slot": 120,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "UpdateTexture",
+      "slot": 124,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetRenderTargetData",
+      "slot": 128,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetFrontBufferData",
+      "slot": 132,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "StretchRect",
+      "slot": 136,
+      "argc": 6
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "ColorFill",
+      "slot": 140,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateOffscreenPlainSurface",
+      "slot": 144,
+      "argc": 7
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetRenderTarget",
+      "slot": 148,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetRenderTarget",
+      "slot": 152,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetDepthStencilSurface",
+      "slot": 156,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetDepthStencilSurface",
+      "slot": 160,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "BeginScene",
+      "slot": 164,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "EndScene",
+      "slot": 168,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "Clear",
+      "slot": 172,
+      "argc": 7
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetTransform",
+      "slot": 176,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetTransform",
+      "slot": 180,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "MultiplyTransform",
+      "slot": 184,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetViewport",
+      "slot": 188,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetViewport",
+      "slot": 192,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetMaterial",
+      "slot": 196,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetMaterial",
+      "slot": 200,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetLight",
+      "slot": 204,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetLight",
+      "slot": 208,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "LightEnable",
+      "slot": 212,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetLightEnable",
+      "slot": 216,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetClipPlane",
+      "slot": 220,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetClipPlane",
+      "slot": 224,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetRenderState",
+      "slot": 228,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetRenderState",
+      "slot": 232,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateStateBlock",
+      "slot": 236,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "BeginStateBlock",
+      "slot": 240,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "EndStateBlock",
+      "slot": 244,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetClipStatus",
+      "slot": 248,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetClipStatus",
+      "slot": 252,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetTexture",
+      "slot": 256,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetTexture",
+      "slot": 260,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetTextureStageState",
+      "slot": 264,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetTextureStageState",
+      "slot": 268,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetSamplerState",
+      "slot": 272,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetSamplerState",
+      "slot": 276,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "ValidateDevice",
+      "slot": 280,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetPaletteEntries",
+      "slot": 284,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetPaletteEntries",
+      "slot": 288,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetCurrentTexturePalette",
+      "slot": 292,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetCurrentTexturePalette",
+      "slot": 296,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetScissorRect",
+      "slot": 300,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetScissorRect",
+      "slot": 304,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetSoftwareVertexProcessing",
+      "slot": 308,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetSoftwareVertexProcessing",
+      "slot": 312,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetNPatchMode",
+      "slot": 316,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetNPatchMode",
+      "slot": 320,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "DrawPrimitive",
+      "slot": 324,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "DrawIndexedPrimitive",
+      "slot": 328,
+      "argc": 7
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "DrawPrimitiveUP",
+      "slot": 332,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "DrawIndexedPrimitiveUP",
+      "slot": 336,
+      "argc": 9
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "ProcessVertices",
+      "slot": 340,
+      "argc": 7
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateVertexDeclaration",
+      "slot": 344,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetVertexDeclaration",
+      "slot": 348,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetVertexDeclaration",
+      "slot": 352,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetFVF",
+      "slot": 356,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetFVF",
+      "slot": 360,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateVertexShader",
+      "slot": 364,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetVertexShader",
+      "slot": 368,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetVertexShader",
+      "slot": 372,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetVertexShaderConstantF",
+      "slot": 376,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetVertexShaderConstantF",
+      "slot": 380,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetVertexShaderConstantI",
+      "slot": 384,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetVertexShaderConstantI",
+      "slot": 388,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetVertexShaderConstantB",
+      "slot": 392,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetVertexShaderConstantB",
+      "slot": 396,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetStreamSource",
+      "slot": 400,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetStreamSource",
+      "slot": 404,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetStreamSourceFreq",
+      "slot": 408,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetStreamSourceFreq",
+      "slot": 412,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetIndices",
+      "slot": 416,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetIndices",
+      "slot": 420,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreatePixelShader",
+      "slot": 424,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetPixelShader",
+      "slot": 428,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetPixelShader",
+      "slot": 432,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetPixelShaderConstantF",
+      "slot": 436,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetPixelShaderConstantF",
+      "slot": 440,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetPixelShaderConstantI",
+      "slot": 444,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetPixelShaderConstantI",
+      "slot": 448,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "SetPixelShaderConstantB",
+      "slot": 452,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "GetPixelShaderConstantB",
+      "slot": 456,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "DrawRectPatch",
+      "slot": 460,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "DrawTriPatch",
+      "slot": 464,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "DeletePatch",
+      "slot": 468,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DDevice9",
+      "method": "CreateQuery",
+      "slot": 472,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "SetPrivateData",
+      "slot": 16,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "GetPrivateData",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "FreePrivateData",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "SetPriority",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "GetPriority",
+      "slot": 32,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "PreLoad",
+      "slot": 36,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DResource9",
+      "method": "GetType",
+      "slot": 40,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "SetPrivateData",
+      "slot": 16,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "GetPrivateData",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "FreePrivateData",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "SetPriority",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "GetPriority",
+      "slot": 32,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "PreLoad",
+      "slot": 36,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "GetType",
+      "slot": 40,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "Lock",
+      "slot": 44,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "Unlock",
+      "slot": 48,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexBuffer9",
+      "method": "GetDesc",
+      "slot": 52,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "SetPrivateData",
+      "slot": 16,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "GetPrivateData",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "FreePrivateData",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "SetPriority",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "GetPriority",
+      "slot": 32,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "PreLoad",
+      "slot": 36,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "GetType",
+      "slot": 40,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "Lock",
+      "slot": 44,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "Unlock",
+      "slot": 48,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DIndexBuffer9",
+      "method": "GetDesc",
+      "slot": 52,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "SetPrivateData",
+      "slot": 16,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "GetPrivateData",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "FreePrivateData",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "SetPriority",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "GetPriority",
+      "slot": 32,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "PreLoad",
+      "slot": 36,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "GetType",
+      "slot": 40,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "GetContainer",
+      "slot": 44,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "GetDesc",
+      "slot": 48,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "LockRect",
+      "slot": 52,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "UnlockRect",
+      "slot": 56,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "GetDC",
+      "slot": 60,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DSurface9",
+      "method": "ReleaseDC",
+      "slot": 64,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "SetPrivateData",
+      "slot": 16,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "GetPrivateData",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "FreePrivateData",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "SetPriority",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "GetPriority",
+      "slot": 32,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "PreLoad",
+      "slot": 36,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "GetType",
+      "slot": 40,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "SetLOD",
+      "slot": 44,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "GetLOD",
+      "slot": 48,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "GetLevelCount",
+      "slot": 52,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "SetAutoGenFilterType",
+      "slot": 56,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "GetAutoGenFilterType",
+      "slot": 60,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DBaseTexture9",
+      "method": "GenerateMipSubLevels",
+      "slot": 64,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "SetPrivateData",
+      "slot": 16,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "GetPrivateData",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "FreePrivateData",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "SetPriority",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "GetPriority",
+      "slot": 32,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "PreLoad",
+      "slot": 36,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "GetType",
+      "slot": 40,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "SetLOD",
+      "slot": 44,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "GetLOD",
+      "slot": 48,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "GetLevelCount",
+      "slot": 52,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "SetAutoGenFilterType",
+      "slot": 56,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "GetAutoGenFilterType",
+      "slot": 60,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "GenerateMipSubLevels",
+      "slot": 64,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "GetLevelDesc",
+      "slot": 68,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "GetSurfaceLevel",
+      "slot": 72,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "LockRect",
+      "slot": 76,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "UnlockRect",
+      "slot": 80,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DTexture9",
+      "method": "AddDirtyRect",
+      "slot": 84,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "SetPrivateData",
+      "slot": 16,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "GetPrivateData",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "FreePrivateData",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "SetPriority",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "GetPriority",
+      "slot": 32,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "PreLoad",
+      "slot": 36,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "GetType",
+      "slot": 40,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "SetLOD",
+      "slot": 44,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "GetLOD",
+      "slot": 48,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "GetLevelCount",
+      "slot": 52,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "SetAutoGenFilterType",
+      "slot": 56,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "GetAutoGenFilterType",
+      "slot": 60,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "GenerateMipSubLevels",
+      "slot": 64,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "GetLevelDesc",
+      "slot": 68,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "GetCubeMapSurface",
+      "slot": 72,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "LockRect",
+      "slot": 76,
+      "argc": 6
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "UnlockRect",
+      "slot": 80,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DCubeTexture9",
+      "method": "AddDirtyRect",
+      "slot": 84,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "SetPrivateData",
+      "slot": 16,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "GetPrivateData",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "FreePrivateData",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "SetPriority",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "GetPriority",
+      "slot": 32,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "PreLoad",
+      "slot": 36,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "GetType",
+      "slot": 40,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "SetLOD",
+      "slot": 44,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "GetLOD",
+      "slot": 48,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "GetLevelCount",
+      "slot": 52,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "SetAutoGenFilterType",
+      "slot": 56,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "GetAutoGenFilterType",
+      "slot": 60,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "GenerateMipSubLevels",
+      "slot": 64,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "GetLevelDesc",
+      "slot": 68,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "GetVolumeLevel",
+      "slot": 72,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "LockBox",
+      "slot": 76,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "UnlockBox",
+      "slot": 80,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolumeTexture9",
+      "method": "AddDirtyBox",
+      "slot": 84,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "SetPrivateData",
+      "slot": 16,
+      "argc": 5
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "GetPrivateData",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "FreePrivateData",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "GetContainer",
+      "slot": 28,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "GetDesc",
+      "slot": 32,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "LockBox",
+      "slot": 36,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVolume9",
+      "method": "UnlockBox",
+      "slot": 40,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexDeclaration9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexDeclaration9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexDeclaration9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexDeclaration9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexDeclaration9",
+      "method": "GetDeclaration",
+      "slot": 16,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DQuery9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DQuery9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DQuery9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DQuery9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DQuery9",
+      "method": "GetType",
+      "slot": 16,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DQuery9",
+      "method": "GetDataSize",
+      "slot": 20,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DQuery9",
+      "method": "Issue",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DQuery9",
+      "method": "GetData",
+      "slot": 28,
+      "argc": 4
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexShader9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexShader9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexShader9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexShader9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DVertexShader9",
+      "method": "GetFunction",
+      "slot": 16,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DPixelShader9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DPixelShader9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DPixelShader9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DPixelShader9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DPixelShader9",
+      "method": "GetFunction",
+      "slot": 16,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DStateBlock9",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DStateBlock9",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DStateBlock9",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DStateBlock9",
+      "method": "GetDevice",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DStateBlock9",
+      "method": "Capture",
+      "slot": 16,
+      "argc": 1
+    },
+    {
+      "dll": "d3d9.dll",
+      "interface": "IDirect3DStateBlock9",
+      "method": "Apply",
+      "slot": 20,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "CreateSoundBuffer",
+      "slot": 12,
+      "argc": 4
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "GetCaps",
+      "slot": 16,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "DuplicateSoundBuffer",
+      "slot": 20,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "SetCooperativeLevel",
+      "slot": 24,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "Compact",
+      "slot": 28,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "GetSpeakerConfig",
+      "slot": 32,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "SetSpeakerConfig",
+      "slot": 36,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound",
+      "method": "Initialize",
+      "slot": 40,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "CreateSoundBuffer",
+      "slot": 12,
+      "argc": 4
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "GetCaps",
+      "slot": 16,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "DuplicateSoundBuffer",
+      "slot": 20,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "SetCooperativeLevel",
+      "slot": 24,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "Compact",
+      "slot": 28,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "GetSpeakerConfig",
+      "slot": 32,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "SetSpeakerConfig",
+      "slot": 36,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "Initialize",
+      "slot": 40,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound8",
+      "method": "VerifyCertification",
+      "slot": 44,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "GetCaps",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "GetCurrentPosition",
+      "slot": 16,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "GetFormat",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "GetVolume",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "GetPan",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "GetFrequency",
+      "slot": 32,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "GetStatus",
+      "slot": 36,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "Initialize",
+      "slot": 40,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "Lock",
+      "slot": 44,
+      "argc": 8
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "Play",
+      "slot": 48,
+      "argc": 4
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "SetCurrentPosition",
+      "slot": 52,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "SetFormat",
+      "slot": 56,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "SetVolume",
+      "slot": 60,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "SetPan",
+      "slot": 64,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "SetFrequency",
+      "slot": 68,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "Stop",
+      "slot": 72,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "Unlock",
+      "slot": 76,
+      "argc": 5
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer",
+      "method": "Restore",
+      "slot": 80,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "GetCaps",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "GetCurrentPosition",
+      "slot": 16,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "GetFormat",
+      "slot": 20,
+      "argc": 4
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "GetVolume",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "GetPan",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "GetFrequency",
+      "slot": 32,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "GetStatus",
+      "slot": 36,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "Initialize",
+      "slot": 40,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "Lock",
+      "slot": 44,
+      "argc": 8
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "Play",
+      "slot": 48,
+      "argc": 4
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "SetCurrentPosition",
+      "slot": 52,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "SetFormat",
+      "slot": 56,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "SetVolume",
+      "slot": 60,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "SetPan",
+      "slot": 64,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "SetFrequency",
+      "slot": 68,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "Stop",
+      "slot": 72,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "Unlock",
+      "slot": 76,
+      "argc": 5
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "Restore",
+      "slot": 80,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "SetFX",
+      "slot": 84,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "AcquireResources",
+      "slot": 88,
+      "argc": 4
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundBuffer8",
+      "method": "GetObjectInPath",
+      "slot": 92,
+      "argc": 7
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "GetAllParameters",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "GetConeAngles",
+      "slot": 16,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "GetConeOrientation",
+      "slot": 20,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "GetConeOutsideVolume",
+      "slot": 24,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "GetMaxDistance",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "GetMinDistance",
+      "slot": 32,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "GetMode",
+      "slot": 36,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "GetPosition",
+      "slot": 40,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "GetVelocity",
+      "slot": 44,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "SetAllParameters",
+      "slot": 48,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "SetConeAngles",
+      "slot": 52,
+      "argc": 4
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "SetConeOrientation",
+      "slot": 56,
+      "argc": 5
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "SetConeOutsideVolume",
+      "slot": 60,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "SetMaxDistance",
+      "slot": 64,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "SetMinDistance",
+      "slot": 68,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "SetMode",
+      "slot": 72,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "SetPosition",
+      "slot": 76,
+      "argc": 5
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DBuffer",
+      "method": "SetVelocity",
+      "slot": 80,
+      "argc": 5
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "GetAllParameters",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "GetDistanceFactor",
+      "slot": 16,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "GetDopplerFactor",
+      "slot": 20,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "GetOrientation",
+      "slot": 24,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "GetPosition",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "GetRolloffFactor",
+      "slot": 32,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "GetVelocity",
+      "slot": 36,
+      "argc": 2
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "SetAllParameters",
+      "slot": 40,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "SetDistanceFactor",
+      "slot": 44,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "SetDopplerFactor",
+      "slot": 48,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "SetOrientation",
+      "slot": 52,
+      "argc": 8
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "SetPosition",
+      "slot": 56,
+      "argc": 5
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "SetRolloffFactor",
+      "slot": 60,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "SetVelocity",
+      "slot": 64,
+      "argc": 5
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSound3DListener",
+      "method": "CommitDeferredSettings",
+      "slot": 68,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundNotify",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundNotify",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundNotify",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "dsound.dll",
+      "interface": "IDirectSoundNotify",
+      "method": "SetNotificationPositions",
+      "slot": 12,
+      "argc": 3
     }
   ]
 }
