@@ -10,7 +10,74 @@ use crate::address::Addresses;
 use crate::canonical::{canonicalize, rewrite_aliases};
 use crate::{CallFacts, Ssa, ValueId};
 
+fn crosses_call(
+    s: &Ssa,
+    load: ValueId,
+    locations: &BTreeMap<ValueId, crate::memory::Access>,
+) -> bool {
+    let Some(target) = locations.get(&load).and_then(|access| access.location) else {
+        return false;
+    };
+    let mut pending = vec![s.args(load)[0]];
+    let mut visited = LookupSet::default();
+    while let Some(token) = pending.pop() {
+        if !visited.insert(token) {
+            continue;
+        }
+        if visited.len() > 4096 {
+            return true;
+        }
+        match s.value(token).op {
+            Op::Phi => pending.extend_from_slice(s.args(token)),
+            Op::Memory => {
+                let args = s.args(token);
+                let Some(&effect) = args.first() else {
+                    continue;
+                };
+                if matches!(s.value(effect).op, Op::Call { .. } | Op::CallInd) {
+                    return true;
+                }
+                if effect != load
+                    && matches!(s.value(effect).op, Op::P(OpCode::Load | OpCode::Store))
+                    && locations.get(&effect).and_then(|access| access.location) == Some(target)
+                {
+                    continue;
+                }
+                if rk_ir::properties(s.value(effect).op).memory {
+                    pending.push(s.args(effect)[0]);
+                } else {
+                    pending.extend_from_slice(args);
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
+    let calls = s.assume_private_stack
+        && s.blocks
+            .iter()
+            .flat_map(|block| &block.ops)
+            .any(|&id| matches!(s.value(id).op, Op::Call { .. } | Op::CallInd));
+    let guards: LookupSet<_> = if calls {
+        let locations = crate::memory::accesses(s, call_facts);
+        s.blocks
+            .iter()
+            .flat_map(|block| &block.ops)
+            .filter(|&&id| {
+                matches!(
+                    s.value(id).op,
+                    Op::P(OpCode::Load) | Op::X87(X87Op::PushInteger { .. })
+                )
+            })
+            .filter(|&&id| crosses_call(s, id, &locations))
+            .copied()
+            .collect()
+    } else {
+        LookupSet::default()
+    };
     crate::memory::partition(s, call_facts);
     let mut addresses = Addresses::new(s);
     let locations: Lookup<ValueId, Address> = s
@@ -163,8 +230,44 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
             projection.s.args.truncate(old_args);
         }
     }
+    integers.retain(|&(load, _, _)| !guards.contains(&load));
     if alias.is_empty() && integers.is_empty() {
         return false;
+    }
+    if calls {
+        let guarded: Vec<_> = s
+            .blocks
+            .iter()
+            .flat_map(|block| &block.ops)
+            .filter_map(|&load| {
+                let &saved = alias.get(&load)?;
+                if !guards.contains(&load) {
+                    return None;
+                }
+                locations
+                    .get(&load)
+                    .is_some_and(|address| {
+                        matches!(
+                            address,
+                            Address::Known {
+                                base: Base::Frame,
+                                ..
+                            }
+                        )
+                    })
+                    .then_some((load, saved))
+            })
+            .collect();
+        for (load, saved) in guarded {
+            let mut args = s.args(load).to_vec();
+            args.push(saved);
+            let start = s.args.len() as u32;
+            s.args.extend(args);
+            s.values[load as usize].op = Op::StackLoad;
+            s.values[load as usize].args_start = start;
+            s.values[load as usize].args_len = 3;
+            alias.remove(&load);
+        }
     }
     let mut forwarded: LookupSet<ValueId> = LookupSet::default();
     for &(load, _, _) in &integers {

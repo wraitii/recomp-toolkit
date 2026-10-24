@@ -32,15 +32,19 @@ pub fn accesses(s: &Ssa, facts: Option<&dyn CallFacts>) -> BTreeMap<ValueId, Acc
             let op = s.value(id).op;
             let empty = Footprint::default();
             let access = match op {
-                Op::P(OpCode::Load | OpCode::Store) => {
-                    let size = if op == Op::P(OpCode::Load) {
+                Op::P(OpCode::Load | OpCode::Store)
+                | Op::StackLoad
+                | Op::StackStore
+                | Op::StackCommit
+                | Op::StackFlush => {
+                    let size = if matches!(op, Op::P(OpCode::Load) | Op::StackLoad) {
                         s.value(id).size
                     } else {
                         s.value(args[2]).size
                     };
                     let range = Range::new(addresses.get(args[1]), size as u32);
                     let effect = footprint(range);
-                    if op == Op::P(OpCode::Load) {
+                    if matches!(op, Op::P(OpCode::Load) | Op::StackLoad) {
                         Access {
                             reads: effect,
                             writes: empty,
@@ -193,21 +197,23 @@ fn identified(range: Range) -> bool {
 pub(crate) struct PrivateFrame {
     pub(crate) eligible: bool,
     independent: Lookup<ValueId, i32>,
+    exposed: Footprint,
+    calls: Lookup<ValueId, Effects>,
+    checkpoints: Lookup<ValueId, u32>,
 }
 
 impl PrivateFrame {
     pub(crate) fn new(
         s: &Ssa,
         accesses: &BTreeMap<ValueId, Access>,
-        calls_are_barriers: bool,
+        facts: Option<&dyn CallFacts>,
     ) -> Self {
         if !s.assume_private_stack
             || s.entries.len() != 1
             || s.entries[0].addr != s.addr
             || accesses.iter().any(|(&id, access)| {
                 access.location.is_none()
-                    && !(calls_are_barriers
-                        && matches!(s.value(id).op, Op::Call { .. } | Op::CallInd))
+                    && !matches!(s.value(id).op, Op::Call { .. } | Op::CallInd)
             })
         {
             return Self::default();
@@ -215,8 +221,7 @@ impl PrivateFrame {
         for block in &s.blocks {
             for &id in &block.ops {
                 let op = s.value(id).op;
-                if rk_ir::properties(op).opaque
-                    && !(calls_are_barriers && matches!(op, Op::Call { .. } | Op::CallInd))
+                if rk_ir::properties(op).opaque && !matches!(op, Op::Call { .. } | Op::CallInd)
                     || matches!(
                         op,
                         Op::Seh(_)
@@ -256,30 +261,157 @@ impl PrivateFrame {
                 }
             }
         }
-        if accesses
-            .keys()
-            .any(|&id| s.value(id).op == Op::P(OpCode::Store) && derived[s.args(id)[2] as usize])
-        {
-            return Self::default();
+        let mut addresses = Addresses::new(s);
+        let mut exposed = Footprint::default();
+        let expose = |exposed: &mut Footprint, address| {
+            if s.assume_stack_pointer_bases {
+                if let Address::Known {
+                    base: Base::Frame,
+                    offset,
+                    span: 0,
+                } = address
+                {
+                    if (offset as i32) < 0 {
+                        exposed.insert(Range::new(address, offset.wrapping_neg()));
+                    }
+                    return;
+                }
+            }
+            *exposed = Footprint::unknown();
+        };
+        let mut stored_frame = false;
+        for &id in accesses.keys() {
+            if s.value(id).op == Op::P(OpCode::Store) && derived[s.args(id)[2] as usize] {
+                stored_frame = true;
+                expose(&mut exposed, addresses.get(s.args(id)[2]));
+            }
         }
-        if calls_are_barriers
-            && s.blocks.iter().flat_map(|block| &block.ops).any(|&id| {
-                matches!(s.value(id).op, Op::Call { .. } | Op::CallInd)
-                    && s.boundary(id).is_some_and(|state| {
+        {
+            for &id in s.blocks.iter().flat_map(|block| &block.ops) {
+                if !matches!(s.value(id).op, Op::Call { .. } | Op::CallInd) {
+                    continue;
+                }
+                let target = match s.value(id).op {
+                    Op::Call { target } => Some(target),
+                    _ => None,
+                };
+                let summary =
+                    facts.and_then(|facts| facts.borrowed_stack(s.value_addr[id as usize], target));
+                if let Some(&offset) =
+                    summary.and_then(|summary| summary.captures.get(&Base::Frame))
+                {
+                    expose(
+                        &mut exposed,
+                        addresses.state(id, Field::Esp).offset(offset as u32),
+                    );
+                }
+                if stored_frame && summary.is_some_and(|summary| {
+                    summary.captures.iter().any(|(base, &offset)| matches!(base, Base::Argument(_)) && offset < 0)
+                        || summary.effects.reads.ranges.iter().chain(&summary.effects.writes.ranges).any(|range|
+                            matches!(range.address, Address::Known { base: Base::Argument(_), offset, .. } if (offset as i32) < 0))
+                }) {
+                    exposed = Footprint::unknown();
+                }
+                for field in Field::ALL {
+                    if field == Field::Esp || rk_core::contract::Fields::FLAGS.contains(field) {
+                        continue;
+                    }
+                    if s.boundary(id).is_some_and(|state| {
                         state.iter().any(|&(key, value)| {
-                            s.field(key).is_some_and(|field| {
-                                field != Field::Esp
-                                    && !rk_core::contract::Fields::FLAGS.contains(field)
-                            }) && derived[value as usize]
+                            s.field(key) == Some(field) && derived[value as usize]
+                        })
+                    }) {
+                        let address = addresses.state(id, field);
+                        let parameter = Base::Parameter(field as u8);
+                        if let Some(summary) = summary {
+                            for range in summary
+                                .effects
+                                .reads
+                                .ranges
+                                .iter()
+                                .chain(&summary.effects.writes.ranges)
+                            {
+                                if let Address::Known { base, offset, span } = range.address {
+                                    if base == parameter {
+                                        exposed.insert(Range::new(
+                                            address.offset(offset).bounded(0, span),
+                                            range.size,
+                                        ));
+                                    }
+                                }
+                            }
+                            if !summary.captures.contains_key(&parameter)
+                                && !summary.effects.reads.opaque
+                                && !summary.effects.writes.opaque
+                            {
+                                continue;
+                            }
+                        }
+                        let floor = summary
+                            .and_then(|summary| summary.captures.get(&parameter))
+                            .copied()
+                            .unwrap_or(0)
+                            .min(0);
+                        expose(&mut exposed, address.offset(floor as u32));
+                    }
+                }
+            }
+        }
+        let mut independent = Lookup::default();
+        let mut calls = Lookup::default();
+        let mut checkpoints = Lookup::default();
+        for (&id, access) in accesses {
+            if let Op::Call { target } = s.value(id).op {
+                if let Some(summary) = s
+                    .stack_calls
+                    .then(|| {
+                        facts.and_then(|facts| {
+                            facts.borrowed_stack(s.value_addr[id as usize], Some(target))
                         })
                     })
-            })
-        {
-            return Self::default();
-        }
-        let mut addresses = Addresses::new(s);
-        let mut independent = Lookup::default();
-        for (&id, access) in accesses {
+                    .flatten()
+                {
+                    let Some(cost) = summary.checkpoints else {
+                        continue;
+                    };
+                    if facts
+                        .and_then(|facts| facts.cleanup(s.value_addr[id as usize], Some(target)))
+                        .is_none()
+                        || summary.effects.writes.ranges.iter().any(|range| {
+                            matches!(
+                                range.address,
+                                Address::Known {
+                                    base: Base::Frame,
+                                    ..
+                                }
+                            ) && !range.disjoint(Range::new(Address::exact(Base::Frame, 0), 4))
+                        })
+                    {
+                        continue;
+                    }
+                    let mut effects = Effects::default();
+                    let frame = addresses.state(id, Field::Esp);
+                    for (source, output) in [
+                        (&summary.effects.reads, &mut effects.reads),
+                        (&summary.effects.writes, &mut effects.writes),
+                    ] {
+                        output.opaque = source.opaque;
+                        for &range in &source.ranges {
+                            if matches!(
+                                range.address,
+                                Address::Known {
+                                    base: Base::Frame,
+                                    ..
+                                }
+                            ) {
+                                output.insert(range.in_frame(frame));
+                            }
+                        }
+                    }
+                    calls.insert(id, effects);
+                    checkpoints.insert(id, cost);
+                }
+            }
             if access.location.is_none() || derived[s.args(id)[1] as usize] {
                 continue;
             }
@@ -297,7 +429,25 @@ impl PrivateFrame {
         Self {
             eligible: true,
             independent,
+            exposed,
+            calls,
+            checkpoints,
         }
+    }
+
+    pub(crate) fn unexposed(&self, range: Range) -> bool {
+        self.eligible && self.exposed.disjoint(range)
+    }
+
+    pub(crate) fn call_disjoint(&self, effect: ValueId, range: Range) -> bool {
+        self.unexposed(range)
+            && self.calls.get(&effect).is_some_and(|effects| {
+                effects.reads.disjoint(range) && effects.writes.disjoint(range)
+            })
+    }
+
+    pub(crate) fn call_checkpoints(&self, effect: ValueId) -> Option<u32> {
+        self.checkpoints.get(&effect).copied()
     }
 
     pub(crate) fn disjoint(&self, effect: ValueId, range: Range) -> bool {
@@ -310,13 +460,18 @@ impl PrivateFrame {
             return false;
         };
         let start = i64::from(offset as i32);
-        range.size != 0
+        self.unexposed(range)
+            && range.size != 0
             && start < 0
             && start + i64::from(range.size) <= 0
-            && self
-                .independent
+            && (self
+                .calls
                 .get(&effect)
-                .is_some_and(|&esp| i64::from(esp) <= start)
+                .is_some_and(|effects| effects.writes.disjoint(range))
+                || self
+                    .independent
+                    .get(&effect)
+                    .is_some_and(|&esp| i64::from(esp) <= start))
     }
 }
 
@@ -325,7 +480,7 @@ pub fn partition(s: &mut Ssa, facts: Option<&dyn CallFacts>) -> bool {
         return true;
     }
     let accesses = accesses(s, facts);
-    let private_frame = PrivateFrame::new(s, &accesses, false);
+    let private_frame = PrivateFrame::new(s, &accesses, facts);
     let mut ranges: BTreeSet<Range> = accesses
         .values()
         .filter_map(|access| access.location)

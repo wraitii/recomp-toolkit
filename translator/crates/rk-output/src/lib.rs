@@ -265,6 +265,15 @@ next(c);\n}\n",
             Declaration::PrivatePrepare(addr) => {
                 prepare.insert(*addr);
             }
+            Declaration::ReusedStack(addr, _) => {
+                let _ = writeln!(s, "void entry_reuse_{addr:08x}(X86 *c);");
+            }
+            Declaration::StackPrepare(addr, _) => {
+                let _ = writeln!(
+                    s,
+                    "int entry_stack_prepare_{addr:08x}(X86 *c);\nvoid fn_{addr:08x}(X86 *c);"
+                );
+            }
             Declaration::PrivateContract {
                 addr,
                 mask,
@@ -366,6 +375,19 @@ fn entry_chunks(
                 );
             }
             for (_, addr) in &entries {
+                if let Some(checkpoints) = t.bodies.iter().flat_map(|body| &body.declarations).filter_map(|decl| {
+                    match decl { Declaration::StackPrepare(target, cost) if target == addr => Some(*cost), _ => None }
+                }).max() {
+                    let _ = writeln!(s,
+                        "int entry_stack_prepare_{addr:08x}(X86 *c) {{\n#ifdef RECOMP_RAW_{addr:08x}\n    if (!recomp_hooks_ever && !recomp_profile_enabled && !recomp_frame_watch && c->checkpoint_countdown > {checkpoints}u) {{\n        --c->checkpoint_countdown;\n        return 1;\n    }}\n#else\n    (void)c;\n#endif\n    return 0;\n}}");
+                }
+                if t.bodies.iter().any(|body| body.addr == *addr && body.reused_stack) {
+                    let checkpoints = t.bodies.iter().flat_map(|body| &body.declarations).filter_map(|decl| {
+                        match decl { Declaration::ReusedStack(target, cost) if target == addr => Some(*cost), _ => None }
+                    }).max().unwrap_or(u32::MAX);
+                    let _ = writeln!(s,
+                        "void fn_reuse_{addr:08x}(X86 *c);\nvoid entry_reuse_{addr:08x}(X86 *c) {{\n#ifdef RECOMP_RAW_{addr:08x}\n    if (!recomp_hooks_ever && !recomp_profile_enabled && !recomp_frame_watch && c->checkpoint_countdown > {checkpoints}u) {{\n        --c->checkpoint_countdown;\n        fn_reuse_{addr:08x}(c);\n        return;\n    }}\n#endif\n    entry_{addr:08x}(c);\n}}");
+                }
                 for mask in t.private_masks.get(addr).into_iter().flatten() {
                     let input = t.private_input_arguments.get(addr);
                     let parameter = input.map_or(String::new(), |name| format!("uint32_t {}_, ", name.to_lowercase()));

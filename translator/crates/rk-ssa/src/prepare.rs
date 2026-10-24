@@ -10,6 +10,7 @@ use crate::{
     DEFAULT_VALUE_BUDGET,
 };
 
+#[derive(Clone, Copy)]
 pub struct PrepareOptions<'a> {
     pub policy: Policy,
     pub call_facts: &'a dyn CallFacts,
@@ -21,6 +22,8 @@ pub struct PrepareOptions<'a> {
     pub coalesce_roots: bool,
     pub assume_private_stack: bool,
     pub lazy_stack_writes: bool,
+    pub retire_reused_stack: bool,
+    pub assume_stack_pointer_bases: bool,
 }
 
 impl Default for PrepareOptions<'static> {
@@ -42,6 +45,8 @@ impl<'a> PrepareOptions<'a> {
             coalesce_roots: true,
             assume_private_stack: false,
             lazy_stack_writes: false,
+            retire_reused_stack: false,
+            assume_stack_pointer_bases: false,
         }
     }
 }
@@ -53,6 +58,49 @@ pub fn prepare(cg: &rk_ir::CgFunction, opts: &PrepareOptions) -> rk_core::Result
 pub fn prepare_with_publications(
     cg: &rk_ir::CgFunction,
     opts: &PrepareOptions,
+) -> rk_core::Result<(Ssa, Option<BTreeMap<ValueId, Vec<StateKey>>>)> {
+    prepare_using(cg, opts, true)
+}
+
+struct NoCleanup<'a>(&'a dyn CallFacts);
+
+impl CallFacts for NoCleanup<'_> {
+    fn checkpoints(&self, site: rk_core::Addr, target: Option<rk_core::Addr>) -> Option<u32> {
+        self.0.checkpoints(site, target)
+    }
+    fn call(&self, site: rk_core::Addr, target: Option<rk_core::Addr>) -> crate::CallEffect {
+        self.0.call(site, target)
+    }
+    fn cleanup(&self, _: rk_core::Addr, _: Option<rk_core::Addr>) -> Option<i32> {
+        None
+    }
+    fn stack(
+        &self,
+        site: rk_core::Addr,
+        target: Option<rk_core::Addr>,
+    ) -> Option<&crate::StackEffect> {
+        self.0.stack(site, target)
+    }
+    fn memory(
+        &self,
+        site: rk_core::Addr,
+        target: Option<rk_core::Addr>,
+    ) -> Option<&rk_core::memory::Effects> {
+        self.0.memory(site, target)
+    }
+    fn borrowed_stack(
+        &self,
+        site: rk_core::Addr,
+        target: Option<rk_core::Addr>,
+    ) -> Option<&crate::BorrowedStack> {
+        self.0.borrowed_stack(site, target)
+    }
+}
+
+fn prepare_using(
+    cg: &rk_ir::CgFunction,
+    opts: &PrepareOptions,
+    stack_cleanups: bool,
 ) -> rk_core::Result<(Ssa, Option<BTreeMap<ValueId, Vec<StateKey>>>)> {
     let build_options = BuildOptions {
         policy: opts.policy,
@@ -69,13 +117,37 @@ pub fn prepare_with_publications(
             .map_err(rk_core::Error::Diagnostic)?;
     crate::validate(&ssa)?;
     ssa.assume_private_stack = opts.assume_private_stack && opts.policy == Policy::Optimizing;
+    ssa.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
     canonicalize(&mut ssa, opts.signed_sub);
     forward(&mut ssa, Some(opts.call_facts));
     if opts.policy == Policy::Optimizing && opts.fault_state == FaultState::Relaxed {
         crate::memory::eliminate_dead_stores(&mut ssa, Some(opts.call_facts));
     }
     if lazy_stack_writes {
-        crate::stack::promote(&mut ssa);
+        crate::stack::promote(&mut ssa, opts.retire_reused_stack, opts.call_facts);
+    }
+    if stack_cleanups
+        && ssa.assume_private_stack
+        && ssa
+            .blocks
+            .iter()
+            .flat_map(|block| &block.ops)
+            .any(|&id| matches!(ssa.value(id).op, Op::Call { .. } | Op::CallInd))
+        && !ssa
+            .blocks
+            .iter()
+            .flat_map(|block| &block.ops)
+            .any(|&id| matches!(ssa.value(id).op, Op::StackLoad | Op::StackStore))
+    {
+        let facts = NoCleanup(opts.call_facts);
+        return prepare_using(
+            cg,
+            &PrepareOptions {
+                call_facts: &facts,
+                ..*opts
+            },
+            false,
+        );
     }
     crate::flags::build_joins(&mut ssa);
     crate::coalesce::coalesce(&mut ssa, opts.coalesce_roots);

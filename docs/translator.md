@@ -145,9 +145,12 @@ their provisional values without caching them; depth and memo limits retain the 
 Read/write summaries use the call-graph SCC fixed point, translate frame offsets at
 each call site, and widen unresolved or
 unbounded effects to opaque memory. Types and local layouts are not alias proofs.
-Production call dispatch remains opaque to memory forwarding because hooks and scheduler
-handoffs can add effects; original-code summaries feed the explicitly enabled offline
-inference below.
+General production call effects remain opaque. Private-frame forwarding can use interprocedural
+effects, including frame-relative accesses and register/stack pointer parameters. Borrowed-stack
+summaries compose over call-graph SCCs; unbounded recursive effects remain conservative.
+Unknown targets, captures and unbounded parameter accesses remain conservative. Bounded
+indirect target sets combine every target's effects; cross-call deferral currently requires
+a direct call. General original-code summaries feed the offline inference below.
 
 `[translate] assume_private_stack` defaults to true in Rust production translation;
 false restores conservative frame aliasing. `exposed_stack_functions = [0x00401000]`
@@ -155,8 +158,12 @@ disables the assumption for the listed function owners in the main image, includ
 their compiled variants. `DIVERGENCE(original):` newly allocated, unescaped frame
 storage is assumed inaccessible through pointers independent of entry ESP, including
 pre-existing pointers and wrapping arithmetic. Explicit ESP-derived accesses still
-alias normally. Load forwarding requires a single entry, no calls, opaque effects
-or escaping branches, and no ESP-derived value stored to memory.
+alias normally. Load forwarding requires a single entry and no opaque non-call effects
+or escaping branches. Escaped ranges retain conservative aliasing independently of
+unexposed slots. `[translate] assume_stack_pointer_bases` defaults to false.
+`DIVERGENCE(original):` when enabled, an escaped frame pointer is assumed to identify
+the beginning of its accessible region. Unknown upward extents expose the remainder
+of the frame; proved callee ranges can narrow exposure and include negative accesses.
 Each exempted write needs a proved current ESP below the entire negative-offset
 slot; arguments and the return address remain conservative. Forwarding retains
 guest stores, and original-code analysis summaries do not use this assumption.
@@ -165,13 +172,29 @@ guest stores, and original-code analysis summaries do not use this assumption.
 is enabled, fault state is relaxed, and store hooks are disabled. Exact negative
 frame slots carry pending values through ordinary SSA phis. A backward pass keeps
 a store eager unless it can be overwritten across an access separated by the
-private-stack assumption. Calls flush and clear pending writes; actual ESP changes
-flush before subsequent effects. Publication requires a pending write on every
-incoming path; mixed paths retain eager stores instead of runtime dirty guards.
-Overlapping candidate slots, unknown effects, alternate entries, stored frame
-addresses, and calls exposing a frame-derived register retain eager writes. `DIVERGENCE(original):` eligible
-private-frame writes are delayed; final bytes are preserved and no expired writes
-are discarded. Set `lazy_stack_writes = false` to retain forwarding with eager
+private-stack assumption. Proved direct calls retain disjoint pending slots on
+their ordinary path. Preparation consumes checkpoint credit only when accepted;
+otherwise pending writes flush before ordinary dispatch consumes its checkpoint.
+Non-leaf callees require credit for the longest nested call path as well as entry;
+recursion, call-containing loops and unresolved dispatch retain eager publication.
+`DIVERGENCE(original):` scheduler work is assumed to preserve this thread's unescaped
+live frame. The hook/replacement/observer path flushes pending slots before dispatch
+and invalidates the function's cached stack state; subsequent stores become eager
+and forwarded reads reload. Unproved calls flush and clear pending writes. ESP
+changes retain allocated slots and flush released slots before subsequent effects.
+Publication requires a pending write on every
+incoming path. At mixed joins, definite-pending predecessors flush before merging;
+unresolved placement retains eager stores instead of runtime dirty guards.
+Overlapping candidate slots, unknown effects, alternate entries and exposed ranges
+retain eager writes. `DIVERGENCE(original):` eligible private-frame writes are delayed;
+ordinary entry paths preserve final bytes. `[translate] retire_reused_stack` defaults
+to false. `DIVERGENCE(original):` normal reuse of released stack storage invalidates
+old contents at and below the new write, including bytes not overwritten. A bounded
+caller-continuation proof selects a distinct variant only when retirement changes
+the emitted body;
+return alone is insufficient. Retirement uses the same nested-checkpoint bound,
+independently of memory-summary precision. Hooks, replacements, observers and
+insufficient checkpoint credit use the ordinary entry. Unknown continuations retain final bytes. Set `lazy_stack_writes = false` to retain forwarding with eager
 stores; `exposed_stack_functions` disables both optimizations for an owner.
 
 `[translate] stack_memory` enables additional original-code summaries for offline

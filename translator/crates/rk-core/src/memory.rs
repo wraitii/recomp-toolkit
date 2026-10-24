@@ -5,6 +5,8 @@ pub enum Base {
     Frame,
     Absolute,
     Value(u32),
+    Parameter(u8),
+    Argument(i32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -188,7 +190,7 @@ impl Footprint {
         if matches!(
             range.address,
             Address::Known {
-                base: Base::Frame | Base::Absolute,
+                base: Base::Frame | Base::Absolute | Base::Parameter(_) | Base::Argument(_),
                 ..
             }
         ) && range.size != 0

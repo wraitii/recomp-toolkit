@@ -63,6 +63,8 @@ TRANSLATE_DEFAULTS = {
     "call_contracts": True,
     "assume_private_stack": True,
     "lazy_stack_writes": True,
+    "retire_reused_stack": False,
+    "assume_stack_pointer_bases": False,
     "private_leaf_contracts": False,
     "private_input_arguments": False,
     "private_input_registers": {},
@@ -507,6 +509,10 @@ def load(game_dir, build_root=None):
         raise ValueError("%s: [translate] assume_private_stack must be a boolean" % source)
     if type(translate.setdefault("lazy_stack_writes", TRANSLATE_DEFAULTS["lazy_stack_writes"])) is not bool:
         raise ValueError("%s: [translate] lazy_stack_writes must be a boolean" % source)
+    if type(translate.setdefault("retire_reused_stack", TRANSLATE_DEFAULTS["retire_reused_stack"])) is not bool:
+        raise ValueError("%s: [translate] retire_reused_stack must be a boolean" % source)
+    if type(translate.setdefault("assume_stack_pointer_bases", TRANSLATE_DEFAULTS["assume_stack_pointer_bases"])) is not bool:
+        raise ValueError("%s: [translate] assume_stack_pointer_bases must be a boolean" % source)
     exposed = translate.setdefault("exposed_stack_functions", [])
     if (not isinstance(exposed, list)
             or any(type(v) is not int or not 0 <= v <= 0xffffffff for v in exposed)

@@ -25,7 +25,7 @@ mod validate;
 pub use validate::validate;
 
 pub use build::{
-    build, BuildOptions, CallEffect, CallFacts, ConservativeCallFacts, StackEffect,
+    build, BorrowedStack, BuildOptions, CallEffect, CallFacts, ConservativeCallFacts, StackEffect,
     DEFAULT_VALUE_BUDGET,
 };
 pub use canonical::canonicalize;
@@ -142,8 +142,11 @@ pub struct Ssa {
     pub loc: Vec<Option<InsnLoc>>,
     pub value_addr: Vec<Addr>,
     pub(crate) stack_states: BTreeMap<ValueId, [ValueId; 4]>,
+    pub stack_guards: BTreeMap<ValueId, ValueId>,
+    pub(crate) stack_calls: bool,
     pub(crate) memory_partitioned: bool,
     pub(crate) assume_private_stack: bool,
+    pub(crate) assume_stack_pointer_bases: bool,
     pub(crate) phi_key: Lookup<ValueId, usize>,
     pub(crate) entry_reads: Vec<Vec<(usize, ValueId)>>,
     pub(crate) exit_state: Vec<Vec<Option<ValueId>>>,

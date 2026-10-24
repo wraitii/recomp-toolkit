@@ -8,6 +8,8 @@ pub enum Declaration {
     Entry(Addr),
     Checked(Addr),
     PrivatePrepare(Addr),
+    ReusedStack(Addr, u32),
+    StackPrepare(Addr, u32),
     PrivateContract {
         addr: Addr,
         mask: Fields,
@@ -40,4 +42,5 @@ pub struct Body {
     pub requires: Requires,
     pub declarations: BTreeSet<Declaration>,
     pub private_mask: Option<Fields>,
+    pub reused_stack: bool,
 }

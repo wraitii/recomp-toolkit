@@ -33,6 +33,15 @@ impl CallEffect {
 }
 
 pub trait CallFacts: Sync {
+    fn checkpoints(&self, site: Addr, target: Option<Addr>) -> Option<u32> {
+        self.borrowed_stack(site, target)?.checkpoints
+    }
+    fn cleanup(&self, site: Addr, target: Option<Addr>) -> Option<i32> {
+        self.stack(site, target).map(|effect| effect.cleanup)
+    }
+    fn borrowed_stack(&self, _site: Addr, _target: Option<Addr>) -> Option<&BorrowedStack> {
+        None
+    }
     fn memory(&self, _site: Addr, _target: Option<Addr>) -> Option<&rk_core::memory::Effects> {
         None
     }
@@ -41,6 +50,22 @@ pub trait CallFacts: Sync {
 
     fn stack(&self, _site: Addr, _target: Option<Addr>) -> Option<&StackEffect> {
         None
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BorrowedStack {
+    pub effects: rk_core::memory::Effects,
+    pub captures: BTreeMap<rk_core::memory::Base, i32>,
+    pub checkpoints: Option<u32>,
+}
+
+impl BorrowedStack {
+    pub fn capture(&mut self, base: rk_core::memory::Base, offset: i32) {
+        self.captures
+            .entry(base)
+            .and_modify(|old| *old = (*old).min(offset))
+            .or_insert(offset);
     }
 }
 
@@ -570,8 +595,11 @@ impl<'a> Builder<'a> {
             loc: self.loc,
             value_addr: self.value_addr,
             stack_states: self.stack_states,
+            stack_guards: BTreeMap::new(),
+            stack_calls: self.lazy_stack_writes,
             memory_partitioned: false,
             assume_private_stack: false,
+            assume_stack_pointer_bases: false,
             phi_key: self.phi_key,
             entry_reads: self.entry_reads,
             exit_state: self.exit_state,
@@ -947,7 +975,7 @@ impl<'a> Builder<'a> {
                 let token = self.value(Op::Memory, 0, &[value]);
                 state[memory_index] = Some(token);
                 let effect = self.call_effect(addr, Some(target));
-                self.reload_call(value, effect, state, block)?;
+                self.reload_call(value, effect, state, block, ops)?;
                 ops.push(value);
             }
             Op::CallInd => {
@@ -966,7 +994,7 @@ impl<'a> Builder<'a> {
                 let token = self.value(Op::Memory, 0, &[value]);
                 state[memory_index] = Some(token);
                 let effect = self.call_effect(addr, None);
-                self.reload_call(value, effect, state, block)?;
+                self.reload_call(value, effect, state, block, ops)?;
                 ops.push(value);
             }
             Op::String(string) => {
@@ -1123,6 +1151,11 @@ impl<'a> Builder<'a> {
             | Op::Pack
             | Op::Memory
             | Op::StackBoundary
+            | Op::StackCallGuard { .. }
+            | Op::StackLoad
+            | Op::StackStore
+            | Op::StackCommit
+            | Op::StackFlush
             | Op::StateReload(_)
             | Op::StateKeep(_)
             | Op::CcKind(_) => {
@@ -1151,20 +1184,26 @@ impl<'a> Builder<'a> {
         effect: CallEffect,
         state: &mut [Option<ValueId>],
         block: BlockId,
+        ops: &mut Vec<ValueId>,
     ) -> Result<(), Diagnostic> {
         let target = match self.values[site as usize].op {
             Op::Call { target } => Some(target),
             _ => None,
         };
         let cleanup = (self.opts.policy != Policy::Conservative)
-            .then(|| self.opts.call_facts.stack(self.current_addr, target))
-            .flatten()
-            .map(|effect| effect.cleanup);
+            .then(|| self.opts.call_facts.cleanup(self.current_addr, target))
+            .flatten();
         let esp = Registers::get().require("ESP");
         let next_esp = if let Some(cleanup) = cleanup {
             let old = self.read(&esp, state, &mut Lookup::default(), block)?;
             let delta = self.value(Op::Const(4u32.wrapping_add(cleanup as u32) as u64), 4, &[]);
-            Some(self.value(Op::P(OpCode::IntAdd), 4, &[old, delta]))
+            let expected = self.value(Op::P(OpCode::IntAdd), 4, &[old, delta]);
+            ops.push(expected);
+            Some(self.value(
+                Op::StateKeep(rk_ir::lanes(Field::Esp)[0]),
+                4,
+                &[site, expected],
+            ))
         } else {
             None
         };

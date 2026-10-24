@@ -53,6 +53,8 @@ pub struct EmitContext<'a> {
     pub host_calls: &'a BTreeSet<Addr>,
     pub private: Option<&'a PrivateEmit>,
     pub reloc: Option<RelocEmit>,
+    pub reused_stack: bool,
+    pub reuse_calls: &'a BTreeMap<Addr, (Addr, u32)>,
 }
 
 pub struct EmitReport {
@@ -80,6 +82,7 @@ pub fn emit_body(planned: &PlannedFunction, ctx: &EmitContext<'_>) -> Result<(Bo
             requires: emitter.requires,
             declarations: emitter.declarations,
             private_mask: ctx.private.map(|private| private.mask),
+            reused_stack: ctx.reused_stack,
         },
         report,
     ))
@@ -97,6 +100,7 @@ struct Emitter<'a> {
     private: Option<&'a PrivateEmit>,
     materialized: Vec<bool>,
     uses_arena: bool,
+    stack_state: bool,
     value_block: Vec<u32>,
     successors: Vec<Vec<usize>>,
     transfers: Transfers,
@@ -287,7 +291,13 @@ impl<'a> Emitter<'a> {
         let uses_arena = s.values.iter().any(|value| {
             matches!(
                 value.op,
-                Op::P(OpCode::Load) | Op::P(OpCode::Store) | Op::ImportTail { .. }
+                Op::P(OpCode::Load)
+                    | Op::P(OpCode::Store)
+                    | Op::StackLoad
+                    | Op::StackStore
+                    | Op::StackCommit
+                    | Op::StackFlush
+                    | Op::ImportTail { .. }
             ) || matches!(value.op, Op::X87(op) if op.touches_memory())
         });
         let mut in_block = vec![false; s.values.len()];
@@ -370,10 +380,21 @@ impl<'a> Emitter<'a> {
             requires: Requires::default(),
             declarations: BTreeSet::new(),
             multi: s.entries.len() > 1,
-            checked: ctx.checked_returns.contains(&s.addr) || ctx.private.is_some(),
+            checked: !ctx.reused_stack
+                && (ctx.checked_returns.contains(&s.addr) || ctx.private.is_some()),
             private: ctx.private,
             materialized,
             uses_arena,
+            stack_state: s.blocks.iter().flat_map(|block| &block.ops).any(|&id| {
+                matches!(
+                    s.value(id).op,
+                    Op::StackLoad
+                        | Op::StackStore
+                        | Op::StackCommit
+                        | Op::StackFlush
+                        | Op::StackCallGuard { .. }
+                )
+            }),
             value_block,
             transfers: Transfers::new(plan, &successors, has_dynamic),
             successors,
@@ -396,7 +417,9 @@ impl<'a> Emitter<'a> {
 
     fn run(&mut self) -> Result<()> {
         let addr = self.s.addr;
-        let body_name = if let Some(private) = self.private {
+        let body_name = if self.ctx.reused_stack {
+            format!("fn_reuse_{addr:08x}")
+        } else if let Some(private) = self.private {
             format!("fn_contract_{addr:08x}_{:04x}", private.mask.0)
         } else if self.checked {
             format!("body_checked_{addr:08x}")
@@ -410,6 +433,10 @@ impl<'a> Emitter<'a> {
         self.out.push_str(" {\n");
         if self.checked && self.private.is_none() {
             self.out.push_str("(void)expected_return_; (void)checked_return_;\n");
+        }
+        if self.stack_state {
+            self.out
+                .push_str("int stack_valid_ = !recomp_hooks_ever;\n");
         }
         self.write_declarations();
         self.write_x87_declarations()?;
@@ -516,7 +543,7 @@ impl<'a> Emitter<'a> {
 
     fn wrappers(&mut self, body: &str) {
         let addr = self.s.addr;
-        if self.private.is_some() {
+        if self.private.is_some() || self.ctx.reused_stack {
             return;
         }
         let base_param = if self.ctx.reloc.is_some() {
@@ -660,7 +687,7 @@ impl<'a> Emitter<'a> {
             if let Some(group) = self.keep_group.get(&id).copied() {
                 let old = self.pack_bytes(&group.olds, false)?;
                 let loaded = format!("c->r[{}]", group.field);
-                let expr = keep_expr(&loaded, &old);
+                let expr = self.kept_expr(&loaded, &old);
                 let _ = writeln!(self.out, "v{id} = ({expr});");
                 continue;
             }
@@ -672,6 +699,14 @@ impl<'a> Emitter<'a> {
 
     fn block_prefix(&self) -> char {
         self.prefix_for(self.clone)
+    }
+
+    fn kept_expr(&self, loaded: &str, old: &str) -> String {
+        if self.stack_state && loaded != old {
+            format!("(RECOMP_UNLIKELY(!stack_valid_ || recomp_hooks_ever) ? ({loaded}) : ({old}))")
+        } else {
+            keep_expr(loaded, old)
+        }
     }
 
     fn prefix_for(&self, clone: usize) -> char {
@@ -1054,8 +1089,46 @@ impl<'a> Emitter<'a> {
                 self.out.push_str("x86_cc_settle(c);\n");
                 Ok(true)
             }
-            Op::P(OpCode::Load) => self.load(value).map(|_| true),
-            Op::P(OpCode::Store) => self.store(value).map(|_| true),
+            Op::P(OpCode::Load) | Op::StackLoad => self.load(value).map(|_| true),
+            Op::P(OpCode::Store) | Op::StackStore | Op::StackCommit | Op::StackFlush => {
+                let guard = match item.op {
+                    Op::StackStore => Some("!stack_valid_ || recomp_hooks_ever".to_string()),
+                    Op::StackCommit => Some("stack_valid_ && !recomp_hooks_ever".to_string()),
+                    Op::StackFlush => Some(format!(
+                        "stack_valid_ && !({})",
+                        self.expr(self.s.args(value)[3])?
+                    )),
+                    _ => None,
+                };
+                if let Some(guard) = &guard {
+                    let _ = writeln!(self.out, "if ({guard}) {{");
+                }
+                self.store(value)?;
+                if guard.is_some() {
+                    self.out.push_str("}\n");
+                }
+                Ok(true)
+            }
+            Op::StackCallGuard {
+                target,
+                checkpoints,
+            } => {
+                let site = self
+                    .s
+                    .stack_guards
+                    .iter()
+                    .find_map(|(&site, &guard)| (guard == value).then_some(site))
+                    .ok_or_else(|| self.error(addr, "stack guard without a call"))?;
+                self.publish(site)?;
+                self.publish_guard(site)?;
+                self.declarations
+                    .insert(Declaration::StackPrepare(target, checkpoints));
+                let _ = writeln!(
+                    self.out,
+                    "v{value} = stack_valid_ && entry_stack_prepare_{target:08x}(c);"
+                );
+                Ok(true)
+            }
             _ => {
                 let expr = self.operation(value)?;
                 let _ = writeln!(self.out, "{}", self.assignment(value, &expr));
@@ -1704,8 +1777,37 @@ impl<'a> Emitter<'a> {
     }
 
     fn call(&mut self, value: ValueId, target: Addr) -> Result<()> {
-        self.publish(value)?;
-        self.publish_guard(value)?;
+        if !self.s.stack_guards.contains_key(&value) {
+            self.publish(value)?;
+            self.publish_guard(value)?;
+        }
+        if let Some(&guard) = self.s.stack_guards.get(&value) {
+            self.declare_entry(target);
+            let guard = self.expr(guard)?;
+            let _ = writeln!(self.out,
+                "if ({guard}) {{ fn_{target:08x}(c); }} else {{ stack_valid_ = 0; CALL_FN({target:08x}); }}");
+            if let Some(&expected) = self.plan.return_addr.get(&value) {
+                self.resume_check(value, target, expected);
+            }
+            if self.plan.settle_sites.contains(&value) {
+                self.out.push_str("x86_cc_settle(c);\n");
+            }
+            return Ok(());
+        }
+        if let Some(&(_, checkpoints)) = self
+            .ctx
+            .reuse_calls
+            .get(&self.s.value_addr[value as usize])
+            .filter(|&&(callee, _)| callee == target)
+        {
+            self.declarations
+                .insert(Declaration::ReusedStack(target, checkpoints));
+            let _ = writeln!(self.out, "entry_reuse_{target:08x}(c);");
+            if self.plan.settle_sites.contains(&value) {
+                self.out.push_str("x86_cc_settle(c);\n");
+            }
+            return Ok(());
+        }
         if self.ctx.setjmp_targets.contains(&target) {
             self.out.push_str("RECOMP_SETJMP3(c);\n");
             return Ok(());
@@ -1879,11 +1981,16 @@ impl<'a> Emitter<'a> {
             _ => return Err(self.error(self.s.value_addr[value as usize], "unsupported load size")),
         };
         let helper = format!("recomp_{read}_");
-        let _ = writeln!(
-            self.out,
-            "{}",
-            self.assignment(value, &format!("{helper}(arena_, (uint32_t)({address}))"))
-        );
+        let read = format!("{helper}(arena_, (uint32_t)({address}))");
+        let read = if self.s.value(value).op == Op::StackLoad {
+            format!(
+                "((!stack_valid_ || recomp_hooks_ever) ? ({read}) : ({}))",
+                self.expr(args[2])?
+            )
+        } else {
+            read
+        };
+        let _ = writeln!(self.out, "{}", self.assignment(value, &read));
         Ok(())
     }
 
@@ -2649,7 +2756,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         loaded
                     };
-                Ok(keep_expr(&loaded, &old))
+                Ok(self.kept_expr(&loaded, &old))
             }
             Op::P(OpCode::Copy) | Op::P(OpCode::IntZExt) => self.expr(
                 *self
@@ -2892,7 +2999,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         loaded
                     };
-                keep_expr(&loaded, &old)
+                self.kept_expr(&loaded, &old)
             }
             Op::Memory => "0u".to_string(),
             Op::Phi => format!("v{value}"),

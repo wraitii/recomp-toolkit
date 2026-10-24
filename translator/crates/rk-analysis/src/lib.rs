@@ -273,16 +273,28 @@ pub fn run(args: Args) -> Result<()> {
     }
     let guest_preferences: BTreeSet<Addr> = observations
         .iter()
-        .filter(|(_, row)| !row.kinds.is_empty()
-            && row.kinds.iter().all(|kind| kind == "known" || kind == "module"))
+        .filter(|(_, row)| {
+            !row.kinds.is_empty()
+                && row
+                    .kinds
+                    .iter()
+                    .all(|kind| kind == "known" || kind == "module")
+        })
         .filter_map(|(&site, _)| {
             let function = program.functions.get(&program.containing(site)?)?;
-            let span = function.spans.iter().find(|span| span.start <= site && site < span.end())?;
+            let span = function
+                .spans
+                .iter()
+                .find(|span| span.start <= site && site < span.end())?;
             let insn = decode_mapped(&program, &decoder, span, site).ok()?;
             (insn.mnemonic.eq_ignore_ascii_case("CALL")
-                && insn.operands.first().is_some_and(|operand|
-                    matches!(operand.kind, OperandKind::Reg { .. } | OperandKind::Mem { .. })))
-                .then_some(site)
+                && insn.operands.first().is_some_and(|operand| {
+                    matches!(
+                        operand.kind,
+                        OperandKind::Reg { .. } | OperandKind::Mem { .. }
+                    )
+                }))
+            .then_some(site)
         })
         .collect();
     let mut generated = Vec::new();
@@ -1140,8 +1152,11 @@ fn build_artifacts(
             "t": target_sets[&site.targets],
         })
     }));
-    let indices: BTreeMap<String, usize> = sites_json.iter().enumerate()
-        .map(|(index, row)| (row["s"].as_str().unwrap().to_string(), index)).collect();
+    let indices: BTreeMap<String, usize> = sites_json
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row["s"].as_str().unwrap().to_string(), index))
+        .collect();
     for &site in guest_preferences {
         let site = Hex(site).to_string();
         if let Some(&index) = indices.get(&site) {

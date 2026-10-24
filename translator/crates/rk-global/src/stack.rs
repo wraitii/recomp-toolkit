@@ -59,6 +59,11 @@ pub struct CallFacts<'a> {
 }
 
 impl rk_ssa::CallFacts for CallFacts<'_> {
+    fn cleanup(&self, site: Addr, target: Option<Addr>) -> Option<i32> {
+        self.summary(site, target)
+            .map(|summary| summary.effect.cleanup)
+            .or_else(|| self.registers.cleanup(site, target))
+    }
     fn memory(&self, site: Addr, target: Option<Addr>) -> Option<&rk_core::memory::Effects> {
         let effects = self.memory?;
         match target {

@@ -15,6 +15,8 @@ enum Action {
     Write,
     Settle,
     Separate,
+    Retire,
+    Hook,
 }
 
 const OVERWRITE: u8 = 1;
@@ -43,7 +45,10 @@ fn delayed_stores(
     let transfer = |id: ValueId, state: u8| match actions.get(&id) {
         Some(Action::Write) => OVERWRITE,
         Some(Action::Settle) => 0,
-        Some(Action::Separate) if state & OVERWRITE != 0 => state | SEPARATED_OVERWRITE,
+        Some(Action::Retire) => OVERWRITE | SEPARATED_OVERWRITE,
+        Some(Action::Separate | Action::Hook) if state & OVERWRITE != 0 => {
+            state | SEPARATED_OVERWRITE
+        }
         _ => state,
     };
     loop {
@@ -90,7 +95,109 @@ fn incoming(s: &Ssa, block: usize, outputs: &[u8]) -> u8 {
     })
 }
 
-pub(crate) fn promote(s: &mut Ssa) {
+fn transfer(
+    actions: &BTreeMap<ValueId, Action>,
+    stores: &BTreeSet<ValueId>,
+    id: ValueId,
+    state: u8,
+) -> u8 {
+    match actions.get(&id) {
+        Some(Action::Write) => {
+            if stores.contains(&id) {
+                PENDING
+            } else {
+                CLEAN
+            }
+        }
+        Some(Action::Settle | Action::Retire) => CLEAN,
+        _ => state,
+    }
+}
+
+fn settle_joins(
+    s: &mut Ssa,
+    frame: ValueId,
+    actions: &mut BTreeMap<ValueId, Action>,
+    stores: &BTreeSet<ValueId>,
+    settlements: &mut BTreeSet<ValueId>,
+) -> Option<Vec<u8>> {
+    loop {
+        let mut outputs = vec![0; s.blocks.len()];
+        loop {
+            let mut changed = false;
+            for (block, item) in s.blocks.iter().enumerate() {
+                let state = item
+                    .ops
+                    .iter()
+                    .fold(incoming(s, block, &outputs), |state, &id| {
+                        transfer(actions, stores, id, state)
+                    });
+                if state != outputs[block] {
+                    outputs[block] = state;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut mixed: Vec<_> = s
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(block, item)| {
+                let mut state = incoming(s, block, &outputs);
+                for &id in &item.ops {
+                    if matches!(actions.get(&id), Some(Action::Settle | Action::Hook))
+                        && state == (CLEAN | PENDING)
+                    {
+                        return Some(block);
+                    }
+                    state = transfer(actions, stores, id, state);
+                }
+                None
+            })
+            .collect();
+        if mixed.is_empty() {
+            return Some(outputs);
+        }
+        let mut visited = BTreeSet::new();
+        let mut predecessors = BTreeSet::new();
+        while let Some(block) = mixed.pop() {
+            if !visited.insert(block) {
+                continue;
+            }
+            for &pred in &s.blocks[block].preds {
+                if pred == DISPATCH_BLOCK {
+                    continue;
+                }
+                match outputs[pred as usize] {
+                    PENDING => {
+                        predecessors.insert(pred);
+                    }
+                    state if state == (CLEAN | PENDING) => mixed.push(pred as usize),
+                    _ => {}
+                }
+            }
+        }
+        if predecessors.is_empty() {
+            return None;
+        }
+        for pred in predecessors {
+            let block = &s.blocks[pred as usize];
+            let last = block.ops.last().copied();
+            let position = block.ops.len()
+                - usize::from(last.is_some_and(|id| rk_ir::properties(s.value(id).op).terminator));
+            let addr = last.map_or(s.addr, |id| s.value_addr[id as usize]);
+            let marker = s.new_value(Op::StackBoundary, 0, &[frame, frame], addr);
+            s.blocks[pred as usize].ops.insert(position, marker);
+            settlements.insert(marker);
+            actions.insert(marker, Action::Settle);
+        }
+    }
+}
+
+pub(crate) fn promote(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallFacts) {
     for block in &mut s.blocks {
         block.ops.retain(|&id| {
             let value = &s.values[id as usize];
@@ -98,7 +205,20 @@ pub(crate) fn promote(s: &mut Ssa) {
                 || s.args[value.args_start as usize] != s.args[value.args_start as usize + 1]
         });
     }
-    place_writes(s);
+    place_writes(s, retire_reused_stack, facts);
+    if !s
+        .blocks
+        .iter()
+        .flat_map(|block| &block.ops)
+        .any(|&id| matches!(s.value(id).op, Op::StackStore | Op::StackLoad))
+    {
+        s.stack_guards.clear();
+        for block in &mut s.blocks {
+            block
+                .ops
+                .retain(|&id| !matches!(s.values[id as usize].op, Op::StackCallGuard { .. }));
+        }
+    }
     for block in &mut s.blocks {
         block
             .ops
@@ -106,9 +226,9 @@ pub(crate) fn promote(s: &mut Ssa) {
     }
 }
 
-fn place_writes(s: &mut Ssa) {
+fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallFacts) {
     let accesses = accesses(s, None);
-    let private = PrivateFrame::new(s, &accesses, true);
+    let private = PrivateFrame::new(s, &accesses, Some(facts));
     if !private.eligible {
         return;
     }
@@ -121,6 +241,9 @@ fn place_writes(s: &mut Ssa) {
         let Some(range) = access.location else {
             continue;
         };
+        if !private.unexposed(range) {
+            continue;
+        }
         let Address::Known {
             base: Base::Frame,
             offset,
@@ -164,7 +287,22 @@ fn place_writes(s: &mut Ssa) {
     }) {
         return;
     }
+    let return_stacks: BTreeMap<_, _> = s
+        .blocks
+        .iter()
+        .flat_map(|block| &block.ops)
+        .filter(|&&id| s.value(id).op == Op::Return)
+        .map(|&id| (id, addresses.state(id, Field::Esp)))
+        .collect();
+    let stack_moves: BTreeMap<_, _> = s
+        .blocks
+        .iter()
+        .flat_map(|block| &block.ops)
+        .filter(|&&id| s.value(id).op == Op::StackBoundary)
+        .map(|&id| (id, addresses.get(s.args(id)[1])))
+        .collect();
     let mut changed = false;
+    let mut settlements = BTreeSet::new();
     let mut constants = BTreeMap::new();
     let esp: Vec<_> = rk_ir::lanes(Field::Esp)
         .iter()
@@ -172,11 +310,67 @@ fn place_writes(s: &mut Ssa) {
         .collect();
     let frame = s.new_value(Op::Pack, 4, &esp, 0);
     s.blocks[s.entries[0].target as usize].ops.insert(0, frame);
+    let calls = s
+        .blocks
+        .iter()
+        .flat_map(|block| &block.ops)
+        .any(|&id| matches!(s.value(id).op, Op::Call { .. } | Op::CallInd));
+    if !slots.is_empty() || s.values.iter().any(|value| value.op == Op::StackLoad) {
+        for block in 0..s.blocks.len() {
+            let mut ops = Vec::new();
+            for id in s.blocks[block].ops.clone() {
+                if let Op::Call { target } = s.value(id).op {
+                    if let Some(checkpoints) = private.call_checkpoints(id) {
+                        let guard = s.new_value(
+                            Op::StackCallGuard {
+                                target,
+                                checkpoints,
+                            },
+                            1,
+                            &[],
+                            s.value_addr[id as usize],
+                        );
+                        s.stack_guards.insert(id, guard);
+                        ops.push(guard);
+                    }
+                }
+                ops.push(id);
+            }
+            s.blocks[block].ops = ops;
+        }
+    }
     for (range, writes) in slots {
         let mut actions = BTreeMap::new();
         for &id in s.blocks.iter().flat_map(|block| &block.ops) {
             let op = s.value(id).op;
-            let action = if writes.contains(&id) {
+            let action = if settlements.contains(&id) {
+                Action::Keep
+            } else if retire_reused_stack
+                && op == Op::Return
+                && matches!(return_stacks.get(&id).copied(), Some(Address::Known {
+                    base: Base::Frame, offset, span: 0
+                }) if i64::from(offset as i32) >= i64::from(match range.address {
+                    Address::Known { offset, .. } => offset as i32,
+                    _ => unreachable!(),
+                }) + i64::from(range.size))
+            {
+                Action::Retire
+            } else if retire_reused_stack && op == Op::StackBoundary {
+                Action::Keep
+            } else if op == Op::StackBoundary
+                && matches!(stack_moves.get(&id),
+                Some(Address::Known { base: Base::Frame, offset, span: 0 })
+                    if (*offset as i32) <= match range.address {
+                        Address::Known { offset, .. } => offset as i32,
+                        _ => unreachable!(),
+                    })
+            {
+                Action::Keep
+            } else if s.stack_guards.contains_key(&id) && private.call_disjoint(id, range) {
+                Action::Hook
+            } else if op == Op::StackLoad {
+                Action::Keep
+            } else if writes.contains(&id) {
                 Action::Write
             } else if matches!(
                 op,
@@ -202,47 +396,9 @@ fn place_writes(s: &mut Ssa) {
         if stores.is_empty() {
             continue;
         }
-        let transfer = |id: ValueId, state: u8| match actions.get(&id) {
-            Some(Action::Write) => {
-                if stores.contains(&id) {
-                    PENDING
-                } else {
-                    CLEAN
-                }
-            }
-            Some(Action::Settle) => CLEAN,
-            _ => state,
-        };
-        let mut outputs = vec![0; s.blocks.len()];
-        loop {
-            let mut changed = false;
-            for (block, item) in s.blocks.iter().enumerate() {
-                let mut state = incoming(s, block, &outputs);
-                for &id in &item.ops {
-                    state = transfer(id, state);
-                }
-                if state != outputs[block] {
-                    outputs[block] = state;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        let mixed = s.blocks.iter().enumerate().any(|(block, item)| {
-            let mut state = incoming(s, block, &outputs);
-            for &id in &item.ops {
-                if actions.get(&id) == Some(&Action::Settle) && state == (CLEAN | PENDING) {
-                    return true;
-                }
-                state = transfer(id, state);
-            }
-            false
-        });
-        if mixed {
+        let Some(outputs) = settle_joins(s, frame, &mut actions, &stores, &mut settlements) else {
             continue;
-        }
+        };
         changed = true;
         let zero = s.constant(&mut constants, range.size as u8, 0);
         let Address::Known { offset, .. } = range.address else {
@@ -265,24 +421,35 @@ fn place_writes(s: &mut Ssa) {
                     value = s.args(id)[2];
                     state = PENDING;
                     let prior = s.args(id)[0];
-                    s.values[id as usize].op = Op::Memory;
-                    s.values[id as usize].args_start = s.args.len() as u32;
-                    s.values[id as usize].args_len = 1;
-                    s.args.push(prior);
+                    if calls {
+                        s.values[id as usize].op = Op::StackStore;
+                        ops.push(id);
+                    } else {
+                        s.values[id as usize].op = Op::Memory;
+                        s.values[id as usize].args_start = s.args.len() as u32;
+                        s.values[id as usize].args_len = 1;
+                        s.args.push(prior);
+                    }
                     continue;
                 }
-                if actions.get(&id) == Some(&Action::Settle) && state == PENDING {
+                if matches!(actions.get(&id), Some(Action::Settle | Action::Hook))
+                    && state == PENDING
+                {
                     let addr = s.value_addr[id as usize];
                     let address = s.new_value(Op::P(OpCode::IntAdd), 4, &[frame, offset], addr);
-                    let flush = s.new_value(
-                        Op::P(OpCode::Store),
-                        0,
-                        &[s.memory().unwrap(), address, value],
-                        addr,
-                    );
+                    let mut args = vec![s.memory().unwrap(), address, value];
+                    let op = if actions.get(&id) == Some(&Action::Hook) {
+                        args.push(s.stack_guards[&id]);
+                        Op::StackFlush
+                    } else if calls {
+                        Op::StackCommit
+                    } else {
+                        Op::P(OpCode::Store)
+                    };
+                    let flush = s.new_value(op, 0, &args, addr);
                     ops.extend([address, flush]);
                 }
-                state = transfer(id, state);
+                state = transfer(&actions, &stores, id, state);
                 if state == CLEAN {
                     value = zero;
                 }

@@ -91,6 +91,11 @@ pub enum Op {
     Pack,
     Memory,
     StackBoundary,
+    StackCallGuard { target: Addr, checkpoints: u32 },
+    StackLoad,
+    StackStore,
+    StackCommit,
+    StackFlush,
     StateReload(StateKey),
     StateKeep(StateKey),
     CcKind(CcKind),
@@ -239,6 +244,17 @@ pub fn properties(op: Op) -> Properties {
         },
         Op::StackBoundary => Properties {
             synthetic: true,
+            ..Properties::new()
+        },
+        Op::StackCallGuard { .. } => Properties {
+            ordered: true,
+            ..Properties::new()
+        },
+        Op::StackLoad | Op::StackStore | Op::StackCommit | Op::StackFlush => Properties {
+            ordered: true,
+            observes: true,
+            faults: true,
+            memory: true,
             ..Properties::new()
         },
         Op::Call { .. } | Op::CallInd => Properties::effect(),

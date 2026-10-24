@@ -179,6 +179,13 @@ The map pins the executable SHA-256 and preserves disconnected function bodies a
 
 Unsupported vector instructions emit named traps at their original addresses; the previous 52 `skip_functions` entries are no longer needed. The kit now lowers `movups xmm3, xmmword ptr [ecx]` at the former first stop, `0x00581699`; `mulps xmm2, xmm3` at `0x005816a8` still traps. Remaining SSE/3DNow gaps still trap; CPUID feature advertisement is unchanged.
 
+`DIVERGENCE(original):` RT3 enables `assume_stack_pointer_bases` and
+`retire_reused_stack`: escaped frame pointers bound access from below unless
+callee evidence widens that range, and proved subsequent stack reuse can retire
+released bytes. Ordinary entry paths preserve final bytes. Disable either
+setting to remove its premise; [translator details](../../docs/translator.md)
+describe guarded calls, range exposure and conservative fallbacks.
+
 The checked-return pilot selects `0x005a10d0` (through `0x005a1144`), the x87
 integer-conversion helper. Original bytes show a single-entry leaf with aligned
 stack scratch, path-dependent ECX/flags and one RET; callers include `0x0042c1b0`

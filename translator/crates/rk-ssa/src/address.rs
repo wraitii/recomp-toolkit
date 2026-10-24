@@ -1,6 +1,6 @@
 use rk_core::contract::Field;
 use rk_core::ir::OpCode;
-use rk_core::memory::{Address, Base};
+use rk_core::memory::{Address, Base, Range};
 use rk_core::{Lookup, LookupSet};
 use rk_ir::Op;
 
@@ -15,6 +15,7 @@ pub struct Addresses<'a> {
     memo: Vec<Option<Address>>,
     active: Vec<bool>,
     depth: usize,
+    parameters: bool,
 }
 
 impl<'a> Addresses<'a> {
@@ -34,6 +35,14 @@ impl<'a> Addresses<'a> {
             memo: vec![None; ssa.values.len()],
             active: vec![false; ssa.values.len()],
             depth: 0,
+            parameters: false,
+        }
+    }
+
+    pub fn with_parameters(ssa: &'a Ssa) -> Self {
+        Self {
+            parameters: true,
+            ..Self::new(ssa)
         }
     }
 
@@ -111,6 +120,23 @@ impl<'a> Addresses<'a> {
     }
 
     fn packed_inner(&mut self, args: &[ValueId]) -> Address {
+        if self.parameters
+            && args
+                .iter()
+                .any(|&id| matches!(self.ssa.value(id).op, Op::StateKeep(_)))
+        {
+            let prior: Vec<_> = args
+                .iter()
+                .map(|&id| {
+                    if matches!(self.ssa.value(id).op, Op::StateKeep(_)) {
+                        self.ssa.args(id)[1]
+                    } else {
+                        id
+                    }
+                })
+                .collect();
+            return self.packed(&prior);
+        }
         let esp = rk_ir::lanes(Field::Esp);
         if args
             .iter()
@@ -118,6 +144,17 @@ impl<'a> Addresses<'a> {
             .all(|(&id, &key)| self.ssa.value(id).op == Op::Input(key))
         {
             return Address::exact(Base::Frame, 0);
+        }
+        if self.parameters {
+            for field in Field::ALL.into_iter().take(8) {
+                if args
+                    .iter()
+                    .zip(rk_ir::lanes(field))
+                    .all(|(&id, &key)| self.ssa.value(id).op == Op::Input(key))
+                {
+                    return Address::exact(Base::Parameter(field as u8), 0);
+                }
+            }
         }
         let roots: Option<Vec<_>> = args
             .iter()
@@ -127,6 +164,20 @@ impl<'a> Addresses<'a> {
         if let Some(roots) = roots {
             if roots.iter().all(|&root| root == roots[0]) {
                 return self.get(roots[0]);
+            }
+        }
+        if self.parameters {
+            let (mut low, mut high) = (0u32, 0u32);
+            for (lane, &id) in args.iter().enumerate() {
+                if let Op::Const(value) = self.ssa.value(id).op {
+                    low |= ((value as u32) & 0xff) << (lane * 8);
+                    high |= ((value as u32) & 0xff) << (lane * 8);
+                } else {
+                    high |= 0xff << (lane * 8);
+                }
+            }
+            if high < i32::MAX as u32 {
+                return Address::exact(Base::Absolute, low).bounded(0, high - low);
             }
         }
         let phis: Vec<ValueId> = args
@@ -174,6 +225,13 @@ impl<'a> Addresses<'a> {
         let value = self.ssa.value(id);
         let args = self.ssa.args(id);
         match value.op {
+            Op::StateKeep(_) if self.parameters || self.ssa.assume_private_stack => {
+                self.get(args[1])
+            }
+            Op::P(OpCode::Load) if self.parameters && value.size == 4 => {
+                let address = self.get(args[1]);
+                self.memory_value(args[0], address, &mut LookupSet::default(), 0)
+            }
             Op::Const(data) if value.size == 4 => Address::exact(Base::Absolute, data as u32),
             Op::Pack if value.size == 4 => self.packed(args),
             Op::Phi if value.size == 4 => {
@@ -256,5 +314,79 @@ impl<'a> Addresses<'a> {
 
     pub fn call_frame(&mut self, site: ValueId) -> Address {
         self.state(site, Field::Esp)
+    }
+
+    pub fn argument(&mut self, site: ValueId, offset: i32) -> Address {
+        let address = self.call_frame(site).offset(offset as u32);
+        self.memory_value(
+            self.ssa.args(site)[0],
+            address,
+            &mut LookupSet::default(),
+            0,
+        )
+    }
+
+    fn memory_value(
+        &mut self,
+        token: ValueId,
+        address: Address,
+        active: &mut LookupSet<ValueId>,
+        depth: usize,
+    ) -> Address {
+        self.steps += 1;
+        if !address.is_exact() || depth >= 256 || self.steps > 50_000 || !active.insert(token) {
+            return Address::Unknown;
+        }
+        let args = self.ssa.args(token);
+        let result = match self.ssa.value(token).op {
+            Op::Input(rk_ir::StateKey::Memory) => match address {
+                Address::Known {
+                    base: Base::Frame,
+                    offset,
+                    span: 0,
+                } if (offset as i32) >= 4 => Address::exact(Base::Argument(offset as i32), 0),
+                _ => Address::Unknown,
+            },
+            Op::Phi => {
+                let mut result = None;
+                for &arg in args {
+                    let next = self.memory_value(arg, address, active, depth + 1);
+                    if result.is_some_and(|prior| prior != next) {
+                        result = Some(Address::Unknown);
+                        break;
+                    }
+                    result = Some(next);
+                }
+                result.unwrap_or(Address::Unknown)
+            }
+            Op::Memory if !args.is_empty() => {
+                let effect = args[0];
+                let inputs = self.ssa.args(effect);
+                match self.ssa.value(effect).op {
+                    Op::P(OpCode::Store) => {
+                        let at = self.get(inputs[1]);
+                        let size = u32::from(self.ssa.value(inputs[2]).size);
+                        if size == 4 && at == address {
+                            self.get(inputs[2])
+                        } else if Range::new(at, size).disjoint(Range::new(address, 4)) {
+                            self.memory_value(inputs[0], address, active, depth + 1)
+                        } else {
+                            Address::Unknown
+                        }
+                    }
+                    Op::P(OpCode::Load) => self.memory_value(inputs[0], address, active, depth + 1),
+                    Op::X87(op) if op.memory() == Some(rk_ir::x87::MemoryEffect::Read) => {
+                        self.memory_value(inputs[0], address, active, depth + 1)
+                    }
+                    Op::Memory | Op::Phi | Op::Input(_) => {
+                        self.memory_value(effect, address, active, depth + 1)
+                    }
+                    _ => Address::Unknown,
+                }
+            }
+            _ => Address::Unknown,
+        };
+        active.remove(&token);
+        result
     }
 }

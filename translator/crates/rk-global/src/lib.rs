@@ -5,6 +5,7 @@
 //! checked returns, and `specialize` merges the planner's call-site requests into variant layouts.
 //! `GlobalFacts::call_facts` feeds the contracts back into SSA.
 
+mod borrows;
 mod callgraph;
 mod cfg;
 mod contracts;
@@ -32,6 +33,8 @@ pub struct ContractCallFacts<'a> {
     contracts: &'a BTreeMap<Addr, Contract>,
     indirect: &'a BTreeMap<Addr, Contract>,
     effects: &'a BTreeMap<Addr, ConfiguredEffect>,
+    borrows: Option<&'a borrows::Analysis>,
+    returns: Option<&'a stack::Analysis>,
 }
 
 pub(crate) fn effect_contract(effect: &ConfiguredEffect) -> Option<Contract> {
@@ -48,6 +51,28 @@ pub(crate) fn call_effect(contract: Contract) -> CallEffect {
 }
 
 impl CallFacts for ContractCallFacts<'_> {
+    fn checkpoints(&self, site: Addr, target: Option<Addr>) -> Option<u32> {
+        let borrows = self.borrows?;
+        match target {
+            Some(target) => borrows.checkpoints.get(&target).copied(),
+            None => borrows.sites.get(&site)?.checkpoints,
+        }
+    }
+    fn cleanup(&self, site: Addr, target: Option<Addr>) -> Option<i32> {
+        let returns = self.returns?;
+        match target {
+            Some(target) => returns.functions.get(&target),
+            None => returns.sites.get(&site),
+        }
+        .map(|summary| summary.effect.cleanup)
+    }
+    fn borrowed_stack(&self, site: Addr, target: Option<Addr>) -> Option<&rk_ssa::BorrowedStack> {
+        let borrows = self.borrows?;
+        match target {
+            Some(target) => borrows.functions.get(&target),
+            None => borrows.sites.get(&site),
+        }
+    }
     fn call(&self, site: Addr, target: Option<Addr>) -> CallEffect {
         if let Some(effect) = self.effects.get(&site) {
             match effect_contract(effect) {
@@ -112,6 +137,7 @@ pub struct GlobalReport {
 
 #[derive(Clone, Debug, Default)]
 pub struct GlobalFacts {
+    borrows: borrows::Analysis,
     pub stack: stack::Analysis,
     pub returns: stack::Analysis,
     pub memory: memory::Analysis,
@@ -169,18 +195,19 @@ impl GlobalFacts {
             input.site_effects,
             &native,
         )?;
-        let memory = {
-            let calls = stack::CallFacts {
-                registers: ContractCallFacts {
-                    contracts: &contracts.contracts,
-                    indirect: &contracts.indirect,
-                    effects: input.site_effects,
-                },
-                stack: &stack,
-                memory: None,
-            };
-            memory::analyze(input, &mode_opaque, &calls)
+        let calls = stack::CallFacts {
+            registers: ContractCallFacts {
+                contracts: &contracts.contracts,
+                indirect: &contracts.indirect,
+                effects: input.site_effects,
+                borrows: None,
+                returns: Some(&returns),
+            },
+            stack: &stack,
+            memory: None,
         };
+        let memory = memory::analyze(input, &mode_opaque, &calls);
+        let borrows = borrows::analyze(input, &mode_opaque, &calls, &returns);
         let mut opaque = opaque_helpers;
         opaque.extend(contracts.rejected.keys().copied());
         let private = private::analyze(&private::PrivateInput {
@@ -236,6 +263,7 @@ impl GlobalFacts {
             *report.contract_excluded.entry(name).or_default() += 1;
         }
         Ok(Self {
+            borrows,
             stack,
             returns,
             memory,
@@ -254,6 +282,8 @@ impl GlobalFacts {
             contracts: &self.contracts,
             indirect: &self.indirect_contracts,
             effects: &self.site_effects,
+            borrows: Some(&self.borrows),
+            returns: Some(&self.returns),
         }
     }
 
@@ -290,6 +320,19 @@ impl GlobalFacts {
                 "memory {addr:08x} reads={:?} writes={:?}",
                 effects.reads, effects.writes
             )?;
+        }
+        for (&addr, summary) in &self.borrows.functions {
+            writeln!(
+                out,
+                "borrowed-stack {addr:08x} checkpoints={:?} reads={:?} writes={:?} captures={:?}",
+                summary.checkpoints,
+                summary.effects.reads,
+                summary.effects.writes,
+                summary.captures
+            )?;
+        }
+        for (&addr, cost) in &self.borrows.checkpoints {
+            writeln!(out, "checkpoint-bound {addr:08x} calls={cost}")?;
         }
         writeln!(out, "contracts")?;
         for (&addr, contract) in &self.contracts {
