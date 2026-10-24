@@ -185,6 +185,8 @@ if(RECOMP_HAVE_GEN)
     endif()
     set(aux_target "recomp_gen_${key}")
     recomp_translation_sources(aux_sources "${dir}")
+    # The main image owns the one call-fact table the runtime links against.
+    list(FILTER aux_sources EXCLUDE REGEX "/call_facts\\.c$")
     if(RECOMP_AUX_SHARED)
       add_library(${aux_target} SHARED ${aux_sources})
       set_target_properties(${aux_target} PROPERTIES
