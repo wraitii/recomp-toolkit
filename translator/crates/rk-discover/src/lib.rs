@@ -522,9 +522,12 @@ impl<'a> Recovery<'a> {
     }
 
     fn clean_start(&self, target: Addr) -> bool {
+        self.clean_pointer_start(target) || (target % 16 == 0 && self.image.is_exec(target))
+    }
+
+    fn clean_pointer_start(&self, target: Addr) -> bool {
         self.image.is_exec(target)
-            && (target % 16 == 0
-                || matches!(self.image.rd8(target.wrapping_sub(1)), Some(0xcc | 0x90))
+            && (matches!(self.image.rd8(target.wrapping_sub(1)), Some(0xcc | 0x90))
                 || self.mapped_ends.contains(&target)
                 || self
                     .owner_at(target.wrapping_sub(1))
@@ -1100,7 +1103,7 @@ impl<'a> Recovery<'a> {
                     self.tables.push((slots[0].0, at));
                     for (slot, target) in slots {
                         if !self.at_known_data(target) && self.pointer_source(slot, target) {
-                            let (rank, root) = if self.clean_start(target) {
+                            let (rank, root) = if self.clean_pointer_start(target) {
                                 (RANK_POINTER, true)
                             } else {
                                 (RANK_INTERIOR_POINTER, false)
