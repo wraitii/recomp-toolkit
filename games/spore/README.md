@@ -110,6 +110,24 @@ measure movie-frame advancement. Decoding and frame selection stay translated.
 intermediate registers. Original-byte differential validation and playback
 validation remain outstanding; the app has not been launched for this change.
 
+## Combat target
+
+`native/combat.cpp` wraps `0x00d67cd0`, the update of creature action
+`0x02d852e6` (enter `0x00d67980`, exit `0x00d672a0`, table `0x01583f30`). Its
+lost-target exit, `0x00d65980` returning 1 for a null `[creature+0xe7c]`, runs
+only while the swing animation in `[state+0x30]` is absent or finished
+(`0x00c0e420`). A target cleared mid-swing, such as on the player's death,
+reaches `0x00d65be0` and faults at `0x00d65d23`. The game's crash reporter
+then terminates the process (known community crash on death in Creature Stage).
+`BUGFIX(original):` with a null target and a swing handle the wrapper takes
+that exit whatever the animation state, reproducing it: `XMM0` cleared and
+`0.0f` stored to `[state+0x1c]`, one `0x00c0e420` query, then `EAX=0`, `ECX`
+the fifth argument and the flags of `XOR AL,AL`. The skipped `0x00c0efc0`,
+`0x00c0efd0`, `0x00d993d0`, `0x00d99460` and `0x00d65980` calls have no side
+effects for a null target. Other states, including a null target without a
+swing, run the translated original. Set `RECOMP_SPORE_COMBAT_ORIGINAL=1` before
+launch to always use it. The app has not been launched for this change.
+
 ## MSVCR90.dll
 
 The executable imports 159 entries from the VS2008 C runtime. The PE entry is
