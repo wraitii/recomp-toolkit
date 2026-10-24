@@ -419,9 +419,15 @@ class X86Host final : public PcodeHost {
         if (!read_memory(c_->r[R_ESP], 4, expected, why))
             return false;
         c_->eip = pc;
+        const bool dynamic_return = !recomp_is_call_return((uint32_t)expected) &&
+                                    !recomp_module_is_call_return((uint32_t)expected);
+        if (dynamic_return)
+            recomp_dynamic_return_push((uint32_t)expected);
         ++g_depth;
         recomp_call(c_, target);
         --g_depth;
+        if (dynamic_return)
+            recomp_dynamic_return_pop((uint32_t)expected);
         x86_cc_settle(c_);
         next_pc = c_->eip;
         handled = next_pc != expected;

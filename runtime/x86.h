@@ -708,6 +708,10 @@ void recomp_shim_call(X86 *c, uint32_t target);
 void recomp_unknown_call(X86 *c, uint32_t target);
 /* A checked return adjusted the target to an address that is not resumable. */
 void recomp_unexpected_return(X86 *c, uint32_t site, uint32_t expected, uint32_t target);
+/* CALL continuations inside code executed by the interpreter. */
+void recomp_dynamic_return_push(uint32_t target);
+void recomp_dynamic_return_pop(uint32_t target);
+int recomp_dynamic_return_accept(uint32_t target);
 void recomp_region_missing(X86 *c, uint32_t target);
 /* A popped callback sentinel can bypass translated callers. The innermost
  * guest_call owns the live host return checkpoint and its guest stack range. */
@@ -887,6 +891,8 @@ static inline void recomp_return(X86 *c) {
         return;
     }
     if (recomp_is_call_return(c->eip) || recomp_module_is_call_return(c->eip))
+        return;
+    if (recomp_dynamic_return_accept(c->eip))
         return;
     if ((c->eip >= GUEST_SHIM_BASE && c->eip < GUEST_SHIM_END) || recomp_index_of(c->eip) >= 0 ||
         recomp_module_lookup(c->eip) >= 0)

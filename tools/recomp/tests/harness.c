@@ -88,6 +88,10 @@ int recomp_module_is_call_return(uint32_t target) {
     (void)target;
     return 0;
 }
+int recomp_dynamic_return_accept(uint32_t target) {
+    (void)target;
+    return 0;
+}
 int recomp_module_call(X86 *c, uint32_t target) {
     (void)c;
     (void)target;

@@ -18,6 +18,10 @@ int recomp_module_is_call_return(uint32_t address) {
     unexpected("module return", address);
     return 0;
 }
+int recomp_dynamic_return_accept(uint32_t address) {
+    unexpected("dynamic return", address);
+    return 0;
+}
 int32_t recomp_index_of(uint32_t address) {
     unexpected("dispatch", address);
     return -1;

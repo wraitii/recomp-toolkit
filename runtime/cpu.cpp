@@ -274,6 +274,32 @@ void recomp_shim_call(X86 *c, uint32_t target) {
     abort();
 }
 
+namespace {
+constexpr unsigned kDynamicReturns = 64;
+thread_local uint32_t dynamic_returns[kDynamicReturns];
+thread_local unsigned dynamic_return_count;
+} // namespace
+
+extern "C" void recomp_dynamic_return_push(uint32_t target) {
+    if (dynamic_return_count < kDynamicReturns)
+        dynamic_returns[dynamic_return_count++] = target;
+}
+
+extern "C" void recomp_dynamic_return_pop(uint32_t target) {
+    if (dynamic_return_count && dynamic_returns[dynamic_return_count - 1] == target)
+        --dynamic_return_count;
+}
+
+extern "C" int recomp_dynamic_return_accept(uint32_t target) {
+    for (unsigned i = dynamic_return_count; i; --i) {
+        if (dynamic_returns[i - 1] != target)
+            continue;
+        dynamic_return_count = i - 1;
+        return 1;
+    }
+    return 0;
+}
+
 #if defined(__GNUC__)
 __attribute__((cold, noinline))
 #endif
