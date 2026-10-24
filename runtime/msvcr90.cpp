@@ -15,6 +15,7 @@
 #include "../platform/os.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cerrno>
 #include <cmath>
@@ -36,6 +37,7 @@ uint32_t g_rand_state = 1;
 uint32_t g_fmode_addr;
 uint32_t g_commode_addr;
 uint32_t g_errno_addr;
+uint32_t g_initenv_addr;
 std::vector<uint32_t> g_onexit;
 uint32_t g_signal_handlers[32];
 std::map<std::string, uint32_t> g_env_cache;
@@ -212,6 +214,10 @@ void crt_p_fmode(X86 *c) {
 
 void crt_p_commode(X86 *c) {
     set_eax(c, guest_slot(g_commode_addr));
+}
+
+void crt_p_initenv(X86 *c) {
+    set_eax(c, guest_slot(g_initenv_addr));
 }
 
 void crt_errno(X86 *c) {
@@ -798,6 +804,34 @@ void crt_strncpy(X86 *c) {
             g_mem[dst + i] = g_mem[src + i];
         for (; i < n; ++i)
             g_mem[dst + i] = 0;
+    }
+    set_eax(c, dst);
+}
+
+void crt_strcpy(X86 *c) {
+    uint32_t dst = arg(c, 0), src = arg(c, 1);
+    if (gm_valid(dst, 1) && gm_valid(src, 1)) {
+        uint32_t i = 0;
+        for (; gm_valid(src + i, 1) && gm_valid(dst + i, 1); ++i) {
+            g_mem[dst + i] = g_mem[src + i];
+            if (!g_mem[src + i])
+                break;
+        }
+    }
+    set_eax(c, dst);
+}
+
+void crt_strcat(X86 *c) {
+    uint32_t dst = arg(c, 0), src = arg(c, 1);
+    if (gm_valid(dst, 1) && gm_valid(src, 1)) {
+        uint32_t at = 0;
+        while (gm_valid(dst + at, 1) && g_mem[dst + at])
+            ++at;
+        for (uint32_t i = 0; gm_valid(src + i, 1) && gm_valid(dst + at + i, 1); ++i) {
+            g_mem[dst + at + i] = g_mem[src + i];
+            if (!g_mem[src + i])
+                break;
+        }
     }
     set_eax(c, dst);
 }
@@ -2174,6 +2208,15 @@ void crt_ci_asin(X86 *c) {
 void crt_ci_acos(X86 *c) {
     fset(c, 0, std::acos(ST(c, 0)));
 }
+void crt_ci_cosh(X86 *c) {
+    fset(c, 0, std::cosh(ST(c, 0)));
+}
+void crt_ci_sinh(X86 *c) {
+    fset(c, 0, std::sinh(ST(c, 0)));
+}
+void crt_ci_tanh(X86 *c) {
+    fset(c, 0, std::tanh(ST(c, 0)));
+}
 
 void crt_ci_fmod(X86 *c) {
     double divisor = ST(c, 0), dividend = ST(c, 1);
@@ -2295,7 +2338,583 @@ void crt_iswctype(X86 *c) {
     set_eax(c, crt_wctype_class(arg(c, 0)) & arg(c, 1));
 }
 
+uint32_t g_iob_addr;
+void crt_bind_iob(uint32_t base);
+
+void crt_strlen(X86 *c) {
+    set_eax(c, (uint32_t)strlen(guest_cstr(arg(c, 0))));
+}
+
+void crt_setlocale(X86 *c) {
+    static uint32_t cached;
+    if (!cached)
+        cached = dup_guest("C");
+    set_eax(c, cached);
+}
+
+void crt_iob_func(X86 *c) {
+    if (!g_iob_addr)
+        g_iob_addr = heap_alloc(3 * 0x40, true);
+    crt_bind_iob(g_iob_addr);
+    set_eax(c, g_iob_addr);
+}
+
+void crt_pctype_func(X86 *c) {
+    static uint32_t table;
+    if (!table) {
+        table = heap_alloc(257 * 2, true) + 2;
+        for (uint32_t ch = 0; ch < 256; ++ch)
+            wr16(table + ch * 2, (uint16_t)crt_wctype_class(ch));
+    }
+    set_eax(c, table);
+}
+
+void crt_return_zero(X86 *c) {
+    set_eax(c, 0);
+}
+
+// ---------------------------------------------------------------------------
+// CRT file handles. Guest FILE* values are opaque guest addresses; the host
+// stdio object lives here and never crosses the guest boundary.
+// ---------------------------------------------------------------------------
+struct CrtFile {
+    FILE *fp;
+    bool owned;
+};
+std::map<uint32_t, CrtFile> g_crt_files;
+thread_local uint32_t g_strtok_next;
+
+FILE *crt_file(uint32_t handle) {
+    auto it = g_crt_files.find(handle);
+    return it == g_crt_files.end() ? nullptr : it->second.fp;
+}
+
+uint32_t crt_add_file(FILE *fp, bool owned) {
+    if (!fp)
+        return 0;
+    uint32_t handle = heap_alloc(0x40, true);
+    if (!handle)
+        return 0;
+    g_crt_files[handle] = {fp, owned};
+    return handle;
+}
+
+void crt_bind_iob(uint32_t base) {
+    if (!base)
+        return;
+    g_crt_files[base] = {stdin, false};
+    g_crt_files[base + 0x40] = {stdout, false};
+    g_crt_files[base + 0x80] = {stderr, false};
+}
+
+bool crt_guest_file(uint32_t guest, bool write, std::string &host) {
+    host = win32_host_path_op(gm_str(guest, 4096), write ? WIN32_FILE_WRITE : WIN32_FILE_READ);
+    return !host.empty();
+}
+
+void crt_set_errno(int value) {
+    wr32(guest_slot(g_errno_addr), (uint32_t)value);
+}
+
+void crt_fopen(X86 *c) {
+    uint32_t path = arg(c, 0), mode = arg(c, 1);
+    std::string name = gm_str(path, 4096), flags = gm_str(mode, 32);
+    bool write = flags.find_first_of("wa+") != std::string::npos;
+    std::string host;
+    if (name.empty() || !crt_guest_file(path, write, host)) {
+        crt_set_errno(ENOENT);
+        set_eax(c, 0);
+        return;
+    }
+    int oflags = OS_O_RDONLY;
+    if (flags.find('+') != std::string::npos)
+        oflags = OS_O_RDWR;
+    else if (write)
+        oflags = OS_O_WRONLY;
+    if (flags.find('w') != std::string::npos)
+        oflags |= OS_O_CREAT | OS_O_TRUNC;
+    if (flags.find('a') != std::string::npos)
+        oflags |= OS_O_CREAT;
+    int fd = os_fd_open(host.c_str(), oflags);
+    if (fd < 0) {
+        crt_set_errno(ENOENT);
+        set_eax(c, 0);
+        return;
+    }
+    std::string host_mode(1, flags[0]);
+    if (flags.find('+') != std::string::npos)
+        host_mode += '+';
+    FILE *fp = (FILE *)os_fdopen(fd, (host_mode + 'b').c_str());
+    if (!fp) {
+        os_fd_close(fd);
+        crt_set_errno(EINVAL);
+        set_eax(c, 0);
+        return;
+    }
+    set_eax(c, crt_add_file(fp, true));
+}
+
+void crt_fclose(X86 *c) {
+    uint32_t handle = arg(c, 0);
+    auto it = g_crt_files.find(handle);
+    if (it == g_crt_files.end()) {
+        crt_set_errno(EBADF);
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    int result = it->second.owned ? fclose(it->second.fp) : 0;
+    g_crt_files.erase(it);
+    set_eax(c, result == 0 ? 0u : 0xffffffffu);
+}
+
+void crt_fread(X86 *c) {
+    uint32_t dst = arg(c, 0), size = arg(c, 1), count = arg(c, 2);
+    FILE *fp = crt_file(arg(c, 3));
+    if (!fp || !size || !count || !gm_valid(dst, size * count)) {
+        set_eax(c, 0);
+        return;
+    }
+    set_eax(c, (uint32_t)fread(g_mem + dst, size, count, fp));
+}
+
+void crt_fwrite(X86 *c) {
+    uint32_t src = arg(c, 0), size = arg(c, 1), count = arg(c, 2);
+    FILE *fp = crt_file(arg(c, 3));
+    if (!fp || !size || !count || !gm_valid(src, size * count)) {
+        set_eax(c, 0);
+        return;
+    }
+    set_eax(c, (uint32_t)fwrite(g_mem + src, size, count, fp));
+}
+
+void crt_fseek(X86 *c) {
+    FILE *fp = crt_file(arg(c, 0));
+    set_eax(c, fp && fseek(fp, (long)(int32_t)arg(c, 1), (int)arg(c, 2)) == 0 ? 0u : 0xffffffffu);
+}
+
+void crt_ftell(X86 *c) {
+    FILE *fp = crt_file(arg(c, 0));
+    set_eax(c, fp ? (uint32_t)ftell(fp) : 0xffffffffu);
+}
+
+void crt_fflush(X86 *c) {
+    uint32_t handle = arg(c, 0);
+    if (!handle) {
+        set_eax(c, (uint32_t)fflush(nullptr));
+        return;
+    }
+    FILE *fp = crt_file(handle);
+    set_eax(c, fp && fflush(fp) == 0 ? 0u : 0xffffffffu);
+}
+
+void crt_fgetc(X86 *c) {
+    FILE *fp = crt_file(arg(c, 0));
+    set_eax(c, fp ? (uint32_t)fgetc(fp) : 0xffffffffu);
+}
+
+void crt_fputc(X86 *c) {
+    FILE *fp = crt_file(arg(c, 1));
+    set_eax(c, fp ? (uint32_t)fputc((int)(arg(c, 0) & 0xff), fp) : 0xffffffffu);
+}
+
+void crt_ungetc(X86 *c) {
+    FILE *fp = crt_file(arg(c, 1));
+    set_eax(c, fp ? (uint32_t)ungetc((int)(arg(c, 0) & 0xff), fp) : 0xffffffffu);
+}
+
+void crt_feof(X86 *c) {
+    FILE *fp = crt_file(arg(c, 0));
+    set_eax(c, fp ? (uint32_t)feof(fp) : 1u);
+}
+
+void crt_ferror(X86 *c) {
+    FILE *fp = crt_file(arg(c, 0));
+    set_eax(c, fp ? (uint32_t)ferror(fp) : 1u);
+}
+
+void crt_clearerr(X86 *c) {
+    FILE *fp = crt_file(arg(c, 0));
+    if (fp)
+        clearerr(fp);
+    set_eax(c, 0);
+}
+
+void crt_printf(X86 *c) {
+    std::string text = guest_format(arg(c, 0), c->r[R_ESP] + 4);
+    fwrite(text.data(), 1, text.size(), stdout);
+    set_eax(c, (uint32_t)text.size());
+}
+
+void crt_fprintf(X86 *c) {
+    FILE *fp = crt_file(arg(c, 0));
+    std::string text = guest_format(arg(c, 1), c->r[R_ESP] + 12);
+    if (fp)
+        fwrite(text.data(), 1, text.size(), fp);
+    set_eax(c, (uint32_t)text.size());
+}
+
+void crt_vfprintf(X86 *c) {
+    FILE *fp = crt_file(arg(c, 0));
+    std::string text = guest_format(arg(c, 1), arg(c, 2));
+    if (fp)
+        fwrite(text.data(), 1, text.size(), fp);
+    set_eax(c, (uint32_t)text.size());
+}
+
+void crt_ftime(X86 *c) {
+    uint32_t out = arg(c, 0);
+    if (!out || !gm_valid(out, 12))
+        return;
+    auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch).count();
+    std::time_t now = (std::time_t)(millis / 1000);
+    std::tm local = *std::localtime(&now);
+    std::tm utc = *std::gmtime(&now);
+    long diff = (long)(std::mktime(&local) - std::mktime(&utc)) / 60;
+    wr32(out, (uint32_t)now);
+    wr16(out + 4, (uint16_t)(millis % 1000));
+    wr16(out + 6, (uint16_t)(-diff));
+    wr16(out + 8, (uint16_t)(local.tm_isdst > 0 ? 1 : 0));
+    wr16(out + 10, 0);
+}
+
+void crt_fullpath(X86 *c) {
+    uint32_t out = arg(c, 0), rel = arg(c, 1), cap = arg(c, 2);
+    std::string full = full_path_named(gm_str(rel, 4096));
+    if (!out) {
+        out = heap_alloc(cap ? cap : 260, true);
+        cap = cap ? cap : 260;
+    }
+    if (!out || !cap) {
+        set_eax(c, 0);
+        return;
+    }
+    put_guest_text(out, full, cap);
+    set_eax(c, out);
+}
+
+void crt_findfirst(X86 *c) {
+    uint32_t h = win32_crt_findfirst(gm_str(arg(c, 0), 4096), arg(c, 1));
+    if (h == 0xffffffffu)
+        crt_set_errno(ENOENT);
+    set_eax(c, h);
+}
+
+void crt_findnext(X86 *c) {
+    uint32_t handle = arg(c, 0), data = arg(c, 1);
+    if (!win32_crt_findnext(handle, data)) {
+        crt_set_errno(ENOENT);
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    set_eax(c, 0);
+}
+
+void crt_findclose(X86 *c) {
+    set_eax(c, win32_crt_findclose(arg(c, 0)) ? 0u : 0xffffffffu);
+}
+
+void crt_open(X86 *c) {
+    std::string host;
+    uint32_t flags = arg(c, 1);
+    if (!crt_guest_file(arg(c, 0), (flags & 3) != 0, host)) {
+        crt_set_errno(ENOENT);
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    int oflags = OS_O_RDONLY;
+    if ((flags & 3) == 1)
+        oflags = OS_O_WRONLY;
+    else if ((flags & 3) == 2)
+        oflags = OS_O_RDWR;
+    if (flags & 0x0100)
+        oflags |= OS_O_CREAT;
+    if (flags & 0x0200)
+        oflags |= OS_O_TRUNC;
+    if (flags & 0x0400)
+        oflags |= OS_O_EXCL;
+    int fd = os_fd_open(host.c_str(), oflags);
+    if (fd < 0)
+        crt_set_errno(ENOENT);
+    set_eax(c, fd < 0 ? 0xffffffffu : (uint32_t)fd);
+}
+
+void crt_read(X86 *c) {
+    int fd = (int)arg(c, 0);
+    uint32_t dst = arg(c, 1), count = arg(c, 2);
+    int64_t n = count && gm_valid(dst, count) ? os_fd_read(fd, g_mem + dst, count) : -1;
+    set_eax(c, n < 0 ? 0xffffffffu : (uint32_t)n);
+}
+
+void crt_write(X86 *c) {
+    int fd = (int)arg(c, 0);
+    uint32_t src = arg(c, 1), count = arg(c, 2);
+    int64_t n = count && gm_valid(src, count) ? os_fd_write(fd, g_mem + src, count) : -1;
+    set_eax(c, n < 0 ? 0xffffffffu : (uint32_t)n);
+}
+
+void crt_lseek(X86 *c) {
+    int64_t off = os_fd_seek((int)arg(c, 0), (int32_t)arg(c, 1), (int)arg(c, 2));
+    set_eax(c, off < 0 ? 0xffffffffu : (uint32_t)off);
+}
+
+void crt_close(X86 *c) {
+    set_eax(c, os_fd_close((int)arg(c, 0)) == 0 ? 0u : 0xffffffffu);
+}
+
+void crt_filelength(X86 *c) {
+    OsStat st{};
+    int fd = (int)arg(c, 0);
+    if (fd < 0 || os_fd_stat(fd, &st) != 0) {
+        crt_set_errno(EBADF);
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    set_eax(c, (uint32_t)st.size);
+}
+
+void crt_remove(X86 *c) {
+    std::string host;
+    if (!crt_guest_file(arg(c, 0), true, host) || os_unlink(host.c_str()) != 0) {
+        crt_set_errno(ENOENT);
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    set_eax(c, 0);
+}
+
+void crt_mkdir(X86 *c) {
+    std::string host;
+    if (!crt_guest_file(arg(c, 0), true, host) || os_mkdir(host.c_str()) != 0) {
+        crt_set_errno(EEXIST);
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    set_eax(c, 0);
+}
+
+void crt_rmdir(X86 *c) {
+    std::string host;
+    if (!crt_guest_file(arg(c, 0), true, host) || os_rmdir(host.c_str()) != 0) {
+        crt_set_errno(ENOENT);
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    set_eax(c, 0);
+}
+
+void crt_getdiskfree(X86 *c) {
+    uint32_t out = arg(c, 1);
+    uint64_t free_bytes = 0;
+    std::string host = win32_host_path_op(".", WIN32_FILE_LIST);
+    if (!host.empty())
+        os_free_space(host.c_str(), &free_bytes);
+    if (out && gm_valid(out, 16)) {
+        wr32(out + 0, (uint32_t)(free_bytes / (8 * 512)));
+        wr32(out + 4, (uint32_t)(free_bytes / (8 * 512)));
+        wr32(out + 8, 8);
+        wr32(out + 12, 512);
+    }
+    set_eax(c, 0);
+}
+
+void crt_getcwd_a(X86 *c) {
+    uint32_t out = arg(c, 0), cap = arg(c, 1);
+    std::string path = current_directory();
+    if (!out || !cap || path.size() + 1 > cap) {
+        crt_set_errno(ERANGE);
+        set_eax(c, 0);
+        return;
+    }
+    put_guest_text(out, path, cap);
+    set_eax(c, out);
+}
+
+void crt_localtime32(X86 *c) {
+    uint32_t p = arg(c, 0);
+    if (!p || !gm_valid(p, 4)) {
+        set_eax(c, 0);
+        return;
+    }
+    std::time_t value = (std::time_t)(int32_t)rd32(p);
+    std::tm *tm = std::localtime(&value);
+    if (!tm) {
+        set_eax(c, 0);
+        return;
+    }
+    uint32_t out = tm_slot();
+    write_tm(out, *tm);
+    set_eax(c, out);
+}
+
+void crt_gmtime32(X86 *c) {
+    uint32_t p = arg(c, 0);
+    if (!p || !gm_valid(p, 4)) {
+        set_eax(c, 0);
+        return;
+    }
+    std::time_t value = (std::time_t)(int32_t)rd32(p);
+    std::tm *tm = std::gmtime(&value);
+    if (!tm) {
+        set_eax(c, 0);
+        return;
+    }
+    uint32_t out = tm_slot();
+    write_tm(out, *tm);
+    set_eax(c, out);
+}
+
+void crt_mktime32(X86 *c) {
+    uint32_t p = arg(c, 0);
+    std::tm tm;
+    if (!read_tm(p, tm)) {
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    std::time_t value = std::mktime(&tm);
+    if (value == (std::time_t)-1) {
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    write_tm(p, tm);
+    set_eax(c, (uint32_t)value);
+}
+
+void crt_clock(X86 *c) {
+    set_eax(c, host_millis());
+}
+
+void crt_srand(X86 *c) {
+    g_rand_state = arg(c, 0);
+    set_eax(c, 0);
+}
+
+void crt_calloc(X86 *c) {
+    uint32_t count = arg(c, 0), size = arg(c, 1);
+    uint64_t total = (uint64_t)count * size;
+    uint32_t p = total && total <= 0xffffffffu ? heap_alloc((uint32_t)total, true) : 0;
+    set_eax(c, p);
+}
+
+void crt_memcmp(X86 *c) {
+    uint32_t a = arg(c, 0), b = arg(c, 1), n = arg(c, 2);
+    int r = 0;
+    if (n && gm_valid(a, n) && gm_valid(b, n))
+        r = memcmp(g_mem + a, g_mem + b, n);
+    set_eax(c, (uint32_t)r);
+}
+
+void crt_strcoll(X86 *c) {
+    set_eax(c, (uint32_t)strcmp(gm_str(arg(c, 0), 1 << 20).c_str(),
+                                gm_str(arg(c, 1), 1 << 20).c_str()));
+}
+
+void crt_strerror(X86 *c) {
+    static thread_local uint32_t slot;
+    if (!slot)
+        slot = heap_alloc(128, true);
+    put_guest_text(slot, std::strerror((int)arg(c, 0)), 128);
+    set_eax(c, slot);
+}
+
+void crt_strtok(X86 *c) {
+    uint32_t p = arg(c, 0) ? arg(c, 0) : g_strtok_next;
+    std::string delim = gm_str(arg(c, 1), 256);
+    if (!p || !gm_valid(p, 1)) {
+        g_strtok_next = 0;
+        set_eax(c, 0);
+        return;
+    }
+    while (gm_valid(p, 1) && g_mem[p] && delim.find((char)g_mem[p]) != std::string::npos)
+        ++p;
+    if (!gm_valid(p, 1) || !g_mem[p]) {
+        g_strtok_next = 0;
+        set_eax(c, 0);
+        return;
+    }
+    uint32_t start = p;
+    while (gm_valid(p, 1) && g_mem[p] && delim.find((char)g_mem[p]) == std::string::npos)
+        ++p;
+    if (gm_valid(p, 1) && g_mem[p]) {
+        g_mem[p] = 0;
+        g_strtok_next = p + 1;
+    } else {
+        g_strtok_next = 0;
+    }
+    set_eax(c, start);
+}
+
+void crt_bsearch(X86 *c) {
+    uint32_t key = arg(c, 0), base = arg(c, 1), count = arg(c, 2), width = arg(c, 3),
+             compare = arg(c, 4);
+    uint32_t lo = 0, hi = count;
+    while (lo < hi && width) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        uint32_t item = base + mid * width;
+        int32_t order = (int32_t)guest_call(c, compare, key, item);
+        if (!order) {
+            set_eax(c, item);
+            return;
+        }
+        if (order > 0)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    set_eax(c, 0);
+}
+
+void crt_wcslen(X86 *c) {
+    uint32_t p = arg(c, 0), n = 0;
+    while (gm_valid(p + n * 2, 2) && rd16(p + n * 2))
+        ++n;
+    set_eax(c, n);
+}
+
+void crt_wcscpy(X86 *c) {
+    uint32_t dst = arg(c, 0), src = arg(c, 1), i = 0;
+    while (gm_valid(src + i * 2, 2) && gm_valid(dst + i * 2, 2)) {
+        uint16_t ch = rd16(src + i * 2);
+        wr16(dst + i * 2, ch);
+        ++i;
+        if (!ch)
+            break;
+    }
+    set_eax(c, dst);
+}
+
+void crt_math_sqrt(X86 *c) {
+    fpush(c, std::sqrt(stack_double(c, 0)));
+}
+
+void crt_math_cos(X86 *c) {
+    fpush(c, std::cos(stack_double(c, 0)));
+}
+
+void crt_abs(X86 *c) {
+    int32_t v = (int32_t)arg(c, 0);
+    set_eax(c, (uint32_t)(v < 0 ? -v : v));
+}
+
+void crt_raise(X86 *c) {
+    uint32_t sig = arg(c, 0);
+    if (sig < 32 && g_signal_handlers[sig]) {
+        uint32_t handler = g_signal_handlers[sig];
+        if (handler != 1)
+            guest_call(c, handler, sig);
+    }
+    set_eax(c, 0);
+}
+
 const ImportShim g_msvcr90_shims[] = {
+    {"MSVCR90.dll", "strlen", ARGC_CDECL, crt_strlen},
+    {"MSVCR90.dll", "setlocale", ARGC_CDECL, crt_setlocale},
+    {"MSVCR90.dll", "__iob_func", ARGC_CDECL, crt_iob_func},
+    {"MSVCR90.dll", "__pctype_func", ARGC_CDECL, crt_pctype_func},
+    {"MSVCR90.dll", "___lc_handle_func", ARGC_CDECL, crt_return_zero},
+    {"MSVCR90.dll", "___lc_codepage_func", ARGC_CDECL, crt_return_zero},
+    {"MSVCR90.dll", "___setlc_active_func", ARGC_CDECL, crt_return_zero},
+    {"MSVCR90.dll", "___unguarded_readlc_active_add_func", ARGC_CDECL, crt_return_zero},
     {"MSVCR90.dll", "_initterm_e", ARGC_CDECL, crt_initterm_e},
     {"MSVCR90.dll", "_initterm", ARGC_CDECL, crt_initterm},
     {"MSVCR90.dll", "_ismbblead", ARGC_CDECL, crt_ismbblead},
@@ -2308,6 +2927,7 @@ const ImportShim g_msvcr90_shims[] = {
     {"MSVCR90.dll", "_decode_pointer", ARGC_CDECL, crt_decode_pointer},
     {"MSVCR90.dll", "__p__fmode", ARGC_CDECL, crt_p_fmode},
     {"MSVCR90.dll", "__p__commode", ARGC_CDECL, crt_p_commode},
+    {"MSVCR90.dll", "__p___initenv", ARGC_CDECL, crt_p_initenv},
     {"MSVCR90.dll", "_errno", ARGC_CDECL, crt_errno},
     {"MSVCR90.dll", "_controlfp_s", ARGC_CDECL, crt_controlfp_s},
     {"MSVCR90.dll", "_controlfp", ARGC_CDECL, crt_controlfp},
@@ -2358,8 +2978,13 @@ const ImportShim g_msvcr90_shims[] = {
     {"MSVCR90.dll", "strcmp", ARGC_CDECL, crt_strcmp},
     {"MSVCR90.dll", "strncmp", ARGC_CDECL, crt_strncmp},
     {"MSVCR90.dll", "_stricmp", ARGC_CDECL, crt_stricmp},
+    {"MSVCR90.dll", "_strcmpi", ARGC_CDECL, crt_stricmp},
     {"MSVCR90.dll", "_strnicmp", ARGC_CDECL, crt_strnicmp},
     {"MSVCR90.dll", "strncpy", ARGC_CDECL, crt_strncpy},
+    {"MSVCR90.dll", "strcpy", ARGC_CDECL, crt_strcpy},
+    {"MSVCR90.dll", "_mbscpy", ARGC_CDECL, crt_strcpy},
+    {"MSVCR90.dll", "strcat", ARGC_CDECL, crt_strcat},
+    {"MSVCR90.dll", "_mbscat", ARGC_CDECL, crt_strcat},
     {"MSVCR90.dll", "strncat", ARGC_CDECL, crt_strncat},
     {"MSVCR90.dll", "strchr", ARGC_CDECL, crt_strchr},
     {"MSVCR90.dll", "strrchr", ARGC_CDECL, crt_strrchr},
@@ -2400,6 +3025,60 @@ const ImportShim g_msvcr90_shims[] = {
     {"MSVCR90.dll", "vsprintf", ARGC_CDECL, crt_vsprintf},
     {"MSVCR90.dll", "_snprintf", ARGC_CDECL, crt_snprintf},
     {"MSVCR90.dll", "_vsnprintf", ARGC_CDECL, crt_vsnprintf},
+    {"MSVCR90.dll", "printf", ARGC_CDECL, crt_printf},
+    {"MSVCR90.dll", "fprintf", ARGC_CDECL, crt_fprintf},
+    {"MSVCR90.dll", "vfprintf", ARGC_CDECL, crt_vfprintf},
+    {"MSVCR90.dll", "fopen", ARGC_CDECL, crt_fopen},
+    {"MSVCR90.dll", "fclose", ARGC_CDECL, crt_fclose},
+    {"MSVCR90.dll", "fread", ARGC_CDECL, crt_fread},
+    {"MSVCR90.dll", "fwrite", ARGC_CDECL, crt_fwrite},
+    {"MSVCR90.dll", "fseek", ARGC_CDECL, crt_fseek},
+    {"MSVCR90.dll", "ftell", ARGC_CDECL, crt_ftell},
+    {"MSVCR90.dll", "fflush", ARGC_CDECL, crt_fflush},
+    {"MSVCR90.dll", "fgetc", ARGC_CDECL, crt_fgetc},
+    {"MSVCR90.dll", "fputc", ARGC_CDECL, crt_fputc},
+    {"MSVCR90.dll", "ungetc", ARGC_CDECL, crt_ungetc},
+    {"MSVCR90.dll", "feof", ARGC_CDECL, crt_feof},
+    {"MSVCR90.dll", "ferror", ARGC_CDECL, crt_ferror},
+    {"MSVCR90.dll", "clearerr", ARGC_CDECL, crt_clearerr},
+    {"MSVCR90.dll", "_ftime", ARGC_CDECL, crt_ftime},
+    {"MSVCR90.dll", "_fullpath", ARGC_CDECL, crt_fullpath},
+    {"MSVCR90.dll", "_findfirst", ARGC_CDECL, crt_findfirst},
+    {"MSVCR90.dll", "_findnext", ARGC_CDECL, crt_findnext},
+    {"MSVCR90.dll", "_findclose", ARGC_CDECL, crt_findclose},
+    {"MSVCR90.dll", "_open", ARGC_CDECL, crt_open},
+    {"MSVCR90.dll", "_read", ARGC_CDECL, crt_read},
+    {"MSVCR90.dll", "_write", ARGC_CDECL, crt_write},
+    {"MSVCR90.dll", "_lseek", ARGC_CDECL, crt_lseek},
+    {"MSVCR90.dll", "_close", ARGC_CDECL, crt_close},
+    {"MSVCR90.dll", "_filelength", ARGC_CDECL, crt_filelength},
+    {"MSVCR90.dll", "remove", ARGC_CDECL, crt_remove},
+    {"MSVCR90.dll", "_mkdir", ARGC_CDECL, crt_mkdir},
+    {"MSVCR90.dll", "_rmdir", ARGC_CDECL, crt_rmdir},
+    {"MSVCR90.dll", "_getdiskfree", ARGC_CDECL, crt_getdiskfree},
+    {"MSVCR90.dll", "_getcwd", ARGC_CDECL, crt_getcwd_a},
+    {"MSVCR90.dll", "time", ARGC_CDECL, crt_time32},
+    {"MSVCR90.dll", "localtime", ARGC_CDECL, crt_localtime32},
+    {"MSVCR90.dll", "gmtime", ARGC_CDECL, crt_gmtime32},
+    {"MSVCR90.dll", "mktime", ARGC_CDECL, crt_mktime32},
+    {"MSVCR90.dll", "clock", ARGC_CDECL, crt_clock},
+    {"MSVCR90.dll", "srand", ARGC_CDECL, crt_srand},
+    {"MSVCR90.dll", "calloc", ARGC_CDECL, crt_calloc},
+    {"MSVCR90.dll", "memcmp", ARGC_CDECL, crt_memcmp},
+    {"MSVCR90.dll", "strcoll", ARGC_CDECL, crt_strcoll},
+    {"MSVCR90.dll", "strerror", ARGC_CDECL, crt_strerror},
+    {"MSVCR90.dll", "strtok", ARGC_CDECL, crt_strtok},
+    {"MSVCR90.dll", "bsearch", ARGC_CDECL, crt_bsearch},
+    {"MSVCR90.dll", "wcslen", ARGC_CDECL, crt_wcslen},
+    {"MSVCR90.dll", "wcscpy", ARGC_CDECL, crt_wcscpy},
+    {"MSVCR90.dll", "sqrt", ARGC_CDECL, crt_math_sqrt},
+    {"MSVCR90.dll", "cos", ARGC_CDECL, crt_math_cos},
+    {"MSVCR90.dll", "abs", ARGC_CDECL, crt_abs},
+    {"MSVCR90.dll", "raise", ARGC_CDECL, crt_raise},
+    {"MSVCR90.dll", "_endthreadex", ARGC_CDECL, kernel32_exit_thread},
+    {"MSVCR90.dll", "_CIcosh", ARGC_CDECL, crt_ci_cosh},
+    {"MSVCR90.dll", "_CIsinh", ARGC_CDECL, crt_ci_sinh},
+    {"MSVCR90.dll", "_CItanh", ARGC_CDECL, crt_ci_tanh},
     {"MSVCR90.dll", "_CIlog", ARGC_CDECL, crt_ci_log},
     {"MSVCR90.dll", "_CIcos", ARGC_CDECL, crt_ci_cos},
     {"MSVCR90.dll", "_CIsin", ARGC_CDECL, crt_ci_sin},
@@ -2437,8 +3116,25 @@ void msvcr90_register() {
     imports_register_strict("MSVCR90.dll");
 }
 
+void msvcr71_register() {
+    static std::vector<ImportShim> shims;
+    if (shims.empty()) {
+        const size_t count = sizeof g_msvcr90_shims / sizeof g_msvcr90_shims[0];
+        shims.assign(g_msvcr90_shims, g_msvcr90_shims + count);
+        for (ImportShim &shim : shims)
+            shim.dll = "MSVCR71.dll";
+    }
+    imports_register(shims.data(), shims.size());
+    imports_register_data("MSVCR71.dll", "_acmdln", 4);
+    imports_register_data("MSVCR71.dll", "_iob", 3 * 0x40);
+}
+
 void msvcr90_init() {
-    uint32_t slot = imports_data_address("MSVCR90.dll", "_acmdln");
-    if (slot)
-        wr32(slot, win32_command_line());
+    for (const char *dll : {"MSVCR90.dll", "MSVCR71.dll"}) {
+        uint32_t slot = imports_data_address(dll, "_acmdln");
+        if (slot)
+            wr32(slot, win32_command_line());
+    }
+    g_iob_addr = imports_data_address("MSVCR71.dll", "_iob");
+    crt_bind_iob(g_iob_addr);
 }

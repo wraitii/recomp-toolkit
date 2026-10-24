@@ -845,6 +845,7 @@ void imports_init() {
     oleaut32_register();
     misc_dlls_register();
     msvcr90_register();
+    msvcr71_register();
     steam_api_register();
     comctl32_register();
     media_foundation_register();

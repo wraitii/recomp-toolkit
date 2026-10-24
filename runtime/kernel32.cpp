@@ -4269,6 +4269,10 @@ void k_UnhandledExceptionFilter(X86 *c) {
 // an unhandled raise aborts with the state that caused it.
 } // namespace
 
+void kernel32_exit_thread(X86 *c) {
+    k_ExitThread(c);
+}
+
 void kernel32_exit_process(uint32_t code) {
     if (request_process_exit(code))
         return;
@@ -5385,9 +5389,7 @@ void copy_file_named(X86 *c, const std::string &source, const std::string &dest)
     set_eax(c, 1);
 }
 
-void find_first_named(X86 *c, const std::string &pattern, bool wide) {
-    uint32_t data = arg(c, 1);
-
+uint32_t find_first_start(const std::string &pattern) {
     // Split the pattern into a directory and a leaf mask.
     std::string dirpart, leaf = pattern;
     size_t slash = pattern.find_last_of("\\/");
@@ -5446,8 +5448,7 @@ void find_first_named(X86 *c, const std::string &pattern, bool wide) {
         if (host_dir.empty()) {
             handles().erase(h);
             set_last_error(ERROR_PATH_NOT_FOUND_);
-            set_eax(c, INVALID_HANDLE_VALUE_);
-            return;
+            return 0;
         }
         o.find_dir = host_dir;
         for (const auto &kv : listing(host_dir))
@@ -5459,11 +5460,21 @@ void find_first_named(X86 *c, const std::string &pattern, bool wide) {
     if (o.matches.empty()) {
         handles().erase(h);
         set_last_error(ERROR_FILE_NOT_FOUND_);
+        return 0;
+    }
+    o.find_pos = 1;
+    return h;
+}
+
+void find_first_named(X86 *c, const std::string &pattern, bool wide) {
+    uint32_t data = arg(c, 1);
+    uint32_t h = find_first_start(pattern);
+    if (!h) {
         set_eax(c, INVALID_HANDLE_VALUE_);
         return;
     }
+    HObj &o = handles()[h];
     fill_find_data(data, o.match_paths[0], o.matches[0], wide);
-    o.find_pos = 1;
     set_eax(c, h);
 }
 
@@ -5477,6 +5488,54 @@ void find_next(X86 *c, bool wide) {
     fill_find_data(arg(c, 1), o->match_paths[o->find_pos], o->matches[o->find_pos], wide);
     ++o->find_pos;
     set_eax(c, 1);
+}
+
+// MSVCRT's _finddata_t is not the Win32 WIN32_FIND_DATAA layout: attributes,
+// three 32-bit times, a 32-bit size and a 260-byte name at offset 20.
+void fill_msvc_find_data(uint32_t addr, const std::string &host_path, const std::string &name) {
+    if (!addr || !gm_valid(addr, 280))
+        return;
+    memset(g_mem + addr, 0, 280);
+    OsStat st{};
+    bool dots = name == "." || name == "..";
+    bool have_stat = os_stat(host_path.c_str(), &st) == 0;
+    wr32(addr, dots        ? FILE_ATTRIBUTE_DIRECTORY_
+               : have_stat ? attrs_for(st)
+                           : FILE_ATTRIBUTE_NORMAL_);
+    if (have_stat) {
+        wr32(addr + 4, (uint32_t)st.ctime);
+        wr32(addr + 8, (uint32_t)st.atime);
+        wr32(addr + 12, (uint32_t)st.mtime);
+        if (!dots)
+            wr32(addr + 16, (uint32_t)st.size);
+    }
+    gm_put_str(addr + 20, name.c_str(), 260);
+}
+
+uint32_t win32_crt_findfirst(const std::string &pattern, uint32_t data) {
+    uint32_t h = find_first_start(pattern);
+    if (!h)
+        return 0xffffffffu;
+    HObj &o = handles()[h];
+    fill_msvc_find_data(data, o.match_paths[0], o.matches[0]);
+    return h;
+}
+
+bool win32_crt_findnext(uint32_t handle, uint32_t data) {
+    HObj *o = handle_get(handle, H_FIND);
+    if (!o || o->find_pos >= o->matches.size())
+        return false;
+    fill_msvc_find_data(data, o->match_paths[o->find_pos], o->matches[o->find_pos]);
+    ++o->find_pos;
+    return true;
+}
+
+bool win32_crt_findclose(uint32_t handle) {
+    HObj *o = handle_get(handle, H_FIND);
+    if (!o)
+        return false;
+    handles().erase(handle);
+    return true;
 }
 
 std::string full_path_named(const std::string &name) {

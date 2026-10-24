@@ -2891,6 +2891,80 @@ static void a_GetUserNameW(X86 *c) {
     set_eax(c, 1);
 }
 
+static void a_AllocateAndInitializeSid(X86 *c) {
+    uint32_t authority = arg(c, 0), count = arg(c, 1) & 0xff, out = arg(c, 10);
+    set_eax(c, 0);
+    if (!out || !gm_valid(out, 4) || !authority || !gm_valid(authority, 6) || !count || count > 8) {
+        set_last_error(87);
+        return;
+    }
+    uint32_t sid = heap_alloc(8 + count * 4, true);
+    if (!sid) {
+        set_last_error(8);
+        return;
+    }
+    wr8(sid, 1);
+    wr8(sid + 1, (uint8_t)count);
+    memcpy(gm_ptr(sid + 2), gm_ptr(authority), 6);
+    for (uint32_t i = 0; i < count; ++i)
+        wr32(sid + 8 + i * 4, arg(c, 2 + (int)i));
+    wr32(out, sid);
+    set_eax(c, 1);
+}
+
+static void a_FreeSid(X86 *c) {
+    uint32_t sid = arg(c, 0);
+    if (sid && heap_owns(sid))
+        heap_free(sid);
+    set_eax(c, 0);
+}
+
+// The runtime has no Windows token; report a valid token that is not a member.
+static void a_CheckTokenMembership(X86 *c) {
+    uint32_t sid = arg(c, 1), out = arg(c, 2);
+    set_eax(c, 0);
+    if (!sid || !gm_valid(sid, 8) || !out || !gm_valid(out, 4)) {
+        set_last_error(87);
+        return;
+    }
+    wr32(out, 0);
+    set_eax(c, 1);
+}
+
+static void a_CryptAcquireContextA(X86 *c) {
+    uint32_t out = arg(c, 0);
+    set_eax(c, 0);
+    if (!out || !gm_valid(out, 4)) {
+        set_last_error(87);
+        return;
+    }
+    wr32(out, 0x43525950);
+    set_eax(c, 1);
+}
+
+static void a_CryptGenRandom(X86 *c) {
+    uint32_t len = arg(c, 1), buf = arg(c, 2);
+    set_eax(c, 0);
+    if (!buf || !gm_valid(buf, len)) {
+        set_last_error(87);
+        return;
+    }
+    try {
+        std::random_device entropy;
+        for (uint32_t i = 0; i < len; ++i)
+            wr8(buf + i, (uint8_t)entropy());
+    } catch (...) {
+        set_last_error(87);
+        return;
+    }
+    set_eax(c, 1);
+}
+
+static void a_CryptReleaseContext(X86 *c) {
+    (void)c;
+    set_eax(c, 1);
+}
+
 // No AVIFile codec adapter is installed yet. Report missing codec support at
 // open instead of inventing a successful file interface and corrupting the
 // caller's stack. The game can follow its normal missing-video path.
@@ -2917,6 +2991,12 @@ const ImportShim g_misc_shims[] = {
     // ADVAPI32
     {"ADVAPI32.dll", "GetUserNameA", 2, a_GetUserNameA},
     {"ADVAPI32.dll", "GetUserNameW", 2, a_GetUserNameW},
+    {"ADVAPI32.dll", "AllocateAndInitializeSid", 11, a_AllocateAndInitializeSid},
+    {"ADVAPI32.dll", "FreeSid", 1, a_FreeSid},
+    {"ADVAPI32.dll", "CheckTokenMembership", 3, a_CheckTokenMembership},
+    {"ADVAPI32.dll", "CryptAcquireContextA", 5, a_CryptAcquireContextA},
+    {"ADVAPI32.dll", "CryptGenRandom", 3, a_CryptGenRandom},
+    {"ADVAPI32.dll", "CryptReleaseContext", 2, a_CryptReleaseContext},
     {"ADVAPI32.dll", "RegOpenKeyA", 3, a_RegOpenKeyA},
     {"ADVAPI32.dll", "RegOpenKeyExA", 5, a_RegOpenKeyExA},
     {"ADVAPI32.dll", "RegCreateKeyExA", 9, a_RegCreateKeyExA},

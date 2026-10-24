@@ -83,6 +83,7 @@ void oleaut32_reset();
 void oleaut32_thread_exit(X86 *c);
 void misc_dlls_register();
 void msvcr90_register();
+void msvcr71_register();
 void steam_api_register();
 // Fills the CRT's data imports once the image is mapped and the IAT is bound.
 void msvcr90_init();
