@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rk_core::contract::{Field, Fields};
 use rk_core::ir::{FunctionIr, Insn, OpCode, PcodeOp, Space, Varnode};
+use rk_core::memory::{Address, Base};
 use rk_core::program::Program;
 use rk_core::Addr;
-use rk_core::memory::{Address, Base};
 use rk_ir::Registers;
 use rk_ssa::StackEffect;
 
@@ -61,7 +61,10 @@ pub struct CallFacts<'a> {
 impl rk_ssa::CallFacts for CallFacts<'_> {
     fn memory(&self, site: Addr, target: Option<Addr>) -> Option<&rk_core::memory::Effects> {
         let effects = self.memory?;
-        match target { Some(target) => effects.functions.get(&target), None => effects.sites.get(&site) }
+        match target {
+            Some(target) => effects.functions.get(&target),
+            None => effects.sites.get(&site),
+        }
     }
 
     fn call(&self, site: Addr, target: Option<Addr>) -> rk_ssa::CallEffect {
@@ -93,7 +96,8 @@ impl CallFacts<'_> {
 
 fn overlap(a: u32, width_a: u32, b: u32, width_b: u32) -> bool {
     use rk_core::memory::{Address, Base, Range};
-    !Range::new(Address::exact(Base::Frame, a), width_a).disjoint(Range::new(Address::exact(Base::Frame, b), width_b))
+    !Range::new(Address::exact(Base::Frame, a), width_a)
+        .disjoint(Range::new(Address::exact(Base::Frame, b), width_b))
 }
 
 fn register_overlap(a: Varnode, b: Varnode) -> bool {
@@ -184,7 +188,8 @@ impl State {
         Ok((
             fields()
                 .filter_map(|(field, register)| {
-                    (self.registers.get(&register) == Some(&Value::Input(register))).then_some(field)
+                    (self.registers.get(&register) == Some(&Value::Input(register)))
+                        .then_some(field)
                 })
                 .collect(),
             returns,
@@ -230,7 +235,14 @@ fn evaluate(op: &PcodeOp, state: &State, locals: &BTreeMap<Varnode, Value>) -> O
                 _ => None,
             };
             if let Value::Constant(data) = b {
-                if let Some(value) = offset(a, if subtract { -(data as u32 as i32 as i64) } else { data as u32 as i32 as i64 }) {
+                if let Some(value) = offset(
+                    a,
+                    if subtract {
+                        -(data as u32 as i32 as i64)
+                    } else {
+                        data as u32 as i32 as i64
+                    },
+                ) {
                     return Some(value);
                 }
             }
@@ -246,10 +258,22 @@ fn evaluate(op: &PcodeOp, state: &State, locals: &BTreeMap<Varnode, Value>) -> O
                 Value::Constant(data) => Address::exact(Base::Absolute, data as u32),
                 _ => Address::Unknown,
             };
-            let result = if subtract { address(a).sub(address(b)) } else { address(a).add(address(b)) };
+            let result = if subtract {
+                address(a).sub(address(b))
+            } else {
+                address(a).add(address(b))
+            };
             match result {
-                Address::Known { base: Base::Frame, offset, span: 0 } => Some(Value::Stack(offset)),
-                Address::Known { base: Base::Absolute, offset, span: 0 } => Some(Value::Constant(offset as u64)),
+                Address::Known {
+                    base: Base::Frame,
+                    offset,
+                    span: 0,
+                } => Some(Value::Stack(offset)),
+                Address::Known {
+                    base: Base::Absolute,
+                    offset,
+                    span: 0,
+                } => Some(Value::Constant(offset as u64)),
                 _ => None,
             }
         }
@@ -331,11 +355,16 @@ fn summarize(
         }
         let insn = fir.insns.get(index as usize).ok_or("invalid CFG index")?;
         let successors = fir.succ.get(index as usize).ok_or("missing successors")?;
-        if insn.x87 || insn.ops.iter().any(|op| {
-            op.opcode == OpCode::CallOther
-                || (matches!(op.opcode, OpCode::Branch | OpCode::CBranch)
-                    && op.inputs.first().is_some_and(|input| input.space == Space::Const))
-        }) {
+        if insn.x87
+            || insn.ops.iter().any(|op| {
+                op.opcode == OpCode::CallOther
+                    || (matches!(op.opcode, OpCode::Branch | OpCode::CBranch)
+                        && op
+                            .inputs
+                            .first()
+                            .is_some_and(|input| input.space == Space::Const))
+            })
+        {
             return Err("unmodeled instruction effects");
         }
         if fir.noreturn.contains_key(&index) {
@@ -478,12 +507,10 @@ fn summarize(
             let effect = match (effect, callee.returns) {
                 _ if callee.writes_other => ReturnEffect::Unknown,
                 (ReturnEffect::Exact, next) | (next, ReturnEffect::Exact) => next,
-                (ReturnEffect::Adjust(a), ReturnEffect::Adjust(b)) => {
-                    match a.wrapping_add(b) {
-                        0 => ReturnEffect::Exact,
-                        delta => ReturnEffect::Adjust(delta),
-                    }
-                }
+                (ReturnEffect::Adjust(a), ReturnEffect::Adjust(b)) => match a.wrapping_add(b) {
+                    0 => ReturnEffect::Exact,
+                    delta => ReturnEffect::Adjust(delta),
+                },
                 _ => ReturnEffect::Unknown,
             };
             returns = Some(match (returns, effect) {

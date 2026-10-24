@@ -63,16 +63,19 @@ pub fn emit_body(planned: &PlannedFunction, ctx: &EmitContext<'_>) -> Result<(Bo
         fallbacks: std::mem::take(&mut emitter.fallbacks),
         slow_ops: std::mem::take(&mut emitter.slow_ops),
     };
-    Ok((Body {
-        addr: planned.ssa.addr,
-        insns: ir.insns.len(),
-        first: ir.insns.first().map_or(ir.addr, |insn| insn.addr),
-        last: ir.insns.last().map_or(ir.addr, |insn| insn.addr),
-        text: emitter.out,
-        requires: emitter.requires,
-        declarations: emitter.declarations,
-        private_mask: ctx.private.map(|private| private.mask),
-    }, report))
+    Ok((
+        Body {
+            addr: planned.ssa.addr,
+            insns: ir.insns.len(),
+            first: ir.insns.first().map_or(ir.addr, |insn| insn.addr),
+            last: ir.insns.last().map_or(ir.addr, |insn| insn.addr),
+            text: emitter.out,
+            requires: emitter.requires,
+            declarations: emitter.declarations,
+            private_mask: ctx.private.map(|private| private.mask),
+        },
+        report,
+    ))
 }
 
 struct Emitter<'a> {
@@ -129,9 +132,17 @@ struct Transfers {
 impl Transfers {
     fn new(plan: &PlannedFunction, successors: &[Vec<usize>], force: bool) -> Self {
         let s = &plan.ssa;
-        let sources: BTreeSet<u32> = s.blocks.iter().enumerate()
-            .filter(|(index, block)| successors[*index].len() > 1
-                && block.ops.iter().any(|value| s.value(*value).op == Op::BranchInd))
+        let sources: BTreeSet<u32> = s
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(index, block)| {
+                successors[*index].len() > 1
+                    && block
+                        .ops
+                        .iter()
+                        .any(|value| s.value(*value).op == Op::BranchInd)
+            })
             .map(|(index, _)| index as u32)
             .chain([DISPATCH_BLOCK])
             .collect();
@@ -139,7 +150,10 @@ impl Transfers {
         let mut channels: Vec<BTreeMap<u32, ValueId>> = Vec::new();
         let mut copies = 0;
         for (target, block) in s.blocks.iter().enumerate() {
-            let preds: Vec<_> = block.preds.iter().enumerate()
+            let preds: Vec<_> = block
+                .preds
+                .iter()
+                .enumerate()
                 .filter(|(_, pred)| sources.contains(pred))
                 .collect();
             if preds.is_empty() {
@@ -150,24 +164,36 @@ impl Transfers {
                 if size == 0 || !plan.live.contains(&phi) {
                     continue;
                 }
-                let args: BTreeMap<_, _> = preds.iter()
+                let args: BTreeMap<_, _> = preds
+                    .iter()
                     .map(|(position, pred)| (**pred, s.args(phi)[*position]))
                     .collect();
                 copies += args.len();
-                let channel = channels.iter().enumerate().position(|(index, values)| {
-                    result.sizes[index] == size && args.iter().all(|(pred, arg)| {
-                        values.get(pred).is_none_or(|value| value == arg)
+                let channel = channels
+                    .iter()
+                    .enumerate()
+                    .position(|(index, values)| {
+                        result.sizes[index] == size
+                            && args.iter().all(|(pred, arg)| {
+                                values.get(pred).is_none_or(|value| value == arg)
+                            })
                     })
-                }).unwrap_or_else(|| {
-                    result.sizes.push(size);
-                    channels.push(BTreeMap::new());
-                    channels.len() - 1
-                });
+                    .unwrap_or_else(|| {
+                        result.sizes.push(size);
+                        channels.push(BTreeMap::new());
+                        channels.len() - 1
+                    });
                 channels[channel].extend(args);
-                result.targets.entry(target).or_default().push((phi, channel));
+                result
+                    .targets
+                    .entry(target)
+                    .or_default()
+                    .push((phi, channel));
             }
             if result.targets.contains_key(&target) {
-                result.edges.extend(preds.iter().map(|(_, pred)| (**pred, target)));
+                result
+                    .edges
+                    .extend(preds.iter().map(|(_, pred)| (**pred, target)));
             }
         }
         let staged: usize = channels.iter().map(BTreeMap::len).sum();
@@ -177,7 +203,11 @@ impl Transfers {
         }
         for (channel, values) in channels.into_iter().enumerate() {
             for (source, arg) in values {
-                result.sources.entry(source).or_default().push((channel, arg));
+                result
+                    .sources
+                    .entry(source)
+                    .or_default()
+                    .push((channel, arg));
             }
         }
         result
@@ -201,16 +231,19 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
-        let key_location = s
-            .keys
+        let key_location = s.keys.iter().map(|key| (*key, location(*key))).collect();
+        let entry_targets: BTreeSet<usize> = s
+            .entries
             .iter()
-            .map(|key| (*key, location(*key)))
+            .map(|entry| entry.target as usize)
             .collect();
-        let entry_targets: BTreeSet<usize> =
-            s.entries.iter().map(|entry| entry.target as usize).collect();
         let mut indirect_targets: BTreeSet<usize> = BTreeSet::new();
         for (index, block) in s.blocks.iter().enumerate() {
-            if block.ops.iter().any(|value| matches!(s.value(*value).op, Op::BranchInd)) {
+            if block
+                .ops
+                .iter()
+                .any(|value| matches!(s.value(*value).op, Op::BranchInd))
+            {
                 indirect_targets.extend(successors[index].iter().copied());
             }
         }
@@ -262,8 +295,12 @@ impl<'a> Emitter<'a> {
             if !plan.live.contains(&id) {
                 continue;
             }
-            let Op::StateKeep(key) = value.op else { continue };
-            let Some((field, lane)) = field_lane(key) else { continue };
+            let Op::StateKeep(key) = value.op else {
+                continue;
+            };
+            let Some((field, lane)) = field_lane(key) else {
+                continue;
+            };
             if field as usize >= 8 || lane >= 4 {
                 continue;
             }
@@ -273,9 +310,16 @@ impl<'a> Emitter<'a> {
         let mut keep_lane: rk_core::Lookup<ValueId, (ValueId, u8)> = rk_core::Lookup::default();
         let mut keep_group: BTreeMap<ValueId, KeepGroup> = BTreeMap::new();
         for ((_site, field), lanes) in slots {
-            let Some(ids) = lanes.iter().copied().collect::<Option<Vec<_>>>() else { continue };
+            let Some(ids) = lanes.iter().copied().collect::<Option<Vec<_>>>() else {
+                continue;
+            };
             let carrier = ids[0];
-            let olds = [s.args(ids[0])[1], s.args(ids[1])[1], s.args(ids[2])[1], s.args(ids[3])[1]];
+            let olds = [
+                s.args(ids[0])[1],
+                s.args(ids[1])[1],
+                s.args(ids[2])[1],
+                s.args(ids[3])[1],
+            ];
             keep_group.insert(carrier, KeepGroup { field, olds });
             for (lane, id) in ids.into_iter().enumerate() {
                 keep_lane.insert(id, (carrier, lane as u8));
@@ -359,8 +403,15 @@ impl<'a> Emitter<'a> {
         self.out.push_str(" {\n");
         self.write_declarations();
         self.write_x87_declarations()?;
-        if self.ctx.ir.seh.values().any(|kinds| kinds.contains(&SehEffect::Orphan)) {
-            self.out.push_str("uint64_t seh_mark_ = recomp_seh_frame_mark(c);\n");
+        if self
+            .ctx
+            .ir
+            .seh
+            .values()
+            .any(|kinds| kinds.contains(&SehEffect::Orphan))
+        {
+            self.out
+                .push_str("uint64_t seh_mark_ = recomp_seh_frame_mark(c);\n");
         }
         if self.uses_arena {
             self.out.push_str("uint8_t *arena_ = g_mem;\n");
@@ -373,8 +424,15 @@ impl<'a> Emitter<'a> {
         let clones = self.plan.x87.as_ref().map_or(1, rk_x87::Plan::clones);
         self.write_dispatch_tables(clones);
         self.entry_dispatch()?;
-        if let Some(site) = self.reload_defs.keys().find(|site| !self.in_block[**site as usize]) {
-            return Err(self.error(self.s.value_addr[*site as usize], "state reload site is not a block op"));
+        if let Some(site) = self
+            .reload_defs
+            .keys()
+            .find(|site| !self.in_block[**site as usize])
+        {
+            return Err(self.error(
+                self.s.value_addr[*site as usize],
+                "state reload site is not a block op",
+            ));
         }
         for clone in 0..clones {
             self.clone = clone;
@@ -442,16 +500,25 @@ impl<'a> Emitter<'a> {
         }
         if self.multi {
             if self.ctx.region_entries.values().any(|&owner| owner == addr) {
-                let args = self.call_args(Some(addr), None).replace(&format!("0x{addr:08x}u"), "target");
-                let _ = writeln!(self.out, "void region_{addr:08x}(X86 *c, uint32_t target) {{ {body}({args}); }}");
+                let args = self
+                    .call_args(Some(addr), None)
+                    .replace(&format!("0x{addr:08x}u"), "target");
+                let _ = writeln!(
+                    self.out,
+                    "void region_{addr:08x}(X86 *c, uint32_t target) {{ {body}({args}); }}"
+                );
             }
             for entry in &self.s.entries {
                 let seh_callback = self.ctx.ir.seh.iter().any(|(&index, kinds)| {
                     let insn = &self.ctx.ir.insns[index as usize];
                     insn.addr + Addr::from(insn.length) == entry.addr
-                        && kinds.iter().any(|kind| matches!(kind, SehEffect::Enter | SehEffect::Adopt))
+                        && kinds
+                            .iter()
+                            .any(|kind| matches!(kind, SehEffect::Enter | SehEffect::Adopt))
                 });
-                if entry.addr == addr || (self.ctx.region_entries.contains_key(&entry.addr) && !seh_callback) {
+                if entry.addr == addr
+                    || (self.ctx.region_entries.contains_key(&entry.addr) && !seh_callback)
+                {
                     continue;
                 }
                 let args = self.call_args(Some(entry.addr), None);
@@ -475,7 +542,11 @@ impl<'a> Emitter<'a> {
             if !self.plan.live.contains(&id) || value.size == 0 || !self.materialized[index] {
                 continue;
             }
-            if self.keep_lane.get(&id).is_some_and(|(carrier, _)| *carrier != id) {
+            if self
+                .keep_lane
+                .get(&id)
+                .is_some_and(|(carrier, _)| *carrier != id)
+            {
                 continue;
             }
             if value.size > 4 {
@@ -523,7 +594,9 @@ impl<'a> Emitter<'a> {
     fn write_inputs(&mut self) -> Result<()> {
         for index in 0..self.s.values.len() {
             let id = index as ValueId;
-            let Op::Input(key) = self.s.value(id).op else { continue };
+            let Op::Input(key) = self.s.value(id).op else {
+                continue;
+            };
             if !self.plan.live.contains(&id) || !self.materialized[index] {
                 continue;
             }
@@ -541,7 +614,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn materialize_defs(&mut self, site: ValueId) -> Result<()> {
-        let Some(values) = self.reload_defs.get(&site).cloned() else { return Ok(()) };
+        let Some(values) = self.reload_defs.get(&site).cloned() else {
+            return Ok(());
+        };
         for id in values {
             if let Some(group) = self.keep_group.get(&id).copied() {
                 let old = self.pack_bytes(&group.olds, false)?;
@@ -561,15 +636,27 @@ impl<'a> Emitter<'a> {
     }
 
     fn prefix_for(&self, clone: usize) -> char {
-        match self.plan.x87.as_ref().and_then(|plan| plan.programs.get(clone)).and_then(|program| program.clone) {
+        match self
+            .plan
+            .x87
+            .as_ref()
+            .and_then(|plan| plan.programs.get(clone))
+            .and_then(|program| program.clone)
+        {
             Some("fast") => 'F',
             _ => 'B',
         }
     }
 
     fn write_dispatch_tables(&mut self, clones: usize) {
-        let Some(dispatch) = self.dispatch else { return };
-        let ctype = if self.s.blocks.len() > u16::MAX as usize { "uint32_t" } else { "uint16_t" };
+        let Some(dispatch) = self.dispatch else {
+            return;
+        };
+        let ctype = if self.s.blocks.len() > u16::MAX as usize {
+            "uint32_t"
+        } else {
+            "uint16_t"
+        };
         let mut slots = BTreeMap::new();
         for (block, &addr) in self.plan.block_addrs.iter().enumerate() {
             if let Some(offset) = addr.checked_sub(dispatch.start) {
@@ -602,7 +689,9 @@ impl<'a> Emitter<'a> {
         &self,
         lines: impl FnOnce(&rk_x87::Plan, &ValueNames) -> Result<Vec<String>>,
     ) -> Result<Vec<String>> {
-        let Some(x87) = self.plan.x87.as_ref() else { return Ok(Vec::new()) };
+        let Some(x87) = self.plan.x87.as_ref() else {
+            return Ok(Vec::new());
+        };
         let names = ValueNames { emitter: self };
         lines(x87, &names)
     }
@@ -625,7 +714,11 @@ impl<'a> Emitter<'a> {
                 let _ = writeln!(self.out, "case 0x{:08x}u:", entry.addr);
                 self.edge(None, entry.target as usize)?;
             }
-            let region = self.ctx.region_entries.values().any(|&owner| owner == self.s.addr);
+            let region = self
+                .ctx
+                .region_entries
+                .values()
+                .any(|&owner| owner == self.s.addr);
             if region {
                 let _ = writeln!(self.out, "case 0u: case 0x{:08x}u:", primary.addr);
             } else {
@@ -633,7 +726,8 @@ impl<'a> Emitter<'a> {
             }
             self.edge(None, primary.target as usize)?;
             if region {
-                self.out.push_str("default: recomp_region_missing(c, entry_); return;\n");
+                self.out
+                    .push_str("default: recomp_region_missing(c, entry_); return;\n");
             }
             self.out.push_str("}\n");
         } else if primary.target == 0 && !self.transfers.edges.contains(&(DISPATCH_BLOCK, 0)) {
@@ -676,7 +770,8 @@ impl<'a> Emitter<'a> {
                 let _ = writeln!(self.out, "// {}", insn.text);
                 commented_addr = Some(insn.addr);
             }
-            let block_lines = self.x87_lines(|x87, names| x87.block_lines(self.clone, block as u32, names))?;
+            let block_lines =
+                self.x87_lines(|x87, names| x87.block_lines(self.clone, block as u32, names))?;
             self.write_x87(block_lines);
             let ops = item.ops.clone();
             let mut continues = true;
@@ -691,15 +786,14 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 if live {
-                    if let (
-                        Op::Branch { target: branch },
-                        Some(Op::Tail { target: tail }),
-                    ) = (
+                    if let (Op::Branch { target: branch }, Some(Op::Tail { target: tail })) = (
                         self.s.value(value).op,
                         ops.get(position + 1).map(|next| self.s.value(*next).op),
                     ) {
                         if branch == tail {
-                            let lines = self.x87_lines(|x87, names| x87.event_lines(self.clone, value, names))?;
+                            let lines = self.x87_lines(|x87, names| {
+                                x87.event_lines(self.clone, value, names)
+                            })?;
                             self.write_x87(lines);
                             self.publish(value)?;
                             self.materialize_defs(value)?;
@@ -710,12 +804,12 @@ impl<'a> Emitter<'a> {
                 }
                 self.materialize_defs(value)?;
             }
-            let ended = ops.last().is_some_and(|value| {
-                match self.s.value(*value).op {
+            let ended = ops
+                .last()
+                .is_some_and(|value| match self.s.value(*value).op {
                     Op::Slow(_) => !continues,
                     op => ends_block(op),
-                }
-            });
+                });
             let end_addr = self.block_end_addr(block);
             let external_branch = ops
                 .last()
@@ -726,11 +820,13 @@ impl<'a> Emitter<'a> {
                     .copied()
                     .any(|next| Some(self.plan.block_addrs[next]) == end_addr);
             if !ended || external_branch {
-                let next = self.successors(block)
+                let next = self
+                    .successors(block)
                     .iter()
                     .copied()
                     .find(|next| Some(self.plan.block_addrs[*next]) == end_addr);
-                let end_lines = self.x87_lines(|x87, names| x87.end_lines(self.clone, block as u32, names))?;
+                let end_lines =
+                    self.x87_lines(|x87, names| x87.end_lines(self.clone, block as u32, names))?;
                 self.write_x87(end_lines);
                 match next {
                     Some(next) if self.can_inline(block, next) => self.inline_block(block, next)?,
@@ -770,22 +866,31 @@ impl<'a> Emitter<'a> {
                 if op.touches_memory() || matches!(op, rk_ir::x87::X87Op::Conditional(..)) {
                     self.publish(value)?;
                 }
-                let lines = self.x87_lines(|x87, names| x87.event_lines(self.clone, value, names))?;
+                let lines =
+                    self.x87_lines(|x87, names| x87.event_lines(self.clone, value, names))?;
                 self.write_x87(lines);
                 Ok(true)
             }
             Op::Slow(index) => {
-                let slow = self.s.slow(index).copied().ok_or_else(|| self.error(addr, "missing slow record"))?;
+                let slow = self
+                    .s
+                    .slow(index)
+                    .copied()
+                    .ok_or_else(|| self.error(addr, "missing slow record"))?;
                 self.publish(value)?;
                 if matches!(slow.family, SlowFamily::X87) {
-                    return Err(Diagnostic::error(addr, Reason::UnsupportedX87 {
-                        detail: "unsupported x87 instruction or operand".into(),
-                    }));
+                    return Err(Diagnostic::error(
+                        addr,
+                        Reason::UnsupportedX87 {
+                            detail: "unsupported x87 instruction or operand".into(),
+                        },
+                    ));
                 }
                 let emitted = self.slow(slow.family, addr)?;
                 if emitted {
                     if let Some(insn) = self.insn_at(addr) {
-                        self.slow_ops.insert((addr, insn.mnemonic.to_ascii_uppercase()));
+                        self.slow_ops
+                            .insert((addr, insn.mnemonic.to_ascii_uppercase()));
                     }
                     if self.plan.settle_sites.contains(&value) {
                         self.out.push_str("x86_cc_settle(c);\n");
@@ -805,7 +910,10 @@ impl<'a> Emitter<'a> {
                     self.declare_entry(target);
                     let _ = writeln!(self.out, "CALL_FN({target:08x}); return;");
                 } else {
-                    let _ = writeln!(self.out, "c->eip = 0x{addr:08x}u; recomp_jump(c, 0x{target:08x}u); return;");
+                    let _ = writeln!(
+                        self.out,
+                        "c->eip = 0x{addr:08x}u; recomp_jump(c, 0x{target:08x}u); return;"
+                    );
                 }
                 Ok(false)
             }
@@ -833,7 +941,9 @@ impl<'a> Emitter<'a> {
             Op::Seh(kind) => {
                 self.publish(value)?;
                 if matches!(kind, SehEffect::Enter | SehEffect::Adopt) {
-                    let insn = self.insn_at(addr).ok_or_else(|| self.error(addr, "SEH site without instruction"))?;
+                    let insn = self
+                        .insn_at(addr)
+                        .ok_or_else(|| self.error(addr, "SEH site without instruction"))?;
                     let next = insn.addr + Addr::from(insn.length);
                     let callback = if self.ctx.ir.index_of(next).is_some() {
                         format!("fn_{next:08x}")
@@ -929,9 +1039,7 @@ impl<'a> Emitter<'a> {
                     self.out.push_str("recomp_popf(c);\n");
                     Ok(true)
                 }
-                _ => {
-                    self.unsupported(addr, &mnemonic)
-                }
+                _ => self.unsupported(addr, &mnemonic),
             },
             SlowFamily::Int => {
                 let vector = match mnemonic.as_str() {
@@ -953,9 +1061,7 @@ impl<'a> Emitter<'a> {
             SlowFamily::Mmx => self.slow_mmx(&insn, addr),
             SlowFamily::Sse => self.slow_sse(&insn, addr),
             SlowFamily::Segment => self.slow_segment(&insn, addr),
-            _ => {
-                self.unsupported(addr, &mnemonic)
-            }
+            _ => self.unsupported(addr, &mnemonic),
         }
     }
 
@@ -968,7 +1074,11 @@ impl<'a> Emitter<'a> {
             if !matches!(suffix, 'b' | 'w' | 'd') {
                 return self.unsupported(addr, &mnemonic);
             }
-            let root = if mnemonic.starts_with("INS") { "ins" } else { "outs" };
+            let root = if mnemonic.starts_with("INS") {
+                "ins"
+            } else {
+                "outs"
+            };
             let _ = writeln!(self.out, "{prefix}{root}{suffix}(c);");
             return Ok(true);
         }
@@ -1019,7 +1129,12 @@ impl<'a> Emitter<'a> {
             };
             let temp = format!("a_{addr:08x}_");
             let _ = writeln!(self.out, "uint32_t {temp} = (uint32_t)({address});");
-            let line = write_gpr(*index, *shift, *mask, &format!("recomp_rd32_(g_mem, {temp})"));
+            let line = write_gpr(
+                *index,
+                *shift,
+                *mask,
+                &format!("recomp_rd32_(g_mem, {temp})"),
+            );
             let _ = writeln!(self.out, "{line}");
             let _ = writeln!(self.out, "(void)recomp_rd16_(g_mem, {temp} + 4u);");
             return Ok(true);
@@ -1030,10 +1145,13 @@ impl<'a> Emitter<'a> {
     fn slow_sse(&mut self, insn: &Insn, addr: Addr) -> Result<bool> {
         let mnemonic = insn.mnemonic.to_ascii_uppercase();
         if mnemonic == "SFENCE" {
-            self.out.push_str("__atomic_thread_fence(__ATOMIC_RELEASE);\n");
+            self.out
+                .push_str("__atomic_thread_fence(__ATOMIC_RELEASE);\n");
             return Ok(true);
         }
-        let Some(SlowOperand::Mem(address)) = slow_operands(insn).and_then(|ops| ops.into_iter().next()) else {
+        let Some(SlowOperand::Mem(address)) =
+            slow_operands(insn).and_then(|ops| ops.into_iter().next())
+        else {
             return self.unsupported(addr, &mnemonic);
         };
         let call = match mnemonic.as_str() {
@@ -1064,15 +1182,18 @@ impl<'a> Emitter<'a> {
             for lane in 0..4u32 {
                 let source = match source {
                     SlowOperand::Xmm(index) => format!("c->xmm[{index}][{lane}]"),
-                    SlowOperand::Mem(address) => format!(
-                        "recomp_rd32_(g_mem, (uint32_t)({address}) + {}u)",
-                        lane * 4
-                    ),
+                    SlowOperand::Mem(address) => {
+                        format!("recomp_rd32_(g_mem, (uint32_t)({address}) + {}u)", lane * 4)
+                    }
                     _ => {
                         return self.unsupported(addr, &mnemonic);
                     }
                 };
-                let invert = if matches!(mnemonic.as_str(), "ANDNPS" | "ANDNPD") { "~" } else { "" };
+                let invert = if matches!(mnemonic.as_str(), "ANDNPS" | "ANDNPD") {
+                    "~"
+                } else {
+                    ""
+                };
                 let _ = writeln!(
                     self.out,
                     "c->xmm[{destination}][{lane}] = {invert}c->xmm[{destination}][{lane}] {operator} {source};"
@@ -1090,7 +1211,9 @@ impl<'a> Emitter<'a> {
             "PEXTRW" => return self.slow_pextrw(dst, operands.get(1), operands.get(2), addr),
             "MOVDQ2Q" => return self.slow_movdq2q(dst, operands.get(1), addr),
             "MOVNTQ" => {
-                if let (SlowOperand::Mem(address), Some(SlowOperand::Mm(source))) = (dst, operands.get(1)) {
+                if let (SlowOperand::Mem(address), Some(SlowOperand::Mm(source))) =
+                    (dst, operands.get(1))
+                {
                     let _ = writeln!(
                         self.out,
                         "recomp_wr64_(g_mem, (uint32_t)({address}), c->mm[{source}]);"
@@ -1131,10 +1254,7 @@ impl<'a> Emitter<'a> {
                         "{function}(c->xmm[{destination}], {source}, {bits}u);"
                     );
                 } else {
-                    let _ = writeln!(
-                        self.out,
-                        "{function}(c->xmm[{destination}], {source});"
-                    );
+                    let _ = writeln!(self.out, "{function}(c->xmm[{destination}], {source});");
                 }
                 if close {
                     self.out.push_str("}\n");
@@ -1147,10 +1267,7 @@ impl<'a> Emitter<'a> {
                 };
                 self.out.push_str("{\n");
                 let _ = writeln!(self.out, "uint64_t n_ = {count};");
-                let _ = writeln!(
-                    self.out,
-                    "{function}(c->xmm[{destination}], n_, {bits}u);"
-                );
+                let _ = writeln!(self.out, "{function}(c->xmm[{destination}], n_, {bits}u);");
                 self.out.push_str("}\n");
                 return Ok(true);
             }
@@ -1369,8 +1486,11 @@ impl<'a> Emitter<'a> {
         imm: Option<&SlowOperand>,
         addr: Addr,
     ) -> Result<bool> {
-        let (SlowOperand::Gpr { index, shift, mask }, Some(SlowOperand::Xmm(register)), Some(SlowOperand::Imm(order))) =
-            (dst, src, imm)
+        let (
+            SlowOperand::Gpr { index, shift, mask },
+            Some(SlowOperand::Xmm(register)),
+            Some(SlowOperand::Imm(order)),
+        ) = (dst, src, imm)
         else {
             return self.unsupported(addr, "PEXTRW form");
         };
@@ -1403,7 +1523,12 @@ impl<'a> Emitter<'a> {
         Ok(true)
     }
 
-    fn slow_movd(&mut self, dst: &SlowOperand, src: Option<&SlowOperand>, addr: Addr) -> Result<bool> {
+    fn slow_movd(
+        &mut self,
+        dst: &SlowOperand,
+        src: Option<&SlowOperand>,
+        addr: Addr,
+    ) -> Result<bool> {
         match (dst, src) {
             (SlowOperand::Mm(destination), Some(source)) => {
                 let Some(source) = mmx_source(source, 32) else {
@@ -1450,7 +1575,12 @@ impl<'a> Emitter<'a> {
         Ok(true)
     }
 
-    fn slow_movq(&mut self, dst: &SlowOperand, src: Option<&SlowOperand>, addr: Addr) -> Result<bool> {
+    fn slow_movq(
+        &mut self,
+        dst: &SlowOperand,
+        src: Option<&SlowOperand>,
+        addr: Addr,
+    ) -> Result<bool> {
         match (dst, src) {
             (SlowOperand::Mm(destination), Some(source)) => {
                 let Some(source) = mmx_source(source, 64) else {
@@ -1511,18 +1641,19 @@ impl<'a> Emitter<'a> {
                     .get(&target)
                     .and_then(|masks| select_mask(masks, wanted))
                 {
-                    let expected = self
-                        .plan
-                        .return_addr
-                        .get(&value)
-                        .copied()
-                        .ok_or_else(|| self.error(self.s.value_addr[value as usize], "call without return address"))?;
+                    let expected = self.plan.return_addr.get(&value).copied().ok_or_else(|| {
+                        self.error(
+                            self.s.value_addr[value as usize],
+                            "call without return address",
+                        )
+                    })?;
                     let argument = self
                         .ctx
                         .private_input_arguments
                         .get(&target)
                         .and_then(|name| Field::from_name(name));
-                    self.declarations.insert(Declaration::PrivatePrepare(target));
+                    self.declarations
+                        .insert(Declaration::PrivatePrepare(target));
                     self.declarations.insert(Declaration::Checked(target));
                     self.declarations.insert(Declaration::PrivateContract {
                         addr: target,
@@ -1547,14 +1678,17 @@ impl<'a> Emitter<'a> {
         }
         let checked = self.ctx.checked_returns.contains(&target);
         if checked {
-            let expected = self
-                .plan
-                .return_addr
-                .get(&value)
-                .copied()
-                .ok_or_else(|| self.error(self.s.value_addr[value as usize], "call without return address"))?;
+            let expected = self.plan.return_addr.get(&value).copied().ok_or_else(|| {
+                self.error(
+                    self.s.value_addr[value as usize],
+                    "call without return address",
+                )
+            })?;
             self.declarations.insert(Declaration::Checked(target));
-            let _ = writeln!(self.out, "CALL_FN_CHECKED({target:08x}, 0x{expected:08x}u);");
+            let _ = writeln!(
+                self.out,
+                "CALL_FN_CHECKED({target:08x}, 0x{expected:08x}u);"
+            );
             self.resume_check(value, target, expected);
         } else {
             self.declare_entry(target);
@@ -1570,7 +1704,10 @@ impl<'a> Emitter<'a> {
         self.publish(value)?;
         self.publish_guard(value)?;
         let args = self.s.args(value);
-        let target = args.get(1).or_else(|| args.first()).copied()
+        let target = args
+            .get(1)
+            .or_else(|| args.first())
+            .copied()
             .ok_or_else(|| self.error(addr, "indirect call without target"))?;
         let target = self.expr(target)?;
         let helper = if self.ctx.guest_calls.contains_key(&addr) {
@@ -1580,7 +1717,10 @@ impl<'a> Emitter<'a> {
         } else {
             "recomp_icall"
         };
-        let _ = writeln!(self.out, "{helper}(c, (uint32_t)({target}), 0x{addr:08x}u);");
+        let _ = writeln!(
+            self.out,
+            "{helper}(c, (uint32_t)({target}), 0x{addr:08x}u);"
+        );
         if self.plan.settle_sites.contains(&value) {
             self.out.push_str("x86_cc_settle(c);\n");
         }
@@ -1590,7 +1730,9 @@ impl<'a> Emitter<'a> {
     fn divide(&mut self, value: ValueId, addr: Addr) -> Result<()> {
         self.publish(value)?;
         let args = self.s.args(value);
-        let divisor = args.get(2).copied()
+        let divisor = args
+            .get(2)
+            .copied()
             .ok_or_else(|| self.error(addr, "division without divisor"))?;
         let divisor = self.expr(divisor)?;
         let helper = match self.s.value(value).op {
@@ -1601,7 +1743,10 @@ impl<'a> Emitter<'a> {
             Op::Idiv { size: 2, .. } => "idiv16",
             _ => "idiv32",
         };
-        let _ = writeln!(self.out, "{helper}(c, (uint32_t)({divisor}), 0x{addr:08x}u);");
+        let _ = writeln!(
+            self.out,
+            "{helper}(c, (uint32_t)({divisor}), 0x{addr:08x}u);"
+        );
         let _ = writeln!(
             self.out,
             "{}",
@@ -1614,7 +1759,11 @@ impl<'a> Emitter<'a> {
         self.publish(value)?;
         let size = self.s.value(value).size;
         let args = self.s.args(value);
-        let address = self.expr(args.get(1).copied().ok_or_else(|| self.error(0, "load without address"))?)?;
+        let address = self.expr(
+            args.get(1)
+                .copied()
+                .ok_or_else(|| self.error(0, "load without address"))?,
+        )?;
         let read = match size {
             1 => "rd8",
             2 => "rd16",
@@ -1634,8 +1783,15 @@ impl<'a> Emitter<'a> {
     fn store(&mut self, value: ValueId) -> Result<()> {
         self.publish(value)?;
         let args = self.s.args(value);
-        let address = self.expr(args.get(1).copied().ok_or_else(|| self.error(0, "store without address"))?)?;
-        let stored = args.get(2).copied().ok_or_else(|| self.error(0, "store without value"))?;
+        let address = self.expr(
+            args.get(1)
+                .copied()
+                .ok_or_else(|| self.error(0, "store without address"))?,
+        )?;
+        let stored = args
+            .get(2)
+            .copied()
+            .ok_or_else(|| self.error(0, "store without value"))?;
         let stored = self.expr(stored)?;
         let size = self.s.value(args[2]).size;
         let write = match size {
@@ -1643,7 +1799,9 @@ impl<'a> Emitter<'a> {
             2 => "wr16",
             4 => "wr32",
             8 => "wr64",
-            _ => return Err(self.error(self.s.value_addr[value as usize], "unsupported store size")),
+            _ => {
+                return Err(self.error(self.s.value_addr[value as usize], "unsupported store size"))
+            }
         };
         let helper = format!("recomp_{write}_");
         let _ = writeln!(
@@ -1667,7 +1825,10 @@ impl<'a> Emitter<'a> {
             if self.checked && self.ctx.checked_returns.contains(&target) {
                 self.declarations.insert(Declaration::Checked(target));
                 if self.private.is_some() {
-                    let _ = writeln!(self.out, "CALL_FN_CHECKED({target:08x}, rd32(c->r[R_ESP])); return;");
+                    let _ = writeln!(
+                        self.out,
+                        "CALL_FN_CHECKED({target:08x}, rd32(c->r[R_ESP])); return;"
+                    );
                 } else {
                     self.declare_entry(target);
                     let _ = writeln!(self.out, "if (checked_return_) {{ CALL_FN_CHECKED({target:08x}, rd32(c->r[R_ESP])); }} else {{ CALL_FN({target:08x}); }} return;");
@@ -1690,7 +1851,11 @@ impl<'a> Emitter<'a> {
         self.publish(value)?;
         let current = self.block_of(value);
         let args = self.s.args(value);
-        let condition = self.expr(*args.first().ok_or_else(|| self.error(0, "branch without condition"))?)?;
+        let condition = self.expr(
+            *args
+                .first()
+                .ok_or_else(|| self.error(0, "branch without condition"))?,
+        )?;
         let taken = self.successor(current, Some(target))?;
         if let Some(taken) = taken {
             let end_addr = self.block_end_addr(current);
@@ -1713,7 +1878,10 @@ impl<'a> Emitter<'a> {
         let at = self.s.value_addr[value as usize];
         if self.ctx.known_entries.contains(&target) {
             self.declare_entry(target);
-            let _ = writeln!(self.out, "if ((uint32_t)({condition})) {{ CALL_FN({target:08x}); return; }}");
+            let _ = writeln!(
+                self.out,
+                "if ((uint32_t)({condition})) {{ CALL_FN({target:08x}); return; }}"
+            );
         } else {
             let _ = writeln!(
                 self.out,
@@ -1734,10 +1902,18 @@ impl<'a> Emitter<'a> {
 
     fn branch_ind(&mut self, value: ValueId, addr: Addr) -> Result<()> {
         let args = self.s.args(value);
-        let target = self.expr(*args.first().ok_or_else(|| self.error(addr, "indirect jump without target"))?)?;
+        let target = self.expr(
+            *args
+                .first()
+                .ok_or_else(|| self.error(addr, "indirect jump without target"))?,
+        )?;
         let current = self.block_of(value);
         let dynamic = self.has_dynamic
-            && self.ctx.ir.index_of(addr).is_some_and(|index| self.ctx.ir.dynamic.contains(&index));
+            && self
+                .ctx
+                .ir
+                .index_of(addr)
+                .is_some_and(|index| self.ctx.ir.dynamic.contains(&index));
         let successors = self.successors(current).to_vec();
         self.stage_transfer(current as u32)?;
         if dynamic && self.dispatch.is_some() {
@@ -1751,23 +1927,35 @@ impl<'a> Emitter<'a> {
                 dispatch.span,
                 self.block_prefix()
             );
-            let default_lines = self.x87_lines(|x87, names| x87.default_lines(self.clone, value, names))?;
+            let default_lines =
+                self.x87_lines(|x87, names| x87.default_lines(self.clone, value, names))?;
             self.write_x87(default_lines);
             self.publish(value)?;
-            let _ = writeln!(self.out, "c->eip = 0x{addr:08x}u; recomp_jump(c, t_); return;");
+            let _ = writeln!(
+                self.out,
+                "c->eip = 0x{addr:08x}u; recomp_jump(c, t_); return;"
+            );
             self.out.push_str("}\n");
             return Ok(());
         }
         let _ = writeln!(self.out, "switch ((uint32_t)({target})) {{");
         for target_block in &successors {
-            let _ = writeln!(self.out, "case 0x{:08x}u:", self.plan.block_addrs[*target_block]);
+            let _ = writeln!(
+                self.out,
+                "case 0x{:08x}u:",
+                self.plan.block_addrs[*target_block]
+            );
             self.edge(Some(current), *target_block)?;
         }
         self.out.push_str("default:\n");
-        let default_lines = self.x87_lines(|x87, names| x87.default_lines(self.clone, value, names))?;
+        let default_lines =
+            self.x87_lines(|x87, names| x87.default_lines(self.clone, value, names))?;
         self.write_x87(default_lines);
         self.publish(value)?;
-        let _ = writeln!(self.out, "c->eip = 0x{addr:08x}u; recomp_jump(c, (uint32_t)({target})); return;");
+        let _ = writeln!(
+            self.out,
+            "c->eip = 0x{addr:08x}u; recomp_jump(c, (uint32_t)({target})); return;"
+        );
         self.out.push_str("}\n");
         Ok(())
     }
@@ -1785,9 +1973,8 @@ impl<'a> Emitter<'a> {
     fn return_value(&mut self, value: ValueId) -> Result<()> {
         if let Some(private) = self.private {
             self.publish_private_return(value, private)?;
-            self.out.push_str(
-                "if (RECOMP_UNLIKELY(c->eip != expected_return_)) {\n",
-            );
+            self.out
+                .push_str("if (RECOMP_UNLIKELY(c->eip != expected_return_)) {\n");
             self.publish_private_fallback(value)?;
             if !self.ctx.effect_returns.contains(&self.s.addr) {
                 self.out.push_str("recomp_return_fast_(c);\n");
@@ -1844,7 +2031,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn publish_private_return(&mut self, value: ValueId, private: &PrivateEmit) -> Result<()> {
-        let Some(keys) = self.plan.publish.get(&value).cloned() else { return Ok(()) };
+        let Some(keys) = self.plan.publish.get(&value).cloned() else {
+            return Ok(());
+        };
         let keys: Vec<StateKey> = keys
             .into_iter()
             .filter(|key| {
@@ -1857,8 +2046,12 @@ impl<'a> Emitter<'a> {
     }
 
     fn publish_private_fallback(&mut self, value: ValueId) -> Result<()> {
-        let Some(keys) = self.plan.publish.get(&value).cloned() else { return Ok(()) };
-        let Some(state) = self.s.boundary(value) else { return Ok(()) };
+        let Some(keys) = self.plan.publish.get(&value).cloned() else {
+            return Ok(());
+        };
+        let Some(state) = self.s.boundary(value) else {
+            return Ok(());
+        };
         let keys: Vec<StateKey> = keys
             .into_iter()
             .filter(|key| state.iter().any(|(candidate, _)| candidate == key))
@@ -1874,29 +2067,45 @@ impl<'a> Emitter<'a> {
             SehEffect::Enter | SehEffect::Adopt => unreachable!(),
             SehEffect::Leave => self.out.push_str("recomp_seh_frame_leave(c);\n"),
             SehEffect::Landing => {
-                let _ = writeln!(self.out, "if (recomp_seh_pending_target()) recomp_seh_intercept(c, 0x{addr:08x}u);");
+                let _ = writeln!(
+                    self.out,
+                    "if (recomp_seh_pending_target()) recomp_seh_intercept(c, 0x{addr:08x}u);"
+                );
             }
             SehEffect::Orphan => {
-                self.out.push_str("recomp_seh_frame_orphan(c, seh_mark_);\n");
+                self.out
+                    .push_str("recomp_seh_frame_orphan(c, seh_mark_);\n");
             }
         }
     }
 
     fn publish(&mut self, value: ValueId) -> Result<()> {
-        let Some(keys) = self.plan.publish.get(&value).cloned() else { return Ok(()) };
+        let Some(keys) = self.plan.publish.get(&value).cloned() else {
+            return Ok(());
+        };
         self.publish_keys(value, &keys, true)
     }
 
     fn publish_guard(&mut self, value: ValueId) -> Result<()> {
-        let Some(keys) = self.plan.guard.get(&value).cloned() else { return Ok(()) };
-        self.out.push_str("if (RECOMP_UNLIKELY(recomp_hooks_ever)) {\n");
+        let Some(keys) = self.plan.guard.get(&value).cloned() else {
+            return Ok(());
+        };
+        self.out
+            .push_str("if (RECOMP_UNLIKELY(recomp_hooks_ever)) {\n");
         self.publish_keys(value, &keys, false)?;
         self.out.push_str("}\n");
         Ok(())
     }
 
-    fn publish_keys(&mut self, value: ValueId, keys: &[StateKey], flags_action: bool) -> Result<()> {
-        let Some(state) = self.s.boundary(value) else { return Ok(()) };
+    fn publish_keys(
+        &mut self,
+        value: ValueId,
+        keys: &[StateKey],
+        flags_action: bool,
+    ) -> Result<()> {
+        let Some(state) = self.s.boundary(value) else {
+            return Ok(());
+        };
         let state: BTreeMap<StateKey, ValueId> = state
             .iter()
             .copied()
@@ -1918,7 +2127,8 @@ impl<'a> Emitter<'a> {
             .and_then(|publication| publication.descriptor)
             .map(|descriptor| (descriptor, descriptor.mask & flag_fields))
             .filter(|(_, mask)| !mask.is_empty());
-        let forwarded = publication.map_or(Fields::NONE, |publication| publication.forwarded) & flag_fields;
+        let forwarded =
+            publication.map_or(Fields::NONE, |publication| publication.forwarded) & flag_fields;
         let mask = descriptor.map_or(Fields::NONE, |(_, mask)| mask);
         let written = mask | (flag_fields & !mask & !forwarded);
         if !written.is_empty() {
@@ -1930,14 +2140,14 @@ impl<'a> Emitter<'a> {
             }
         }
         if let Some((_, mask)) = descriptor {
-            locations.retain(|location| {
-                !matches!(location, Location::Flag(field) if mask.contains(*field))
-            });
+            locations.retain(
+                |location| !matches!(location, Location::Flag(field) if mask.contains(*field)),
+            );
         }
         if !forwarded.is_empty() {
-            locations.retain(|location| {
-                !matches!(location, Location::Flag(field) if forwarded.contains(*field))
-            });
+            locations.retain(
+                |location| !matches!(location, Location::Flag(field) if forwarded.contains(*field)),
+            );
         }
         for location in locations {
             self.publish_location(location, &state, keys)?;
@@ -1993,8 +2203,13 @@ impl<'a> Emitter<'a> {
             self.plan.live.contains(&value)
         } else {
             match self.s.value(value).op {
-                Op::Const(_) | Op::Target(_) | Op::Memory | Op::Input(_) | Op::StateReload(_) => true,
-                Op::Byte(_) | Op::Pack | Op::StateKeep(_) | Op::P(OpCode::Copy | OpCode::IntZExt) => {
+                Op::Const(_) | Op::Target(_) | Op::Memory | Op::Input(_) | Op::StateReload(_) => {
+                    true
+                }
+                Op::Byte(_)
+                | Op::Pack
+                | Op::StateKeep(_)
+                | Op::P(OpCode::Copy | OpCode::IntZExt) => {
                     self.s.args(value).iter().all(|arg| self.available(*arg))
                 }
                 _ => false,
@@ -2034,13 +2249,19 @@ impl<'a> Emitter<'a> {
                     Some(value) => self.expr(value)?,
                     None => format!("c->eflags_{}", field.name().to_ascii_lowercase()),
                 };
-                let _ = writeln!(self.out, "c->eflags_{} = (uint32_t)(({expr}) & 1u);", field.name().to_ascii_lowercase());
+                let _ = writeln!(
+                    self.out,
+                    "c->eflags_{} = (uint32_t)(({expr}) & 1u);",
+                    field.name().to_ascii_lowercase()
+                );
             }
             Location::Xmm(reg, lane) => {
                 let register = Registers::get().require(&format!("XMM{reg}"));
                 let mut values = Vec::with_capacity(4);
                 for byte in 0..4 {
-                    let key = StateKey::Register((register.offset + lane as u64 * 4 + byte as u64) as u32);
+                    let key = StateKey::Register(
+                        (register.offset + lane as u64 * 4 + byte as u64) as u32,
+                    );
                     values.push(self.listed_value(state, keys, key)?);
                 }
                 let text = match values.iter().copied().collect::<Option<Vec<_>>>() {
@@ -2055,7 +2276,9 @@ impl<'a> Emitter<'a> {
                         .map(|(byte, value)| {
                             let expr = match value {
                                 Some(value) => self.expr(*value),
-                                None => Ok(format!("((c->xmm[{reg}][{lane}] >> {}) & 0xffu)", byte * 8)),
+                                None => {
+                                    Ok(format!("((c->xmm[{reg}][{lane}] >> {}) & 0xffu)", byte * 8))
+                                }
                             }?;
                             Ok(format!("((({expr}) & 0xffu) << {})", byte * 8))
                         })
@@ -2182,7 +2405,11 @@ impl<'a> Emitter<'a> {
         if let Some(copies) = self.transfers.sources.get(&source) {
             for &(channel, arg) in copies {
                 let expr = self.expr(arg)?;
-                let _ = writeln!(self.out, "e{channel} = ({})({expr});", ctype(self.transfers.sizes[channel]));
+                let _ = writeln!(
+                    self.out,
+                    "e{channel} = ({})({expr});",
+                    ctype(self.transfers.sizes[channel])
+                );
             }
         }
         Ok(())
@@ -2192,15 +2419,22 @@ impl<'a> Emitter<'a> {
         let block = &self.s.blocks[target];
         let position = block.preds.iter().position(|candidate| *candidate == pred);
         if let Some(position) = position {
-            let phis: Vec<_> = block.phis.iter().copied()
+            let phis: Vec<_> = block
+                .phis
+                .iter()
+                .copied()
                 .filter(|phi| self.plan.live.contains(phi) && self.s.value(*phi).size != 0)
                 .collect();
             let destinations = phis.iter().copied().collect();
-            let parallel = phis.iter().any(|phi| {
-                self.reads_phi(self.s.args(*phi)[position], &destinations)
-            });
+            let parallel = phis
+                .iter()
+                .any(|phi| self.reads_phi(self.s.args(*phi)[position], &destinations));
             for &phi in &phis {
-                let arg = *self.s.args(phi).get(position).ok_or_else(|| self.error(0, "phi arity"))?;
+                let arg = *self
+                    .s
+                    .args(phi)
+                    .get(position)
+                    .ok_or_else(|| self.error(0, "phi arity"))?;
                 let ctype = ctype(self.s.value(phi).size);
                 let expr = self.expr(arg)?;
                 if parallel {
@@ -2221,7 +2455,11 @@ impl<'a> Emitter<'a> {
     fn reads_phi(&self, value: ValueId, phis: &BTreeSet<ValueId>) -> bool {
         if matches!(self.s.value(value).op, Op::Byte(_)) {
             return phis.contains(&value)
-                || self.s.args(value).iter().any(|arg| self.reads_phi(*arg, phis));
+                || self
+                    .s
+                    .args(value)
+                    .iter()
+                    .any(|arg| self.reads_phi(*arg, phis));
         }
         if let Some((carrier, _)) = self.keep_lane.get(&value) {
             return phis.contains(carrier);
@@ -2230,10 +2468,11 @@ impl<'a> Emitter<'a> {
             return phis.contains(&value);
         }
         match self.s.value(value).op {
-            Op::Pack | Op::StateKeep(_)
-            | Op::P(OpCode::Copy | OpCode::IntZExt) => {
-                self.s.args(value).iter().any(|arg| self.reads_phi(*arg, phis))
-            }
+            Op::Pack | Op::StateKeep(_) | Op::P(OpCode::Copy | OpCode::IntZExt) => self
+                .s
+                .args(value)
+                .iter()
+                .any(|arg| self.reads_phi(*arg, phis)),
             _ => phis.contains(&value),
         }
     }
@@ -2272,7 +2511,13 @@ impl<'a> Emitter<'a> {
             Op::Memory => Ok("0u".to_string()),
             Op::Byte(index) => Ok(format!(
                 "((({}) >> {}) & 0xffu)",
-                self.expr(*self.s.args(value).first().ok_or_else(|| self.error(0, "missing argument"))?)?,
+                self.expr(
+                    *self
+                        .s
+                        .args(value)
+                        .first()
+                        .ok_or_else(|| self.error(0, "missing argument"))?
+                )?,
                 index as u32 * 8
             )),
             Op::Pack => match self.pack_lanes(self.s.args(value)) {
@@ -2280,17 +2525,28 @@ impl<'a> Emitter<'a> {
                 None => self.pack_bytes(self.s.args(value), item.size > 4),
             },
             Op::StateKeep(key) => {
-                let old = self.expr(*self.s.args(value).get(1).ok_or_else(|| self.error(0, "missing argument"))?)?;
+                let old = self.expr(
+                    *self
+                        .s
+                        .args(value)
+                        .get(1)
+                        .ok_or_else(|| self.error(0, "missing argument"))?,
+                )?;
                 let loaded = self.field_expr(key, item.size)?;
-                let loaded = if field_lane(key).is_some_and(|(field, _)| Fields::FLAGS.contains(field)) {
-                    format!("(x86_cc_settle(c), {loaded})")
-                } else {
-                    loaded
-                };
+                let loaded =
+                    if field_lane(key).is_some_and(|(field, _)| Fields::FLAGS.contains(field)) {
+                        format!("(x86_cc_settle(c), {loaded})")
+                    } else {
+                        loaded
+                    };
                 Ok(keep_expr(&loaded, &old))
             }
             Op::P(OpCode::Copy) | Op::P(OpCode::IntZExt) => self.expr(
-                *self.s.args(value).first().ok_or_else(|| self.error(0, "missing argument"))?,
+                *self
+                    .s
+                    .args(value)
+                    .first()
+                    .ok_or_else(|| self.error(0, "missing argument"))?,
             ),
             _ => Ok(format!("v{value}")),
         }
@@ -2299,9 +2555,21 @@ impl<'a> Emitter<'a> {
     fn operation(&self, value: ValueId) -> Result<String> {
         let item = *self.s.value(value);
         let args = self.s.args(value);
-        let a = |index: usize| -> Result<String> { self.expr(*args.get(index).ok_or_else(|| self.error(0, "missing argument"))?) };
+        let a = |index: usize| -> Result<String> {
+            self.expr(
+                *args
+                    .get(index)
+                    .ok_or_else(|| self.error(0, "missing argument"))?,
+            )
+        };
         let wide = item.size > 4 || item.op == Op::P(OpCode::SubPiece);
-        let cast = |text: String| if wide { format!("(uint64_t)({text})") } else { text };
+        let cast = |text: String| {
+            if wide {
+                format!("(uint64_t)({text})")
+            } else {
+                text
+            }
+        };
         let zero = if wide { "0ull" } else { "0u" };
         let one = if wide { "1ull" } else { "1u" };
         if let Op::P(
@@ -2337,11 +2605,12 @@ impl<'a> Emitter<'a> {
             Op::StateKeep(key) => {
                 let old = a(1)?;
                 let loaded = self.field_expr(key, item.size)?;
-                let loaded = if field_lane(key).is_some_and(|(field, _)| Fields::FLAGS.contains(field)) {
-                    format!("(x86_cc_settle(c), {loaded})")
-                } else {
-                    loaded
-                };
+                let loaded =
+                    if field_lane(key).is_some_and(|(field, _)| Fields::FLAGS.contains(field)) {
+                        format!("(x86_cc_settle(c), {loaded})")
+                    } else {
+                        loaded
+                    };
                 keep_expr(&loaded, &old)
             }
             Op::Memory => "0u".to_string(),
@@ -2350,29 +2619,27 @@ impl<'a> Emitter<'a> {
                 OpCode::FloatNan => format!("!!isnan(recomp_sse_f32((uint32_t)({})))", a(0)?),
                 OpCode::FloatEqual => format!(
                     "(recomp_sse_f32((uint32_t)({})) == recomp_sse_f32((uint32_t)({})))",
-                    a(0)?, a(1)?
+                    a(0)?,
+                    a(1)?
                 ),
                 OpCode::FloatNotEqual => format!(
                     "(recomp_sse_f32((uint32_t)({})) != recomp_sse_f32((uint32_t)({})))",
-                    a(0)?, a(1)?
+                    a(0)?,
+                    a(1)?
                 ),
                 OpCode::FloatLess => format!(
                     "(recomp_sse_f32((uint32_t)({})) < recomp_sse_f32((uint32_t)({})))",
-                    a(0)?, a(1)?
+                    a(0)?,
+                    a(1)?
                 ),
                 OpCode::FloatLessEqual => format!(
                     "(recomp_sse_f32((uint32_t)({})) <= recomp_sse_f32((uint32_t)({})))",
-                    a(0)?, a(1)?
+                    a(0)?,
+                    a(1)?
                 ),
-                OpCode::FloatSqrt => format!(
-                    "recomp_sse_sqrtps((uint32_t)({}))", a(0)?
-                ),
-                OpCode::FloatRcp => format!(
-                    "recomp_sse_rcpps((uint32_t)({}))", a(0)?
-                ),
-                OpCode::FloatRsqrt => format!(
-                    "recomp_sse_rsqrtps((uint32_t)({}))", a(0)?
-                ),
+                OpCode::FloatSqrt => format!("recomp_sse_sqrtps((uint32_t)({}))", a(0)?),
+                OpCode::FloatRcp => format!("recomp_sse_rcpps((uint32_t)({}))", a(0)?),
+                OpCode::FloatRsqrt => format!("recomp_sse_rsqrtps((uint32_t)({}))", a(0)?),
                 OpCode::FloatAdd
                 | OpCode::FloatSub
                 | OpCode::FloatMult
@@ -2387,12 +2654,27 @@ impl<'a> Emitter<'a> {
                         OpCode::FloatMin => "min",
                         _ => "max",
                     };
-                    let context = if matches!(code, OpCode::FloatMin | OpCode::FloatMax) { "" } else { "c, " };
-                    format!("recomp_sse_{helper}ps({context}(uint32_t)({}), (uint32_t)({}))", a(0)?, a(1)?)
+                    let context = if matches!(code, OpCode::FloatMin | OpCode::FloatMax) {
+                        ""
+                    } else {
+                        "c, "
+                    };
+                    format!(
+                        "recomp_sse_{helper}ps({context}(uint32_t)({}), (uint32_t)({}))",
+                        a(0)?,
+                        a(1)?
+                    )
                 }
                 OpCode::Cvtss2si | OpCode::Cvttss2si => {
-                    let helper = if code == OpCode::Cvtss2si { "cvtss2si" } else { "cvttss2si" };
-                    format!("(uint32_t)recomp_sse_{helper}(recomp_sse_f32((uint32_t)({})))", a(0)?)
+                    let helper = if code == OpCode::Cvtss2si {
+                        "cvtss2si"
+                    } else {
+                        "cvttss2si"
+                    };
+                    format!(
+                        "(uint32_t)recomp_sse_{helper}(recomp_sse_f32((uint32_t)({})))",
+                        a(0)?
+                    )
                 }
                 OpCode::Cvtsi2ss => {
                     format!("recomp_sse_f32_bits((float)(int32_t)(uint32_t)({}))", a(0)?)
@@ -2427,11 +2709,20 @@ impl<'a> Emitter<'a> {
                 OpCode::IntLeft | OpCode::IntRight => {
                     let bits = args.first().map_or(32, |arg| self.s.value(*arg).size) * 8;
                     let op = if code == OpCode::IntLeft { "<<" } else { ">>" };
-                    format!("(({}) >= {bits} ? {zero} : (({}) {op} ({})))", a(1)?, a(0)?, a(1)?)
+                    format!(
+                        "(({}) >= {bits} ? {zero} : (({}) {op} ({})))",
+                        a(1)?,
+                        a(0)?,
+                        a(1)?
+                    )
                 }
                 OpCode::IntSRight => {
                     let bits = args.first().map_or(32, |arg| self.s.value(*arg).size) * 8;
-                    let sign = if bits >= 64 { format!("0x{:x}ull", 1u64 << 63) } else { format!("0x{:x}u", 1u32 << (bits - 1)) };
+                    let sign = if bits >= 64 {
+                        format!("0x{:x}ull", 1u64 << 63)
+                    } else {
+                        format!("0x{:x}u", 1u32 << (bits - 1))
+                    };
                     format!("(({}) >= {bits} ? (({}) - (({}) >> {})) : (((({}) ^ {sign}) >> ({})) - ({sign} >> ({}))))",
                         a(1)?, zero, a(0)?, bits - 1, a(0)?, a(1)?, a(1)?)
                 }
@@ -2458,29 +2749,73 @@ impl<'a> Emitter<'a> {
                 OpCode::BoolOr => format!("(({}) || ({}))", a(0)?, a(1)?),
                 OpCode::IntDiv => format!("(({}) / ({}))", cast(a(0)?), cast(a(1)?)),
                 OpCode::IntRem => format!("(({}) % ({}))", cast(a(0)?), cast(a(1)?)),
-                OpCode::IntSDiv => format!("(({})({}) / ({})({}))", signed_type(item.size), a(0)?, signed_type(item.size), a(1)?),
-                OpCode::IntSRem => format!("(({})({}) % ({})({}))", signed_type(item.size), a(0)?, signed_type(item.size), a(1)?),
+                OpCode::IntSDiv => format!(
+                    "(({})({}) / ({})({}))",
+                    signed_type(item.size),
+                    a(0)?,
+                    signed_type(item.size),
+                    a(1)?
+                ),
+                OpCode::IntSRem => format!(
+                    "(({})({}) % ({})({}))",
+                    signed_type(item.size),
+                    a(0)?,
+                    signed_type(item.size),
+                    a(1)?
+                ),
                 OpCode::PopCount => {
-                    let helper = if args.first().map_or(4, |arg| self.s.value(*arg).size) > 4 { "__builtin_popcountll" } else { "__builtin_popcount" };
+                    let helper = if args.first().map_or(4, |arg| self.s.value(*arg).size) > 4 {
+                        "__builtin_popcountll"
+                    } else {
+                        "__builtin_popcount"
+                    };
                     format!("{helper}(({}))", a(0)?)
                 }
                 OpCode::LzCount => {
                     let bits = args.first().map_or(4, |arg| self.s.value(*arg).size) * 8;
-                    let helper = if bits > 32 { "__builtin_clzll" } else { "__builtin_clz" };
-                    format!("(({}) ? ({helper}(({})) - {}) : {bits})", a(0)?, a(0)?, 32u32.saturating_sub(bits as u32))
+                    let helper = if bits > 32 {
+                        "__builtin_clzll"
+                    } else {
+                        "__builtin_clz"
+                    };
+                    format!(
+                        "(({}) ? ({helper}(({})) - {}) : {bits})",
+                        a(0)?,
+                        a(0)?,
+                        32u32.saturating_sub(bits as u32)
+                    )
                 }
                 OpCode::Piece => {
                     let shift = args.get(1).map_or(0, |arg| self.s.value(*arg).size) * 8;
                     if shift >= 32 {
-                        format!("((((uint64_t)({})) << {shift}) | ((uint64_t)({})))", a(0)?, a(1)?)
+                        format!(
+                            "((((uint64_t)({})) << {shift}) | ((uint64_t)({})))",
+                            a(0)?,
+                            a(1)?
+                        )
                     } else {
                         format!("((({}) << {shift}) | ({}))", a(0)?, a(1)?)
                     }
                 }
-                OpCode::SubPiece => format!("(({}) >= 8 ? 0ull : (({}) >> (({}) * 8)))", a(1)?, a(0)?, a(1)?),
-                _ => return Err(self.error(self.s.value_addr[value as usize], &format!("unsupported p-code {code:?} at v{value}"))),
+                OpCode::SubPiece => format!(
+                    "(({}) >= 8 ? 0ull : (({}) >> (({}) * 8)))",
+                    a(1)?,
+                    a(0)?,
+                    a(1)?
+                ),
+                _ => {
+                    return Err(self.error(
+                        self.s.value_addr[value as usize],
+                        &format!("unsupported p-code {code:?} at v{value}"),
+                    ))
+                }
             },
-            _ => return Err(self.error(self.s.value_addr[value as usize], &format!("unsupported SSA op {:?} at v{value}", item.op))),
+            _ => {
+                return Err(self.error(
+                    self.s.value_addr[value as usize],
+                    &format!("unsupported SSA op {:?} at v{value}", item.op),
+                ))
+            }
         };
         Ok(result)
     }
@@ -2494,14 +2829,21 @@ impl<'a> Emitter<'a> {
             .ok_or_else(|| self.error(0, &format!("unsupported register lane {key:?}")))?;
         let size = size as u32;
         if lane + size > width {
-            return Err(self.error(0, &format!("register field {key:?} has no {size}-byte slice")));
+            return Err(self.error(
+                0,
+                &format!("register field {key:?} has no {size}-byte slice"),
+            ));
         }
         if lane == 0 && size == width {
             Ok(base)
         } else if lane == 0 {
             Ok(format!("({base} & 0x{:x}u)", (1u64 << (size * 8)) - 1))
         } else {
-            Ok(format!("(({base} >> {}) & 0x{:x}u)", lane * 8, (1u64 << (size * 8)) - 1))
+            Ok(format!(
+                "(({base} >> {}) & 0x{:x}u)",
+                lane * 8,
+                (1u64 << (size * 8)) - 1
+            ))
         }
     }
 
@@ -2533,7 +2875,11 @@ impl<'a> Emitter<'a> {
             ));
         }
         if let Some((reg, offset)) = rk_ir::xmm_offset(key) {
-            return Some((format!("c->xmm[{reg}][{}]", offset / 4), (offset % 4) as u32, 4));
+            return Some((
+                format!("c->xmm[{reg}][{}]", offset / 4),
+                (offset % 4) as u32,
+                4,
+            ));
         }
         let StateKey::Register(offset) = key else {
             return None;
@@ -2615,10 +2961,7 @@ impl<'a> Emitter<'a> {
                 return Some(format!("(({text}) & 0x{:x}u)", (1u64 << bits) - 1));
             }
         }
-        if args
-            .iter()
-            .any(|arg| self.materialized[*arg as usize])
-        {
+        if args.iter().any(|arg| self.materialized[*arg as usize]) {
             return None;
         }
         let mut origin: Option<(String, u32, u32)> = None;
@@ -2656,7 +2999,11 @@ impl<'a> Emitter<'a> {
             lanes.push(lane);
         }
         let (base, first, width) = origin?;
-        if lanes.iter().enumerate().any(|(index, lane)| *lane != first + index as u32) {
+        if lanes
+            .iter()
+            .enumerate()
+            .any(|(index, lane)| *lane != first + index as u32)
+        {
             return None;
         }
         let bits = args.len() * 8;
@@ -2665,12 +3012,21 @@ impl<'a> Emitter<'a> {
         } else if first == 0 {
             Some(format!("({base} & 0x{:x}u)", (1u64 << bits) - 1))
         } else {
-            Some(format!("(({base} >> {}) & 0x{:x}u)", first * 8, (1u64 << bits) - 1))
+            Some(format!(
+                "(({base} >> {}) & 0x{:x}u)",
+                first * 8,
+                (1u64 << bits) - 1
+            ))
         }
     }
 
     fn error(&self, addr: Addr, detail: &str) -> rk_core::Error {
-        Diagnostic::error(addr, Reason::Unsupported { detail: detail.into() })
+        Diagnostic::error(
+            addr,
+            Reason::Unsupported {
+                detail: detail.into(),
+            },
+        )
     }
 }
 
@@ -2683,4 +3039,3 @@ impl External for ValueNames<'_, '_> {
         self.emitter.expr(id)
     }
 }
-

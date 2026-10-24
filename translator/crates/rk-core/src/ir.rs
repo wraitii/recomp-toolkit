@@ -21,7 +21,11 @@ pub struct Varnode {
 
 impl Varnode {
     pub const fn new(space: Space, offset: u64, size: u32) -> Self {
-        Self { space, offset, size }
+        Self {
+            space,
+            offset,
+            size,
+        }
     }
 
     pub const fn constant(value: u64, size: u32) -> Self {

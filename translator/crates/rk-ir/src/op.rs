@@ -121,26 +121,55 @@ impl Properties {
         }
     }
     const fn pure() -> Self {
-        Self { pure: true, ..Self::new() }
+        Self {
+            pure: true,
+            ..Self::new()
+        }
     }
     const fn effect() -> Self {
-        Self { ordered: true, observes: true, faults: true, memory: true, opaque: true, ..Self::new() }
+        Self {
+            ordered: true,
+            observes: true,
+            faults: true,
+            memory: true,
+            opaque: true,
+            ..Self::new()
+        }
     }
 }
 
 pub fn properties(op: Op) -> Properties {
     match op {
         Op::P(code) => match code {
-            OpCode::Load => Properties { ordered: true, observes: true, faults: true, memory: true, ..Properties::new() },
-            OpCode::Store => Properties { ordered: true, observes: true, faults: true, memory: true, ..Properties::new() },
-            OpCode::Branch | OpCode::CBranch => Properties { terminator: true, ..Properties::new() },
+            OpCode::Load => Properties {
+                ordered: true,
+                observes: true,
+                faults: true,
+                memory: true,
+                ..Properties::new()
+            },
+            OpCode::Store => Properties {
+                ordered: true,
+                observes: true,
+                faults: true,
+                memory: true,
+                ..Properties::new()
+            },
+            OpCode::Branch | OpCode::CBranch => Properties {
+                terminator: true,
+                ..Properties::new()
+            },
             OpCode::BranchInd | OpCode::Return => Properties {
                 observes: true,
                 terminator: true,
                 ..Properties::new()
             },
             OpCode::Call | OpCode::CallInd => Properties::effect(),
-            OpCode::CallOther => Properties { opaque: true, faults: true, ..Properties::new() },
+            OpCode::CallOther => Properties {
+                opaque: true,
+                faults: true,
+                ..Properties::new()
+            },
             OpCode::Copy
             | OpCode::IntEqual
             | OpCode::IntNotEqual
@@ -201,18 +230,30 @@ pub fn properties(op: Op) -> Properties {
             | OpCode::SubPiece
             | OpCode::PopCount
             | OpCode::LzCount => Properties::pure(),
-            OpCode::Unknown => Properties { opaque: true, faults: true, ..Properties::new() },
+            OpCode::Unknown => Properties {
+                opaque: true,
+                faults: true,
+                ..Properties::new()
+            },
         },
         Op::Call { .. } | Op::CallInd => Properties::effect(),
         Op::Div { .. } | Op::Idiv { .. } | Op::String(_) => Properties::effect(),
         Op::Slow(_) | Op::CallOther(_) => Properties::effect(),
-        Op::Tail { .. } | Op::ImportTail { .. } | Op::BranchInd | Op::Return => {
-            Properties { observes: true, terminator: true, ..Properties::new() }
-        }
-        Op::Branch { .. } | Op::CBranch { .. } => {
-            Properties { terminator: true, ..Properties::new() }
-        }
-        Op::Trap(_) => Properties { terminator: true, faults: true, opaque: true, ..Properties::new() },
+        Op::Tail { .. } | Op::ImportTail { .. } | Op::BranchInd | Op::Return => Properties {
+            observes: true,
+            terminator: true,
+            ..Properties::new()
+        },
+        Op::Branch { .. } | Op::CBranch { .. } => Properties {
+            terminator: true,
+            ..Properties::new()
+        },
+        Op::Trap(_) => Properties {
+            terminator: true,
+            faults: true,
+            opaque: true,
+            ..Properties::new()
+        },
         Op::Breakpoint => Properties {
             observes: true,
             terminator: true,
@@ -233,10 +274,20 @@ pub fn properties(op: Op) -> Properties {
             memory: op.touches_memory(),
             ..Properties::new()
         },
-        Op::Input(_) | Op::Const(_) | Op::Target(_) | Op::Phi | Op::Byte(_) | Op::Pack
-        | Op::Memory | Op::StateReload(_) | Op::StateKeep(_) | Op::CcKind(_) => {
-            Properties { pure: true, synthetic: true, ..Properties::new() }
-        }
+        Op::Input(_)
+        | Op::Const(_)
+        | Op::Target(_)
+        | Op::Phi
+        | Op::Byte(_)
+        | Op::Pack
+        | Op::Memory
+        | Op::StateReload(_)
+        | Op::StateKeep(_)
+        | Op::CcKind(_) => Properties {
+            pure: true,
+            synthetic: true,
+            ..Properties::new()
+        },
     }
 }
 

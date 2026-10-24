@@ -12,19 +12,20 @@ use rk_ir::{Op, SlowInsn, StateKey};
 
 pub mod address;
 mod build;
-pub mod memory;
 mod canonical;
 mod coalesce;
 mod dump;
 mod flags;
 mod forward;
 mod liveness;
+pub mod memory;
 mod prepare;
 mod validate;
 pub use validate::validate;
 
 pub use build::{
-    build, BuildOptions, CallEffect, CallFacts, ConservativeCallFacts, StackEffect, DEFAULT_VALUE_BUDGET,
+    build, BuildOptions, CallEffect, CallFacts, ConservativeCallFacts, StackEffect,
+    DEFAULT_VALUE_BUDGET,
 };
 pub use canonical::canonicalize;
 pub use dump::dump;
@@ -151,12 +152,22 @@ impl Ssa {
         let id = self.values.len() as ValueId;
         let start = self.args.len() as u32;
         self.args.extend_from_slice(args);
-        self.values.push(Value { op, size, args_start: start, args_len: args.len() as u32 });
+        self.values.push(Value {
+            op,
+            size,
+            args_start: start,
+            args_len: args.len() as u32,
+        });
         self.value_addr.push(addr);
         id
     }
 
-    pub(crate) fn constant(&mut self, cache: &mut BTreeMap<(u8, u64), ValueId>, size: u8, data: u64) -> ValueId {
+    pub(crate) fn constant(
+        &mut self,
+        cache: &mut BTreeMap<(u8, u64), ValueId>,
+        size: u8,
+        data: u64,
+    ) -> ValueId {
         let data = data & rk_core::mask(size as u32);
         if let Some(&value) = cache.get(&(size, data)) {
             return value;
@@ -213,7 +224,9 @@ impl Ssa {
         let mut blocks = vec![Vec::new(); self.blocks.len()];
         for (block, item) in self.blocks.iter().enumerate() {
             for &phi in &item.phis {
-                let Some(&key) = self.phi_key.get(&phi) else { continue };
+                let Some(&key) = self.phi_key.get(&phi) else {
+                    continue;
+                };
                 blocks[block].push((key, phi, self.args(phi).to_vec()));
             }
         }

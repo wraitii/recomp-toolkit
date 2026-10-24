@@ -104,7 +104,10 @@ fn validate_site(
     row: &SiteFacts,
 ) -> Result<()> {
     let (insn, _, indirect) = instruction_at(program, analysis, site)?;
-    let call = insn.ops.iter().any(|op| matches!(op.opcode, OpCode::Call | OpCode::CallInd));
+    let call = insn
+        .ops
+        .iter()
+        .any(|op| matches!(op.opcode, OpCode::Call | OpCode::CallInd));
     let jump = insn.mnemonic.eq_ignore_ascii_case("JMP")
         && insn.ops.iter().any(|op| op.opcode == OpCode::BranchInd);
     match row.kind {
@@ -305,7 +308,11 @@ fn resolve_import_effects(
             .ok_or_else(|| Error::input(format!("import {name:?} must be dll!name")))?;
         facts.imports.insert(name, effect.clone());
     }
-    for fir in analysis.ir.values().filter_map(|result| result.as_ref().ok()) {
+    for fir in analysis
+        .ir
+        .values()
+        .filter_map(|result| result.as_ref().ok())
+    {
         for insn in &fir.insns {
             let Some(name) = called_import(program, insn) else {
                 continue;
@@ -383,7 +390,9 @@ fn runtime_call_facts(
     for (&site, found) in targets {
         let (end, indirect) = call_end(program, analysis, site)?;
         if !indirect {
-            return Err(Error::input(format!("site {site:08x} is not an indirect call")));
+            return Err(Error::input(format!(
+                "site {site:08x} is not an indirect call"
+            )));
         }
         out.insert(end, found.clone());
     }

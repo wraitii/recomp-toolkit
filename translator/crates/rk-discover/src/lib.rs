@@ -14,10 +14,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register};
-use rk_core::program::{Function, Image, InteriorKind, PeDetails, Program, Span};
-use rk_core::facts::{AnalysisFacts, TransferKind};
-use rk_core::settings::Settings;
 use rayon::prelude::*;
+use rk_core::facts::{AnalysisFacts, TransferKind};
+use rk_core::program::{Function, Image, InteriorKind, PeDetails, Program, Span};
+use rk_core::settings::Settings;
 use rk_core::{parse_hex, Addr, Error, Hex, Result};
 
 use report::{
@@ -75,7 +75,9 @@ thread_local! {
 
 impl SleighLengths {
     fn length(&self, image: &Image, at: Addr) -> Option<u8> {
-        let cache = self.cache.get_or_init(|| (0..image.size).map(|_| AtomicU8::new(0)).collect());
+        let cache = self
+            .cache
+            .get_or_init(|| (0..image.size).map(|_| AtomicU8::new(0)).collect());
         let slot = cache.get(at.saturating_sub(image.base) as usize)?;
         let cached = slot.load(Ordering::Relaxed);
         if cached != 0 {
@@ -85,7 +87,8 @@ impl SleighLengths {
         let bytes = image.bytes(at, available)?;
         let out = LIFTER.with(|lifter| {
             let mut lifter = lifter.borrow_mut();
-            let lifter = lifter.get_or_insert_with(|| rk_sleigh::Lifter::new().expect("SLEIGH initialization"));
+            let lifter = lifter
+                .get_or_insert_with(|| rk_sleigh::Lifter::new().expect("SLEIGH initialization"));
             lifter.length(at, bytes).ok()
         });
         slot.store(out.unwrap_or(u8::MAX), Ordering::Relaxed);
@@ -164,12 +167,18 @@ impl Insn {
     fn seeds_flow(&self) -> bool {
         self.is_call()
             || (self.is_jump()
-                && !matches!(self.mnemonic, Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne))
+                && !matches!(
+                    self.mnemonic,
+                    Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne
+                ))
     }
 
     fn ends_flow(&self) -> bool {
         self.is_ret()
-            || matches!(self.mnemonic, Mnemonic::Jmp | Mnemonic::Int3 | Mnemonic::Ud0 | Mnemonic::Ud1 | Mnemonic::Ud2)
+            || matches!(
+                self.mnemonic,
+                Mnemonic::Jmp | Mnemonic::Int3 | Mnemonic::Ud0 | Mnemonic::Ud1 | Mnemonic::Ud2
+            )
     }
 
     fn flow_target(&self) -> Option<(Addr, bool)> {
@@ -178,7 +187,9 @@ impl Insn {
 
     fn absolute_slot(&self) -> Option<Addr> {
         match self.ops[0] {
-            SimpleOp::Mem(m) if m.base == Register::None && m.index == Register::None => Some(m.displacement),
+            SimpleOp::Mem(m) if m.base == Register::None && m.index == Register::None => {
+                Some(m.displacement)
+            }
             _ => None,
         }
     }
@@ -195,7 +206,12 @@ impl Insn {
             return None;
         }
         match self.ops[0] {
-            SimpleOp::Mem(m) if m.base == Register::None && m.index != Register::None && m.scale == 4 && m.size == 4 => {
+            SimpleOp::Mem(m)
+                if m.base == Register::None
+                    && m.index != Register::None
+                    && m.scale == 4
+                    && m.size == 4 =>
+            {
                 Some((m.index.full_register(), m.displacement))
             }
             _ => None,
@@ -203,8 +219,10 @@ impl Insn {
     }
 
     fn writes(&self, register: Register) -> bool {
-        !matches!(self.mnemonic, Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Push)
-            && matches!(self.ops[0], SimpleOp::Reg(r) if r.full_register() == register)
+        !matches!(
+            self.mnemonic,
+            Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Push
+        ) && matches!(self.ops[0], SimpleOp::Reg(r) if r.full_register() == register)
     }
 }
 
@@ -262,8 +280,17 @@ pub fn discover(settings: &Settings, program: &Program) -> Result<Discovered> {
     let (functions, entries) = recovery.filter(functions, entries)?;
     let mut report = recovery.report();
     report.converged = converged;
-    let instruction_lengths = recovery.instructions.iter().map(|(&at, ins)| (at, ins.size)).collect();
-    Ok(Discovered { functions, entries, instruction_lengths, report })
+    let instruction_lengths = recovery
+        .instructions
+        .iter()
+        .map(|(&at, ins)| (at, ins.size))
+        .collect();
+    Ok(Discovered {
+        functions,
+        entries,
+        instruction_lengths,
+        report,
+    })
 }
 
 fn run_discovery(recovery: &mut Recovery<'_>, settings: &Settings) -> Result<()> {
@@ -413,7 +440,12 @@ impl<'a> Recovery<'a> {
             mapped_starts: BTreeSet::new(),
             mapped_ends,
             mapped_tables,
-            noreturn_functions: program.functions.values().filter(|f| f.noreturn).map(|f| f.addr).collect(),
+            noreturn_functions: program
+                .functions
+                .values()
+                .filter(|f| f.noreturn)
+                .map(|f| f.addr)
+                .collect(),
             noreturn_calls: program.noreturn_calls.clone(),
             seeds: BTreeMap::new(),
             pending: VecDeque::new(),
@@ -442,11 +474,15 @@ impl<'a> Recovery<'a> {
     }
 
     fn offset(&self, at: Addr) -> Option<usize> {
-        at.checked_sub(self.image.base).map(|off| off as usize).filter(|&off| off < self.covered.len())
+        at.checked_sub(self.image.base)
+            .map(|off| off as usize)
+            .filter(|&off| off < self.covered.len())
     }
 
     fn owner_at(&self, at: Addr) -> Option<Addr> {
-        self.offset(at).map(|off| self.covered[off]).filter(|&owner| owner != 0)
+        self.offset(at)
+            .map(|off| self.covered[off])
+            .filter(|&owner| owner != 0)
     }
 
     fn rank_of(&self, at: Addr) -> u16 {
@@ -462,7 +498,10 @@ impl<'a> Recovery<'a> {
     }
 
     fn suppressed_at(&self, at: Addr) -> Option<(Addr, Addr)> {
-        let index = self.suppressed.partition_point(|&(start, _)| start <= at).checked_sub(1)?;
+        let index = self
+            .suppressed
+            .partition_point(|&(start, _)| start <= at)
+            .checked_sub(1)?;
         let &(start, end) = self.suppressed.get(index)?;
         (at < end).then_some((start, end))
     }
@@ -513,7 +552,9 @@ impl<'a> Recovery<'a> {
                         .and_then(|_| self.image.rd32(target + 2))
                         .is_some_and(|slot| self.noreturn_import(slot))
             }
-            None => ins.absolute_slot().is_some_and(|slot| self.noreturn_import(slot)),
+            None => ins
+                .absolute_slot()
+                .is_some_and(|slot| self.noreturn_import(slot)),
         }
     }
 
@@ -560,7 +601,10 @@ impl<'a> Recovery<'a> {
         let old_rank = self.seed_rank.get(&target).copied();
         let effective = old_rank.map_or(rank, |old| old.max(rank));
         let mut first = old_rank.is_none() || effective > old_rank.unwrap_or(0);
-        self.seeds.entry(target).or_default().insert(evidence.to_string());
+        self.seeds
+            .entry(target)
+            .or_default()
+            .insert(evidence.to_string());
         self.seed_rank.insert(target, effective);
         if effective >= RANK_TRUSTED {
             self.trusted_seeds.insert(target);
@@ -581,9 +625,13 @@ impl<'a> Recovery<'a> {
             }
         } else if let Some(current) = owner {
             if effective >= RANK_TRUSTED {
-                self.conflicts.insert((target, current, evidence.to_string()));
+                self.conflicts
+                    .insert((target, current, evidence.to_string()));
             } else if effective < self.rank_of(current) {
-                self.discard_seed(target, &format!("covered by {current:08x} rank {}", self.rank_of(current)));
+                self.discard_seed(
+                    target,
+                    &format!("covered by {current:08x} rank {}", self.rank_of(current)),
+                );
             }
             return;
         }
@@ -599,7 +647,8 @@ impl<'a> Recovery<'a> {
         self.seed_rank.remove(&target);
         self.trusted_seeds.remove(&target);
         self.roots.remove(&target);
-        self.discarded_seeds.push((target, reason.to_string(), evidence.into_iter().collect()));
+        self.discarded_seeds
+            .push((target, reason.to_string(), evidence.into_iter().collect()));
     }
 
     fn retract(&mut self, address: Addr) {
@@ -621,7 +670,10 @@ impl<'a> Recovery<'a> {
         (0..2).all(|step| {
             let slot = at + step * 4;
             self.reloc_slots.contains(&slot)
-                && self.image.rd32(slot).is_some_and(|target| self.image.is_exec(target))
+                && self
+                    .image
+                    .rd32(slot)
+                    .is_some_and(|target| self.image.is_exec(target))
         })
     }
 
@@ -646,7 +698,8 @@ impl<'a> Recovery<'a> {
                         || (owner_rank == rank && !(flow && self.speculative.contains(&owner)))
                     {
                         if rank >= RANK_TRUSTED {
-                            self.conflicts.insert((ins.addr, owner, "overlapping decode".into()));
+                            self.conflicts
+                                .insert((ins.addr, owner, "overlapping decode".into()));
                         }
                         return false;
                     }
@@ -688,10 +741,22 @@ impl<'a> Recovery<'a> {
             self.speculative.insert(ins.addr);
         }
         if let Some((target, call)) = ins.flow_target() {
-            self.seed_from(ins.addr, target, "direct", rank, call && rank >= RANK_MAPPED_FLOW);
+            self.seed_from(
+                ins.addr,
+                target,
+                "direct",
+                rank,
+                call && rank >= RANK_MAPPED_FLOW,
+            );
         }
         if let Some(target) = ins.pointer_immediate().filter(|&t| self.clean_start(t)) {
-            self.seed_from(ins.addr, target, "immediate", rank.min(RANK_IMMEDIATE), true);
+            self.seed_from(
+                ins.addr,
+                target,
+                "immediate",
+                rank.min(RANK_IMMEDIATE),
+                true,
+            );
         }
         if let Some((index, table)) = ins.switch_jump() {
             let previous = self.previous_instructions(ins.addr);
@@ -732,7 +797,10 @@ impl<'a> Recovery<'a> {
         for ins in previous {
             match (ins.mnemonic, ins.ops[0], ins.ops[1]) {
                 (Mnemonic::Movzx | Mnemonic::Mov, SimpleOp::Reg(dest), SimpleOp::Mem(m))
-                    if index_table.is_none() && dest.full_register() == index && m.size == 1 && m.scale <= 1 =>
+                    if index_table.is_none()
+                        && dest.full_register() == index
+                        && m.size == 1
+                        && m.scale <= 1 =>
                 {
                     let register = match (m.base, m.index) {
                         (base, Register::None) if base != Register::None => base,
@@ -754,7 +822,13 @@ impl<'a> Recovery<'a> {
                 _ => {}
             }
         }
-        let cases = bound.map(|bound| if inclusive { bound.saturating_add(1) } else { bound });
+        let cases = bound.map(|bound| {
+            if inclusive {
+                bound.saturating_add(1)
+            } else {
+                bound
+            }
+        });
         let slots = match (cases, index_table) {
             (Some(cases), Some(bytes)) => {
                 let values = self.image.bytes(bytes, cases.min(SWITCH_SLOTS) as usize)?;
@@ -765,7 +839,9 @@ impl<'a> Recovery<'a> {
             (None, None) => {
                 let fits = |value: Addr| match known {
                     Some(targets) => targets.contains(&value),
-                    None => self.image.is_exec(value) && value < table && table - value < SWITCH_REACH,
+                    None => {
+                        self.image.is_exec(value) && value < table && table - value < SWITCH_REACH
+                    }
                 };
                 let mut count = 0;
                 while count < SWITCH_SLOTS && self.image.rd32(table + count * 4).is_some_and(fits) {
@@ -780,15 +856,27 @@ impl<'a> Recovery<'a> {
         if slots == 0 || slots > SWITCH_SLOTS {
             return None;
         }
-        if !(0..slots).all(|i| self.image.rd32(table + i * 4).is_some_and(|t| self.image.is_exec(t))) {
+        if !(0..slots).all(|i| {
+            self.image
+                .rd32(table + i * 4)
+                .is_some_and(|t| self.image.is_exec(t))
+        }) {
             return None;
         }
         if let Some(targets) = known {
-            if !(0..slots).all(|i| self.image.rd32(table + i * 4).is_some_and(|t| targets.contains(&t))) {
+            if !(0..slots).all(|i| {
+                self.image
+                    .rd32(table + i * 4)
+                    .is_some_and(|t| targets.contains(&t))
+            }) {
                 return self.switch_extent(&[], index, table, known);
             }
         }
-        Some(Switch { table, slots, index_table: index_table.zip(cases) })
+        Some(Switch {
+            table,
+            slots,
+            index_table: index_table.zip(cases),
+        })
     }
 
     fn claim_data(&mut self, lo: Addr, hi: Addr, kind: &'static str, rank: u16) -> bool {
@@ -826,7 +914,8 @@ impl<'a> Recovery<'a> {
         let targets: BTreeSet<Addr> = (0..switch.slots)
             .filter_map(|i| self.image.rd32(switch.table + i * 4))
             .collect();
-        self.switches.insert(site, (switch.table, end, targets.iter().copied().collect()));
+        self.switches
+            .insert(site, (switch.table, end, targets.iter().copied().collect()));
         for target in targets {
             self.seed_from(site, target, "switch", rank.min(RANK_MAPPED_FLOW), false);
         }
@@ -911,7 +1000,12 @@ impl<'a> Recovery<'a> {
         let relocations = self.image.relocations.clone();
         for r in &relocations {
             if !self.image.is_exec(r.site) && !self.at_known_data(r.target) {
-                self.seed(r.target, &format!("relocation:{:08x}", r.site), RANK_RELOCATION, false);
+                self.seed(
+                    r.target,
+                    &format!("relocation:{:08x}", r.site),
+                    RANK_RELOCATION,
+                    false,
+                );
             }
         }
         if let Some(mut at) = self.details.tls_callbacks {
@@ -938,7 +1032,12 @@ impl<'a> Recovery<'a> {
                 } else {
                     RANK_RELOCATED_IMMEDIATE
                 };
-                self.seed(r.target, &format!("relocated-immediate:{owner:08x}"), rank, false);
+                self.seed(
+                    r.target,
+                    &format!("relocated-immediate:{owner:08x}"),
+                    rank,
+                    false,
+                );
             }
         }
         self.trace();
@@ -959,7 +1058,10 @@ impl<'a> Recovery<'a> {
         if let Some(path) = &settings.indirect_targets {
             for fields in rows(path)?.iter().skip(2) {
                 let [site, kind, targets] = &fields[..] else {
-                    return Err(Error::input(format!("{}: invalid indirect target row", path.display())));
+                    return Err(Error::input(format!(
+                        "{}: invalid indirect target row",
+                        path.display()
+                    )));
                 };
                 for target in targets.split(',') {
                     observed.push((address(path, site)?, address(path, target)?, kind == "call"));
@@ -969,7 +1071,10 @@ impl<'a> Recovery<'a> {
         if let Some(path) = &settings.discovery_evidence {
             for fields in rows(path)?.iter().filter(|f| !f[0].starts_with('#')) {
                 let [target, kind, site, _] = &fields[..] else {
-                    return Err(Error::input(format!("{}: invalid discovery row", path.display())));
+                    return Err(Error::input(format!(
+                        "{}: invalid discovery row",
+                        path.display()
+                    )));
                 };
                 observed.push((address(path, site)?, address(path, target)?, kind == "call"));
             }
@@ -1075,14 +1180,19 @@ impl<'a> Recovery<'a> {
                     if executable_section && !self.reloc_slots.contains(&absolute) {
                         continue;
                     }
-                    if self.covered[image_offset..image_offset + 4].iter().any(|&b| b != 0) {
+                    if self.covered[image_offset..image_offset + 4]
+                        .iter()
+                        .any(|&b| b != 0)
+                    {
                         continue;
                     }
                     let original = self
                         .details
                         .original
                         .get(image_offset..image_offset + 4)
-                        .map(|b| u32::from_le_bytes(b.try_into().unwrap()).wrapping_add(self.delta));
+                        .map(|b| {
+                            u32::from_le_bytes(b.try_into().unwrap()).wrapping_add(self.delta)
+                        });
                     if original == Some(target) {
                         candidates.insert(absolute, target);
                     }
@@ -1120,7 +1230,12 @@ impl<'a> Recovery<'a> {
                         && self.clean_start(target)
                         && self.pointer_source(slot, target);
                     if single {
-                        self.seed(target, &format!("pointer:{slot:08x}"), RANK_SINGLE_POINTER, true);
+                        self.seed(
+                            target,
+                            &format!("pointer:{slot:08x}"),
+                            RANK_SINGLE_POINTER,
+                            true,
+                        );
                     }
                     next_at = slot + 1;
                 }
@@ -1164,12 +1279,17 @@ impl<'a> Recovery<'a> {
     }
 
     fn data_containing(&self, at: Addr) -> Option<(Addr, Addr, &'static str)> {
-        let index = self.offset(at).map(|off| self.data_owner[off]).filter(|&i| i >= 0)?;
+        let index = self
+            .offset(at)
+            .map(|off| self.data_owner[off])
+            .filter(|&i| i >= 0)?;
         Some(self.data_ranges[index as usize])
     }
 
     fn first_data_start(&self, at: Addr, size: u8) -> Option<Addr> {
-        (1..size as u32).map(|step| at + step).find(|&inner| self.in_data(inner) || self.at_known_data(inner))
+        (1..size as u32)
+            .map(|step| at + step)
+            .find(|&inner| self.in_data(inner) || self.at_known_data(inner))
     }
 
     fn sweep(&mut self) {
@@ -1184,7 +1304,10 @@ impl<'a> Recovery<'a> {
                     continue;
                 }
                 if let Some(owner) = self.owner_at(at) {
-                    let size = self.instructions.get(&owner).map_or(1, |ins| ins.size as u32);
+                    let size = self
+                        .instructions
+                        .get(&owner)
+                        .map_or(1, |ins| ins.size as u32);
                     at = owner + size;
                     continue;
                 }
@@ -1221,8 +1344,12 @@ impl<'a> Recovery<'a> {
                 }
                 let rank = RANK_SWEEP.max(self.seed_rank.get(&at).copied().unwrap_or(0));
                 let blocked = (at + 1..at + size).any(|inner| {
-                    self.owner_at(inner).is_some_and(|owner| self.rank_of(owner) >= rank)
-                        || self.seed_rank.get(&inner).is_some_and(|&rank| rank >= RANK_SWEEP)
+                    self.owner_at(inner)
+                        .is_some_and(|owner| self.rank_of(owner) >= rank)
+                        || self
+                            .seed_rank
+                            .get(&inner)
+                            .is_some_and(|&rank| rank >= RANK_SWEEP)
                 });
                 if blocked {
                     self.gaps.push((at, at + 1, "sweep-padding"));
@@ -1244,7 +1371,10 @@ impl<'a> Recovery<'a> {
             if !self.speculative.contains(&at) {
                 if let Some((target, _)) = ins.flow_target() {
                     if !self.instructions.contains_key(&target) {
-                        self.traps.insert(at, format!("direct transfer to unmapped instruction {target:08x}"));
+                        self.traps.insert(
+                            at,
+                            format!("direct transfer to unmapped instruction {target:08x}"),
+                        );
                     }
                 }
             }
@@ -1281,7 +1411,8 @@ impl<'a> Recovery<'a> {
                 continue;
             }
             let joins = owner.is_some_and(|current| {
-                falls || (!roots.contains(&at) && targets.contains(&at) && at < current + BODY_BYTES)
+                falls
+                    || (!roots.contains(&at) && targets.contains(&at) && at < current + BODY_BYTES)
             });
             if !joins {
                 owner = Some(at);
@@ -1301,7 +1432,10 @@ impl<'a> Recovery<'a> {
         let mut entries = BTreeMap::new();
         for (owner, group) in groups {
             if !self.instructions.contains_key(&owner) {
-                return Err(Error::input(format!("function {} has no instruction at its entry", Hex(owner))));
+                return Err(Error::input(format!(
+                    "function {} has no instruction at its entry",
+                    Hex(owner)
+                )));
             }
             let mut runs: Vec<(Addr, Vec<u8>)> = Vec::new();
             for (at, size) in group {
@@ -1328,7 +1462,9 @@ impl<'a> Recovery<'a> {
             );
         }
         for (&target, &owner) in &self.ghidra_entries {
-            entries.entry(target).or_insert((owner, InteriorKind::Branch));
+            entries
+                .entry(target)
+                .or_insert((owner, InteriorKind::Branch));
         }
         Ok((functions, entries))
     }
@@ -1344,7 +1480,10 @@ impl<'a> Recovery<'a> {
 
     fn spans_are_padding(&self, owner: Addr, spans: &[Span]) -> bool {
         if self.mapped_span_at(owner).is_some()
-            || self.seed_rank.get(&owner).is_some_and(|&rank| rank > RANK_POINTER)
+            || self
+                .seed_rank
+                .get(&owner)
+                .is_some_and(|&rank| rank > RANK_POINTER)
             || self.known_entries.contains(&owner)
         {
             return false;
@@ -1431,15 +1570,22 @@ impl<'a> Recovery<'a> {
         if end % 16 != 0 {
             return false;
         }
-        let next = self.ghidra_spans.partition_point(|&(start, _, _)| start < end);
+        let next = self
+            .ghidra_spans
+            .partition_point(|&(start, _, _)| start < end);
         let Some(&(next_start, _, _)) = self.ghidra_spans.get(next) else {
             return false;
         };
         if next_start != end {
             return false;
         }
-        let previous = self.ghidra_spans.partition_point(|&(start, _, _)| start < span.start);
-        let Some(&(_, previous_end, _)) = previous.checked_sub(1).and_then(|index| self.ghidra_spans.get(index)) else {
+        let previous = self
+            .ghidra_spans
+            .partition_point(|&(start, _, _)| start < span.start);
+        let Some(&(_, previous_end, _)) = previous
+            .checked_sub(1)
+            .and_then(|index| self.ghidra_spans.get(index))
+        else {
             return false;
         };
         previous_end == span.start
@@ -1488,10 +1634,9 @@ impl<'a> Recovery<'a> {
         for (&owner, spans) in &functions {
             let reason = if self.spans_are_padding(owner, spans) {
                 Some(FunctionReject::PaddingOnly)
-            } else if signatures
-                .get(&owner)
-                .is_some_and(|signature| counts.get(signature).copied().unwrap_or(0) > SHORT_FRAGMENT_REPEAT_LIMIT)
-            {
+            } else if signatures.get(&owner).is_some_and(|signature| {
+                counts.get(signature).copied().unwrap_or(0) > SHORT_FRAGMENT_REPEAT_LIMIT
+            }) {
                 Some(FunctionReject::RepeatedShortFragment)
             } else if self.alignment_call_stub(owner, spans) {
                 Some(FunctionReject::AlignmentCallStub)
@@ -1534,7 +1679,8 @@ impl<'a> Recovery<'a> {
                         && !self.trusted_seeds.contains(&target)
                         && self.mapped_span_at(target).is_none()
                         && evidence.iter().all(|item| {
-                            evidence_source(item).is_some_and(|source| discarded_sources.contains(&source))
+                            evidence_source(item)
+                                .is_some_and(|source| discarded_sources.contains(&source))
                         })
                 })
                 .map(|(&target, _)| target)
@@ -1546,7 +1692,11 @@ impl<'a> Recovery<'a> {
                 if discarded.iter().any(|(owner, _)| *owner == target) {
                     continue;
                 }
-                self.function_rejections.push((target, FunctionReject::OnlySeededByDiscardedCode, self.pass));
+                self.function_rejections.push((
+                    target,
+                    FunctionReject::OnlySeededByDiscardedCode,
+                    self.pass,
+                ));
                 suppressions.extend(spans.iter().map(|span| (span.start, span.end())));
             }
         }
@@ -1556,11 +1706,17 @@ impl<'a> Recovery<'a> {
     fn filter(&mut self, functions: Functions, entries: Entries) -> Result<(Functions, Entries)> {
         let mut discovered_spans: Vec<(Addr, Addr, Addr)> = functions
             .iter()
-            .flat_map(|(&owner, spans)| spans.iter().map(move |span| (span.start, span.end(), owner)))
+            .flat_map(|(&owner, spans)| {
+                spans
+                    .iter()
+                    .map(move |span| (span.start, span.end(), owner))
+            })
             .collect();
         discovered_spans.sort_unstable();
         let discovered_at = |at: Addr| -> Option<Addr> {
-            let index = discovered_spans.partition_point(|&(start, _, _)| start <= at).checked_sub(1)?;
+            let index = discovered_spans
+                .partition_point(|&(start, _, _)| start <= at)
+                .checked_sub(1)?;
             let &(_, end, owner) = discovered_spans.get(index)?;
             (at < end).then_some(owner)
         };
@@ -1590,7 +1746,10 @@ impl<'a> Recovery<'a> {
             if reason.is_none() {
                 'spans: for span in spans {
                     let Some(lengths) = &span.lengths else {
-                        return Err(Error::input(format!("{}: discovered span has no lengths", Hex(span.start))));
+                        return Err(Error::input(format!(
+                            "{}: discovered span has no lengths",
+                            Hex(span.start)
+                        )));
                     };
                     let mut at = span.start;
                     for &length in lengths {
@@ -1600,8 +1759,14 @@ impl<'a> Recovery<'a> {
                                 break 'spans;
                             }
                         }
-                        let falls = self.instructions.get(&at).filter(|ins| !self.stops(ins)).map(Insn::end);
-                        if let Some(next) = falls.filter(|&next| self.mapped_span_at(next).is_some()) {
+                        let falls = self
+                            .instructions
+                            .get(&at)
+                            .filter(|ins| !self.stops(ins))
+                            .map(Insn::end);
+                        if let Some(next) =
+                            falls.filter(|&next| self.mapped_span_at(next).is_some())
+                        {
                             if !self.mapped_starts.contains(&next) {
                                 reason = Some(FunctionReject::FlowsIntoMappedInstruction);
                                 break 'spans;
@@ -1611,7 +1776,9 @@ impl<'a> Recovery<'a> {
                                 break 'spans;
                             }
                         }
-                        if let Some((target, call)) = self.instructions.get(&at).and_then(Insn::flow_target) {
+                        if let Some((target, call)) =
+                            self.instructions.get(&at).and_then(Insn::flow_target)
+                        {
                             if self.mapped_span_at(target).is_some() {
                                 if !self.mapped_starts.contains(&target) {
                                     reason = Some(FunctionReject::FlowsIntoMappedInstruction);
@@ -1685,9 +1852,16 @@ impl<'a> Recovery<'a> {
     }
 
     fn report(&self) -> DiscoveryReport {
-        let run = |&(start, end): &(Addr, Addr)| PointerRun { start: Hex(start).to_string(), end: Hex(end).to_string() };
+        let run = |&(start, end): &(Addr, Addr)| PointerRun {
+            start: Hex(start).to_string(),
+            end: Hex(end).to_string(),
+        };
         let pointer_runs = self.tables.iter().map(run).collect();
-        let switch_tables = self.switches.values().map(|&(start, end, _)| run(&(start, end))).collect();
+        let switch_tables = self
+            .switches
+            .values()
+            .map(|&(start, end, _)| run(&(start, end)))
+            .collect();
         let gaps = self
             .gaps
             .iter()
@@ -1709,7 +1883,11 @@ impl<'a> Recovery<'a> {
                 target: Hex(target).to_string(),
                 instruction: Hex(instruction).to_string(),
                 evidence: evidence.clone(),
-                kind: if self.instructions.contains_key(&target) { "shared" } else { "rejected" },
+                kind: if self.instructions.contains_key(&target) {
+                    "shared"
+                } else {
+                    "rejected"
+                },
             })
             .collect();
         let seeds = self
@@ -1734,38 +1912,73 @@ impl<'a> Recovery<'a> {
         let mut rejection_counts = RejectionCounts::default();
         for (_, reason, _) in &self.function_rejections {
             match reason {
-                FunctionReject::StartsInsideMappedInstruction => rejection_counts.functions_starts_inside_mapped_instruction += 1,
-                FunctionReject::StartsInMappedFunction => rejection_counts.functions_starts_in_mapped_function += 1,
-                FunctionReject::OverlapsMappedCode => rejection_counts.functions_overlaps_mapped_code += 1,
-                FunctionReject::FlowsIntoMappedInstruction => rejection_counts.functions_flows_into_mapped_instruction += 1,
-                FunctionReject::FlowsToMappedInterior => rejection_counts.functions_flows_to_mapped_interior += 1,
-                FunctionReject::CallsToDiscoveredInterior => rejection_counts.functions_calls_to_discovered_interior += 1,
-                FunctionReject::CallsToUngroundedTarget => rejection_counts.functions_calls_to_ungrounded_target += 1,
-                FunctionReject::JumpsToDiscoveredInterior => rejection_counts.functions_jumps_to_discovered_interior += 1,
+                FunctionReject::StartsInsideMappedInstruction => {
+                    rejection_counts.functions_starts_inside_mapped_instruction += 1
+                }
+                FunctionReject::StartsInMappedFunction => {
+                    rejection_counts.functions_starts_in_mapped_function += 1
+                }
+                FunctionReject::OverlapsMappedCode => {
+                    rejection_counts.functions_overlaps_mapped_code += 1
+                }
+                FunctionReject::FlowsIntoMappedInstruction => {
+                    rejection_counts.functions_flows_into_mapped_instruction += 1
+                }
+                FunctionReject::FlowsToMappedInterior => {
+                    rejection_counts.functions_flows_to_mapped_interior += 1
+                }
+                FunctionReject::CallsToDiscoveredInterior => {
+                    rejection_counts.functions_calls_to_discovered_interior += 1
+                }
+                FunctionReject::CallsToUngroundedTarget => {
+                    rejection_counts.functions_calls_to_ungrounded_target += 1
+                }
+                FunctionReject::JumpsToDiscoveredInterior => {
+                    rejection_counts.functions_jumps_to_discovered_interior += 1
+                }
                 FunctionReject::PaddingOnly => rejection_counts.functions_padding_only += 1,
-                FunctionReject::RepeatedShortFragment => rejection_counts.functions_repeated_short_fragment += 1,
-                FunctionReject::OnlySeededByDiscardedCode => rejection_counts.functions_only_seeded_by_discarded_code += 1,
-                FunctionReject::AlignmentCallStub => rejection_counts.functions_alignment_call_stub += 1,
+                FunctionReject::RepeatedShortFragment => {
+                    rejection_counts.functions_repeated_short_fragment += 1
+                }
+                FunctionReject::OnlySeededByDiscardedCode => {
+                    rejection_counts.functions_only_seeded_by_discarded_code += 1
+                }
+                FunctionReject::AlignmentCallStub => {
+                    rejection_counts.functions_alignment_call_stub += 1
+                }
                 FunctionReject::DataTable => rejection_counts.functions_data_table += 1,
             }
         }
         for (_, reason) in &self.entry_rejections {
             match reason {
-                EntryReject::EntryInsideMappedInstruction => rejection_counts.entries_inside_mapped_instruction += 1,
-                EntryReject::EntryInMappedFunction => rejection_counts.entries_in_mapped_function += 1,
-                EntryReject::EntryInRejectedFunction => rejection_counts.entries_in_rejected_function += 1,
+                EntryReject::EntryInsideMappedInstruction => {
+                    rejection_counts.entries_inside_mapped_instruction += 1
+                }
+                EntryReject::EntryInMappedFunction => {
+                    rejection_counts.entries_in_mapped_function += 1
+                }
+                EntryReject::EntryInRejectedFunction => {
+                    rejection_counts.entries_in_rejected_function += 1
+                }
                 EntryReject::EntryNotInFunction => rejection_counts.entries_not_in_function += 1,
             }
         }
         let function_rejections = self
             .function_rejections
             .iter()
-            .map(|&(addr, reason, pass)| FunctionRejection { address: Hex(addr).to_string(), reason, pass })
+            .map(|&(addr, reason, pass)| FunctionRejection {
+                address: Hex(addr).to_string(),
+                reason,
+                pass,
+            })
             .collect();
         let entry_rejections = self
             .entry_rejections
             .iter()
-            .map(|&(addr, reason)| EntryRejection { address: Hex(addr).to_string(), reason })
+            .map(|&(addr, reason)| EntryRejection {
+                address: Hex(addr).to_string(),
+                reason,
+            })
             .collect();
         DiscoveryReport {
             instructions: self.instructions.len(),
@@ -1797,27 +2010,35 @@ fn rows(path: &Path) -> Result<Vec<Vec<String>>> {
     Ok(text
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| line.split(['\t', ' ']).filter(|f| !f.is_empty()).map(str::to_string).collect())
+        .map(|line| {
+            line.split(['\t', ' '])
+                .filter(|f| !f.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
         .collect())
 }
 
 fn address(path: &Path, text: &str) -> Result<Addr> {
-    parse_hex(text).ok_or_else(|| Error::input(format!("{}: invalid address {text:?}", path.display())))
+    parse_hex(text)
+        .ok_or_else(|| Error::input(format!("{}: invalid address {text:?}", path.display())))
 }
 
-fn span_lengths(
-    image: &Image,
-    check: &SleighLengths,
-    start: Addr,
-    end: Addr,
-) -> Result<Vec<u8>> {
+fn span_lengths(image: &Image, check: &SleighLengths, start: Addr, end: Addr) -> Result<Vec<u8>> {
     let mut lengths = Vec::new();
     let mut at = start;
     while at < end {
-        let ins = decode_between(image, check, at, end)
-            .ok_or_else(|| Error::input(format!("{}: cannot recover mapped instruction boundaries", Hex(at))))?;
+        let ins = decode_between(image, check, at, end).ok_or_else(|| {
+            Error::input(format!(
+                "{}: cannot recover mapped instruction boundaries",
+                Hex(at)
+            ))
+        })?;
         if at + ins.size as u32 > end {
-            return Err(Error::input(format!("{}: cannot recover mapped instruction boundaries", Hex(at))));
+            return Err(Error::input(format!(
+                "{}: cannot recover mapped instruction boundaries",
+                Hex(at)
+            )));
         }
         lengths.push(ins.size);
         at += ins.size as u32;
@@ -1834,15 +2055,12 @@ fn decode_at(image: &Image, check: &SleighLengths, at: Addr) -> Option<Insn> {
     decode_between(image, check, at, end)
 }
 
-fn decode_between(
-    image: &Image,
-    check: &SleighLengths,
-    at: Addr,
-    end: Addr,
-) -> Option<Insn> {
+fn decode_between(image: &Image, check: &SleighLengths, at: Addr, end: Addr) -> Option<Insn> {
     let len = 15usize.min(end.saturating_sub(at) as usize);
     let bytes = image.bytes(at, len)?;
-    let found = if let Some(mut next) = (decode_one(bytes, at, None)?).mnemonic.eq(&Mnemonic::Wait)
+    let found = if let Some(mut next) = (decode_one(bytes, at, None)?)
+        .mnemonic
+        .eq(&Mnemonic::Wait)
         .then(|| decode_one(&bytes[1..], at + 1, Some(1)))
         .flatten()
         .filter(|next| mnemonic_name(next.mnemonic).starts_with("fn"))
@@ -1903,12 +2121,13 @@ fn decode_one(bytes: &[u8], at: Addr, folded: Option<u8>) -> Option<Insn> {
         )
     });
     let flow = insn.flow_control();
-    let direct = if matches!(flow, FlowControl::Call | FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch)
-        && matches!(
-            insn.op0_kind(),
-            OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
-        )
-    {
+    let direct = if matches!(
+        flow,
+        FlowControl::Call | FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch
+    ) && matches!(
+        insn.op0_kind(),
+        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+    ) {
         Some((insn.near_branch_target() as u32, flow == FlowControl::Call))
     } else {
         None

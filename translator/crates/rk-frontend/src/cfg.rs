@@ -7,8 +7,8 @@ use rk_decode::{branch_target, gpr32, imm, DecodedInsn, Decoder, OperandKind, JC
 use rk_sleigh::Lifter;
 
 use crate::seh::{
-    eh3_trylevels, msvc_eh3_finally_only, msvc_unwind_only, seh_frame_sites,
-    seh_restore_sites, MSVC_EH3_FRAME_LEN,
+    eh3_trylevels, msvc_eh3_finally_only, msvc_unwind_only, seh_frame_sites, seh_restore_sites,
+    MSVC_EH3_FRAME_LEN,
 };
 use crate::tables::{recover_tables, table_jumps};
 use crate::{R_EBP, R_ESP};
@@ -44,7 +44,11 @@ struct ReturnState {
 
 impl ReturnState {
     fn unknown() -> Self {
-        Self { delta: None, frame: None, saved: BTreeSet::new() }
+        Self {
+            delta: None,
+            frame: None,
+            saved: BTreeSet::new(),
+        }
     }
 }
 
@@ -92,7 +96,11 @@ impl RawFunction {
                 return self.idx(target).into_iter().collect();
             }
         }
-        let next = self.fallthrough.get(i).copied().and_then(|addr| self.idx(addr));
+        let next = self
+            .fallthrough
+            .get(i)
+            .copied()
+            .and_then(|addr| self.idx(addr));
         if let Some(&target) = self.intra_calls.get(&(i as u32)) {
             return std::iter::once(target)
                 .chain(self.fallthrough.get(i).copied())
@@ -134,7 +142,10 @@ impl RawFunction {
                 .or_else(|| self.recovered_tables.get(&ins.addr))
                 .cloned()
                 .unwrap_or_else(|| self.index.keys().copied().collect());
-            return targets.into_iter().filter_map(|target| self.idx(target)).collect();
+            return targets
+                .into_iter()
+                .filter_map(|target| self.idx(target))
+                .collect();
         }
         next.into_iter().collect()
     }
@@ -180,10 +191,21 @@ impl RawFunction {
             }
         }
 
-        let roots: Vec<Addr> = std::iter::once(self.addr).chain(entries.iter().copied()).collect();
+        let roots: Vec<Addr> = std::iter::once(self.addr)
+            .chain(entries.iter().copied())
+            .collect();
         for addr in roots {
             if let Some(i) = self.idx(addr) {
-                merge(&mut states, &mut pending, i, ReturnState { delta: Some(0), frame: None, saved: BTreeSet::new() });
+                merge(
+                    &mut states,
+                    &mut pending,
+                    i,
+                    ReturnState {
+                        delta: Some(0),
+                        frame: None,
+                        saved: BTreeSet::new(),
+                    },
+                );
             }
         }
         while let Some(i) = pending.pop() {
@@ -195,7 +217,10 @@ impl RawFunction {
                 continue;
             };
             if candidates.contains(&index)
-                && self.first(index).and_then(gpr32).is_some_and(|r| state.saved.contains(&r))
+                && self
+                    .first(index)
+                    .and_then(gpr32)
+                    .is_some_and(|r| state.saved.contains(&r))
             {
                 continue;
             }
@@ -217,7 +242,9 @@ impl RawFunction {
             .into_iter()
             .filter(|&i| {
                 states.get(&(i as u32)).is_some_and(|state| {
-                    self.first(i).and_then(gpr32).is_some_and(|r| state.saved.contains(&r))
+                    self.first(i)
+                        .and_then(gpr32)
+                        .is_some_and(|r| state.saved.contains(&r))
                 })
             })
             .map(|i| i as u32)
@@ -229,7 +256,11 @@ impl RawFunction {
             return Vec::new();
         };
         let m = ins.mnemonic.as_str();
-        let next = self.fallthrough.get(i).copied().and_then(|addr| self.idx(addr));
+        let next = self
+            .fallthrough
+            .get(i)
+            .copied()
+            .and_then(|addr| self.idx(addr));
         if let Some(&target) = self.intra_calls.get(&(i as u32)) {
             std::iter::once(target)
                 .chain(self.fallthrough.get(i).copied())
@@ -257,9 +288,16 @@ impl RawFunction {
             if let Some(target) = self.branch_target(i) {
                 self.idx(target).into_iter().collect()
             } else if self.push_ret_target(i).is_some() {
-                self.push_ret_target(i).and_then(|t| self.idx(t)).into_iter().collect()
+                self.push_ret_target(i)
+                    .and_then(|t| self.idx(t))
+                    .into_iter()
+                    .collect()
             } else {
-                self.index.keys().copied().filter_map(|t| self.idx(t)).collect()
+                self.index
+                    .keys()
+                    .copied()
+                    .filter_map(|t| self.idx(t))
+                    .collect()
             }
         } else {
             next.into_iter().collect()
@@ -288,7 +326,8 @@ impl RawFunction {
             }
         }
         let adjustment = if matches!(m, "PUSH" | "POP") {
-            operand_size(ops, Some(32)).map(|size| size as i32 / 8 * if m == "PUSH" { -1 } else { 1 })
+            operand_size(ops, Some(32))
+                .map(|size| size as i32 / 8 * if m == "PUSH" { -1 } else { 1 })
         } else if matches!(m, "PUSHAD" | "PUSHFD" | "PUSHF" | "POPFD" | "POPF") {
             Some(match m {
                 "PUSHAD" => -32,
@@ -299,9 +338,7 @@ impl RawFunction {
             })
         } else if m == "RET" {
             Some(4 + ops.first().and_then(imm).unwrap_or(0) as i32)
-        } else if matches!(m, "ADD" | "SUB")
-            && ops.first().and_then(gpr32) == Some(R_ESP)
-        {
+        } else if matches!(m, "ADD" | "SUB") && ops.first().and_then(gpr32) == Some(R_ESP) {
             ops.get(1).and_then(imm).map(|value| {
                 let signed = value as u32 as i32;
                 signed * if m == "SUB" { -1 } else { 1 }
@@ -320,11 +357,19 @@ impl RawFunction {
         } else {
             state.delta
         };
-        let mut new_frame = if writes.contains(&R_EBP) { None } else { state.frame };
+        let mut new_frame = if writes.contains(&R_EBP) {
+            None
+        } else {
+            state.frame
+        };
         if m == "MOV" && ops.len() == 2 && ops[0].display == "EBP" && ops[1].display == "ESP" {
             new_frame = state.delta;
         }
-        ReturnState { delta: new_delta, frame: new_frame, saved }
+        ReturnState {
+            delta: new_delta,
+            frame: new_frame,
+            saved,
+        }
     }
 
     fn reached(&self, program: &Program, roots: &BTreeSet<Addr>) -> BTreeSet<u32> {
@@ -353,7 +398,11 @@ impl RawFunction {
                 continue;
             }
             if popped_jump(self, index) {
-                work.extend(self.pushed_continuations.iter().filter_map(|t| self.idx(*t)));
+                work.extend(
+                    self.pushed_continuations
+                        .iter()
+                        .filter_map(|t| self.idx(*t)),
+                );
                 continue;
             }
             if !TERMINATORS.contains(&ins.mnemonic.as_str()) && !self.contiguous[index] {
@@ -371,7 +420,9 @@ impl RawFunction {
         if !self.decoded.iter().any(|ins| never_returns(program, ins)) {
             return BTreeSet::new();
         }
-        let roots = std::iter::once(self.addr).chain(entries.iter().copied()).collect();
+        let roots = std::iter::once(self.addr)
+            .chain(entries.iter().copied())
+            .collect();
         let live = self.reached(program, &roots);
         let mut dead = BTreeSet::new();
         let mut after_noreturn = false;
@@ -446,8 +497,7 @@ impl RawFunction {
                 continue;
             };
             let target = target as Addr;
-            if operand_size(&ins.operands, Some(32)) == Some(32)
-                && self.index.contains_key(&target)
+            if operand_size(&ins.operands, Some(32)) == Some(32) && self.index.contains_key(&target)
             {
                 targets.insert(target);
             }
@@ -485,13 +535,12 @@ pub(crate) fn build_raw(
         };
         let mut at = span.start;
         for &length in lengths {
-            let raw = program
-                .image
-                .bytes(at, length as usize)
-                .ok_or_else(|| Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: span.start }))?;
-            let ins = decoder
-                .decode_span(at, raw)
-                .ok_or_else(|| Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: span.start }))?;
+            let raw = program.image.bytes(at, length as usize).ok_or_else(|| {
+                Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: span.start })
+            })?;
+            let ins = decoder.decode_span(at, raw).ok_or_else(|| {
+                Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: span.start })
+            })?;
             decoded.push(ins);
             at += length as u32;
         }
@@ -510,56 +559,79 @@ pub(crate) fn build_raw(
                     rk_core::Reason::OverlappingEntryDoesNotRejoin { entry },
                 ));
             }
-            let bytes = program
-                .image
-                .bytes(at, 15)
-                .ok_or_else(|| Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry }))?;
+            let bytes = program.image.bytes(at, 15).ok_or_else(|| {
+                Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
+            })?;
             let length = lifter.length(at, bytes)?;
             lengths.push(length);
             at += length as u32;
             let instruction = program
                 .image
                 .bytes(at - length as u32, length as usize)
-                .ok_or_else(|| Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry }))?;
+                .ok_or_else(|| {
+                    Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
+                })?;
             if lifter.ends_flow(at - length as u32, instruction)? {
                 break;
             }
         }
         let mut at = entry;
         for length in lengths {
-            let raw = program
-                .image
-                .bytes(at, length as usize)
-                .ok_or_else(|| Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry }))?;
-            let ins = decoder
-                .decode_span(at, raw)
-                .ok_or_else(|| Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry }))?;
+            let raw = program.image.bytes(at, length as usize).ok_or_else(|| {
+                Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
+            })?;
+            let ins = decoder.decode_span(at, raw).ok_or_else(|| {
+                Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
+            })?;
             decoded.push(ins);
             at += length as u32;
         }
     }
     decoded.sort_by_key(|ins| ins.addr);
     if !decoded.iter().any(|ins| ins.addr == addr) {
-        return Err(Diagnostic::error(addr, rk_core::Reason::EntryNotInstructionBoundary));
+        return Err(Diagnostic::error(
+            addr,
+            rk_core::Reason::EntryNotInstructionBoundary,
+        ));
     }
-    let gprs: Vec<(u8, u64, u32)> = lifter.registers()
+    let gprs: Vec<(u8, u64, u32)> = lifter
+        .registers()
         .filter_map(|(name, offset, size)| {
-            rk_decode::REG32.iter().position(|&reg| reg == name)
+            rk_decode::REG32
+                .iter()
+                .position(|&reg| reg == name)
                 .map(|index| (index as u8, offset, size))
-        }).collect();
+        })
+        .collect();
     let mut register_writes = Vec::with_capacity(decoded.len());
     let mut insns = Vec::with_capacity(decoded.len());
     for ins in &decoded {
         let lifted = lifter.lift(ins.addr, &ins.raw[..ins.length as usize])?;
-        register_writes.push(if lifted.ops.iter().any(|op| matches!(op.opcode, OpCode::CallOther | OpCode::Unknown)) {
-            None
-        } else {
-            Some(lifted.ops.iter().filter_map(|op| op.output)
-                .filter(|v| v.space == Space::Register)
-                .flat_map(|v| gprs.iter().filter_map(move |&(reg, offset, size)| {
-                    (v.offset < offset + size as u64 && offset < v.offset + v.size as u64).then_some(reg)
-                })).collect())
-        });
+        register_writes.push(
+            if lifted
+                .ops
+                .iter()
+                .any(|op| matches!(op.opcode, OpCode::CallOther | OpCode::Unknown))
+            {
+                None
+            } else {
+                Some(
+                    lifted
+                        .ops
+                        .iter()
+                        .filter_map(|op| op.output)
+                        .filter(|v| v.space == Space::Register)
+                        .flat_map(|v| {
+                            gprs.iter().filter_map(move |&(reg, offset, size)| {
+                                (v.offset < offset + size as u64
+                                    && offset < v.offset + v.size as u64)
+                                    .then_some(reg)
+                            })
+                        })
+                        .collect(),
+                )
+            },
+        );
         insns.push(Insn {
             addr: ins.addr,
             length: lifted.length,
@@ -604,7 +676,12 @@ pub(crate) fn build_raw(
     Ok(raw)
 }
 
-pub(crate) fn finalize(program: &Program, addr: Addr, mut raw: RawFunction, helpers: &BTreeSet<Addr>) -> Result<FunctionIr> {
+pub(crate) fn finalize(
+    program: &Program,
+    addr: Addr,
+    mut raw: RawFunction,
+    helpers: &BTreeSet<Addr>,
+) -> Result<FunctionIr> {
     let mut entries = program
         .interior_by_function
         .get(&addr)
@@ -646,17 +723,16 @@ pub(crate) fn finalize(program: &Program, addr: Addr, mut raw: RawFunction, help
     let seh = raw.seh_effects(program, helpers)?;
     entries.extend(seh.iter().filter_map(|(index, kinds)| {
         let next = raw.fallthrough[*index as usize];
-        (kinds.iter().any(|kind| matches!(kind, SehEffect::Enter | SehEffect::Adopt))
-            && raw.idx(next).is_some()).then_some(next)
+        (kinds
+            .iter()
+            .any(|kind| matches!(kind, SehEffect::Enter | SehEffect::Adopt))
+            && raw.idx(next).is_some())
+        .then_some(next)
     }));
     entries.sort_unstable();
     entries.dedup();
-    let eh3 = msvc_eh3_finally_only(
-        &program.image,
-        addr,
-        eh3_trylevels(&raw, program).as_ref(),
-    )
-    .then_some(addr + MSVC_EH3_FRAME_LEN - 7);
+    let eh3 = msvc_eh3_finally_only(&program.image, addr, eh3_trylevels(&raw, program).as_ref())
+        .then_some(addr + MSVC_EH3_FRAME_LEN - 7);
     let seh_unwind_only: BTreeSet<u32> = raw
         .seh_sites
         .iter()
@@ -670,7 +746,10 @@ pub(crate) fn finalize(program: &Program, addr: Addr, mut raw: RawFunction, help
         .decoded
         .iter()
         .enumerate()
-        .filter_map(|(i, _)| raw.import_tail_slot(program, i).map(|slot| (i as u32, slot)))
+        .filter_map(|(i, _)| {
+            raw.import_tail_slot(program, i)
+                .map(|slot| (i as u32, slot))
+        })
         .collect();
     let dead = raw.dead_addrs.iter().filter_map(|a| raw.idx(*a)).collect();
     Ok(FunctionIr {
@@ -762,17 +841,21 @@ fn popped_jump(raw: &RawFunction, i: usize) -> bool {
         && i > 0
         && raw.contiguous[i - 1]
         && raw.decoded[i - 1].mnemonic == "POP"
-        && raw.decoded[i - 1].operands.first().map(|o| &o.display) == ins.operands.first().map(|o| &o.display)
+        && raw.decoded[i - 1].operands.first().map(|o| &o.display)
+            == ins.operands.first().map(|o| &o.display)
 }
 
 fn operand_size(ops: &[rk_decode::Operand], hint: Option<u16>) -> Option<u16> {
-    ops.iter().find_map(|o| match o.kind {
-        OperandKind::Reg { .. } => o.size,
-        _ => None,
-    })
-    .or_else(|| ops.iter().find_map(|o| match o.kind {
-        OperandKind::Mem { .. } => o.size,
-        _ => None,
-    }))
-    .or(hint)
+    ops.iter()
+        .find_map(|o| match o.kind {
+            OperandKind::Reg { .. } => o.size,
+            _ => None,
+        })
+        .or_else(|| {
+            ops.iter().find_map(|o| match o.kind {
+                OperandKind::Mem { .. } => o.size,
+                _ => None,
+            })
+        })
+        .or(hint)
 }

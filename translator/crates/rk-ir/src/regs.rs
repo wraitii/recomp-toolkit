@@ -29,11 +29,20 @@ impl Registers {
             map.entry(name.to_string())
                 .or_insert_with(|| Varnode::new(Space::Register, offset, size));
         }
-        let end = map.values().filter(|v| v.space == Space::Register).map(|v| v.offset + v.size as u64).max().unwrap_or(0);
+        let end = map
+            .values()
+            .filter(|v| v.space == Space::Register)
+            .map(|v| v.offset + v.size as u64)
+            .max()
+            .unwrap_or(0);
         let covering = (0..end)
             .map(|offset| {
                 map.iter()
-                    .filter(|(_, v)| v.space == Space::Register && v.offset <= offset && offset < v.offset + v.size as u64)
+                    .filter(|(_, v)| {
+                        v.space == Space::Register
+                            && v.offset <= offset
+                            && offset < v.offset + v.size as u64
+                    })
                     .min_by_key(|(_, v)| (v.size, v.offset))
                     .map(|(name, v)| (name.clone(), *v))
             })
@@ -90,7 +99,9 @@ pub fn field_lane(key: StateKey) -> Option<(Field, u8)> {
 }
 
 pub fn xmm_offset(key: StateKey) -> Option<(usize, u8)> {
-    let StateKey::Register(offset) = key else { return None };
+    let StateKey::Register(offset) = key else {
+        return None;
+    };
     let (name, register) = Registers::get().covering(offset as u64)?;
     let (reg, lane) = name.strip_prefix("XMM")?.split_once('_')?;
     let reg = reg.parse().ok().filter(|reg| *reg < 8)?;

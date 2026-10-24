@@ -209,7 +209,6 @@ impl X87Effect {
     }
 }
 
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct Global {
     pub addr: Addr,
@@ -291,7 +290,10 @@ impl Settings {
         let t = &input.translate;
         let unsupported = [
             ("x87_facts", module.is_none() && t.x87_facts.is_some()),
-            ("x87_mode_metadata", module.is_none() && t.x87_mode_metadata.is_some()),
+            (
+                "x87_mode_metadata",
+                module.is_none() && t.x87_mode_metadata.is_some(),
+            ),
             ("x87_entry_contracts", !t.x87_entry_contracts.is_empty()),
             ("x87_imports_preserve_pc_rc", t.x87_imports_preserve_pc_rc),
             ("allocators", !t.allocators.is_empty()),

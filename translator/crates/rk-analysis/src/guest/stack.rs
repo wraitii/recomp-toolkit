@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rk_core::ir::{FunctionIr, Insn, OpCode, PcodeOp, Space, Varnode};
+use rk_core::memory::{Address, Base};
 use rk_core::program::Program;
 use rk_core::Addr;
-use rk_core::memory::{Address, Base};
 use rk_decode::{branch_target, Decoder};
 use rk_ir::Registers;
 
@@ -64,7 +64,10 @@ pub fn analyze(program: &Program, analysis: &rk_frontend::Analysis) -> BTreeMap<
     verified
 }
 
-pub fn return_immediates(program: &Program, analysis: &rk_frontend::Analysis) -> BTreeMap<Addr, i32> {
+pub fn return_immediates(
+    program: &Program,
+    analysis: &rk_frontend::Analysis,
+) -> BTreeMap<Addr, i32> {
     analysis
         .ir
         .iter()
@@ -77,7 +80,11 @@ pub fn return_immediates(program: &Program, analysis: &rk_frontend::Analysis) ->
             for index in reachable(fir) {
                 let insn = fir.insns.get(index as usize)?;
                 let successors = fir.succ.get(index as usize)?;
-                if fir.exits.get(&index).is_some_and(|targets| !targets.is_empty()) {
+                if fir
+                    .exits
+                    .get(&index)
+                    .is_some_and(|targets| !targets.is_empty())
+                {
                     return None;
                 }
                 if insn.mnemonic.eq_ignore_ascii_case("RET") {
@@ -88,7 +95,10 @@ pub fn return_immediates(program: &Program, analysis: &rk_frontend::Analysis) ->
                 } else if successors.is_empty() && !fir.noreturn.contains_key(&index) {
                     return None;
                 }
-                if successors.iter().any(|&next| next as usize >= fir.insns.len()) {
+                if successors
+                    .iter()
+                    .any(|&next| next as usize >= fir.insns.len())
+                {
                     return None;
                 }
             }
@@ -267,7 +277,15 @@ fn observe_pcode(insn: &Insn, state: &mut StackState, esp: Varnode, ebp: Varnode
         let Some(output) = op.output else {
             continue;
         };
-        if output.size != 4 && matches!(value, Address::Known { base: Base::Frame, .. }) {
+        if output.size != 4
+            && matches!(
+                value,
+                Address::Known {
+                    base: Base::Frame,
+                    ..
+                }
+            )
+        {
             value = Address::Unknown;
         }
         if overlaps(output, esp) {
@@ -312,10 +330,16 @@ fn read_value(
         return Address::exact(Base::Absolute, constant(value) as u32);
     }
     if value == esp {
-        return state.sp.map(|offset| Address::exact(Base::Frame, offset as u32)).unwrap_or(Address::Unknown);
+        return state
+            .sp
+            .map(|offset| Address::exact(Base::Frame, offset as u32))
+            .unwrap_or(Address::Unknown);
     }
     if value == ebp {
-        return state.bp.map(|offset| Address::exact(Base::Frame, offset as u32)).unwrap_or(Address::Unknown);
+        return state
+            .bp
+            .map(|offset| Address::exact(Base::Frame, offset as u32))
+            .unwrap_or(Address::Unknown);
     }
     if value.space == Space::Register && (overlaps(value, esp) || overlaps(value, ebp)) {
         return Address::Unknown;
@@ -344,7 +368,11 @@ fn constant(value: Varnode) -> i32 {
 
 fn relative(value: Address) -> Option<i32> {
     match value {
-        Address::Known { base: Base::Frame, offset, span: 0 } => Some(offset as i32),
+        Address::Known {
+            base: Base::Frame,
+            offset,
+            span: 0,
+        } => Some(offset as i32),
         _ => None,
     }
 }

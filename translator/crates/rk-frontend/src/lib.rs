@@ -79,5 +79,8 @@ pub fn analyze(program: &Program) -> Analysis {
             (addr, result)
         })
         .collect();
-    Analysis { ir, seh_helpers: helpers }
+    Analysis {
+        ir,
+        seh_helpers: helpers,
+    }
 }

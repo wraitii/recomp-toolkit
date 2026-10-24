@@ -38,7 +38,10 @@ fn addr(text: &str, what: &str) -> Result<Addr> {
 
 fn columns<'a>(row: &[&'a str], count: usize, name: &str) -> Result<Vec<&'a str>> {
     if row.len() != count {
-        return Err(Error::input(format!("invalid code-map row in {name}: {}", row.join("\t"))));
+        return Err(Error::input(format!(
+            "invalid code-map row in {name}: {}",
+            row.join("\t")
+        )));
     }
     Ok(row.to_vec())
 }
@@ -64,9 +67,16 @@ pub fn read_map(root: &Path) -> Result<CodeMap> {
         let size: u32 = row[2]
             .parse()
             .map_err(|_| Error::input(format!("invalid code-map span size at {}", Hex(start))))?;
-        let owner = if row[0].is_empty() { start } else { addr(row[0], "span owner")? };
+        let owner = if row[0].is_empty() {
+            start
+        } else {
+            addr(row[0], "span owner")?
+        };
         if size == 0 || start as u64 + size as u64 > 1 << 32 {
-            return Err(Error::input(format!("invalid code-map span at {}", Hex(start))));
+            return Err(Error::input(format!(
+                "invalid code-map span at {}",
+                Hex(start)
+            )));
         }
         let lengths = if row[3].is_empty() {
             None
@@ -77,14 +87,23 @@ pub fn read_map(root: &Path) -> Result<CodeMap> {
                 .collect();
             match lengths {
                 Some(l) if l.iter().map(|&n| n as u32).sum::<u32>() == size => Some(l),
-                _ => return Err(Error::input(format!("invalid code-map lengths at {}", Hex(start)))),
+                _ => {
+                    return Err(Error::input(format!(
+                        "invalid code-map lengths at {}",
+                        Hex(start)
+                    )))
+                }
             }
         };
         if (start as u64) < ends.get(&owner).copied().unwrap_or(0) {
             return Err(Error::input("overlapping or unordered code-map spans"));
         }
         ends.insert(owner, start as u64 + size as u64);
-        functions.entry(owner).or_default().push(Span { start, size, lengths });
+        functions.entry(owner).or_default().push(Span {
+            start,
+            size,
+            lengths,
+        });
     }
     let expected: usize = metadata
         .get("functions")
@@ -102,7 +121,10 @@ pub fn read_map(root: &Path) -> Result<CodeMap> {
             .split(',')
             .map(|t| addr(t, "table target"))
             .collect::<Result<Vec<_>>>()?;
-        tables.insert((addr(row[0], "table function")?, addr(row[1], "table site")?), targets);
+        tables.insert(
+            (addr(row[0], "table function")?, addr(row[1], "table site")?),
+            targets,
+        );
     }
 
     let mut interior = BTreeMap::new();
@@ -113,7 +135,11 @@ pub fn read_map(root: &Path) -> Result<CodeMap> {
             "branch" => InteriorKind::Branch,
             "data" => InteriorKind::Data,
             "table" => InteriorKind::Table,
-            other => return Err(Error::input(format!("invalid code-map entry kind: {other}"))),
+            other => {
+                return Err(Error::input(format!(
+                    "invalid code-map entry kind: {other}"
+                )))
+            }
         };
         interior.insert(addr(row[0], "entry")?, (addr(row[1], "entry owner")?, kind));
     }
@@ -127,7 +153,11 @@ pub fn read_map(root: &Path) -> Result<CodeMap> {
         match row[1] {
             "function" => noreturn_functions.insert(at),
             "call" => noreturn_calls.insert(at),
-            other => return Err(Error::input(format!("invalid code-map noreturn kind: {other}"))),
+            other => {
+                return Err(Error::input(format!(
+                    "invalid code-map noreturn kind: {other}"
+                )))
+            }
         };
     }
 

@@ -10,50 +10,74 @@ pub(crate) enum SlowOperand {
 }
 
 pub(crate) fn slow_operands(insn: &Insn) -> Option<Vec<SlowOperand>> {
-    insn.typed_operands.iter().map(|operand| {
-        use rk_core::ir::{OperandKind, Part};
-        Some(match &operand.kind {
-            OperandKind::Reg { gpr, part } => SlowOperand::Gpr {
-                index: *gpr as usize,
-                shift: if *part == Some(Part::H) { 8 } else { 0 },
-                mask: match operand.size? { 8 => 0xff, 16 => 0xffff, 32 => u32::MAX, _ => return None },
-            },
-            OperandKind::Mm(index) => SlowOperand::Mm(*index),
-            OperandKind::Xmm(index) => SlowOperand::Xmm(*index),
-            OperandKind::Imm(value) => SlowOperand::Imm(*value as u64),
-            OperandKind::Mem { base, index, scale, disp, seg } => {
-                if !matches!(insn.address_size, 2 | 4) { return None; }
-                let register = |reg: u8| {
-                    if insn.address_size == 2 {
-                        format!("((c->r[{reg}] >> 0) & 0xffffu)")
-                    } else {
-                        format!("c->r[{reg}]")
+    insn.typed_operands
+        .iter()
+        .map(|operand| {
+            use rk_core::ir::{OperandKind, Part};
+            Some(match &operand.kind {
+                OperandKind::Reg { gpr, part } => SlowOperand::Gpr {
+                    index: *gpr as usize,
+                    shift: if *part == Some(Part::H) { 8 } else { 0 },
+                    mask: match operand.size? {
+                        8 => 0xff,
+                        16 => 0xffff,
+                        32 => u32::MAX,
+                        _ => return None,
+                    },
+                },
+                OperandKind::Mm(index) => SlowOperand::Mm(*index),
+                OperandKind::Xmm(index) => SlowOperand::Xmm(*index),
+                OperandKind::Imm(value) => SlowOperand::Imm(*value as u64),
+                OperandKind::Mem {
+                    base,
+                    index,
+                    scale,
+                    disp,
+                    seg,
+                } => {
+                    if !matches!(insn.address_size, 2 | 4) {
+                        return None;
                     }
-                };
-                let mut terms = Vec::new();
-                if let Some(base) = base { terms.push(register(*base)); }
-                if let Some(index) = index { terms.push(format!("({} * 0x{scale:x}u)", register(*index))); }
-                if *disp != 0 || terms.is_empty() { terms.push(format!("0x{:x}u", *disp as u64)); }
-                let mut address = terms.join(" + ");
-                if insn.address_size == 2 { address = format!("(({address}) & 0xffffu)"); }
-                match seg.as_deref() {
-                    Some("FS") => address.push_str(" + c->fs_base"),
-                    None | Some("CS" | "DS" | "ES" | "SS") => {},
-                    _ => return None,
+                    let register = |reg: u8| {
+                        if insn.address_size == 2 {
+                            format!("((c->r[{reg}] >> 0) & 0xffffu)")
+                        } else {
+                            format!("c->r[{reg}]")
+                        }
+                    };
+                    let mut terms = Vec::new();
+                    if let Some(base) = base {
+                        terms.push(register(*base));
+                    }
+                    if let Some(index) = index {
+                        terms.push(format!("({} * 0x{scale:x}u)", register(*index)));
+                    }
+                    if *disp != 0 || terms.is_empty() {
+                        terms.push(format!("0x{:x}u", *disp as u64));
+                    }
+                    let mut address = terms.join(" + ");
+                    if insn.address_size == 2 {
+                        address = format!("(({address}) & 0xffffu)");
+                    }
+                    match seg.as_deref() {
+                        Some("FS") => address.push_str(" + c->fs_base"),
+                        None | Some("CS" | "DS" | "ES" | "SS") => {}
+                        _ => return None,
+                    }
+                    SlowOperand::Mem(address)
                 }
-                SlowOperand::Mem(address)
-            },
-            _ => return None,
+                _ => return None,
+            })
         })
-    }).collect()
+        .collect()
 }
 
 pub(crate) fn port_expr(operand: &SlowOperand) -> Option<String> {
     match operand {
         SlowOperand::Imm(value) => Some(format!("0x{:x}u", value & 0xffff)),
-        SlowOperand::Gpr { index, shift, .. } => Some(format!(
-            "((c->r[{index}] >> {shift}) & 0xffffu)"
-        )),
+        SlowOperand::Gpr { index, shift, .. } => {
+            Some(format!("((c->r[{index}] >> {shift}) & 0xffffu)"))
+        }
         _ => None,
     }
 }
@@ -239,4 +263,3 @@ pub(crate) fn xmm_unpack(mnemonic: &str) -> Option<(u32, u32)> {
         _ => return None,
     })
 }
-

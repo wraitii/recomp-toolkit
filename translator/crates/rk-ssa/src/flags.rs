@@ -68,7 +68,10 @@ pub struct FlagPlan {
 }
 
 fn is_flag(field: Field) -> bool {
-    matches!(field, Field::Cf | Field::Pf | Field::Af | Field::Zf | Field::Sf | Field::Of)
+    matches!(
+        field,
+        Field::Cf | Field::Pf | Field::Af | Field::Zf | Field::Sf | Field::Of
+    )
 }
 
 impl Ssa {
@@ -139,14 +142,22 @@ fn entry_flag_value(
 ) -> Option<ValueId> {
     let index = *flag_keys.get(&field)?;
     let item = &s.blocks[block];
-    if let Some(&phi) = item.phis.iter().find(|phi| s.phi_key.get(*phi) == Some(&index)) {
+    if let Some(&phi) = item
+        .phis
+        .iter()
+        .find(|phi| s.phi_key.get(*phi) == Some(&index))
+    {
         return s.args(phi).get(position).copied();
     }
     let pred = *item.preds.get(position)?;
     if pred == DISPATCH_BLOCK {
         return None;
     }
-    s.exit_state.get(pred as usize)?.get(index).copied().flatten()
+    s.exit_state
+        .get(pred as usize)?
+        .get(index)
+        .copied()
+        .flatten()
 }
 
 fn record_index(s: &Ssa) -> BTreeMap<(ValueId, Field), FlagId> {
@@ -217,11 +228,20 @@ fn merge_join_sources(
     let entry = block_entry_state(s, block);
     let mut groups: BTreeMap<u8, Vec<(Field, Vec<FlagId>, ValueId)>> = BTreeMap::new();
     for field in candidates.iter() {
-        let Some(&key) = flag_keys.get(&field) else { continue };
-        let Some(Some(value)) = entry.get(key) else { continue };
+        let Some(&key) = flag_keys.get(&field) else {
+            continue;
+        };
+        let Some(Some(value)) = entry.get(key) else {
+            continue;
+        };
         let ids = ids_by_field.remove(&field).unwrap_or_default();
-        let Some(record) = ids.first().and_then(|id| s.flag(*id)) else { continue };
-        groups.entry(record.size).or_default().push((field, ids, *value));
+        let Some(record) = ids.first().and_then(|id| s.flag(*id)) else {
+            continue;
+        };
+        groups
+            .entry(record.size)
+            .or_default()
+            .push((field, ids, *value));
     }
     let Some((size, fields)) = groups.into_iter().max_by_key(|(_, fields)| fields.len()) else {
         return;
@@ -251,16 +271,23 @@ fn merge_join_sources(
         .first()
         .map_or(0, |value| s.value_addr[*value as usize]);
     let mut kind_args = Vec::with_capacity(preds.len());
-    let mut part_values: [Vec<Option<ValueId>>; 4] = std::array::from_fn(|_| Vec::with_capacity(preds.len()));
+    let mut part_values: [Vec<Option<ValueId>>; 4] =
+        std::array::from_fn(|_| Vec::with_capacity(preds.len()));
     for record in &records {
         if record.kind == FlagKind::Join {
-            let Some(value) = record.kind_value else { return };
+            let Some(value) = record.kind_value else {
+                return;
+            };
             kind_args.push(value);
         } else {
-            let Some(kind) = cc_kind(record.kind) else { return };
+            let Some(kind) = cc_kind(record.kind) else {
+                return;
+            };
             kind_args.push(s.new_value(Op::CcKind(kind), 1, &[], addr));
         }
-        let Some(result_value) = record.result else { return };
+        let Some(result_value) = record.result else {
+            return;
+        };
         part_values[0].push(record.a);
         part_values[1].push(record.b);
         part_values[2].push(record.carry);
@@ -283,7 +310,9 @@ fn merge_join_sources(
         parts.push(s.new_value(Op::Phi, part_size, &args, addr));
     }
     let kind_value = s.new_value(Op::Phi, 1, &kind_args, addr);
-    let [a, b, carry, result_value] = parts.as_slice() else { return };
+    let [a, b, carry, result_value] = parts.as_slice() else {
+        return;
+    };
     let (a, b, carry, result_value) = (*a, *b, *carry, *result_value);
     s.blocks[block].phis.push(kind_value);
     s.blocks[block].phis.push(a);
@@ -348,7 +377,9 @@ impl FlagPlan {
             _ => {}
         }
         if let Some(&record) = self.record_of.get(&value) {
-            if s.flag(record).is_some_and(|record| record.flags.get(&field) == Some(&value)) {
+            if s.flag(record)
+                .is_some_and(|record| record.flags.get(&field) == Some(&value))
+            {
                 return FlagSource::Record(record);
             }
         }
@@ -361,7 +392,9 @@ impl FlagPlan {
 
     pub fn values(&self, s: &Ssa, at: ValueId) -> BTreeMap<Field, ValueId> {
         let mut out = BTreeMap::new();
-        let Some(state) = s.boundary(at) else { return out };
+        let Some(state) = s.boundary(at) else {
+            return out;
+        };
         for (key, value) in state {
             if let Some(field) = s.field(*key) {
                 if is_flag(field) {
@@ -386,7 +419,9 @@ impl FlagPlan {
         keys: &[StateKey],
         guard_only: &[StateKey],
     ) -> FlagPublication {
-        let Some(state) = s.boundary(at) else { return FlagPublication::default() };
+        let Some(state) = s.boundary(at) else {
+            return FlagPublication::default();
+        };
         let wanted: Lookup<StateKey, ()> = keys.iter().map(|key| (*key, ())).collect();
         let guard_only: Lookup<StateKey, ()> = guard_only.iter().map(|key| (*key, ())).collect();
         let mut forwarded = Fields::NONE;
@@ -404,25 +439,35 @@ impl FlagPlan {
             if !cold {
                 hot.insert(field);
             }
-            if cold && matches!(s.value(*value).op, Op::StateKeep(k) | Op::StateReload(k) if k == *key) {
+            if cold
+                && matches!(s.value(*value).op, Op::StateKeep(k) | Op::StateReload(k) if k == *key)
+            {
                 forwarded.insert(field);
                 continue;
             }
-            let FlagSource::Record(id) = self.source(s, field, *value) else { continue };
+            let FlagSource::Record(id) = self.source(s, field, *value) else {
+                continue;
+            };
             let Some(record) = s.flag(id) else { continue };
-            if record.size == 0 || record.size > 4 || !record.defined.contains(field) || !record_has_operands(record) {
+            if record.size == 0
+                || record.size > 4
+                || !record.defined.contains(field)
+                || !record_has_operands(record)
+            {
                 continue;
             }
             groups.entry(id).or_default().insert(field);
         }
         let score = |fields: Fields| ((fields & hot).0.count_ones(), fields.0.count_ones());
-        let best = groups.into_iter().fold(None, |best: Option<(FlagId, Fields)>, (id, fields)| {
-            if best.is_none_or(|(_, current)| score(fields) > score(current)) {
-                Some((id, fields))
-            } else {
-                best
-            }
-        });
+        let best = groups
+            .into_iter()
+            .fold(None, |best: Option<(FlagId, Fields)>, (id, fields)| {
+                if best.is_none_or(|(_, current)| score(fields) > score(current)) {
+                    Some((id, fields))
+                } else {
+                    best
+                }
+            });
         let descriptor = best.and_then(|(id, mask)| {
             s.flag(id).map(|record| FlagDescriptor {
                 kind: record.kind,
@@ -435,7 +480,10 @@ impl FlagPlan {
                 result: record.result.unwrap_or(0),
             })
         });
-        FlagPublication { descriptor, forwarded }
+        FlagPublication {
+            descriptor,
+            forwarded,
+        }
     }
 }
 
@@ -444,7 +492,10 @@ fn record_has_operands(record: &crate::FlagRecord) -> bool {
         FlagKind::Logic => record.result.is_some(),
         FlagKind::Inc | FlagKind::Dec => record.a.is_some() && record.result.is_some(),
         FlagKind::Adc | FlagKind::Sbb => {
-            record.a.is_some() && record.b.is_some() && record.carry.is_some() && record.result.is_some()
+            record.a.is_some()
+                && record.b.is_some()
+                && record.carry.is_some()
+                && record.result.is_some()
         }
         FlagKind::Add | FlagKind::Sub | FlagKind::Cmp => {
             record.a.is_some() && record.b.is_some() && record.result.is_some()

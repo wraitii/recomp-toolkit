@@ -21,8 +21,7 @@ pub(crate) fn recover_tables(
         {
             continue;
         }
-        let Some((None, Some(_), 4, displacement, None)) =
-            ins.operands.first().and_then(mem)
+        let Some((None, Some(_), 4, displacement, None)) = ins.operands.first().and_then(mem)
         else {
             continue;
         };

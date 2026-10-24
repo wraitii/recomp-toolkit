@@ -67,11 +67,24 @@ pub enum Expr {
     NanTest(Box<Expr>),
     FloatStore(Box<Expr>, Box<Expr>),
     PcRound(Box<Expr>, Box<Expr>),
-    FloatArithmetic(&'static str, Box<Expr>, Box<Expr>, Box<Expr>, Option<Box<Expr>>),
+    FloatArithmetic(
+        &'static str,
+        Box<Expr>,
+        Box<Expr>,
+        Box<Expr>,
+        Option<Box<Expr>>,
+    ),
     StatusWord(Box<Expr>, Box<Expr>),
-    Load { bits: u16, integer: bool, address: Box<Expr> },
+    Load {
+        bits: u16,
+        integer: bool,
+        address: Box<Expr>,
+    },
     LoadWord(Box<Expr>),
-    IntegerConvert { bits: u16, args: Vec<Expr> },
+    IntegerConvert {
+        bits: u16,
+        args: Vec<Expr>,
+    },
     Helper(&'static str, Vec<Expr>),
 }
 
@@ -98,9 +111,7 @@ impl Expr {
             Expr::Binary(_, lhs, _) => lhs.ty(),
             Expr::Group(value) | Expr::Negate(value) => value.ty(),
             Expr::ClearMask(_) => Type::U16,
-            Expr::NanFold(value) | Expr::PcRound(_, value) => {
-                value.ty()
-            }
+            Expr::NanFold(value) | Expr::PcRound(_, value) => value.ty(),
             Expr::NanTest(_) => Type::U16,
             Expr::FloatStore(..) => Type::F32,
             Expr::FloatArithmetic(..) => Type::F64,
@@ -138,8 +149,22 @@ fn helper_type(name: &str) -> Type {
         "fto_float" => Type::F32,
         "fist" => Type::I64,
         "fcomi_flags" => Type::U16,
-        "fabs" | "sqrt" | "sin" | "cos" | "tan" | "expm1" | "log2" | "log1p" | "fx87" | "fx87_exact"
-        | "fround" | "fdivz" | "fprem" | "fscale" | "atan2" | "fxtract_exponent"
+        "fabs"
+        | "sqrt"
+        | "sin"
+        | "cos"
+        | "tan"
+        | "expm1"
+        | "log2"
+        | "log1p"
+        | "fx87"
+        | "fx87_exact"
+        | "fround"
+        | "fdivz"
+        | "fprem"
+        | "fscale"
+        | "atan2"
+        | "fxtract_exponent"
         | "fxtract_significand" => Type::F64,
         _ => Type::Void,
     }
@@ -206,7 +231,11 @@ pub fn st(index: u8) -> Expr {
 }
 
 pub fn load(bits: u16, address: Expr, integer: bool) -> Expr {
-    Expr::Load { bits, integer, address: Box::new(address) }
+    Expr::Load {
+        bits,
+        integer,
+        address: Box::new(address),
+    }
 }
 
 pub fn arithmetic(op: ArithmeticOp, lhs: Expr, rhs: Expr, sw: Expr) -> Expr {
@@ -233,7 +262,6 @@ pub fn unary(op: X87Unary, value: Expr, sw: Expr, cw: Expr) -> Expr {
     }
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assign {
     pub target: Expr,
@@ -243,7 +271,11 @@ pub struct Assign {
 
 impl Assign {
     pub fn new(target: Expr, value: Expr) -> Self {
-        Self { target, value, op: "=" }
+        Self {
+            target,
+            value,
+            op: "=",
+        }
     }
 }
 
@@ -265,7 +297,13 @@ pub enum Choice {
 pub enum Event {
     Assign(Assign),
     Evaluate(Expr),
-    Store { bits: u16, address: Expr, value: Expr, floating: bool, bcd: bool },
+    Store {
+        bits: u16,
+        address: Expr,
+        value: Expr,
+        floating: bool,
+        bcd: bool,
+    },
     PublishTags(Vec<(Expr, Expr)>),
     Activation(Activation),
     Reset,

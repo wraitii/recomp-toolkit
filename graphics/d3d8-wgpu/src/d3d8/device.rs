@@ -2,24 +2,24 @@
 //! This is an isolated probe implementation, with no COM or guest addresses.
 use super::{
     fixed_function::{
-        gpu_lit_layout, gpu_lit_shader_source, gpu_lit_source, lit_layout, lit_shader_source,
-        AlphaTestUniform, FogUniform, FvfLayout, StagesUniform, TransformUniform, TEXTURED_WGSL,
-        UNLIT_WGSL,
+        AlphaTestUniform, FogUniform, FvfLayout, StagesUniform, TEXTURED_WGSL, TransformUniform,
+        UNLIT_WGSL, gpu_lit_layout, gpu_lit_shader_source, gpu_lit_source, lit_layout,
+        lit_shader_source,
     },
     resource::{
-        expand_indexed_into, expand_nonindexed_into, indexed_list_into, packed_indexed_list_into,
-        IndexedDraw, VertexBuffer,
+        IndexedDraw, VertexBuffer, expand_indexed_into, expand_nonindexed_into, indexed_list_into,
+        packed_indexed_list_into,
     },
     shader::{self, Declaration, Program},
     state::{DeviceState, LightingUniform, LitInput, MAX_TEXTURE_STAGES},
     stats, survey,
     texture_cache::{TextureCache, TextureKey},
 };
-use crate::backend::native_present::{create_ready_event, signal_ready, ReadyEvent};
+use crate::backend::native_present::{ReadyEvent, create_ready_event, signal_ready};
 use crate::{
+    RenderError,
     backend::{GpuContext, OffscreenTarget},
     fast_map::FastMap,
-    RenderError,
 };
 
 #[path = "render_targets.rs"]
@@ -2077,9 +2077,10 @@ impl Device {
                     self.stage_textures[stage].is_some()
                 ))
             } else if stage < 2 {
-                survey_or_skip!(self
-                    .state
-                    .resolve_texture_stage(stage as u32, self.stage_textures[stage].is_some()))
+                survey_or_skip!(
+                    self.state
+                        .resolve_texture_stage(stage as u32, self.stage_textures[stage].is_some())
+                )
             } else {
                 inactive_sampler
             };

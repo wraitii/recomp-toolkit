@@ -63,7 +63,11 @@ fn expr(s: &Ssa, value: crate::ValueId) -> String {
             {
                 return expr(s, s.args(args[0])[0]);
             }
-            let body = args.iter().map(|arg| expr(s, *arg)).collect::<Vec<_>>().join(", ");
+            let body = args
+                .iter()
+                .map(|arg| expr(s, *arg))
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("Pack({body})")
         }
         Op::P(rk_core::ir::OpCode::Copy) => s
@@ -95,8 +99,14 @@ fn op_name(op: Op) -> String {
 
 pub fn dump(s: &Ssa, out: &mut impl Write) -> std::io::Result<()> {
     writeln!(out, "== ssa {}", Hex(s.addr))?;
-    writeln!(out, "dispatch {} loads, {} entries, {} blocks, {} values",
-        s.dispatch.loads.len(), s.entries.len(), s.blocks.len(), s.values.len())?;
+    writeln!(
+        out,
+        "dispatch {} loads, {} entries, {} blocks, {} values",
+        s.dispatch.loads.len(),
+        s.entries.len(),
+        s.blocks.len(),
+        s.values.len()
+    )?;
     for (key, value) in &s.dispatch.loads {
         writeln!(out, "dispatch v{value} = Input {}", key_name(*key))?;
     }
@@ -104,17 +114,40 @@ pub fn dump(s: &Ssa, out: &mut impl Write) -> std::io::Result<()> {
         writeln!(out, "entry {} -> block {}", Hex(entry.addr), entry.target)?;
     }
     for (index, block) in s.blocks.iter().enumerate() {
-        writeln!(out, "block {index} insns {}..{} preds {:?}", block.start, block.end, block.preds)?;
+        writeln!(
+            out,
+            "block {index} insns {}..{} preds {:?}",
+            block.start, block.end, block.preds
+        )?;
         for &phi in &block.phis {
-            let args = s.args(phi).iter().map(|value| expr(s, *value)).collect::<Vec<_>>().join(", ");
-            writeln!(out, "  {} v{phi}: phi({args})", Hex(s.value_addr[phi as usize]))?;
+            let args = s
+                .args(phi)
+                .iter()
+                .map(|value| expr(s, *value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                out,
+                "  {} v{phi}: phi({args})",
+                Hex(s.value_addr[phi as usize])
+            )?;
         }
         for &id in &block.ops {
             let value = s.value(id);
             let props = properties(value.op);
-            let args = s.args(id).iter().map(|arg| expr(s, *arg)).collect::<Vec<_>>().join(", ");
-            write!(out, "  {} v{id}: {} size={} args=[{args}]",
-                Hex(s.value_addr[id as usize]), op_name(value.op), value.size)?;
+            let args = s
+                .args(id)
+                .iter()
+                .map(|arg| expr(s, *arg))
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(
+                out,
+                "  {} v{id}: {} size={} args=[{args}]",
+                Hex(s.value_addr[id as usize]),
+                op_name(value.op),
+                value.size
+            )?;
             if props.observes {
                 write!(out, " observe")?;
             }
@@ -125,21 +158,28 @@ pub fn dump(s: &Ssa, out: &mut impl Write) -> std::io::Result<()> {
                     .filter(|(key, value)| s.input(*key) != Some(*value))
                     .map(|(key, value)| (*key, *value))
                     .collect();
-                let reloaded = changed.iter().filter(|(_, value)| {
-                    matches!(s.value(*value).op, Op::StateReload(_) | Op::StateKeep(_))
-                }).count();
+                let reloaded = changed
+                    .iter()
+                    .filter(|(_, value)| {
+                        matches!(s.value(*value).op, Op::StateReload(_) | Op::StateKeep(_))
+                    })
+                    .count();
                 if reloaded * 2 >= s.keys.len() {
                     write!(out, "    state reload all")?;
-                    let rest = changed.iter().filter(|(_, value)| {
-                        !matches!(s.value(*value).op, Op::StateReload(_) | Op::StateKeep(_))
-                    }).map(|(key, value)| format!("{}<{}", key_name(*key), expr(s, *value)))
+                    let rest = changed
+                        .iter()
+                        .filter(|(_, value)| {
+                            !matches!(s.value(*value).op, Op::StateReload(_) | Op::StateKeep(_))
+                        })
+                        .map(|(key, value)| format!("{}<{}", key_name(*key), expr(s, *value)))
                         .collect::<Vec<_>>();
                     if !rest.is_empty() {
                         write!(out, " except {}", rest.join(" "))?;
                     }
                     writeln!(out)?;
                 } else {
-                    let changed = changed.iter()
+                    let changed = changed
+                        .iter()
                         .map(|(key, value)| format!("{}<{}", key_name(*key), expr(s, *value)))
                         .collect::<Vec<_>>();
                     if !changed.is_empty() {

@@ -109,7 +109,11 @@ struct Sites {
     sites: Vec<Addr>,
 }
 
-fn tally(functions: &mut usize, by_reason: &mut BTreeMap<String, Sites>, found: BTreeSet<(Addr, String)>) {
+fn tally(
+    functions: &mut usize,
+    by_reason: &mut BTreeMap<String, Sites>,
+    found: BTreeSet<(Addr, String)>,
+) {
     if found.is_empty() {
         return;
     }
@@ -344,7 +348,9 @@ fn emit_row(
                 .flatten()
             {
                 if !covered.contains(entry) {
-                    emit_report.fallbacks.insert((*entry, "uncovered entry".to_string()));
+                    emit_report
+                        .fallbacks
+                        .insert((*entry, "uncovered entry".to_string()));
                     body.text.push_str(&format!(
                         "\nvoid fn_{entry:08x}(X86 *c) {{ recomp_unmodelled(c, 0x{entry:08x}u); }}"
                     ));
@@ -371,8 +377,16 @@ fn account(stats: &mut EmitStats, (addr, body, reason, report): BodyRow, bodies:
             stats.c_field_residency_violations += report.c_field_residency_violations;
             stats.c_field_residency_violation_addrs.push(addr);
         }
-        tally(&mut stats.fallback_functions, &mut stats.fallbacks, report.fallbacks);
-        tally(&mut stats.slow_op_functions, &mut stats.slow_ops, report.slow_ops);
+        tally(
+            &mut stats.fallback_functions,
+            &mut stats.fallbacks,
+            report.fallbacks,
+        );
+        tally(
+            &mut stats.slow_op_functions,
+            &mut stats.slow_ops,
+            report.slow_ops,
+        );
     }
     if let Some((reason, detail)) = reason {
         stats.trapping += 1;
@@ -776,7 +790,10 @@ fn dump_ssa(
         }
         let cg = rk_ir::lower(ir, &program.image, &rk_ir::NoX87)?;
         if prepared {
-            let options = rk_ssa::PrepareOptions { coalesce_roots: switches.coalesce_roots, ..Default::default() };
+            let options = rk_ssa::PrepareOptions {
+                coalesce_roots: switches.coalesce_roots,
+                ..Default::default()
+            };
             match rk_ssa::prepare(&cg, &options) {
                 Ok(ssa) => rk_ssa::dump(&ssa, out)?,
                 Err(error) => writeln!(out, "== prepared {owner:08x}: {error}")?,
@@ -1080,10 +1097,15 @@ fn main() -> Result<()> {
         BTreeMap::new()
     };
     let effect_returns = effect_returns(&global.returns);
-    global.private.checked_returns.extend(effect_returns.iter().copied());
+    global
+        .private
+        .checked_returns
+        .extend(effect_returns.iter().copied());
     let mut pending: Vec<_> = global.private.checked_returns.iter().copied().collect();
     while let Some(addr) = pending.pop() {
-        let Some(Ok(fir)) = analysis.ir.get(&addr) else { continue };
+        let Some(Ok(fir)) = analysis.ir.get(&addr) else {
+            continue;
+        };
         for (&index, targets) in &fir.exits {
             if fir.insns[index as usize].mnemonic != "JMP" {
                 continue;
@@ -1110,7 +1132,11 @@ fn main() -> Result<()> {
             &facts.call_targets,
             &facts.host_calls,
             &settings,
-            if switches.x87_dynamic { X87Mode::Dynamic } else { args.x87_mode },
+            if switches.x87_dynamic {
+                X87Mode::Dynamic
+            } else {
+                args.x87_mode
+            },
             switches,
             only,
         )?

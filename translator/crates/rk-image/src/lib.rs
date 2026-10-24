@@ -16,7 +16,10 @@ use rk_core::{Addr, Diagnostic, Error, Hex, Reason, Result};
 use sha2::{Digest, Sha256};
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 pub fn load(settings: &Settings) -> Result<Program> {
@@ -30,15 +33,22 @@ pub fn load(settings: &Settings) -> Result<Program> {
         .map_err(|message| invalid(&message))?;
     let map = code_map::read_map(&settings.code_map)?;
     if actual != settings.sha256 || map.metadata.get("executable_sha256") != Some(&actual) {
-        return Err(Error::input("code-map, game.toml and executable SHA-256 do not match"));
+        return Err(Error::input(
+            "code-map, game.toml and executable SHA-256 do not match",
+        ));
     }
     if image.base != settings.base
         || map.metadata.get("image_base") != Some(&Hex(image.base).to_string())
     {
-        return Err(Error::input("code-map, game.toml and executable image bases do not match"));
+        return Err(Error::input(
+            "code-map, game.toml and executable image bases do not match",
+        ));
     }
-    let pe = pe.ok_or_else(|| invalid("malformed PE image"))?.map_err(|message| invalid(&message))?;
-    let provisional = map.metadata.get("provenance").map(String::as_str) == Some("provisional-sweep");
+    let pe = pe
+        .ok_or_else(|| invalid("malformed PE image"))?
+        .map_err(|message| invalid(&message))?;
+    let provisional =
+        map.metadata.get("provenance").map(String::as_str) == Some("provisional-sweep");
     let functions: BTreeMap<Addr, Function> = map
         .functions
         .into_iter()
@@ -77,8 +87,11 @@ pub fn load(settings: &Settings) -> Result<Program> {
 }
 
 pub fn index_entries(program: &mut Program) -> Result<()> {
-    let mut found: BTreeMap<Addr, EntryKind> =
-        program.functions.keys().map(|&a| (a, EntryKind::Function)).collect();
+    let mut found: BTreeMap<Addr, EntryKind> = program
+        .functions
+        .keys()
+        .map(|&a| (a, EntryKind::Function))
+        .collect();
     for targets in program.tables.values() {
         for &target in targets {
             found.entry(target).or_insert(EntryKind::Table);

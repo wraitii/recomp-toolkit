@@ -26,11 +26,7 @@ pub(crate) fn parse_headers(
         }
         let (rva, len) = headers.directory(index)?;
         if rva != 0 && len != 0 {
-            data_ranges.push((
-                base + rva,
-                base + rva + len,
-                "PE directory",
-            ));
+            data_ranges.push((base + rva, base + rva + len, "PE directory"));
         }
     }
     let (debug_rva, debug_size) = headers.directory(DIR_DEBUG)?;
@@ -71,7 +67,11 @@ pub(crate) fn parse_headers(
         if let Some(dll) = c_string(original, name as usize) {
             add_import(name, dll.len() as u32 + 1);
         }
-        let lookup = if original_thunk != 0 { original_thunk } else { first_thunk };
+        let lookup = if original_thunk != 0 {
+            original_thunk
+        } else {
+            first_thunk
+        };
         let mut count = 0u32;
         loop {
             let Some(thunk) = u32_at(original, lookup as usize + count as usize * 4) else {

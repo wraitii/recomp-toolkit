@@ -93,7 +93,12 @@ pub fn prepare_with_publications(
         })
         .flatten()
         .collect();
-    simplify(&mut ssa, plans.as_ref().map(|(_, simplify)| simplify), &flag_roots, &[]);
+    simplify(
+        &mut ssa,
+        plans.as_ref().map(|(_, simplify)| simplify),
+        &flag_roots,
+        &[],
+    );
     crate::validate(&ssa)?;
     Ok((ssa, plans.map(|(base, _)| base)))
 }
@@ -104,8 +109,16 @@ pub fn publications(s: &Ssa, call_facts: &dyn CallFacts) -> BTreeMap<ValueId, Ve
     for boundary in &s.boundaries {
         let value = &s.values[boundary.at as usize];
         let fields = match value.op {
-            Op::Call { target } => Some(call_facts.call(s.value_addr[boundary.at as usize], Some(target)).reads),
-            Op::CallInd => Some(call_facts.call(s.value_addr[boundary.at as usize], None).reads),
+            Op::Call { target } => Some(
+                call_facts
+                    .call(s.value_addr[boundary.at as usize], Some(target))
+                    .reads,
+            ),
+            Op::CallInd => Some(
+                call_facts
+                    .call(s.value_addr[boundary.at as usize], None)
+                    .reads,
+            ),
             _ => None,
         };
         let keys: Vec<StateKey> = match fields {

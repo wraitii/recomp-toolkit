@@ -56,51 +56,291 @@ pub struct CgFunction {
 
 impl CgFunction {
     pub fn index_of(&self, addr: Addr) -> Option<u32> {
-        self.insns.binary_search_by_key(&addr, |insn| insn.addr).ok().map(|n| n as u32)
+        self.insns
+            .binary_search_by_key(&addr, |insn| insn.addr)
+            .ok()
+            .map(|n| n as u32)
     }
 }
 
 const SUPPORTED: &[&str] = &[
-    "MOV", "MOVSX", "MOVZX", "XCHG", "NOT", "BSWAP", "BSR", "LEAVE", "LEA", "PUSH", "POP", "RET", "NOP", "ADD",
-    "SUB", "CMP", "INC", "DEC", "ADC", "SBB", "SHL", "SHR", "SAR", "DIV", "IDIV", "NEG", "MUL",
-    "IMUL", "CDQ", "CWD", "CBW", "CWDE", "CLD", "STD", "SAHF", "LAHF", "TEST", "AND", "OR", "XOR",
-    "ROL", "ROR", "RCL", "RCR", "SHLD", "SHRD", "JMP", "JZ", "JNZ",
-    "JE", "JNE", "JA", "JAE", "JB", "JBE", "JC", "JNC", "JG", "JGE", "JL", "JLE", "JS", "JNS",
-    "JO", "JNO", "JP", "JNP", "JPE", "JPO", "CALL", "SETA", "SETAE", "SETB", "SETBE", "SETC",
-    "SETE", "SETG", "SETGE", "SETL", "SETLE", "SETNA", "SETNAE", "SETNB", "SETNBE", "SETNC",
-    "SETNE", "SETNG", "SETNGE", "SETNL", "SETNLE", "SETNO", "SETNP", "SETNS", "SETNZ", "SETO",
-    "SETP", "SETPE", "SETPO", "SETS", "SETZ",
-    "XLAT", "BT", "BTS", "BTR", "BTC", "CLC", "STC", "CMC", "SALC", "AAA", "AAS", "AAM", "AAD",
-    "DAA", "DAS", "ARPL", "PUSHAD", "POPAD", "LOOP", "LOOPE", "LOOPNE", "JECXZ", "JCXZ",
-    "MOVSS", "MOVAPS", "ADDSS", "SUBSS", "MULSS", "DIVSS", "MINSS", "MAXSS",
-    "ADDPS", "SUBPS", "MULPS", "DIVPS", "MINPS", "MAXPS", "SQRTPS", "RCPPS",
-    "RSQRTPS", "RSQRTSS", "CMPEQPS", "CMPLTPS", "CMPLEPS", "CMPUNORDPS",
-    "CMPNEQPS", "CMPNLTPS", "CMPNLEPS", "CMPORDPS", "SHUFPS", "UNPCKLPS",
-    "UNPCKHPS", "MOVLHPS", "MOVHLPS", "MOVLPS", "MOVHPS", "MOVMSKPS", "MOVUPS",
-    "MOVNTPS", "MOVDQA", "MOVDQU", "MOVAPD", "PSHUFD", "PUNPCKLQDQ",
-    "PUNPCKHQDQ", "PSRLDQ",
-    "COMISS", "UCOMISS", "CVTTSS2SI", "CVTSS2SI", "CVTSI2SS", "XORPS", "ANDPS",
-    "ORPS", "ANDNPS", "CMOVA", "CMOVAE", "CMOVB", "CMOVBE", "CMOVC", "CMOVE",
-    "CMOVG", "CMOVGE", "CMOVL", "CMOVLE", "CMOVNA", "CMOVNAE", "CMOVNB",
-    "CMOVNBE", "CMOVNC", "CMOVNE", "CMOVNG", "CMOVNGE", "CMOVNL", "CMOVNLE",
-    "CMOVNO", "CMOVNP", "CMOVNS", "CMOVNZ", "CMOVO", "CMOVP", "CMOVPE",
-    "CMOVPO", "CMOVS", "CMOVZ", "XADD", "CMPXCHG", "CMPXCHG8B",
+    "MOV",
+    "MOVSX",
+    "MOVZX",
+    "XCHG",
+    "NOT",
+    "BSWAP",
+    "BSR",
+    "LEAVE",
+    "LEA",
+    "PUSH",
+    "POP",
+    "RET",
+    "NOP",
+    "ADD",
+    "SUB",
+    "CMP",
+    "INC",
+    "DEC",
+    "ADC",
+    "SBB",
+    "SHL",
+    "SHR",
+    "SAR",
+    "DIV",
+    "IDIV",
+    "NEG",
+    "MUL",
+    "IMUL",
+    "CDQ",
+    "CWD",
+    "CBW",
+    "CWDE",
+    "CLD",
+    "STD",
+    "SAHF",
+    "LAHF",
+    "TEST",
+    "AND",
+    "OR",
+    "XOR",
+    "ROL",
+    "ROR",
+    "RCL",
+    "RCR",
+    "SHLD",
+    "SHRD",
+    "JMP",
+    "JZ",
+    "JNZ",
+    "JE",
+    "JNE",
+    "JA",
+    "JAE",
+    "JB",
+    "JBE",
+    "JC",
+    "JNC",
+    "JG",
+    "JGE",
+    "JL",
+    "JLE",
+    "JS",
+    "JNS",
+    "JO",
+    "JNO",
+    "JP",
+    "JNP",
+    "JPE",
+    "JPO",
+    "CALL",
+    "SETA",
+    "SETAE",
+    "SETB",
+    "SETBE",
+    "SETC",
+    "SETE",
+    "SETG",
+    "SETGE",
+    "SETL",
+    "SETLE",
+    "SETNA",
+    "SETNAE",
+    "SETNB",
+    "SETNBE",
+    "SETNC",
+    "SETNE",
+    "SETNG",
+    "SETNGE",
+    "SETNL",
+    "SETNLE",
+    "SETNO",
+    "SETNP",
+    "SETNS",
+    "SETNZ",
+    "SETO",
+    "SETP",
+    "SETPE",
+    "SETPO",
+    "SETS",
+    "SETZ",
+    "XLAT",
+    "BT",
+    "BTS",
+    "BTR",
+    "BTC",
+    "CLC",
+    "STC",
+    "CMC",
+    "SALC",
+    "AAA",
+    "AAS",
+    "AAM",
+    "AAD",
+    "DAA",
+    "DAS",
+    "ARPL",
+    "PUSHAD",
+    "POPAD",
+    "LOOP",
+    "LOOPE",
+    "LOOPNE",
+    "JECXZ",
+    "JCXZ",
+    "MOVSS",
+    "MOVAPS",
+    "ADDSS",
+    "SUBSS",
+    "MULSS",
+    "DIVSS",
+    "MINSS",
+    "MAXSS",
+    "ADDPS",
+    "SUBPS",
+    "MULPS",
+    "DIVPS",
+    "MINPS",
+    "MAXPS",
+    "SQRTPS",
+    "RCPPS",
+    "RSQRTPS",
+    "RSQRTSS",
+    "CMPEQPS",
+    "CMPLTPS",
+    "CMPLEPS",
+    "CMPUNORDPS",
+    "CMPNEQPS",
+    "CMPNLTPS",
+    "CMPNLEPS",
+    "CMPORDPS",
+    "SHUFPS",
+    "UNPCKLPS",
+    "UNPCKHPS",
+    "MOVLHPS",
+    "MOVHLPS",
+    "MOVLPS",
+    "MOVHPS",
+    "MOVMSKPS",
+    "MOVUPS",
+    "MOVNTPS",
+    "MOVDQA",
+    "MOVDQU",
+    "MOVAPD",
+    "PSHUFD",
+    "PUNPCKLQDQ",
+    "PUNPCKHQDQ",
+    "PSRLDQ",
+    "COMISS",
+    "UCOMISS",
+    "CVTTSS2SI",
+    "CVTSS2SI",
+    "CVTSI2SS",
+    "XORPS",
+    "ANDPS",
+    "ORPS",
+    "ANDNPS",
+    "CMOVA",
+    "CMOVAE",
+    "CMOVB",
+    "CMOVBE",
+    "CMOVC",
+    "CMOVE",
+    "CMOVG",
+    "CMOVGE",
+    "CMOVL",
+    "CMOVLE",
+    "CMOVNA",
+    "CMOVNAE",
+    "CMOVNB",
+    "CMOVNBE",
+    "CMOVNC",
+    "CMOVNE",
+    "CMOVNG",
+    "CMOVNGE",
+    "CMOVNL",
+    "CMOVNLE",
+    "CMOVNO",
+    "CMOVNP",
+    "CMOVNS",
+    "CMOVNZ",
+    "CMOVO",
+    "CMOVP",
+    "CMOVPE",
+    "CMOVPO",
+    "CMOVS",
+    "CMOVZ",
+    "XADD",
+    "CMPXCHG",
+    "CMPXCHG8B",
 ];
 
 fn is_media(mnemonic: &str) -> bool {
     matches!(
         mnemonic,
-        "MOVD" | "MOVQ" | "MOVNTQ" | "EMMS" | "FEMMS" | "PSHUFW" | "ORPD"
-            | "XORPD" | "ANDPD" | "ANDNPD" | "PADDB"
-            | "PADDW" | "PADDD" | "PADDQ" | "PSUBB" | "PSUBW" | "PSUBD" | "PSUBQ"
-            | "PADDSB" | "PADDSW" | "PSUBSB" | "PSUBSW" | "PADDUSB" | "PADDUSW"
-            | "PSUBUSB" | "PSUBUSW" | "PMULLW" | "PMULHW" | "PMADDWD" | "PCMPEQB"
-            | "PCMPEQW" | "PCMPEQD" | "PCMPGTB" | "PCMPGTW" | "PCMPGTD" | "PACKSSWB"
-            | "PACKSSDW" | "PACKUSWB" | "PMINUB" | "PMAXUB" | "PUNPCKLBW"
-            | "PUNPCKLWD" | "PUNPCKLDQ" | "PUNPCKHBW" | "PUNPCKHWD" | "PUNPCKHDQ"
-            | "PAND" | "PANDN" | "POR" | "PXOR" | "PSRLW" | "PSRLD" | "PSRLQ"
-            | "PSRAW" | "PSRAD" | "PSLLW" | "PSLLD" | "PSLLQ" | "CVTPI2PS"
-            | "CVTPS2PI" | "CVTTPS2DQ" | "CVTTSD2SI" | "PEXTRW" | "MOVDQ2Q"
+        "MOVD"
+            | "MOVQ"
+            | "MOVNTQ"
+            | "EMMS"
+            | "FEMMS"
+            | "PSHUFW"
+            | "ORPD"
+            | "XORPD"
+            | "ANDPD"
+            | "ANDNPD"
+            | "PADDB"
+            | "PADDW"
+            | "PADDD"
+            | "PADDQ"
+            | "PSUBB"
+            | "PSUBW"
+            | "PSUBD"
+            | "PSUBQ"
+            | "PADDSB"
+            | "PADDSW"
+            | "PSUBSB"
+            | "PSUBSW"
+            | "PADDUSB"
+            | "PADDUSW"
+            | "PSUBUSB"
+            | "PSUBUSW"
+            | "PMULLW"
+            | "PMULHW"
+            | "PMADDWD"
+            | "PCMPEQB"
+            | "PCMPEQW"
+            | "PCMPEQD"
+            | "PCMPGTB"
+            | "PCMPGTW"
+            | "PCMPGTD"
+            | "PACKSSWB"
+            | "PACKSSDW"
+            | "PACKUSWB"
+            | "PMINUB"
+            | "PMAXUB"
+            | "PUNPCKLBW"
+            | "PUNPCKLWD"
+            | "PUNPCKLDQ"
+            | "PUNPCKHBW"
+            | "PUNPCKHWD"
+            | "PUNPCKHDQ"
+            | "PAND"
+            | "PANDN"
+            | "POR"
+            | "PXOR"
+            | "PSRLW"
+            | "PSRLD"
+            | "PSRLQ"
+            | "PSRAW"
+            | "PSRAD"
+            | "PSLLW"
+            | "PSLLD"
+            | "PSLLQ"
+            | "CVTPI2PS"
+            | "CVTPS2PI"
+            | "CVTTPS2DQ"
+            | "CVTTSD2SI"
+            | "PEXTRW"
+            | "MOVDQ2Q"
     )
 }
 
@@ -220,7 +460,11 @@ impl Lowerer<'_> {
 
     fn slow(&mut self, insn: &Insn, family: SlowFamily) -> Op {
         let index = self.slow.len() as u32;
-        self.slow.push(SlowInsn { addr: insn.addr, length: insn.length, family });
+        self.slow.push(SlowInsn {
+            addr: insn.addr,
+            length: insn.length,
+            family,
+        });
         Op::Slow(index)
     }
 
@@ -242,7 +486,13 @@ impl Lowerer<'_> {
         if mnem == "INT3" {
             return Ok((vec![cg(Op::Breakpoint)], false, None));
         }
-        if mnem == "MOV" && insn.operands.split(',').next().is_some_and(|op| op.trim().eq_ignore_ascii_case("CS")) {
+        if mnem == "MOV"
+            && insn
+                .operands
+                .split(',')
+                .next()
+                .is_some_and(|op| op.trim().eq_ignore_ascii_case("CS"))
+        {
             let op = self.slow(insn, SlowFamily::Segment);
             return Ok((vec![cg(op)], false, None));
         }
@@ -265,14 +515,21 @@ impl Lowerer<'_> {
                 let ops = lowering
                     .recipes
                     .into_iter()
-                    .map(|recipe| CgOp { op: recipe.op, output: recipe.output, inputs: recipe.inputs })
+                    .map(|recipe| CgOp {
+                        op: recipe.op,
+                        output: recipe.output,
+                        inputs: recipe.inputs,
+                    })
                     .collect();
                 return Ok((ops, true, None));
             }
             let op = self.slow(insn, SlowFamily::X87);
             return Ok((vec![cg(op)], true, None));
         }
-        let raw = self.image.bytes(insn.addr, insn.length as usize).unwrap_or(&[]);
+        let raw = self
+            .image
+            .bytes(insn.addr, insn.length as usize)
+            .unwrap_or(&[]);
         if let Some(helper) = string::helper(raw) {
             return Ok((vec![cg(Op::String(StringOp(helper)))], false, None));
         }
@@ -288,7 +545,9 @@ impl Lowerer<'_> {
             stripped.extend(
                 insn.ops
                     .iter()
-                    .filter(|op| !(op.opcode == OpCode::CallOther && matches!(op.userop, Some(17 | 18))))
+                    .filter(|op| {
+                        !(op.opcode == OpCode::CallOther && matches!(op.userop, Some(17 | 18)))
+                    })
                     .cloned(),
             );
             &stripped
@@ -298,7 +557,14 @@ impl Lowerer<'_> {
         if let Some(call) = raw_ops.iter().find(|op| op.opcode == OpCode::CallOther) {
             let handled = matches!(
                 mnem.as_str(),
-                "MINPS" | "MAXPS" | "DIVPS" | "SQRTPS" | "RCPPS" | "RSQRTPS" | "RSQRTSS" | "MOVMSKPS"
+                "MINPS"
+                    | "MAXPS"
+                    | "DIVPS"
+                    | "SQRTPS"
+                    | "RCPPS"
+                    | "RSQRTPS"
+                    | "RSQRTSS"
+                    | "MOVMSKPS"
             );
             if !handled {
                 let family = call_other_family(&mnem, call.userop);
@@ -307,12 +573,18 @@ impl Lowerer<'_> {
             }
         }
         let divide_by_zero = matches!(mnem.as_str(), "AAM")
-            && self.image.bytes(insn.addr, insn.length as usize).and_then(|b| b.last()) == Some(&0);
+            && self
+                .image
+                .bytes(insn.addr, insn.length as usize)
+                .and_then(|b| b.last())
+                == Some(&0);
         if divide_by_zero || !SUPPORTED.contains(&mnem.as_str()) {
             let family = unmodelled_family(&mnem);
             let op = self.reject(
                 insn,
-                Reason::Unmodelled { mnemonic: mnem.clone() },
+                Reason::Unmodelled {
+                    mnemonic: mnem.clone(),
+                },
                 family,
             );
             return Ok((vec![cg(op)], false, None));
@@ -339,19 +611,16 @@ impl Lowerer<'_> {
             }
         };
         if mnem == "DIV" || mnem == "IDIV" {
-            let (mut converted, has_address) = match correct_div_cg(
-                &mnem,
-                &ops,
-                self.regs,
-                insn.addr,
-                &mut |size| self.fresh(size),
-            ) {
-                Ok(ops) => (ops, true),
-                Err(reason) => {
-                    let op = self.reject(insn, reason, SlowFamily::Unmodelled);
-                    (vec![cg(op)], false)
-                }
-            };
+            let (mut converted, has_address) =
+                match correct_div_cg(&mnem, &ops, self.regs, insn.addr, &mut |size| {
+                    self.fresh(size)
+                }) {
+                    Ok(ops) => (ops, true),
+                    Err(reason) => {
+                        let op = self.reject(insn, reason, SlowFamily::Unmodelled);
+                        (vec![cg(op)], false)
+                    }
+                };
             if has_address {
                 if let Some(kinds) = fir.seh.get(&index) {
                     apply_seh(&mut converted, kinds);
@@ -365,8 +634,26 @@ impl Lowerer<'_> {
         }
         let rewrites_memory = matches!(
             mnem.as_str(),
-            "ADD" | "SUB" | "CMP" | "INC" | "DEC" | "ADC" | "SBB" | "SHL" | "SHR" | "SAR"
-                | "NEG" | "AND" | "OR" | "XOR" | "NOT" | "ROL" | "ROR" | "RCL" | "RCR" | "SHLD"
+            "ADD"
+                | "SUB"
+                | "CMP"
+                | "INC"
+                | "DEC"
+                | "ADC"
+                | "SBB"
+                | "SHL"
+                | "SHR"
+                | "SAR"
+                | "NEG"
+                | "AND"
+                | "OR"
+                | "XOR"
+                | "NOT"
+                | "ROL"
+                | "ROR"
+                | "RCL"
+                | "RCR"
+                | "SHLD"
                 | "SHRD"
         ) && ops.iter().any(|op| op.opcode == OpCode::Store);
         let prepared = if rewrites_memory {
@@ -377,16 +664,16 @@ impl Lowerer<'_> {
         let mut flag_operands = None;
         let corrected = prepared.and_then(|ops| {
             let corrected = match mnem.as_str() {
-                "ADD" | "SUB" | "CMP" | "INC" | "DEC" | "ADC" | "SBB" => {
-                    correct_arithmetic(
-                        &mnem,
-                        &ops,
-                        self.regs,
-                        &mut |size| self.fresh(size),
-                        &mut flag_operands,
-                    )
+                "ADD" | "SUB" | "CMP" | "INC" | "DEC" | "ADC" | "SBB" => correct_arithmetic(
+                    &mnem,
+                    &ops,
+                    self.regs,
+                    &mut |size| self.fresh(size),
+                    &mut flag_operands,
+                ),
+                "SHL" | "SHR" => {
+                    correct_shift(&mnem, &ops, self.regs, &mut |size| self.fresh(size))
                 }
-                "SHL" | "SHR" => correct_shift(&mnem, &ops, self.regs, &mut |size| self.fresh(size)),
                 "SAR" => correct_sar(&ops, self.regs, &mut |size| self.fresh(size)),
                 "BSR" => correct_bsr(&ops, self.regs, &mut |size| self.fresh(size)),
                 "NEG" => correct_neg(&ops, self.regs, &mut |size| self.fresh(size)),
@@ -431,7 +718,11 @@ impl Lowerer<'_> {
         if out.iter().any(|op| matches!(op.op, Op::CBranch { .. })) {
             let insn = &fir.insns[index as usize];
             let target = insn.addr + Addr::from(insn.length);
-            if fir.exits.get(&index).is_some_and(|targets| targets.contains(&target)) {
+            if fir
+                .exits
+                .get(&index)
+                .is_some_and(|targets| targets.contains(&target))
+            {
                 out.push(cg(Op::Tail { target }));
             }
             return;
@@ -448,7 +739,11 @@ impl Lowerer<'_> {
 }
 
 fn cg(op: Op) -> CgOp {
-    CgOp { op, output: None, inputs: Vec::new() }
+    CgOp {
+        op,
+        output: None,
+        inputs: Vec::new(),
+    }
 }
 
 fn from_pcode(op: PcodeOp) -> CgOp {
@@ -463,7 +758,11 @@ fn from_pcode(op: PcodeOp) -> CgOp {
         }
         OpCode::CBranch => {
             let target = op.inputs.first().and_then(target_addr);
-            let inputs = if target.is_some() { op.inputs.get(1..).unwrap_or(&[]).to_vec() } else { op.inputs };
+            let inputs = if target.is_some() {
+                op.inputs.get(1..).unwrap_or(&[]).to_vec()
+            } else {
+                op.inputs
+            };
             CgOp {
                 op: target.map_or(Op::P(OpCode::CBranch), |target| Op::CBranch { target }),
                 output: op.output,
@@ -478,11 +777,31 @@ fn from_pcode(op: PcodeOp) -> CgOp {
                 inputs: Vec::new(),
             }
         }
-        OpCode::CallInd => CgOp { op: Op::CallInd, output: op.output, inputs: op.inputs },
-        OpCode::Return => CgOp { op: Op::Return, output: op.output, inputs: Vec::new() },
-        OpCode::BranchInd => CgOp { op: Op::BranchInd, output: op.output, inputs: op.inputs },
-        OpCode::CallOther => CgOp { op: Op::CallOther(op.userop.unwrap_or(0)), output: op.output, inputs: op.inputs },
-        other => CgOp { op: Op::P(other), output: op.output, inputs: op.inputs },
+        OpCode::CallInd => CgOp {
+            op: Op::CallInd,
+            output: op.output,
+            inputs: op.inputs,
+        },
+        OpCode::Return => CgOp {
+            op: Op::Return,
+            output: op.output,
+            inputs: Vec::new(),
+        },
+        OpCode::BranchInd => CgOp {
+            op: Op::BranchInd,
+            output: op.output,
+            inputs: op.inputs,
+        },
+        OpCode::CallOther => CgOp {
+            op: Op::CallOther(op.userop.unwrap_or(0)),
+            output: op.output,
+            inputs: op.inputs,
+        },
+        other => CgOp {
+            op: Op::P(other),
+            output: op.output,
+            inputs: op.inputs,
+        },
     }
 }
 
@@ -520,7 +839,11 @@ fn correct_sse(
         let (compare, branch, copy) = (&ops[at], &ops[at + 1], &ops[at + 2]);
         let dest = copy.output.ok_or_else(unsupported)?;
         let source = *copy.inputs.first().ok_or_else(unsupported)?;
-        let expected = if mnem == "MINSS" { (dest, source) } else { (source, dest) };
+        let expected = if mnem == "MINSS" {
+            (dest, source)
+        } else {
+            (source, dest)
+        };
         if copy.opcode != OpCode::Copy
             || dest.space != Space::Register
             || dest.size != 4
@@ -544,7 +867,11 @@ fn correct_sse(
             return Err(unsupported());
         }
         let mut out = ops[..at].to_vec();
-        let code = if mnem == "MINSS" { OpCode::FloatMin } else { OpCode::FloatMax };
+        let code = if mnem == "MINSS" {
+            OpCode::FloatMin
+        } else {
+            OpCode::FloatMax
+        };
         out.push(op(code, dest, vec![dest, source]));
         return Ok(out);
     }
@@ -628,7 +955,11 @@ fn correct_sse(
                 if output.size == 16 && source.size == 16 {
                     let output_lanes = wide_output(output, regs, fresh)?;
                     let source_lanes = wide_lanes(source, &BTreeMap::new(), regs, fresh)?;
-                    out.push(op(OpCode::FloatRsqrt, output_lanes[0], vec![source_lanes[0]]));
+                    out.push(op(
+                        OpCode::FloatRsqrt,
+                        output_lanes[0],
+                        vec![source_lanes[0]],
+                    ));
                 } else if output.size == 4 && source.size == 4 {
                     out.push(op(OpCode::FloatRsqrt, output, vec![source]));
                 } else {
@@ -752,7 +1083,9 @@ fn lower_shuffle(
         .iter()
         .filter(|op| {
             op.opcode == OpCode::Copy
-                && op.output.is_some_and(|v| v.size == 4 && v.space == Space::Unique)
+                && op
+                    .output
+                    .is_some_and(|v| v.size == 4 && v.space == Space::Unique)
                 && op.inputs.len() == 1
                 && op.inputs[0].size == 4
         })
@@ -760,7 +1093,10 @@ fn lower_shuffle(
         .collect();
     let dest: Vec<Varnode> = ops[ops.len() - 4..]
         .iter()
-        .filter_map(|op| op.output.filter(|v| v.size == 4 && v.space == Space::Register))
+        .filter_map(|op| {
+            op.output
+                .filter(|v| v.size == 4 && v.space == Space::Register)
+        })
         .collect();
     if dest.len() != 4 || snapshots.len() < if mnem == "SHUFPS" { 8 } else { 4 } {
         return None;
@@ -796,7 +1132,12 @@ fn split_psrldq(
         .iter()
         .find(|op| op.opcode == OpCode::IntRight && op.output.is_some_and(|v| v.size == 16))
         .ok_or_else(unsupported)?;
-    let source = wide_lanes(*item.inputs.first().ok_or_else(unsupported)?, &BTreeMap::new(), regs, fresh)?;
+    let source = wide_lanes(
+        *item.inputs.first().ok_or_else(unsupported)?,
+        &BTreeMap::new(),
+        regs,
+        fresh,
+    )?;
     let output = wide_output(item.output.ok_or_else(unsupported)?, regs, fresh)?;
     let mut out = Vec::new();
     let mut snapshot = [Varnode::constant(0, 4); 4];
@@ -818,9 +1159,21 @@ fn split_psrldq(
             let down = fresh(4);
             let up = fresh(4);
             let merged = fresh(4);
-            out.push(op(OpCode::IntRight, down, vec![snapshot[index], Varnode::constant(bits, 4)]));
-            let high = if index < 3 { snapshot[index + 1] } else { Varnode::constant(0, 4) };
-            out.push(op(OpCode::IntLeft, up, vec![high, Varnode::constant(32 - bits, 4)]));
+            out.push(op(
+                OpCode::IntRight,
+                down,
+                vec![snapshot[index], Varnode::constant(bits, 4)],
+            ));
+            let high = if index < 3 {
+                snapshot[index + 1]
+            } else {
+                Varnode::constant(0, 4)
+            };
+            out.push(op(
+                OpCode::IntLeft,
+                up,
+                vec![high, Varnode::constant(32 - bits, 4)],
+            ));
             out.push(op(OpCode::IntOr, merged, vec![down, up]));
             merged
         };
@@ -884,8 +1237,16 @@ fn add_af(
     vec![
         op(OpCode::IntXor, x, vec![a, b]),
         op(OpCode::IntXor, y, vec![x, result]),
-        op(OpCode::IntRight, z, vec![y, Varnode::constant(4, result.size)]),
-        op(OpCode::IntAnd, flag(regs, "AF"), vec![z, Varnode::constant(1, result.size)]),
+        op(
+            OpCode::IntRight,
+            z,
+            vec![y, Varnode::constant(4, result.size)],
+        ),
+        op(
+            OpCode::IntAnd,
+            flag(regs, "AF"),
+            vec![z, Varnode::constant(1, result.size)],
+        ),
     ]
 }
 
@@ -898,9 +1259,12 @@ fn correct_cmov(
     insn: &Insn,
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
-    let unsupported = || Reason::Unsupported { detail: "unsupported CMOV p-code shape".into() };
+    let unsupported = || Reason::Unsupported {
+        detail: "unsupported CMOV p-code shape".into(),
+    };
     let at = ops.len().checked_sub(4).ok_or_else(unsupported)?;
-    let (source_copy, negate, branch, dest_copy) = (&ops[at], &ops[at + 1], &ops[at + 2], &ops[at + 3]);
+    let (source_copy, negate, branch, dest_copy) =
+        (&ops[at], &ops[at + 1], &ops[at + 2], &ops[at + 3]);
     let dest = dest_copy.output.ok_or_else(unsupported)?;
     let source = *source_copy.inputs.first().ok_or_else(unsupported)?;
     let condition = *negate.inputs.first().ok_or_else(unsupported)?;
@@ -920,7 +1284,10 @@ fn correct_cmov(
         || !matches!(dest.size, 2 | 4)
         || dest_copy.inputs != [source_copy.output.unwrap()]
         || ops[..at].iter().any(|op| {
-            matches!(op.opcode, OpCode::Branch | OpCode::CBranch | OpCode::BranchInd | OpCode::Store)
+            matches!(
+                op.opcode,
+                OpCode::Branch | OpCode::CBranch | OpCode::BranchInd | OpCode::Store
+            )
         })
     {
         return Err(unsupported());
@@ -935,7 +1302,9 @@ fn correct_xadd(
     regs: &Registers,
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
-    let unsupported = || Reason::Unsupported { detail: "unsupported XADD p-code shape".into() };
+    let unsupported = || Reason::Unsupported {
+        detail: "unsupported XADD p-code shape".into(),
+    };
     let primary = ops
         .iter()
         .rposition(|op| {
@@ -947,7 +1316,9 @@ fn correct_xadd(
     let result = ops[primary].output.unwrap();
     let old = ops[primary].inputs[0];
     let source = ops[primary].inputs[1];
-    let stores: Vec<usize> = ops.iter().enumerate()
+    let stores: Vec<usize> = ops
+        .iter()
+        .enumerate()
         .filter(|(_, op)| op.opcode == OpCode::Store)
         .map(|(index, _)| index)
         .collect();
@@ -957,7 +1328,9 @@ fn correct_xadd(
     let mut address = None;
     if let Some(&store_index) = stores.first() {
         let store = &ops[store_index];
-        let load_index = ops.iter().position(|op| op.opcode == OpCode::Load && op.output == Some(old))
+        let load_index = ops
+            .iter()
+            .position(|op| op.opcode == OpCode::Load && op.output == Some(old))
             .ok_or_else(unsupported)?;
         if store.inputs.len() != 2
             || store.inputs[1].size != result.size
@@ -967,17 +1340,19 @@ fn correct_xadd(
         }
         address = Some((store.inputs[0], load_index));
     }
-    let source_write = ops[primary + 1..].iter().any(|op| {
-        op.opcode == OpCode::Copy && op.output == Some(source) && op.inputs == [old]
-    });
+    let source_write = ops[primary + 1..]
+        .iter()
+        .any(|op| op.opcode == OpCode::Copy && op.output == Some(source) && op.inputs == [old]);
     let destination_write = if stores.is_empty() {
-        ops[primary + 1..].iter().any(|op| {
-            op.opcode == OpCode::Copy && op.output == Some(old) && op.inputs == [result]
-        })
+        ops[primary + 1..]
+            .iter()
+            .any(|op| op.opcode == OpCode::Copy && op.output == Some(old) && op.inputs == [result])
     } else {
         let store = &ops[stores[0]];
         ops[primary + 1..].iter().any(|op| {
-            (op.opcode == OpCode::Copy && op.output == Some(store.inputs[1]) && op.inputs == [result])
+            (op.opcode == OpCode::Copy
+                && op.output == Some(store.inputs[1])
+                && op.inputs == [result])
                 || (op.opcode == OpCode::Store && op.inputs[1] == result)
         })
     };
@@ -1020,9 +1395,14 @@ fn correct_cmpxchg(
     insn: &Insn,
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
-    let unsupported = || Reason::Unsupported { detail: "unsupported CMPXCHG p-code shape".into() };
+    let unsupported = || Reason::Unsupported {
+        detail: "unsupported CMPXCHG p-code shape".into(),
+    };
     let end = insn.addr + insn.length as Addr;
-    let if_index = ops.iter().position(|op| op.opcode == OpCode::CBranch).ok_or_else(unsupported)?;
+    let if_index = ops
+        .iter()
+        .position(|op| op.opcode == OpCode::CBranch)
+        .ok_or_else(unsupported)?;
     let branch_index = ops[if_index + 1..]
         .iter()
         .position(|op| op.opcode == OpCode::Branch)
@@ -1046,9 +1426,9 @@ fn correct_cmpxchg(
         || acc.size != old.size
         || result.size != acc.size
         || condition.size != 1
-        || ops[..if_index].iter().any(|op| {
-            matches!(op.opcode, OpCode::Branch | OpCode::CBranch | OpCode::Store)
-        })
+        || ops[..if_index]
+            .iter()
+            .any(|op| matches!(op.opcode, OpCode::Branch | OpCode::CBranch | OpCode::Store))
     {
         return Err(unsupported());
     }
@@ -1057,13 +1437,16 @@ fn correct_cmpxchg(
         .find(|op| op.opcode == OpCode::Copy && op.output == Some(old) && op.inputs.len() == 1)
         .ok_or_else(unsupported)?;
     let destination = old_copy.inputs[0];
-    if !ops[if_index + 1..branch_index].iter().any(|op| {
-        op.opcode == OpCode::Copy && op.output == Some(acc) && op.inputs == [old]
-    }) {
+    if !ops[if_index + 1..branch_index]
+        .iter()
+        .any(|op| op.opcode == OpCode::Copy && op.output == Some(acc) && op.inputs == [old])
+    {
         return Err(unsupported());
     }
     let after = &ops[branch_index + 1..];
-    let stores: Vec<usize> = after.iter().enumerate()
+    let stores: Vec<usize> = after
+        .iter()
+        .enumerate()
         .filter(|(_, op)| op.opcode == OpCode::Store)
         .map(|(index, _)| index)
         .collect();
@@ -1073,8 +1456,11 @@ fn correct_cmpxchg(
     let (source, memory) = if let Some(&store_index) = stores.first() {
         let store = &after[store_index];
         let stored = *store.inputs.get(1).ok_or_else(unsupported)?;
-        let success = after[..store_index].iter()
-            .find(|op| op.opcode == OpCode::Copy && op.output == Some(stored) && op.inputs.len() == 1)
+        let success = after[..store_index]
+            .iter()
+            .find(|op| {
+                op.opcode == OpCode::Copy && op.output == Some(stored) && op.inputs.len() == 1
+            })
             .ok_or_else(unsupported)?;
         let load_index = ops[..if_index]
             .iter()
@@ -1088,11 +1474,10 @@ fn correct_cmpxchg(
         }
         (success.inputs[0], Some((store.inputs[0], load_index)))
     } else {
-        let success = after.iter()
+        let success = after
+            .iter()
             .find(|op| {
-                op.opcode == OpCode::Copy
-                    && op.output == Some(destination)
-                    && op.inputs.len() == 1
+                op.opcode == OpCode::Copy && op.output == Some(destination) && op.inputs.len() == 1
             })
             .ok_or_else(unsupported)?;
         if destination.space != Space::Register {
@@ -1147,8 +1532,11 @@ fn correct_cmpxchg8b(
     };
     let end = insn.addr + insn.length as Addr;
     let zf = flag(regs, "ZF");
-    let zf_index = ops.iter()
-        .position(|op| op.opcode == OpCode::IntEqual && op.output == Some(zf) && op.inputs.len() == 2)
+    let zf_index = ops
+        .iter()
+        .position(|op| {
+            op.opcode == OpCode::IntEqual && op.output == Some(zf) && op.inputs.len() == 2
+        })
         .ok_or_else(unsupported)?;
     let if_index = ops[zf_index + 1..]
         .iter()
@@ -1167,7 +1555,10 @@ fn correct_cmpxchg8b(
     let loaded = ops[load_index].output.unwrap();
     let old = ops[zf_index].inputs[1];
     let after = &ops[branch_index + 1..];
-    let store = after.iter().find(|op| op.opcode == OpCode::Store).ok_or_else(unsupported)?;
+    let store = after
+        .iter()
+        .find(|op| op.opcode == OpCode::Store)
+        .ok_or_else(unsupported)?;
     let eax = regs.require("EAX");
     let ecx = regs.require("ECX");
     let edx = regs.require("EDX");
@@ -1175,15 +1566,21 @@ fn correct_cmpxchg8b(
     if !internal_target(ops[if_index].inputs[0], end)
         || !internal_target(ops[branch_index].inputs[0], end)
         || old.size != 8
-        || !ops[..zf_index].iter().any(|op| {
-            op.opcode == OpCode::Copy && op.output == Some(old) && op.inputs == [loaded]
-        })
+        || !ops[..zf_index]
+            .iter()
+            .any(|op| op.opcode == OpCode::Copy && op.output == Some(old) && op.inputs == [loaded])
         || store.inputs.len() != 2
         || store.inputs[1].size != 8
         || store.inputs[0] != ops[load_index].inputs[0]
-        || !after.iter().any(|op| op.opcode == OpCode::IntZExt && op.inputs == [ecx])
-        || !after.iter().any(|op| op.opcode == OpCode::IntZExt && op.inputs == [ebx])
-        || ops[..zf_index].iter().any(|op| matches!(op.opcode, OpCode::Branch | OpCode::CBranch | OpCode::Store))
+        || !after
+            .iter()
+            .any(|op| op.opcode == OpCode::IntZExt && op.inputs == [ecx])
+        || !after
+            .iter()
+            .any(|op| op.opcode == OpCode::IntZExt && op.inputs == [ebx])
+        || ops[..zf_index]
+            .iter()
+            .any(|op| matches!(op.opcode, OpCode::Branch | OpCode::CBranch | OpCode::Store))
     {
         return Err(unsupported());
     }
@@ -1204,7 +1601,11 @@ fn correct_cmpxchg8b(
     let desired = fresh(8);
     out.extend([
         op(OpCode::IntZExt, high, vec![ecx]),
-        op(OpCode::IntLeft, shifted, vec![high, Varnode::constant(32, 4)]),
+        op(
+            OpCode::IntLeft,
+            shifted,
+            vec![high, Varnode::constant(32, 4)],
+        ),
         op(OpCode::IntZExt, low, vec![ebx]),
         op(OpCode::IntOr, desired, vec![shifted, low]),
     ]);
@@ -1220,8 +1621,16 @@ fn correct_cmpxchg8b(
     let original_low = fresh(4);
     let original_high = fresh(4);
     out.extend([
-        op(OpCode::SubPiece, original_low, vec![old, Varnode::constant(0, 4)]),
-        op(OpCode::SubPiece, original_high, vec![old, Varnode::constant(4, 4)]),
+        op(
+            OpCode::SubPiece,
+            original_low,
+            vec![old, Varnode::constant(0, 4)],
+        ),
+        op(
+            OpCode::SubPiece,
+            original_high,
+            vec![old, Varnode::constant(4, 4)],
+        ),
     ]);
     out.extend(select_value(zf, eax, original_low, eax, fresh));
     out.extend(select_value(zf, edx, original_high, edx, fresh));
@@ -1252,7 +1661,10 @@ fn wide_lanes(
     }
     if value.space == Space::Const {
         return Ok(std::array::from_fn(|lane| {
-            Varnode::constant(value.offset.checked_shr(lane as u32 * 32).unwrap_or(0) & 0xffff_ffff, 4)
+            Varnode::constant(
+                value.offset.checked_shr(lane as u32 * 32).unwrap_or(0) & 0xffff_ffff,
+                4,
+            )
         }));
     }
     Err(Reason::Unsupported {
@@ -1359,30 +1771,54 @@ fn split_wide(
         if item.opcode == OpCode::CallOther {
             if mnem == "MOVMSKPS" {
                 let output = item.output.ok_or_else(unsupported)?;
-                let source = wide_lanes(*item.inputs.last().ok_or_else(unsupported)?, &lanes, regs, fresh)?;
+                let source = wide_lanes(
+                    *item.inputs.last().ok_or_else(unsupported)?,
+                    &lanes,
+                    regs,
+                    fresh,
+                )?;
                 let mut acc = Varnode::constant(0, 4);
                 for lane in 0..4 {
                     let shifted = fresh(4);
                     let bit = fresh(4);
                     let placed = fresh(4);
                     let merged = fresh(4);
-                    out.push(op(OpCode::IntRight, shifted, vec![source[lane], Varnode::constant(31, 4)]));
-                    out.push(op(OpCode::IntAnd, bit, vec![shifted, Varnode::constant(1, 4)]));
-                    out.push(op(OpCode::IntLeft, placed, vec![bit, Varnode::constant(lane as u64, 4)]));
+                    out.push(op(
+                        OpCode::IntRight,
+                        shifted,
+                        vec![source[lane], Varnode::constant(31, 4)],
+                    ));
+                    out.push(op(
+                        OpCode::IntAnd,
+                        bit,
+                        vec![shifted, Varnode::constant(1, 4)],
+                    ));
+                    out.push(op(
+                        OpCode::IntLeft,
+                        placed,
+                        vec![bit, Varnode::constant(lane as u64, 4)],
+                    ));
                     out.push(op(OpCode::IntOr, merged, vec![acc, placed]));
                     acc = merged;
                 }
                 out.push(copy(output, acc));
                 continue;
             }
-            if matches!(mnem, "MINPS" | "MAXPS" | "DIVPS" | "SQRTPS" | "RCPPS" | "RSQRTPS" | "RSQRTSS") {
+            if matches!(
+                mnem,
+                "MINPS" | "MAXPS" | "DIVPS" | "SQRTPS" | "RCPPS" | "RSQRTPS" | "RSQRTSS"
+            ) {
                 let output = item.output.ok_or_else(unsupported)?;
                 let source = *item.inputs.last().ok_or_else(unsupported)?;
                 if output.size == 16 {
                     let output_lanes = wide_output(output, regs, fresh)?;
                     if matches!(mnem, "MINPS" | "MAXPS" | "DIVPS") {
-                        let vectors: Vec<Varnode> =
-                            item.inputs.iter().copied().filter(|value| value.size == 16).collect();
+                        let vectors: Vec<Varnode> = item
+                            .inputs
+                            .iter()
+                            .copied()
+                            .filter(|value| value.size == 16)
+                            .collect();
                         if vectors.len() < 2 {
                             return Err(unsupported());
                         }
@@ -1431,7 +1867,12 @@ fn split_wide(
             continue;
         }
         let half_output_value = item.output.filter(|v| v.size == 8);
-        let half_inputs = item.inputs.iter().filter(|v| v.size == 8).copied().collect::<Vec<_>>();
+        let half_inputs = item
+            .inputs
+            .iter()
+            .filter(|v| v.size == 8)
+            .copied()
+            .collect::<Vec<_>>();
         if half_output_value.is_some() || !half_inputs.is_empty() {
             match item.opcode {
                 OpCode::Load if half_output_value.is_some() && item.inputs.len() == 1 => {
@@ -1472,7 +1913,12 @@ fn split_wide(
             continue;
         }
         let wide_output_value = item.output.filter(|v| v.size == 16);
-        let wide_inputs = item.inputs.iter().filter(|v| v.size == 16).copied().collect::<Vec<_>>();
+        let wide_inputs = item
+            .inputs
+            .iter()
+            .filter(|v| v.size == 16)
+            .copied()
+            .collect::<Vec<_>>();
         if wide_output_value.is_none() && wide_inputs.is_empty() {
             out.push(item.clone());
             continue;
@@ -1542,8 +1988,7 @@ fn normalize_direct_ram(
 ) -> Result<Vec<PcodeOp>, Reason> {
     let mut ops = ops.to_vec();
     if let Some(index) = ops.iter().position(|op| {
-        op.opcode == OpCode::BranchInd
-            && op.inputs.first().is_some_and(|v| v.space == Space::Ram)
+        op.opcode == OpCode::BranchInd && op.inputs.first().is_some_and(|v| v.space == Space::Ram)
     }) {
         let target = ops[index].inputs[0];
         let unique = fresh(target.size);
@@ -1576,23 +2021,33 @@ fn normalize_direct_ram(
     let mut operands = BTreeSet::new();
     for &index in &touched {
         let op = &ops[index];
-        for v in std::iter::once(op.output.as_ref()).chain(op.inputs.iter().map(Some)).flatten() {
+        for v in std::iter::once(op.output.as_ref())
+            .chain(op.inputs.iter().map(Some))
+            .flatten()
+        {
             if v.space == Space::Ram {
                 operands.insert((v.offset, v.size));
             }
         }
     }
     if operands.len() != 1 {
-        return Err(Reason::UnsupportedDirectRam { detail: "multiple direct-ram operands".into() });
+        return Err(Reason::UnsupportedDirectRam {
+            detail: "multiple direct-ram operands".into(),
+        });
     }
     let (offset, size) = operands.pop_first().unwrap();
     let address = Varnode::constant(offset, 4);
-    let has_write = touched.iter().any(|&i| ops[i].output.is_some_and(|v| v.space == Space::Ram));
+    let has_write = touched
+        .iter()
+        .any(|&i| ops[i].output.is_some_and(|v| v.space == Space::Ram));
     let has_read = touched
         .iter()
         .any(|&i| ops[i].inputs.iter().any(|v| v.space == Space::Ram));
     if has_write && has_read {
-        let writes = touched.iter().filter(|&&i| ops[i].output.is_some_and(|v| v.space == Space::Ram)).count();
+        let writes = touched
+            .iter()
+            .filter(|&&i| ops[i].output.is_some_and(|v| v.space == Space::Ram))
+            .count();
         if writes != 1 {
             return Err(Reason::UnsupportedDirectRam {
                 detail: "unsupported direct-ram read-modify-write".into(),
@@ -1679,10 +2134,20 @@ fn flag(regs: &Registers, name: &str) -> Varnode {
     regs.require(name)
 }
 fn copy(output: Varnode, input: Varnode) -> PcodeOp {
-    PcodeOp { opcode: OpCode::Copy, output: Some(output), inputs: vec![input], userop: None }
+    PcodeOp {
+        opcode: OpCode::Copy,
+        output: Some(output),
+        inputs: vec![input],
+        userop: None,
+    }
 }
 fn op(opcode: OpCode, output: Varnode, inputs: Vec<Varnode>) -> PcodeOp {
-    PcodeOp { opcode, output: Some(output), inputs, userop: None }
+    PcodeOp {
+        opcode,
+        output: Some(output),
+        inputs,
+        userop: None,
+    }
 }
 
 fn with_af_zero(ops: &[PcodeOp], regs: &Registers) -> Vec<PcodeOp> {
@@ -1696,9 +2161,14 @@ fn correct_bsr(
     regs: &Registers,
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
-    let unsupported = || Reason::Unsupported { detail: "unsupported BSR p-code shape".into() };
+    let unsupported = || Reason::Unsupported {
+        detail: "unsupported BSR p-code shape".into(),
+    };
     let zf = flag(regs, "ZF");
-    let at = ops.iter().position(|op| op.output == Some(zf)).ok_or_else(unsupported)?;
+    let at = ops
+        .iter()
+        .position(|op| op.output == Some(zf))
+        .ok_or_else(unsupported)?;
     let zero = &ops[at];
     let source = *zero.inputs.first().ok_or_else(unsupported)?;
     let last = ops.last().ok_or_else(unsupported)?;
@@ -1723,9 +2193,20 @@ fn correct_bsr(
     let mut out = ops[..=at].to_vec();
     out.extend([
         op(OpCode::LzCount, leading, vec![source]),
-        op(OpCode::IntSub, index, vec![Varnode::constant((dst.size * 8 - 1) as u64, dst.size), leading]),
+        op(
+            OpCode::IntSub,
+            index,
+            vec![
+                Varnode::constant((dst.size * 8 - 1) as u64, dst.size),
+                leading,
+            ],
+        ),
         op(OpCode::IntZExt, extended, vec![zf]),
-        op(OpCode::IntSub, mask, vec![extended, Varnode::constant(1, dst.size)]),
+        op(
+            OpCode::IntSub,
+            mask,
+            vec![extended, Varnode::constant(1, dst.size)],
+        ),
         op(OpCode::IntXor, changed, vec![dst, index]),
         op(OpCode::IntAnd, selected, vec![changed, mask]),
         op(OpCode::IntXor, dst, vec![dst, selected]),
@@ -1737,14 +2218,18 @@ fn prepare_rmw(
     ops: &[PcodeOp],
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
-    let stores: Vec<usize> = ops.iter().enumerate()
+    let stores: Vec<usize> = ops
+        .iter()
+        .enumerate()
         .filter(|(_, op)| op.opcode == OpCode::Store)
         .map(|(index, _)| index)
         .collect();
     if stores.is_empty() {
         return Ok(ops.to_vec());
     }
-    let loads: Vec<usize> = ops.iter().enumerate()
+    let loads: Vec<usize> = ops
+        .iter()
+        .enumerate()
         .filter(|(_, op)| op.opcode == OpCode::Load)
         .map(|(index, _)| index)
         .collect();
@@ -1754,17 +2239,20 @@ fn prepare_rmw(
         });
     }
     let load = &ops[loads[0]];
-    if loads.iter().any(|&index| {
-        ops[index].inputs != load.inputs || ops[index].output != load.output
-    }) {
+    if loads
+        .iter()
+        .any(|&index| ops[index].inputs != load.inputs || ops[index].output != load.output)
+    {
         return Err(Reason::UnsupportedReadModifyWrite {
             detail: "repeated memory operand loads disagree".into(),
         });
     }
     let store = &ops[stores[0]];
-    let loaded = load.output.ok_or_else(|| Reason::UnsupportedReadModifyWrite {
-        detail: "memory load without an output".into(),
-    })?;
+    let loaded = load
+        .output
+        .ok_or_else(|| Reason::UnsupportedReadModifyWrite {
+            detail: "memory load without an output".into(),
+        })?;
     if store.inputs.len() != 2
         || store.inputs[0] != load.inputs[0]
         || store.inputs[1].size != loaded.size
@@ -1786,7 +2274,10 @@ fn prepare_rmw(
                     out.push(copy(old, op.output.unwrap()));
                     seen_load = true;
                 } else {
-                    out.push(copy(op.output.unwrap(), if seen_store { stored } else { old }));
+                    out.push(copy(
+                        op.output.unwrap(),
+                        if seen_store { stored } else { old },
+                    ));
                 }
             }
             OpCode::Store => {
@@ -1800,7 +2291,11 @@ fn prepare_rmw(
     Ok(out)
 }
 
-fn defer_flags(ops: Vec<PcodeOp>, regs: &Registers, fresh: &mut dyn FnMut(u32) -> Varnode) -> Vec<PcodeOp> {
+fn defer_flags(
+    ops: Vec<PcodeOp>,
+    regs: &Registers,
+    fresh: &mut dyn FnMut(u32) -> Varnode,
+) -> Vec<PcodeOp> {
     let mut names = BTreeMap::new();
     let mut deferred = Vec::new();
     let mut out = Vec::with_capacity(ops.len() + 8);
@@ -1826,7 +2321,11 @@ fn defer_flags(ops: Vec<PcodeOp>, regs: &Registers, fresh: &mut dyn FnMut(u32) -
         }
         out.push(op);
     }
-    out.extend(deferred.into_iter().map(|(register, value)| copy(register, value)));
+    out.extend(
+        deferred
+            .into_iter()
+            .map(|(register, value)| copy(register, value)),
+    );
     out
 }
 
@@ -1839,20 +2338,34 @@ fn correct_arithmetic(
 ) -> Result<Vec<PcodeOp>, Reason> {
     let mut ops = ops.to_vec();
     let (_, a, b, result, insert) = if mnem == "ADC" || mnem == "SBB" {
-        let opcode = if mnem == "ADC" { OpCode::IntAdd } else { OpCode::IntSub };
+        let opcode = if mnem == "ADC" {
+            OpCode::IntAdd
+        } else {
+            OpCode::IntSub
+        };
         let primary = ops
             .iter()
             .rposition(|op| {
                 op.opcode == opcode
-                    && op.output.is_some_and(|v| matches!(v.space, Space::Register | Space::Unique))
+                    && op
+                        .output
+                        .is_some_and(|v| matches!(v.space, Space::Register | Space::Unique))
             })
-            .ok_or_else(|| Reason::UnsupportedArithmetic { mnemonic: mnem.into() })?;
+            .ok_or_else(|| Reason::UnsupportedArithmetic {
+                mnemonic: mnem.into(),
+            })?;
         let result = ops[primary].output.unwrap();
         let first_cf = ops
             .iter()
             .position(|op| op.output == Some(flag(regs, "CF")))
-            .ok_or_else(|| Reason::UnsupportedArithmetic { mnemonic: mnem.into() })?;
-        let expected = if mnem == "ADC" { OpCode::IntCarry } else { OpCode::IntLess };
+            .ok_or_else(|| Reason::UnsupportedArithmetic {
+                mnemonic: mnem.into(),
+            })?;
+        let expected = if mnem == "ADC" {
+            OpCode::IntCarry
+        } else {
+            OpCode::IntLess
+        };
         let inputs = if ops[first_cf].opcode == expected {
             ops[first_cf].inputs.clone()
         } else if ops[first_cf].opcode == OpCode::Copy
@@ -1860,10 +2373,14 @@ fn correct_arithmetic(
         {
             vec![result, result]
         } else {
-            return Err(Reason::UnsupportedArithmetic { mnemonic: mnem.into() });
+            return Err(Reason::UnsupportedArithmetic {
+                mnemonic: mnem.into(),
+            });
         };
         if inputs.len() < 2 {
-            return Err(Reason::UnsupportedArithmetic { mnemonic: mnem.into() });
+            return Err(Reason::UnsupportedArithmetic {
+                mnemonic: mnem.into(),
+            });
         }
         let a = fresh(result.size);
         let b = fresh(result.size);
@@ -1871,12 +2388,16 @@ fn correct_arithmetic(
         ops.splice(first_cf..first_cf, [copy(a, inputs[0]), copy(b, inputs[1])]);
         (primary + 2, a, b, result, first_cf + 3)
     } else {
-        let opcode = if mnem == "ADD" || mnem == "INC" { OpCode::IntAdd } else { OpCode::IntSub };
+        let opcode = if mnem == "ADD" || mnem == "INC" {
+            OpCode::IntAdd
+        } else {
+            OpCode::IntSub
+        };
         let Some(primary) = ops.iter().position(|op| {
             op.opcode == opcode
-                && op.output.is_some_and(|v| {
-                    v.space == Space::Register || v.space == Space::Unique
-                })
+                && op
+                    .output
+                    .is_some_and(|v| v.space == Space::Register || v.space == Space::Unique)
         }) else {
             let is_flag = |v: Varnode| {
                 ["CF", "PF", "AF", "ZF", "SF", "OF"].iter().any(|name| {
@@ -1886,10 +2407,13 @@ fn correct_arithmetic(
             };
             let zero_result = ops.iter().any(|op| {
                 op.opcode == OpCode::Copy
-                    && op.inputs.first().is_some_and(|v| {
-                        v.space == Space::Const && v.offset == 0
-                    })
-                    && op.output.is_some_and(|v| v.space == Space::Register && !is_flag(v))
+                    && op
+                        .inputs
+                        .first()
+                        .is_some_and(|v| v.space == Space::Const && v.offset == 0)
+                    && op
+                        .output
+                        .is_some_and(|v| v.space == Space::Register && !is_flag(v))
             });
             if (mnem == "SUB" || mnem == "CMP") && zero_result {
                 let mut out = ops.to_vec();
@@ -1899,12 +2423,16 @@ fn correct_arithmetic(
                 }
                 return Ok(out);
             }
-            return Err(Reason::UnsupportedArithmetic { mnemonic: mnem.into() });
+            return Err(Reason::UnsupportedArithmetic {
+                mnemonic: mnem.into(),
+            });
         };
         let result = ops[primary].output.unwrap();
         let inputs = ops[primary].inputs.clone();
         if inputs.len() < 2 {
-            return Err(Reason::UnsupportedArithmetic { mnemonic: mnem.into() });
+            return Err(Reason::UnsupportedArithmetic {
+                mnemonic: mnem.into(),
+            });
         }
         let a = fresh(result.size);
         let b = fresh(result.size);
@@ -1917,8 +2445,16 @@ fn correct_arithmetic(
     let recipe = vec![
         op(OpCode::IntXor, x, vec![a, b]),
         op(OpCode::IntXor, y, vec![x, result]),
-        op(OpCode::IntRight, z, vec![y, Varnode::constant(4, result.size)]),
-        op(OpCode::IntAnd, flag(regs, "AF"), vec![z, Varnode::constant(1, result.size)]),
+        op(
+            OpCode::IntRight,
+            z,
+            vec![y, Varnode::constant(4, result.size)],
+        ),
+        op(
+            OpCode::IntAnd,
+            flag(regs, "AF"),
+            vec![z, Varnode::constant(1, result.size)],
+        ),
     ];
     ops.splice(insert..insert, recipe);
     Ok(ops)
@@ -1933,14 +2469,23 @@ fn correct_shift(
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
     let mut ops = ops.to_vec();
-    let opcode = if mnem == "SHL" { OpCode::IntLeft } else { OpCode::IntRight };
+    let opcode = if mnem == "SHL" {
+        OpCode::IntLeft
+    } else {
+        OpCode::IntRight
+    };
     let index = ops
         .iter()
         .position(|op| {
             op.opcode == opcode
-                && op.output.is_some_and(|v| matches!(v.space, Space::Register | Space::Unique) && matches!(v.size, 1 | 2 | 4))
+                && op.output.is_some_and(|v| {
+                    matches!(v.space, Space::Register | Space::Unique)
+                        && matches!(v.size, 1 | 2 | 4)
+                })
         })
-        .ok_or_else(|| Reason::UnsupportedShift { mnemonic: mnem.into() })?;
+        .ok_or_else(|| Reason::UnsupportedShift {
+            mnemonic: mnem.into(),
+        })?;
     let source = ops[index].output.unwrap();
     let count = ops[index].inputs[1];
     let original = fresh(source.size);
@@ -1955,14 +2500,22 @@ fn correct_shift(
     let updated = fresh(1);
     let sign_source = if mnem == "SHL" { source } else { original };
     let mut recipe = vec![
-        op(OpCode::IntNotEqual, nonzero, vec![count, Varnode::constant(0, count.size)]),
+        op(
+            OpCode::IntNotEqual,
+            nonzero,
+            vec![count, Varnode::constant(0, count.size)],
+        ),
         PcodeOp {
             opcode: OpCode::BoolNegate,
             output: Some(zero),
             inputs: vec![nonzero],
             userop: None,
         },
-        op(OpCode::IntSLess, sign, vec![sign_source, Varnode::constant(0, sign_source.size)]),
+        op(
+            OpCode::IntSLess,
+            sign,
+            vec![sign_source, Varnode::constant(0, sign_source.size)],
+        ),
     ];
     if mnem == "SHL" {
         let x = fresh(1);
@@ -1988,9 +2541,14 @@ fn correct_sar(
         .iter()
         .position(|op| {
             op.opcode == OpCode::IntSRight
-                && op.output.is_some_and(|v| matches!(v.space, Space::Register | Space::Unique) && matches!(v.size, 1 | 2 | 4))
+                && op.output.is_some_and(|v| {
+                    matches!(v.space, Space::Register | Space::Unique)
+                        && matches!(v.size, 1 | 2 | 4)
+                })
         })
-        .ok_or_else(|| Reason::UnsupportedShift { mnemonic: "SAR".into() })?;
+        .ok_or_else(|| Reason::UnsupportedShift {
+            mnemonic: "SAR".into(),
+        })?;
     let count = ops[index].inputs[1];
     let old_of = fresh(1);
     let nonzero = fresh(1);
@@ -1998,7 +2556,11 @@ fn correct_sar(
     let updated = fresh(1);
     ops.insert(0, copy(old_of, flag(regs, "OF")));
     ops.extend([
-        op(OpCode::IntNotEqual, nonzero, vec![count, Varnode::constant(0, count.size)]),
+        op(
+            OpCode::IntNotEqual,
+            nonzero,
+            vec![count, Varnode::constant(0, count.size)],
+        ),
         PcodeOp {
             opcode: OpCode::BoolNegate,
             output: Some(zero),
@@ -2019,14 +2581,29 @@ fn correct_neg(
     let mut ops = ops.to_vec();
     let result = ops
         .iter()
-        .find(|op| op.opcode == OpCode::Int2Comp && op.output.is_some_and(|v| matches!(v.space, Space::Register | Space::Unique)))
+        .find(|op| {
+            op.opcode == OpCode::Int2Comp
+                && op
+                    .output
+                    .is_some_and(|v| matches!(v.space, Space::Register | Space::Unique))
+        })
         .and_then(|op| op.output)
-        .ok_or_else(|| Reason::UnsupportedArithmetic { mnemonic: "NEG".into() })?;
+        .ok_or_else(|| Reason::UnsupportedArithmetic {
+            mnemonic: "NEG".into(),
+        })?;
     let low = fresh(result.size);
     let af = fresh(1);
     ops.extend([
-        op(OpCode::IntAnd, low, vec![result, Varnode::constant(0xf, result.size)]),
-        op(OpCode::IntNotEqual, af, vec![low, Varnode::constant(0, result.size)]),
+        op(
+            OpCode::IntAnd,
+            low,
+            vec![result, Varnode::constant(0xf, result.size)],
+        ),
+        op(
+            OpCode::IntNotEqual,
+            af,
+            vec![low, Varnode::constant(0, result.size)],
+        ),
         copy(flag(regs, "AF"), af),
     ]);
     Ok(ops)
@@ -2040,10 +2617,23 @@ fn correct_div_cg(
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<CgOp>, Reason> {
     let signed = mnem == "IDIV";
-    let div = if signed { OpCode::IntSDiv } else { OpCode::IntDiv };
-    let rem = if signed { OpCode::IntSRem } else { OpCode::IntRem };
-    let unsupported = || Reason::UnsupportedDivide { mnemonic: mnem.into() };
-    let index = ops.iter().position(|op| op.opcode == div).ok_or_else(unsupported)?;
+    let div = if signed {
+        OpCode::IntSDiv
+    } else {
+        OpCode::IntDiv
+    };
+    let rem = if signed {
+        OpCode::IntSRem
+    } else {
+        OpCode::IntRem
+    };
+    let unsupported = || Reason::UnsupportedDivide {
+        mnemonic: mnem.into(),
+    };
+    let index = ops
+        .iter()
+        .position(|op| op.opcode == div)
+        .ok_or_else(unsupported)?;
     let division = &ops[index];
     let quotient = division.output.ok_or_else(unsupported)?;
     let remainder = ops
@@ -2070,16 +2660,19 @@ fn correct_div_cg(
         if op.opcode == div || op.opcode == rem {
             continue;
         }
-        let matched = outputs.iter().enumerate().position(|(n, (name, source, _))| {
-            let register = regs.require(name);
-            !emitted[n]
-                && op.opcode == OpCode::SubPiece
-                && op.output == Some(register)
-                && op.inputs.len() == 2
-                && op.inputs[0] == *source
-                && op.inputs[1].space == Space::Const
-                && op.inputs[1].offset == 0
-        });
+        let matched = outputs
+            .iter()
+            .enumerate()
+            .position(|(n, (name, source, _))| {
+                let register = regs.require(name);
+                !emitted[n]
+                    && op.opcode == OpCode::SubPiece
+                    && op.output == Some(register)
+                    && op.inputs.len() == 2
+                    && op.inputs[0] == *source
+                    && op.inputs[1].space == Space::Const
+                    && op.inputs[1].offset == 0
+            });
         match matched {
             Some(n) => emitted[n] = true,
             None => return Err(unsupported()),
@@ -2092,12 +2685,22 @@ fn correct_div_cg(
     let mut inputs = division.inputs.clone();
     inputs.push(Varnode::constant(addr as u64, 4));
     let opcode = if signed {
-        Op::Idiv { addr, size: width as u8 }
+        Op::Idiv {
+            addr,
+            size: width as u8,
+        }
     } else {
-        Op::Div { addr, size: width as u8 }
+        Op::Div {
+            addr,
+            size: width as u8,
+        }
     };
     let mut out: Vec<CgOp> = ops[..index].iter().cloned().map(from_pcode).collect();
-    out.push(CgOp { op: opcode, output: Some(result), inputs });
+    out.push(CgOp {
+        op: opcode,
+        output: Some(result),
+        inputs,
+    });
     out.extend(outputs.into_iter().map(|(name, _, offset)| CgOp {
         op: Op::P(OpCode::SubPiece),
         output: Some(regs.require(name)),

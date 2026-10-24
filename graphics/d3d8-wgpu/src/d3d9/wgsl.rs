@@ -182,7 +182,11 @@ fn operand_count(op: u32, major: u32, minor: u32, pixel: bool) -> Option<u32> {
             }
         }
         OP_SINCOS => {
-            if major >= 3 { 2 } else { 4 }
+            if major >= 3 {
+                2
+            } else {
+                4
+            }
         }
         OP_REP | OP_IF => 1,
         OP_IFC | OP_BREAKC => 2,
@@ -1225,7 +1229,10 @@ impl<'a> Gen<'a> {
             5 => "!=",
             6 => "<=",
             _ => {
-                self.fail(format!("comparison control {} is not implemented", inst.ctrl));
+                self.fail(format!(
+                    "comparison control {} is not implemented",
+                    inst.ctrl
+                ));
                 "=="
             }
         };
@@ -1243,9 +1250,7 @@ impl<'a> Gen<'a> {
         let n = self.seq;
         self.seq += 1;
         self.body += &format!("let rep{n} = bitcast<u32>(i32(({count}).x));\n");
-        self.body += &format!(
-            "for (var rep_i{n}: u32 = 0u; rep_i{n} < rep{n}; rep_i{n}++) {{\n"
-        );
+        self.body += &format!("for (var rep_i{n}: u32 = 0u; rep_i{n} < rep{n}; rep_i{n}++) {{\n");
         let stop = self.emit_sequence(code, i, &[OP_ENDREP], loops + 1);
         if stop == Some(OP_ENDREP) {
             *i += 1;

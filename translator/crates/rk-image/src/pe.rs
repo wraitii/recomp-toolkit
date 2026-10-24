@@ -76,7 +76,15 @@ impl<'a> Headers<'a> {
         }
         data.resize(size as usize, 0);
 
-        Some(Self { file, opt, directory_count, preferred_base, size, data, sections })
+        Some(Self {
+            file,
+            opt,
+            directory_count,
+            preferred_base,
+            size,
+            data,
+            sections,
+        })
     }
 
     pub(crate) fn entry_rva(&self) -> Option<u32> {
@@ -91,7 +99,10 @@ impl<'a> Headers<'a> {
         if index >= self.directory_count {
             return Some((0, 0));
         }
-        Some((u32_at(self.file, self.opt + 96 + index * 8)?, u32_at(self.file, self.opt + 100 + index * 8)?))
+        Some((
+            u32_at(self.file, self.opt + 96 + index * 8)?,
+            u32_at(self.file, self.opt + 100 + index * 8)?,
+        ))
     }
 
     pub(crate) fn exec_ranges(&self, base: Addr) -> Vec<(Addr, Addr)> {
@@ -177,7 +188,10 @@ pub(crate) fn parse_headers(
             };
             imports.insert(
                 base + first + (i as u32) * 4,
-                Import { dll: dll.clone(), name: symbol },
+                Import {
+                    dll: dll.clone(),
+                    name: symbol,
+                },
             );
         }
         descriptor += 20;

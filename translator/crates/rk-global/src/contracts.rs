@@ -166,12 +166,21 @@ pub(crate) fn analyze(
     native: &BTreeSet<Addr>,
 ) -> Result<ContractAnalysis> {
     let lanes = LaneMap::get();
-    let has_tails: BTreeMap<Addr, bool> = analysis.ir.iter().map(|(&addr, result)| {
-        let tail = result.as_ref().is_ok_and(|fir| fir.exits.keys().any(|&index| {
-            fir.insns[index as usize].mnemonic.eq_ignore_ascii_case("JMP") && fir.succ[index as usize].is_empty()
-        }));
-        (addr, tail)
-    }).collect();
+    let has_tails: BTreeMap<Addr, bool> = analysis
+        .ir
+        .iter()
+        .map(|(&addr, result)| {
+            let tail = result.as_ref().is_ok_and(|fir| {
+                fir.exits.keys().any(|&index| {
+                    fir.insns[index as usize]
+                        .mnemonic
+                        .eq_ignore_ascii_case("JMP")
+                        && fir.succ[index as usize].is_empty()
+                })
+            });
+            (addr, tail)
+        })
+        .collect();
     let prepared: Vec<(Addr, Option<Prepared>, Option<Reason>)> = analysis
         .ir
         .par_iter()
@@ -843,11 +852,7 @@ impl CallFacts for PreservationCallFacts<'_> {
     }
 }
 
-fn preserved_registers(
-    cg: &CgFunction,
-    candidates: Fields,
-    call_facts: &dyn CallFacts,
-) -> Fields {
+fn preserved_registers(cg: &CgFunction, candidates: Fields, call_facts: &dyn CallFacts) -> Fields {
     let options = BuildOptions {
         policy: Policy::Optimizing,
         call_facts,
@@ -937,10 +942,7 @@ fn stack_info(program: &Program, fir: &FunctionIr) -> (bool, Fields) {
     if leave && pushed.contains(Field::Ebp) {
         saved.insert(Field::Ebp);
     }
-    (
-        !pushed.is_empty() && (!popped.is_empty() || leave),
-        saved,
-    )
+    (!pushed.is_empty() && (!popped.is_empty() || leave), saved)
 }
 
 fn flag_free(mnemonic: &str) -> bool {

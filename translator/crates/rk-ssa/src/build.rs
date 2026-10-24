@@ -2,14 +2,16 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use rk_core::contract::{Field, Fields};
-use rk_core::ir::{OpCode, Space, Varnode};
 use rk_core::ir::Policy;
+use rk_core::ir::{OpCode, Space, Varnode};
 use rk_core::settings::FaultState;
 use rk_core::{Addr, Diagnostic, Lookup, Reason};
 use rk_ir::{CgFunction, CgOp, FlagShape, Op, Registers, SlowInsn, StateKey};
 
 use crate::canonical::{resolve_alias, rewrite_aliases};
-use crate::{Boundary, Dispatch, Entry, FlagRecord, InsnLoc, Ssa, Value, ValueId, BlockId, DISPATCH_BLOCK};
+use crate::{
+    BlockId, Boundary, Dispatch, Entry, FlagRecord, InsnLoc, Ssa, Value, ValueId, DISPATCH_BLOCK,
+};
 
 pub const DEFAULT_VALUE_BUDGET: usize = 40_000_000;
 
@@ -137,10 +139,27 @@ fn base_layout() -> &'static (Vec<StateKey>, Vec<Option<Field>>) {
         let mut keys = Vec::new();
         let mut fields = Vec::new();
         for name in [
-            "EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI", "EIP", "FS_OFFSET",
-            "CF", "PF", "AF", "ZF", "SF", "OF", "DF",
+            "EAX",
+            "ECX",
+            "EDX",
+            "EBX",
+            "ESP",
+            "EBP",
+            "ESI",
+            "EDI",
+            "EIP",
+            "FS_OFFSET",
+            "CF",
+            "PF",
+            "AF",
+            "ZF",
+            "SF",
+            "OF",
+            "DF",
         ] {
-            let Some(v) = regs.register(name) else { continue };
+            let Some(v) = regs.register(name) else {
+                continue;
+            };
             if v.space != Space::Register {
                 continue;
             }
@@ -178,7 +197,10 @@ impl<'a> Builder<'a> {
         let mut extra = std::collections::BTreeSet::new();
         for insn in &cg.insns {
             for op in &insn.ops {
-                for v in std::iter::once(op.output.as_ref()).chain(op.inputs.iter().map(Some)).flatten() {
+                for v in std::iter::once(op.output.as_ref())
+                    .chain(op.inputs.iter().map(Some))
+                    .flatten()
+                {
                     if v.space == Space::Register {
                         for n in 0..v.size as u64 {
                             let offset = (v.offset + n) as u32;
@@ -199,15 +221,21 @@ impl<'a> Builder<'a> {
         let mut seen = Lookup::default();
         for key in &keys {
             if seen.insert(*key, ()).is_some() {
-                return Err(Diagnostic::new(cg.addr, Reason::UnsupportedVarnode {
-                    detail: format!("duplicate state key {key:?}"),
-                }));
+                return Err(Diagnostic::new(
+                    cg.addr,
+                    Reason::UnsupportedVarnode {
+                        detail: format!("duplicate state key {key:?}"),
+                    },
+                ));
             }
         }
-        let key_index: Lookup<StateKey, usize> = keys.iter().enumerate().map(|(i, key)| (*key, i)).collect();
+        let key_index: Lookup<StateKey, usize> =
+            keys.iter().enumerate().map(|(i, key)| (*key, i)).collect();
         let mut access_indices = Vec::new();
         for name in ["ESP", "EBP", "EIP"] {
-            let Some(register) = regs.register(name) else { continue };
+            let Some(register) = regs.register(name) else {
+                continue;
+            };
             if register.space != Space::Register {
                 continue;
             }
@@ -254,21 +282,30 @@ impl<'a> Builder<'a> {
     fn run(mut self, cg: &CgFunction) -> Result<Ssa, Diagnostic> {
         let n = cg.insns.len();
         if cg.succ.len() != n {
-            return Err(Diagnostic::new(cg.addr, Reason::UnsupportedControlFlow {
-                detail: "successor table length mismatch".into(),
-            }));
+            return Err(Diagnostic::new(
+                cg.addr,
+                Reason::UnsupportedControlFlow {
+                    detail: "successor table length mismatch".into(),
+                },
+            ));
         }
         let mut roots = Vec::new();
         roots.push(cg.index_of(cg.addr).ok_or_else(|| {
-            Diagnostic::new(cg.addr, Reason::UnsupportedControlFlow {
-                detail: "function address is not an instruction".into(),
-            })
+            Diagnostic::new(
+                cg.addr,
+                Reason::UnsupportedControlFlow {
+                    detail: "function address is not an instruction".into(),
+                },
+            )
         })?);
         for &entry in &cg.entries {
             roots.push(cg.index_of(entry).ok_or_else(|| {
-                Diagnostic::new(entry, Reason::UnsupportedControlFlow {
-                    detail: "entry is not an instruction boundary".into(),
-                })
+                Diagnostic::new(
+                    entry,
+                    Reason::UnsupportedControlFlow {
+                        detail: "entry is not an instruction boundary".into(),
+                    },
+                )
             })?);
         }
         roots.sort_unstable();
@@ -283,9 +320,12 @@ impl<'a> Builder<'a> {
             reachable[i as usize] = true;
             for &s in &cg.succ[i as usize] {
                 if s as usize >= n {
-                    return Err(Diagnostic::new(cg.insns[i as usize].addr, Reason::UnsupportedControlFlow {
-                        detail: format!("successor {s} outside the instruction table"),
-                    }));
+                    return Err(Diagnostic::new(
+                        cg.insns[i as usize].addr,
+                        Reason::UnsupportedControlFlow {
+                            detail: format!("successor {s} outside the instruction table"),
+                        },
+                    ));
                 }
                 pending.push(s);
             }
@@ -305,7 +345,10 @@ impl<'a> Builder<'a> {
                 && cg.insns.get(i + 1).is_some_and(|next| {
                     cg.insns[i].addr + u32::from(cg.insns[i].length) == next.addr
                 });
-            if !fallthrough || cg.exits.contains_key(&(i as u32)) || cg.import_tails.contains_key(&(i as u32)) {
+            if !fallthrough
+                || cg.exits.contains_key(&(i as u32))
+                || cg.import_tails.contains_key(&(i as u32))
+            {
                 for &s in succ {
                     leader[s as usize] = true;
                 }
@@ -333,7 +376,10 @@ impl<'a> Builder<'a> {
             }
             let id = blocks.len() as BlockId;
             for i in start..end {
-                self.loc[i] = Some(InsnLoc { block: id, position: (i - start) as u32 });
+                self.loc[i] = Some(InsnLoc {
+                    block: id,
+                    position: (i - start) as u32,
+                });
             }
             blocks.push(crate::Block {
                 start: start as u32,
@@ -348,7 +394,9 @@ impl<'a> Builder<'a> {
         for id in 0..blocks.len() {
             let last = (blocks[id].end - 1) as usize;
             for &successor in &cg.succ[last] {
-                let target = self.loc[successor as usize].expect("reachable successor block").block;
+                let target = self.loc[successor as usize]
+                    .expect("reachable successor block")
+                    .block;
                 if !blocks[target as usize].preds.contains(&(id as BlockId)) {
                     blocks[target as usize].preds.push(id as BlockId);
                 }
@@ -409,10 +457,12 @@ impl<'a> Builder<'a> {
                     ..Pending::default()
                 };
                 let cf = cf_register();
-                let touches_cf = |v: Varnode| {
-                    v.space == Space::Register && v.offset == cf.offset && v.size == 1
-                };
-                let reads_cf = insn.ops.iter().any(|op| op.inputs.iter().copied().any(touches_cf));
+                let touches_cf =
+                    |v: Varnode| v.space == Space::Register && v.offset == cf.offset && v.size == 1;
+                let reads_cf = insn
+                    .ops
+                    .iter()
+                    .any(|op| op.inputs.iter().copied().any(touches_cf));
                 let writes_cf = insn.ops.iter().any(|op| op.output.is_some_and(touches_cf));
                 if reads_cf && writes_cf {
                     let cf_key = StateKey::Register(cf.offset as u32);
@@ -422,9 +472,12 @@ impl<'a> Builder<'a> {
                 }
                 for cg_op in &insn.ops {
                     if self.values.len() >= self.opts.value_budget {
-                        return Err(Diagnostic::new(insn.addr, Reason::SsaBudget {
-                            detail: format!("more than {} values", self.opts.value_budget),
-                        }));
+                        return Err(Diagnostic::new(
+                            insn.addr,
+                            Reason::SsaBudget {
+                                detail: format!("more than {} values", self.opts.value_budget),
+                            },
+                        ));
                     }
                     self.current_addr = insn.addr;
                     if let Err(mut diagnostic) = self.apply_op(
@@ -466,7 +519,11 @@ impl<'a> Builder<'a> {
         let alias = self.trivial_phi_aliases();
 
         let dispatch = Dispatch {
-            loads: keys.iter().copied().zip(self.dispatch_loads.iter().copied()).collect(),
+            loads: keys
+                .iter()
+                .copied()
+                .zip(self.dispatch_loads.iter().copied())
+                .collect(),
         };
         let mut ssa = Ssa {
             addr: cg.addr,
@@ -511,7 +568,11 @@ impl<'a> Builder<'a> {
         }
         let value = self.defined(index, block)?;
         state[index] = Some(value);
-        if block != DISPATCH_BLOCK && !self.entry_reads[block as usize].iter().any(|(key, _)| *key == index) {
+        if block != DISPATCH_BLOCK
+            && !self.entry_reads[block as usize]
+                .iter()
+                .any(|(key, _)| *key == index)
+        {
             self.entry_reads[block as usize].push((index, value));
         }
         Ok(value)
@@ -532,9 +593,15 @@ impl<'a> Builder<'a> {
         }
         let preds = self.preds[block as usize].clone();
         if preds.is_empty() {
-            return Err(Diagnostic::new(0, Reason::UnsupportedControlFlow {
-                detail: format!("block {block} has no predecessor for {:?}", self.keys[index]),
-            }));
+            return Err(Diagnostic::new(
+                0,
+                Reason::UnsupportedControlFlow {
+                    detail: format!(
+                        "block {block} has no predecessor for {:?}",
+                        self.keys[index]
+                    ),
+                },
+            ));
         }
         if preds.len() == 1 && self.sealed(block) {
             return self.defined(index, preds[0]);
@@ -557,7 +624,12 @@ impl<'a> Builder<'a> {
             }
         }
         if !missing.is_empty() {
-            self.pending_phis.push(PendingPhi { value: phi, index, block, positions: missing });
+            self.pending_phis.push(PendingPhi {
+                value: phi,
+                index,
+                block,
+                positions: missing,
+            });
         }
         Ok(phi)
     }
@@ -606,8 +678,8 @@ impl<'a> Builder<'a> {
                 if alias.contains_key(&id) {
                     continue;
                 }
-                let args = &self.args[value.args_start as usize
-                    ..(value.args_start + value.args_len) as usize];
+                let args = &self.args
+                    [value.args_start as usize..(value.args_start + value.args_len) as usize];
                 let mut replacement = None;
                 let mut consistent = true;
                 for &arg in args {
@@ -664,18 +736,41 @@ impl<'a> Builder<'a> {
             Some(FlagShape::Logic) => crate::FlagKind::Logic,
             None => return Ok(()),
         };
-        let operands = self.pending.ab.take().filter(|operands| operands.len() >= 2).unwrap_or(args);
+        let operands = self
+            .pending
+            .ab
+            .take()
+            .filter(|operands| operands.len() >= 2)
+            .unwrap_or(args);
         let mut flags = BTreeMap::new();
-        for field in [Field::Cf, Field::Pf, Field::Af, Field::Zf, Field::Sf, Field::Of] {
-            if let Some(index) = self.field_of.iter().position(|candidate| *candidate == Some(field)) {
+        for field in [
+            Field::Cf,
+            Field::Pf,
+            Field::Af,
+            Field::Zf,
+            Field::Sf,
+            Field::Of,
+        ] {
+            if let Some(index) = self
+                .field_of
+                .iter()
+                .position(|candidate| *candidate == Some(field))
+            {
                 flags.insert(field, self.state_slot(state, index, block)?);
             }
         }
         let writes_cf = !matches!(kind, crate::FlagKind::Inc | crate::FlagKind::Dec);
-        let defined: Fields = [Field::Cf, Field::Pf, Field::Af, Field::Zf, Field::Sf, Field::Of]
-            .into_iter()
-            .filter(|field| writes_cf || *field != Field::Cf)
-            .collect();
+        let defined: Fields = [
+            Field::Cf,
+            Field::Pf,
+            Field::Af,
+            Field::Zf,
+            Field::Sf,
+            Field::Of,
+        ]
+        .into_iter()
+        .filter(|field| writes_cf || *field != Field::Cf)
+        .collect();
         self.flags.push(FlagRecord {
             kind,
             size,
@@ -700,7 +795,12 @@ impl<'a> Builder<'a> {
         let id = self.values.len() as ValueId;
         let start = self.args.len() as u32;
         self.args.extend_from_slice(args);
-        self.values.push(Value { op, size, args_start: start, args_len: args.len() as u32 });
+        self.values.push(Value {
+            op,
+            size,
+            args_start: start,
+            args_len: args.len() as u32,
+        });
         self.value_addr.push(self.current_addr);
         id
     }
@@ -709,7 +809,12 @@ impl<'a> Builder<'a> {
         let id = self.values.len() as ValueId;
         let start = self.args.len() as u32;
         self.args.extend(std::iter::repeat_n(0, preds));
-        self.values.push(Value { op: Op::Phi, size, args_start: start, args_len: preds as u32 });
+        self.values.push(Value {
+            op: Op::Phi,
+            size,
+            args_start: start,
+            args_len: preds as u32,
+        });
         self.value_addr.push(self.current_addr);
         id
     }
@@ -719,11 +824,25 @@ impl<'a> Builder<'a> {
         self.args[start + position] = arg;
     }
 
-    fn boundary(&mut self, at: ValueId, state: &mut [Option<ValueId>], block: BlockId, access: bool) -> Result<(), Diagnostic> {
-        let count = if access { self.access_indices.len() } else { self.keys.len() };
+    fn boundary(
+        &mut self,
+        at: ValueId,
+        state: &mut [Option<ValueId>],
+        block: BlockId,
+        access: bool,
+    ) -> Result<(), Diagnostic> {
+        let count = if access {
+            self.access_indices.len()
+        } else {
+            self.keys.len()
+        };
         let mut resolved = Vec::with_capacity(count);
         for position in 0..count {
-            let index = if access { self.access_indices[position] } else { position };
+            let index = if access {
+                self.access_indices[position]
+            } else {
+                position
+            };
             let key = self.keys[index];
             resolved.push((key, self.state_slot(state, index, block)?));
         }
@@ -731,7 +850,11 @@ impl<'a> Builder<'a> {
         let state_len = resolved.len() as u32;
         self.state_arena.extend(resolved);
         let index = self.boundaries.len() as u32;
-        self.boundaries.push(Boundary { at, state_start, state_len });
+        self.boundaries.push(Boundary {
+            at,
+            state_start,
+            state_len,
+        });
         self.boundary_index.insert(at, index);
         Ok(())
     }
@@ -805,9 +928,12 @@ impl<'a> Builder<'a> {
             }
             Op::CallInd => {
                 let target = cg_op.inputs.first().ok_or_else(|| {
-                    Diagnostic::new(addr, Reason::UnsupportedCall {
-                        detail: "indirect call without a target".into(),
-                    })
+                    Diagnostic::new(
+                        addr,
+                        Reason::UnsupportedCall {
+                            detail: "indirect call without a target".into(),
+                        },
+                    )
                 })?;
                 let target = self.read(target, state, temps, block)?;
                 let memory = self.state_slot(state, memory_index, block)?;
@@ -876,7 +1002,11 @@ impl<'a> Builder<'a> {
                 }
                 ops.push(value);
             }
-            Op::Return | Op::Tail { .. } | Op::ImportTail { .. } | Op::BranchInd | Op::Breakpoint => {
+            Op::Return
+            | Op::Tail { .. }
+            | Op::ImportTail { .. }
+            | Op::BranchInd
+            | Op::Breakpoint => {
                 let mut args = Vec::new();
                 for input in &cg_op.inputs {
                     args.push(self.read(input, state, temps, block)?);
@@ -947,11 +1077,22 @@ impl<'a> Builder<'a> {
                 }
                 ops.push(value);
             }
-            Op::Input(_) | Op::Const(_) | Op::Target(_) | Op::Phi | Op::Byte(_) | Op::Pack
-            | Op::Memory | Op::StateReload(_) | Op::StateKeep(_) | Op::CcKind(_) => {
-                return Err(Diagnostic::new(addr, Reason::UnsupportedVarnode {
-                    detail: format!("synthetic op in lowered instruction {:?}", cg_op.op),
-                }));
+            Op::Input(_)
+            | Op::Const(_)
+            | Op::Target(_)
+            | Op::Phi
+            | Op::Byte(_)
+            | Op::Pack
+            | Op::Memory
+            | Op::StateReload(_)
+            | Op::StateKeep(_)
+            | Op::CcKind(_) => {
+                return Err(Diagnostic::new(
+                    addr,
+                    Reason::UnsupportedVarnode {
+                        detail: format!("synthetic op in lowered instruction {:?}", cg_op.op),
+                    },
+                ));
             }
         }
         Ok(())
@@ -978,13 +1119,16 @@ impl<'a> Builder<'a> {
         };
         let cleanup = (self.opts.policy != Policy::Conservative)
             .then(|| self.opts.call_facts.stack(self.current_addr, target))
-            .flatten().map(|effect| effect.cleanup);
+            .flatten()
+            .map(|effect| effect.cleanup);
         let esp = Registers::get().require("ESP");
         let next_esp = if let Some(cleanup) = cleanup {
             let old = self.read(&esp, state, &mut Lookup::default(), block)?;
             let delta = self.value(Op::Const(4u32.wrapping_add(cleanup as u32) as u64), 4, &[]);
             Some(self.value(Op::P(OpCode::IntAdd), 4, &[old, delta]))
-        } else { None };
+        } else {
+            None
+        };
         for index in 0..self.keys.len() {
             let key = self.keys[index];
             if key == StateKey::Memory {
@@ -1045,9 +1189,12 @@ impl<'a> Builder<'a> {
         block: BlockId,
     ) -> Result<ValueId, Diagnostic> {
         if varnode.size == 0 || varnode.size > 8 {
-            return Err(Diagnostic::new(0, Reason::UnsupportedVarnode {
-                detail: format!("{} byte varnode", varnode.size),
-            }));
+            return Err(Diagnostic::new(
+                0,
+                Reason::UnsupportedVarnode {
+                    detail: format!("{} byte varnode", varnode.size),
+                },
+            ));
         }
         match varnode.space {
             Space::Const => Ok(self.value(Op::Const(varnode.offset), varnode.size as u8, &[])),
@@ -1056,9 +1203,15 @@ impl<'a> Builder<'a> {
                 for n in 0..varnode.size as u64 {
                     let key = StateKey::Register((varnode.offset + n) as u32);
                     let index = self.key_index.get(&key).copied().ok_or_else(|| {
-                        Diagnostic::new(0, Reason::UnsupportedVarnode {
-                            detail: format!("unmapped register byte {:08x}", varnode.offset + n),
-                        })
+                        Diagnostic::new(
+                            0,
+                            Reason::UnsupportedVarnode {
+                                detail: format!(
+                                    "unmapped register byte {:08x}",
+                                    varnode.offset + n
+                                ),
+                            },
+                        )
                     })?;
                     lanes.push(self.state_slot(state, index, block)?);
                 }
@@ -1072,9 +1225,12 @@ impl<'a> Builder<'a> {
                 let mut lanes = Vec::with_capacity(varnode.size as usize);
                 for n in 0..varnode.size as u64 {
                     lanes.push(*temps.get(&(varnode.offset + n, 1)).ok_or_else(|| {
-                        Diagnostic::new(0, Reason::SsaUniqueBeforeDef {
-                            detail: format!("unique {:08x} byte {n}", varnode.offset),
-                        })
+                        Diagnostic::new(
+                            0,
+                            Reason::SsaUniqueBeforeDef {
+                                detail: format!("unique {:08x} byte {n}", varnode.offset),
+                            },
+                        )
                     })?);
                 }
                 if lanes.len() == 1 {
@@ -1083,9 +1239,12 @@ impl<'a> Builder<'a> {
                     Ok(self.value(Op::Pack, varnode.size as u8, &lanes))
                 }
             }
-            Space::Ram => Err(Diagnostic::new(0, Reason::UnsupportedDirectRam {
-                detail: "raw direct-ram varnode reached SSA".into(),
-            })),
+            Space::Ram => Err(Diagnostic::new(
+                0,
+                Reason::UnsupportedDirectRam {
+                    detail: "raw direct-ram varnode reached SSA".into(),
+                },
+            )),
         }
     }
 
@@ -1101,9 +1260,15 @@ impl<'a> Builder<'a> {
                 for n in 0..varnode.size as u64 {
                     let key = StateKey::Register((varnode.offset + n) as u32);
                     let index = self.key_index.get(&key).copied().ok_or_else(|| {
-                        Diagnostic::new(0, Reason::UnsupportedVarnode {
-                            detail: format!("unmapped register byte {:08x}", varnode.offset + n),
-                        })
+                        Diagnostic::new(
+                            0,
+                            Reason::UnsupportedVarnode {
+                                detail: format!(
+                                    "unmapped register byte {:08x}",
+                                    varnode.offset + n
+                                ),
+                            },
+                        )
                     })?;
                     state[index] = Some(if varnode.size == 1 {
                         value
@@ -1126,15 +1291,22 @@ impl<'a> Builder<'a> {
                 }
                 Ok(())
             }
-            _ => Err(Diagnostic::new(0, Reason::UnsupportedVarnode {
-                detail: format!("unsupported output space {:?}", varnode.space),
-            })),
+            _ => Err(Diagnostic::new(
+                0,
+                Reason::UnsupportedVarnode {
+                    detail: format!("unsupported output space {:?}", varnode.space),
+                },
+            )),
         }
     }
 }
 
 fn key_size(key: StateKey) -> u8 {
-    if key == StateKey::Memory { 0 } else { 1 }
+    if key == StateKey::Memory {
+        0
+    } else {
+        1
+    }
 }
 
 fn rpo(roots: &[BlockId], succ: &[Vec<BlockId>]) -> Vec<BlockId> {
