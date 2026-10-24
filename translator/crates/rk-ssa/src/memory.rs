@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use rk_core::contract::Field;
 use rk_core::ir::OpCode;
 use rk_core::memory::{Address, Base, Effects, Footprint, Range};
 use rk_core::{Lookup, LookupSet};
@@ -188,11 +189,115 @@ fn identified(range: Range) -> bool {
     )
 }
 
+#[derive(Default)]
+struct PrivateFrame {
+    independent: Lookup<ValueId, i32>,
+}
+
+impl PrivateFrame {
+    fn new(s: &Ssa, accesses: &BTreeMap<ValueId, Access>) -> Self {
+        if !s.assume_private_stack
+            || s.entries.len() != 1
+            || s.entries[0].addr != s.addr
+            || accesses.values().any(|access| access.location.is_none())
+        {
+            return Self::default();
+        }
+        for block in &s.blocks {
+            for &id in &block.ops {
+                let op = s.value(id).op;
+                if rk_ir::properties(op).opaque
+                    || matches!(
+                        op,
+                        Op::Seh(_)
+                            | Op::Tail { .. }
+                            | Op::ImportTail { .. }
+                            | Op::BranchInd
+                            | Op::Breakpoint
+                    )
+                    || matches!(op, Op::Branch { .. } | Op::CBranch { .. })
+                        && s.boundary(id).is_some()
+                {
+                    return Self::default();
+                }
+            }
+        }
+        let mut derived = vec![false; s.values.len()];
+        let mut users = vec![Vec::new(); s.values.len()];
+        for (index, value) in s.values.iter().enumerate() {
+            if value.size != 0 && rk_ir::properties(value.op).pure {
+                for &arg in s.args(index as ValueId) {
+                    users[arg as usize].push(index);
+                }
+            }
+        }
+        let mut pending = VecDeque::new();
+        for &key in rk_ir::lanes(Field::Esp) {
+            if let Some(id) = s.input(key) {
+                derived[id as usize] = true;
+                pending.push_back(id as usize);
+            }
+        }
+        while let Some(id) = pending.pop_front() {
+            for &user in &users[id] {
+                if !derived[user] {
+                    derived[user] = true;
+                    pending.push_back(user);
+                }
+            }
+        }
+        if accesses
+            .keys()
+            .any(|&id| s.value(id).op == Op::P(OpCode::Store) && derived[s.args(id)[2] as usize])
+        {
+            return Self::default();
+        }
+        let mut addresses = Addresses::new(s);
+        let mut independent = Lookup::default();
+        for (&id, access) in accesses {
+            if access.location.is_none() || derived[s.args(id)[1] as usize] {
+                continue;
+            }
+            if let Address::Known {
+                base: Base::Frame,
+                offset,
+                span: 0,
+            } = addresses.state(id, Field::Esp)
+            {
+                if (offset as i32) < 0 {
+                    independent.insert(id, offset as i32);
+                }
+            }
+        }
+        Self { independent }
+    }
+
+    fn disjoint(&self, effect: ValueId, range: Range) -> bool {
+        let Address::Known {
+            base: Base::Frame,
+            offset,
+            span: 0,
+        } = range.address
+        else {
+            return false;
+        };
+        let start = i64::from(offset as i32);
+        range.size != 0
+            && start < 0
+            && start + i64::from(range.size) <= 0
+            && self
+                .independent
+                .get(&effect)
+                .is_some_and(|&esp| i64::from(esp) <= start)
+    }
+}
+
 pub fn partition(s: &mut Ssa, facts: Option<&dyn CallFacts>) -> bool {
     if s.memory_partitioned {
         return true;
     }
     let accesses = accesses(s, facts);
+    let private_frame = PrivateFrame::new(s, &accesses);
     let mut ranges: BTreeSet<Range> = accesses
         .values()
         .filter_map(|access| access.location)
@@ -210,6 +315,7 @@ pub fn partition(s: &mut Ssa, facts: Option<&dyn CallFacts>) -> bool {
         s,
         accesses: &accesses,
         regions: &regions,
+        private_frame: &private_frame,
         old_len,
         cache: Lookup::default(),
         aliases: Lookup::default(),
@@ -238,7 +344,8 @@ pub fn partition(s: &mut Ssa, facts: Option<&dyn CallFacts>) -> bool {
                 }
                 let touched = match region {
                     Some(region) => {
-                        !access.reads.disjoint(*region) || !access.writes.disjoint(*region)
+                        !projection.private_frame.disjoint(effect, *region)
+                            && (!access.reads.disjoint(*region) || !access.writes.disjoint(*region))
                     }
                     None => {
                         access.reads.opaque
@@ -313,6 +420,7 @@ struct Projection<'a> {
     s: &'a mut Ssa,
     accesses: &'a BTreeMap<ValueId, Access>,
     regions: &'a [Option<Range>],
+    private_frame: &'a PrivateFrame,
     old_len: usize,
     cache: Lookup<(ValueId, usize), ValueId>,
     aliases: Lookup<ValueId, ValueId>,
@@ -390,7 +498,9 @@ impl Projection<'_> {
         };
         let prior = self.s.args(effect)[0];
         let touched = match self.regions[region] {
-            Some(range) => !access.writes.disjoint(range),
+            Some(range) => {
+                !self.private_frame.disjoint(effect, range) && !access.writes.disjoint(range)
+            }
             None => {
                 access.writes.opaque
                     || (!access.writes.ranges.is_empty() && access.location.is_none())

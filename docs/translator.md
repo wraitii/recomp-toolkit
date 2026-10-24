@@ -149,6 +149,18 @@ Production call dispatch remains opaque to memory forwarding because hooks and s
 handoffs can add effects; original-code summaries feed the explicitly enabled offline
 inference below.
 
+`[translate] assume_private_stack` defaults to true in Rust production translation;
+false restores conservative frame aliasing. `exposed_stack_functions = [0x00401000]`
+disables the assumption for the listed function owners in the main image, including
+their compiled variants. `DIVERGENCE(original):` newly allocated, unescaped frame
+storage is assumed inaccessible through pointers independent of entry ESP, including
+pre-existing pointers and wrapping arithmetic. Explicit ESP-derived accesses still
+alias normally. The current implementation requires a single entry, no calls,
+opaque effects or escaping branches, and no ESP-derived value stored to memory.
+Each exempted write needs a proved current ESP below the entire negative-offset
+slot; arguments and the return address remain conservative. Guest stores remain,
+and original-code analysis summaries do not use this assumption.
+
 `[translate] stack_memory` enables additional original-code summaries for offline
 inference; it defaults to false. Ghost Recon enables it with the explicit premise
 that no concurrent guest execution interferes with these calls. This setting does

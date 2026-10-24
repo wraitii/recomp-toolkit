@@ -29,6 +29,7 @@ pub struct PlanOptions<'a> {
     pub private_targets: &'a BTreeSet<Addr>,
     pub descriptors: bool,
     pub coalesce_roots: bool,
+    pub assume_private_stack: bool,
 }
 
 pub struct PlannedFunction {
@@ -51,6 +52,7 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     prepare_options.policy = opts.policy;
     prepare_options.fault_state = opts.fault_state;
     prepare_options.coalesce_roots = opts.coalesce_roots;
+    prepare_options.assume_private_stack = opts.assume_private_stack;
     let (ssa, base) = prepare_with_publications(cg, &prepare_options)?;
     let base = base.unwrap_or_else(|| publications(&ssa, opts.call_facts));
     let (publish, guard) = reduce_publications(&ssa, &base, opts.call_facts);

@@ -239,6 +239,8 @@ struct BodyContext<'a> {
     x87_modes: rk_x87::ModeInput,
     x87_options: rk_x87::Options,
     fault_state: rk_core::settings::FaultState,
+    assume_private_stack: bool,
+    exposed_stack_functions: &'a BTreeSet<Addr>,
     known_entries: &'a BTreeSet<Addr>,
     setjmp_targets: &'a BTreeSet<Addr>,
     guest_calls: &'a BTreeSet<Addr>,
@@ -291,6 +293,8 @@ fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::
             private_targets: ctx.private_targets,
             descriptors: ctx.switches.descriptors,
             coalesce_roots: ctx.switches.coalesce_roots,
+            assume_private_stack: ctx.assume_private_stack
+                && !ctx.exposed_stack_functions.contains(&ir.addr),
         },
     )
 }
@@ -526,6 +530,8 @@ fn build_bodies(
             force: x87_mode.into(),
         },
         fault_state: settings.fault_state,
+        assume_private_stack: settings.assume_private_stack,
+        exposed_stack_functions: &settings.exposed_stack_functions,
         known_entries: &known_entries,
         setjmp_targets: &setjmp_targets,
         guest_calls,
@@ -783,6 +789,7 @@ fn dump_fir(
 fn dump_ssa(
     program: &Program,
     analysis: &rk_frontend::Analysis,
+    settings: &Settings,
     only: &[Addr],
     prepared: bool,
     switches: Switches,
@@ -804,6 +811,8 @@ fn dump_ssa(
         if prepared {
             let options = rk_ssa::PrepareOptions {
                 coalesce_roots: switches.coalesce_roots,
+                assume_private_stack: settings.assume_private_stack
+                    && !settings.exposed_stack_functions.contains(&owner),
                 ..Default::default()
             };
             match rk_ssa::prepare(&cg, &options) {
@@ -1212,10 +1221,14 @@ fn main() -> Result<()> {
             dump_fir(&program, &analysis, &args.only, &mut out)?;
         }
         if args.wants(Stage::Ssa) {
-            dump_ssa(&program, &analysis, &args.only, false, switches, &mut out)?;
+            dump_ssa(
+                &program, &analysis, &settings, &args.only, false, switches, &mut out,
+            )?;
         }
         if args.wants(Stage::Prepared) {
-            dump_ssa(&program, &analysis, &args.only, true, switches, &mut out)?;
+            dump_ssa(
+                &program, &analysis, &settings, &args.only, true, switches, &mut out,
+            )?;
         }
         if args.wants(Stage::Global) {
             dump_global(&program, &global, &args.only, &mut out)?;

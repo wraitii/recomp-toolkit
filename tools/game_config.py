@@ -61,6 +61,7 @@ TRANSLATE_DEFAULTS = {
     "fault_state": "relaxed",
     "msvc_x87_convention": True,
     "call_contracts": True,
+    "assume_private_stack": True,
     "private_leaf_contracts": False,
     "private_input_arguments": False,
     "private_input_registers": {},
@@ -501,6 +502,13 @@ def load(game_dir, build_root=None):
     # ssa-call-contracts). False publishes every field at every call.
     if not isinstance(translate.setdefault("call_contracts", TRANSLATE_DEFAULTS["call_contracts"]), bool):
         raise ValueError("%s: [translate] call_contracts must be a boolean" % source)
+    if type(translate.setdefault("assume_private_stack", TRANSLATE_DEFAULTS["assume_private_stack"])) is not bool:
+        raise ValueError("%s: [translate] assume_private_stack must be a boolean" % source)
+    exposed = translate.setdefault("exposed_stack_functions", [])
+    if (not isinstance(exposed, list)
+            or any(type(v) is not int or not 0 <= v <= 0xffffffff for v in exposed)
+            or len(set(exposed)) != len(exposed)):
+        raise ValueError("%s: [translate] exposed_stack_functions must be a list of unique 32-bit addresses" % source)
     if not isinstance(translate.setdefault("x87_cw_clone", TRANSLATE_DEFAULTS["x87_cw_clone"]), bool):
         raise ValueError("%s: [translate] x87_cw_clone must be a boolean" % source)
     if not isinstance(translate.setdefault("private_leaf_contracts", TRANSLATE_DEFAULTS["private_leaf_contracts"]), bool):

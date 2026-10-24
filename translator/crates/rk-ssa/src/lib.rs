@@ -141,6 +141,7 @@ pub struct Ssa {
     pub loc: Vec<Option<InsnLoc>>,
     pub value_addr: Vec<Addr>,
     pub(crate) memory_partitioned: bool,
+    pub(crate) assume_private_stack: bool,
     pub(crate) phi_key: Lookup<ValueId, usize>,
     pub(crate) entry_reads: Vec<Vec<(usize, ValueId)>>,
     pub(crate) exit_state: Vec<Vec<Option<ValueId>>>,

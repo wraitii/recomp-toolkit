@@ -548,6 +548,7 @@ impl<'a> Builder<'a> {
             loc: self.loc,
             value_addr: self.value_addr,
             memory_partitioned: false,
+            assume_private_stack: false,
             phi_key: self.phi_key,
             entry_reads: self.entry_reads,
             exit_state: self.exit_state,

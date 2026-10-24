@@ -19,6 +19,7 @@ pub struct PrepareOptions<'a> {
     pub lazy_publications: bool,
     pub fault_state: FaultState,
     pub coalesce_roots: bool,
+    pub assume_private_stack: bool,
 }
 
 impl Default for PrepareOptions<'static> {
@@ -38,6 +39,7 @@ impl<'a> PrepareOptions<'a> {
             lazy_publications: true,
             fault_state: FaultState::Relaxed,
             coalesce_roots: true,
+            assume_private_stack: false,
         }
     }
 }
@@ -59,6 +61,7 @@ pub fn prepare_with_publications(
     let mut ssa = crate::build::build_with_faults(cg, &build_options, opts.fault_state)
         .map_err(rk_core::Error::Diagnostic)?;
     crate::validate(&ssa)?;
+    ssa.assume_private_stack = opts.assume_private_stack && opts.policy == Policy::Optimizing;
     canonicalize(&mut ssa, opts.signed_sub);
     forward(&mut ssa, Some(opts.call_facts));
     if opts.policy == Policy::Optimizing && opts.fault_state == FaultState::Relaxed {
