@@ -135,8 +135,15 @@ SSA memory uses exact entry-ESP and absolute ranges plus residual memory. EBP ac
 need a proved frame derivation. Bounded addresses carry may-write footprints; unknown
 reads depend on every possibly aliased range and residual memory. May-definitions retain
 the prior version, and disjoint writes retain the existing range definition. Different
-address roots alone never prove disjointness. Read/write summaries use the call-graph
-SCC fixed point, translate frame offsets at each call site, and widen unresolved or
+address roots alone never prove disjointness. When every incoming memory path establishes
+the contents of an exact frame or absolute slot, forwarding builds a shared value phi
+for its joins and loop backedges; unknown definitions retain the load. Guest stores remain.
+Projections share by exact address, width and memory version, preserving predecessor
+order. Provisional phis close cycles, but publication requires every input to succeed
+and a value other than the reload itself to anchor the graph. Failed attempts discard
+their provisional values without caching them; depth and memo limits retain the load.
+Read/write summaries use the call-graph SCC fixed point, translate frame offsets at
+each call site, and widen unresolved or
 unbounded effects to opaque memory. Types and local layouts are not alias proofs.
 Production call dispatch remains opaque to memory forwarding because hooks and scheduler
 handoffs can add effects; original-code summaries feed the explicitly enabled offline

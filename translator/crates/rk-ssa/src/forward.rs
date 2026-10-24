@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use rk_core::ir::OpCode;
+use rk_core::memory::{Address, Base, Range};
 use rk_core::{Lookup, LookupSet};
 use rk_ir::x87::{MemoryEffect, X87Op};
 use rk_ir::Op;
@@ -10,6 +13,14 @@ use crate::{CallFacts, Ssa, ValueId};
 pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
     crate::memory::partition(s, call_facts);
     let mut addresses = Addresses::new(s);
+    let locations: Lookup<ValueId, Address> = s
+        .blocks
+        .iter()
+        .flat_map(|block| &block.ops)
+        .filter(|&&id| matches!(s.value(id).op, Op::P(OpCode::Load | OpCode::Store)))
+        .map(|&id| (id, addresses.get(s.args(id)[1])))
+        .collect();
+    let mut candidates = Vec::new();
     let mut alias: Lookup<ValueId, ValueId> = Lookup::default();
     let mut integers = Vec::new();
     for block in &s.blocks {
@@ -88,6 +99,17 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
                     }
                 }
             }
+            if failed
+                && matches!(
+                    target,
+                    Address::Known {
+                        base: Base::Frame | Base::Absolute,
+                        ..
+                    }
+                )
+            {
+                candidates.push((load, target, width));
+            }
             if !failed {
                 if let Some(saved) = saved {
                     if matches!(s.value(load).op, Op::X87(_)) {
@@ -97,6 +119,48 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
                     }
                 }
             }
+        }
+    }
+    let owners: Lookup<ValueId, usize> = s
+        .blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(block, item)| item.phis.iter().map(move |&phi| (phi, block)))
+        .collect();
+    let mut proven = Lookup::default();
+    for (load, target, width) in candidates {
+        let old_len = s.values.len();
+        let old_args = s.args.len();
+        let token = s.args(load)[0];
+        let mut projection = Values {
+            s,
+            locations: &locations,
+            owners: &owners,
+            target: Range::new(target, u32::from(width)),
+            load,
+            proven: &proven,
+            memo: BTreeMap::new(),
+            phis: Vec::new(),
+            anchored: false,
+        };
+        let saved = projection.get(token, 0);
+        if let Some(saved) = saved.filter(|&saved| saved != load && projection.anchored) {
+            for (phi, block) in projection.phis {
+                projection.s.blocks[block].phis.push(phi);
+            }
+            if matches!(projection.s.value(load).op, Op::X87(_)) {
+                integers.push((load, saved, width));
+            } else {
+                alias.insert(load, saved);
+            }
+            let range = projection.target;
+            for (token, value) in projection.memo {
+                proven.insert((range, token), value);
+            }
+        } else {
+            projection.s.values.truncate(old_len);
+            projection.s.value_addr.truncate(old_len);
+            projection.s.args.truncate(old_args);
         }
     }
     if alias.is_empty() && integers.is_empty() {
@@ -135,4 +199,102 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
     rewrite_aliases(s, &alias);
     canonicalize(s, true);
     true
+}
+
+struct Values<'a> {
+    s: &'a mut Ssa,
+    locations: &'a Lookup<ValueId, Address>,
+    owners: &'a Lookup<ValueId, usize>,
+    target: Range,
+    load: ValueId,
+    proven: &'a Lookup<(Range, ValueId), ValueId>,
+    memo: BTreeMap<ValueId, ValueId>,
+    phis: Vec<(ValueId, usize)>,
+    anchored: bool,
+}
+
+impl Values<'_> {
+    fn get(&mut self, token: ValueId, depth: usize) -> Option<ValueId> {
+        if let Some(&value) = self.proven.get(&(self.target, token)) {
+            self.anchored = true;
+            return Some(value);
+        }
+        if let Some(&value) = self.memo.get(&token) {
+            return Some(value);
+        }
+        if depth >= 256 || self.memo.len() >= 4096 {
+            return None;
+        }
+        let args = self.s.args(token).to_vec();
+        let result = match self.s.value(token).op {
+            Op::Phi => {
+                let block = *self.owners.get(&token)?;
+                if args.is_empty() {
+                    return None;
+                }
+                let phi = self.s.new_value(
+                    Op::Phi,
+                    self.target.size as u8,
+                    &[],
+                    self.s.value_addr[token as usize],
+                );
+                self.memo.insert(token, phi);
+                self.phis.push((phi, block));
+                let inputs: Option<Vec<_>> = args
+                    .into_iter()
+                    .map(|arg| self.get(arg, depth + 1))
+                    .collect();
+                let inputs = inputs?;
+                let start = self.s.args.len() as u32;
+                self.s.args.extend_from_slice(&inputs);
+                self.s.values[phi as usize].args_start = start;
+                self.s.values[phi as usize].args_len = inputs.len() as u32;
+                phi
+            }
+            Op::Memory => {
+                let &effect = args.first()?;
+                match self.s.value(effect).op {
+                    Op::P(OpCode::Store | OpCode::Load) => {
+                        let store = self.s.value(effect).op == Op::P(OpCode::Store);
+                        let candidate = if store {
+                            self.s.args(effect)[2]
+                        } else {
+                            effect
+                        };
+                        if self.s.value(candidate).size as u32 == self.target.size
+                            && self.locations.get(&effect) == Some(&self.target.address)
+                        {
+                            self.anchored |= candidate != self.load;
+                            candidate
+                        } else if !store {
+                            self.get(
+                                args.get(1).copied().unwrap_or(self.s.args(effect)[0]),
+                                depth + 1,
+                            )?
+                        } else {
+                            return None;
+                        }
+                    }
+                    Op::X87(op) if op.memory() == Some(MemoryEffect::Read) => self.get(
+                        args.get(1).copied().unwrap_or(self.s.args(effect)[0]),
+                        depth + 1,
+                    )?,
+                    Op::Memory | Op::Phi | Op::Input(_) => {
+                        let mut values = args.into_iter().map(|arg| self.get(arg, depth + 1));
+                        let first = values.next()??;
+                        for next in values {
+                            if next? != first {
+                                return None;
+                            }
+                        }
+                        first
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        self.memo.insert(token, result);
+        Some(result)
+    }
 }
