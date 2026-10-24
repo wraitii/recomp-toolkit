@@ -2491,6 +2491,7 @@ struct GuestThread {
     size_t index = 0;
     uint32_t handle = 0; // 0 for the main thread: it has none
     uint32_t id = 1;     // GetCurrentThreadId
+    uint32_t start = 0, param = 0;
     X86 ctx{};
     uint32_t stack_lo = 0, stack_hi = 0;
     uint32_t teb = TEB_BASE, tls = TLS_BASE;
@@ -3817,14 +3818,9 @@ void *thread_host_main(void *arg) {
         return nullptr;
     }
 
-    uint32_t start = 0, param = 0;
-    if (HObj *o = handle_any(t->handle)) {
-        start = o->thread_start;
-        param = o->thread_param;
-    }
     uint32_t result = 0;
     if (setjmp(t->exit_jmp) == 0)
-        result = guest_call(&t->ctx, start, param);
+        result = guest_call(&t->ctx, t->start, t->param);
     else
         result = t->exit_code;
 
@@ -4000,6 +3996,10 @@ bool thread_spawn(uint32_t h) {
     t->index = threads().size();
     t->handle = h;
     t->id = g_next_thread_id++;
+    if (HObj *o = handle_get(h, H_THREAD)) {
+        t->start = o->thread_start;
+        t->param = o->thread_param;
+    }
     if (!thread_prepare_context(t)) {
         delete t;
         return false;
