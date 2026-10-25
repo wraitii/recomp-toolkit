@@ -11,7 +11,7 @@ pub mod regs;
 pub mod string;
 pub mod x87;
 
-pub use lower::{lower, CgFunction, CgInsn, CgOp, FlagShape};
+pub use lower::{lower, lower_with, CgFunction, CgInsn, CgOp, FlagShape};
 pub use op::{
     properties, CcKind, NoX87, Op, Properties, SlowFamily, SlowInsn, StateKey, StringOp, X87Recipes,
 };

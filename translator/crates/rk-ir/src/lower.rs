@@ -391,6 +391,15 @@ struct Lowerer<'a> {
 }
 
 pub fn lower(fir: &FunctionIr, image: &Image, x87: &dyn X87Recipes) -> rk_core::Result<CgFunction> {
+    lower_with(fir, image, x87, false)
+}
+
+pub fn lower_with(
+    fir: &FunctionIr,
+    image: &Image,
+    x87: &dyn X87Recipes,
+    mark_call_returns: bool,
+) -> rk_core::Result<CgFunction> {
     let mut lowerer = Lowerer {
         regs: Registers::get(),
         image,
@@ -402,6 +411,26 @@ pub fn lower(fir: &FunctionIr, image: &Image, x87: &dyn X87Recipes) -> rk_core::
     let mut insns = Vec::with_capacity(fir.insns.len());
     for (index, insn) in fir.insns.iter().enumerate() {
         let (mut ops, is_x87, flag_operands) = lowerer.lower_insn(fir, index as u32, insn)?;
+        if mark_call_returns && insn.mnemonic == "CALL" {
+            let return_addr = insn.addr + Addr::from(insn.length);
+            if let Some(position) = ops.iter().position(|op| {
+                op.op == Op::P(OpCode::Store)
+                    && op.inputs.get(1).is_some_and(|value| {
+                        value.space == Space::Const && value.offset == return_addr as u64
+                    })
+            }) {
+                let value = lowerer.fresh(4);
+                ops.insert(
+                    position,
+                    CgOp {
+                        op: Op::Target(return_addr),
+                        output: Some(value.clone()),
+                        inputs: Vec::new(),
+                    },
+                );
+                ops[position + 1].inputs[1] = value;
+            }
+        }
         if let Some(&target) = fir.intra_calls.get(&(index as u32)) {
             for op in &mut ops {
                 if matches!(op.op, Op::Call { .. }) {

@@ -7,6 +7,7 @@
 pub mod code_map;
 pub mod details;
 pub mod pe;
+pub mod reloc;
 
 use std::collections::BTreeMap;
 

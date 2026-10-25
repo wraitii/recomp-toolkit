@@ -1077,9 +1077,15 @@ impl<'a> Builder<'a> {
                 }
                 ops.push(value);
             }
+            Op::Target(addr) => {
+                let value = self.value(Op::Target(addr), 4, &[]);
+                if let Some(output) = cg_op.output {
+                    self.write(&output, value, state, temps)?;
+                }
+                ops.push(value);
+            }
             Op::Input(_)
             | Op::Const(_)
-            | Op::Target(_)
             | Op::Phi
             | Op::Byte(_)
             | Op::Pack

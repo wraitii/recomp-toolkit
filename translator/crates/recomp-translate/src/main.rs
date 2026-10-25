@@ -6,6 +6,7 @@
 //! becomes a named trap body. See `docs/translator.md`.
 
 mod facts;
+mod reloc;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -34,6 +35,8 @@ struct Args {
     module: Option<String>,
     #[arg(long)]
     report: Option<PathBuf>,
+    #[arg(long, help = "translate only the [reloc] manifest into out/reloc")]
+    reloc_only: bool,
     #[arg(long)]
     quiet: bool,
     #[arg(long)]
@@ -244,6 +247,7 @@ struct BodyContext<'a> {
     private_masks: BTreeMap<Addr, BTreeSet<Fields>>,
     private_input_arguments: BTreeMap<Addr, String>,
     switches: Switches,
+    reloc: Option<rk_emit::RelocEmit>,
 }
 
 impl<'a> BodyContext<'a> {
@@ -264,12 +268,18 @@ impl<'a> BodyContext<'a> {
             guest_calls: self.guest_calls,
             host_calls: self.host_calls,
             private,
+            reloc: self.reloc,
         }
     }
 }
 
 fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::PlannedFunction> {
-    let cg = rk_ir::lower(ir, &ctx.program.image, &rk_x87::Recipes)?;
+    let cg = rk_ir::lower_with(
+        ir,
+        &ctx.program.image,
+        &rk_x87::Recipes,
+        ctx.reloc.is_some(),
+    )?;
     rk_plan::plan_function(
         &cg,
         &rk_plan::PlanOptions {
@@ -476,6 +486,7 @@ fn build_bodies(
     x87_mode: X87Mode,
     switches: Switches,
     only: &[Addr],
+    reloc: Option<rk_emit::RelocEmit>,
 ) -> Result<(
     Vec<Body>,
     EmitStats,
@@ -523,6 +534,7 @@ fn build_bodies(
         private_masks,
         private_input_arguments,
         switches,
+        reloc,
     };
     let ctx = make_ctx(BTreeMap::new(), BTreeMap::new());
     let selected: BTreeSet<Addr> = only.iter().copied().collect();
@@ -1062,6 +1074,20 @@ fn main() -> Result<()> {
     let mut phases = Phases::new(args.quiet);
     let settings = Settings::load(&args.input, args.module.as_deref())?;
     phases.mark("settings");
+    if args.reloc_only {
+        let Some(out) = args.out.as_ref() else {
+            bail!("--out is required with --reloc-only");
+        };
+        let Some(manifest) = &settings.reloc else {
+            bail!("--reloc-only needs a [reloc] manifest in the translation input");
+        };
+        let report = args
+            .report
+            .clone()
+            .unwrap_or_else(|| out.join("translate-reloc-report.json"));
+        reloc::translate(&settings, manifest, out, &report, switches)?;
+        return Ok(());
+    }
     let mut program = rk_image::load(&settings)?;
     phases.mark("load");
     let discovered = rk_discover::discover(&settings, &program)?;
@@ -1139,6 +1165,7 @@ fn main() -> Result<()> {
             },
             switches,
             only,
+            None,
         )?
     } else {
         (
@@ -1274,6 +1301,12 @@ fn main() -> Result<()> {
             })?,
         )
         .with_context(|| path.display().to_string())?;
+        if args.module.is_none() {
+            if let Some(manifest) = &settings.reloc {
+                let reloc_report = path.with_file_name("translate-reloc-report.json");
+                reloc::translate(&settings, manifest, out, &reloc_report, switches)?;
+            }
+        }
     }
     Ok(())
 }

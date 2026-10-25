@@ -3,6 +3,7 @@
 //! model from `rk-emit`. Callers stage into a fresh directory because stale chunks are not
 //! removed.
 
+pub mod reloc;
 mod symbols;
 mod table;
 
@@ -17,6 +18,7 @@ use rk_core::settings::Settings;
 use rk_core::{Addr, Error, Result};
 use rk_emit::{Body, Declaration, Preludes};
 
+pub use reloc as reloc_output;
 pub use symbols::{symbol_rows, SymbolRow};
 
 pub const CHUNK_ADDRESS_BITS: u32 = 16;

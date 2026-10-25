@@ -352,12 +352,14 @@ def translation_input(cfg):
             return [stable(item) for item in value]
         return value
 
+    reloc = cfg.get("reloc")
     return {"format": "recomp-translate-input-v1", "dir": str(cfg["dir"]),
             "exe": str(cfg["developer_exe_path"]),
             "code_map": str(cfg["code_map_path"]) if cfg.get("code_map_path") else None,
             "image_base": cfg["game"]["image_base"], "sha256": cfg["game"]["sha256"],
             "translate": stable(cfg["translate"]), "globals": stable(cfg["globals"]),
-            "curated": stable(cfg["curated"]), "aux_modules": stable(cfg["aux_modules"])}
+            "curated": stable(cfg["curated"]), "aux_modules": stable(cfg["aux_modules"]),
+            "reloc": str(reloc["manifest_path"]) if reloc else None}
 
 
 def rust_pcode_library(build_root):
@@ -437,6 +439,16 @@ def test_translator_analysis(build_root):
                     "--target-dir", str(Path(build_root) / "recomp/cargo")], check=True)
 
 
+def run_reloc_extractor(cfg):
+    """Refresh the game-owned reloc manifest through its configured extractor."""
+    reloc = cfg["reloc"]
+    command = [sys.executable, str(reloc["extractor"]),
+               "--install", str(cfg["developer_exe_path"].parent),
+               "--exe", str(cfg["developer_exe_path"]),
+               "--out", str(reloc["manifest_path"])] + reloc["args"]
+    subprocess.run(command, cwd=ROOT, check=True)
+
+
 def write_translation_input(cfg, build_root):
     path = Path(build_root) / "recomp/translate-input.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -510,6 +522,14 @@ def rust_translation_dependencies(cfg, key):
                     include = rest[len("include"):].strip()
                     if include.startswith('"') and '"' in include[1:]:
                         pending.append((parent / include[1:].split('"', 1)[0], False))
+
+        if cfg.get("reloc"):
+            reloc = cfg["reloc"]
+            digest.update(b"reloc-extractor\0" + reloc["extractor"].as_posix().encode() + b"\0")
+            digest.update(reloc["extractor"].read_bytes() + b"\0")
+            digest.update(json.dumps(reloc["args"], sort_keys=True).encode() + b"\0")
+            manifest = reloc["manifest_path"]
+            digest.update((manifest.read_bytes() if manifest.is_file() else b"<missing>") + b"\0")
 
     digest.update(b"rust-generation-env\0")
     for name in ("RK_NO_DESCRIPTORS", "RK_NO_PRIVATE", "RK_X87_DYNAMIC", "RK_NO_ROOTS"):
@@ -727,9 +747,15 @@ def build_diff_harness(build_root, out):
     print("built diff harness: %s" % out)
 
 
-def run_rust_translator(stage, cfg, build_root, aux_modules=(), main=True):
+def run_rust_translator(stage, cfg, build_root, aux_modules=(), main=True, reloc_only=False):
     binary = rust_translator(build_root)
     source = write_translation_input(cfg, build_root)
+    if reloc_only:
+        command = [str(binary), "--input", str(source), "--out", str(stage),
+                   "--report", str(Path(build_root) / "recomp/translate-reloc-report.json"),
+                   "--reloc-only"]
+        subprocess.run(command, cwd=ROOT, check=True)
+        return
     images = ([(None, Path(stage))] if main else []) + [
         (module["key"], Path(stage) / ("aux-" + module["key"])) for module in aux_modules]
     for key, destination in images:
@@ -743,9 +769,9 @@ def run_rust_translator(stage, cfg, build_root, aux_modules=(), main=True):
 
 
 def run_translator(stage, game_dir, build_root, aux_modules=(), regen_functions=(), main=True,
-                   cache_emission=True, cfg=None):
+                   cache_emission=True, cfg=None, reloc_only=False):
     if cfg is not None and cfg["translate_engine"] == "rust":
-        return run_rust_translator(stage, cfg, build_root, aux_modules, main)
+        return run_rust_translator(stage, cfg, build_root, aux_modules, main, reloc_only)
     if main:
         command = [sys.executable, str(ROOT / "tools/recomp/driver.py"), "--out", str(stage),
                    "--game", str(game_dir),
@@ -776,7 +802,7 @@ def parse_args(argv, system=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--regenerate", nargs="?", const="all", default=None, metavar="MODULES",
                         help="Regenerate translated C: all images, or only the named auxiliary modules "
-                             "(comma-separated; 'main' names the game image)")
+                             "(comma-separated; 'main' names the game image, 'reloc' the relocatable templates)")
     parser.add_argument("--engine", choices=("python", "rust"), default=None,
                         help="Translator to regenerate with (default: [translate] engine, else rust)")
     parser.add_argument("--no-emission-cache", action="store_true",
@@ -889,6 +915,8 @@ def regenerate_selection(value, cfg, parser):
     if not keys or "all" in keys:
         return None
     known = {"main"} | {module["key"] for module in cfg["aux_modules"]}
+    if cfg.get("reloc"):
+        known.add("reloc")
     unknown = [key for key in keys if key not in known]
     if unknown:
         parser.error("--regenerate names unknown modules: %s (known: %s)"
@@ -930,6 +958,8 @@ def main():
         return
     cfg = game_config.load(args.game_dir, args.build_root)
     cfg["translate_engine"] = args.engine or cfg["translate"].get("engine", "rust")
+    if cfg.get("reloc") and cfg["translate_engine"] != "rust":
+        parser.error("[reloc] requires the Rust translator; --engine python is unsupported")
     if args.produce_analysis_facts:
         with buildlock.BuildLock(args.build_root.parent, "tools/build.py --produce-analysis-facts"):
             run_analysis(args, cfg, args.build_root)
@@ -957,6 +987,8 @@ def main():
                 if not cfg.get("code_map_path"):
                     parser.error("Translation needs the game's code map: set [translate] code_map in game.toml")
                 selection = regenerate_selection(args.regenerate, cfg, parser)
+                if cfg.get("reloc") and (selection is None or "main" in selection or "reloc" in selection):
+                    run_reloc_extractor(cfg)
                 fingerprints = translation_fingerprints(cfg, args.build_root)
                 stamp = args.build_root / "recomp/translate.stamp"
                 stamped = read_translation_stamp(stamp)
@@ -989,17 +1021,25 @@ def main():
                 else:
                     if not translated:
                         parser.error("a partial --regenerate needs an existing translation; run --regenerate first")
-                    main_image = "main" in selection
-                    aux = [module for module in cfg["aux_modules"] if module["key"] in selection]
-                    publish_generated(args.build_root,
-                                      lambda stage: run_translator(stage, args.game_dir, args.build_root,
-                                                                   aux_modules=aux, main=main_image,
-                                                                   cache_emission=args.cache_emission,
-                                                                   cfg=cfg),
-                                      partial=True, main=main_image)
-                    stamped.update((key, fingerprints[key]) for key in selection if key in fingerprints)
-                    write_translation_stamp(stamp, {key: value for key, value in stamped.items()
-                                                    if key in fingerprints})
+                    if "reloc" in selection:
+                        if selection != {"reloc"}:
+                            parser.error("--regenerate reloc must be used on its own")
+                        publish_generated(args.build_root,
+                                          lambda stage: run_translator(stage, args.game_dir, args.build_root,
+                                                                       main=False, reloc_only=True, cfg=cfg),
+                                          partial=True, main=False)
+                    else:
+                        main_image = "main" in selection
+                        aux = [module for module in cfg["aux_modules"] if module["key"] in selection]
+                        publish_generated(args.build_root,
+                                          lambda stage: run_translator(stage, args.game_dir, args.build_root,
+                                                                       aux_modules=aux, main=main_image,
+                                                                       cache_emission=args.cache_emission,
+                                                                       cfg=cfg),
+                                          partial=True, main=main_image)
+                        stamped.update((key, fingerprints[key]) for key in selection if key in fingerprints)
+                        write_translation_stamp(stamp, {key: value for key, value in stamped.items()
+                                                        if key in fingerprints})
             # Generated sources include the adjacent runtime header. Refresh
             # it under the same lock even when their translation is unchanged.
             header = args.build_root / "recomp/gen/x86.h"

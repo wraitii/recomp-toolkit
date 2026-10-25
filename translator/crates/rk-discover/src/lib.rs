@@ -304,6 +304,30 @@ fn run_discovery(recovery: &mut Recovery<'_>, settings: &Settings) -> Result<()>
     Ok(())
 }
 
+pub fn discover_from_entries(program: &Program, entries: &[Addr]) -> Result<Discovered> {
+    let check = SleighLengths::default();
+    let mut recovery = Recovery::new(program, program.pe.clone(), &check, Vec::new());
+    for &entry in entries {
+        recovery.seed(entry, "reloc entry", RANK_TRUSTED, true);
+    }
+    recovery.map_lengths()?;
+    recovery.trace();
+    recovery.finish();
+    let (functions, entries) = recovery.code_map_rows()?;
+    let report = recovery.report();
+    let instruction_lengths = recovery
+        .instructions
+        .iter()
+        .map(|(&at, ins)| (at, ins.size))
+        .collect();
+    Ok(Discovered {
+        functions,
+        entries,
+        instruction_lengths,
+        report,
+    })
+}
+
 pub fn merge(program: &mut Program, discovered: &Discovered) -> Result<()> {
     for (&addr, spans) in &discovered.functions {
         program.functions.entry(addr).or_insert_with(|| Function {

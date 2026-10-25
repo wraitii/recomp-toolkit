@@ -34,6 +34,12 @@ pub struct PrivateEmit {
     pub input_argument: Option<Field>,
 }
 
+#[derive(Clone, Copy)]
+pub struct RelocEmit {
+    pub image_base: Addr,
+    pub local_size: u32,
+}
+
 pub struct EmitContext<'a> {
     pub ir: &'a FunctionIr,
     pub checked_returns: &'a BTreeSet<Addr>,
@@ -46,6 +52,7 @@ pub struct EmitContext<'a> {
     pub guest_calls: &'a BTreeMap<Addr, Vec<Addr>>,
     pub host_calls: &'a BTreeSet<Addr>,
     pub private: Option<&'a PrivateEmit>,
+    pub reloc: Option<RelocEmit>,
 }
 
 pub struct EmitReport {
@@ -451,8 +458,26 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    fn guest_addr(&self, addr: Addr) -> String {
+        if let Some(reloc) = self.ctx.reloc {
+            if addr >= reloc.image_base && addr < reloc.image_base + reloc.local_size {
+                return format!("(base_ + 0x{:x}u)", addr - reloc.image_base);
+            }
+        }
+        format!("0x{addr:08x}u")
+    }
+
+    fn reloc_internal(&self, addr: Addr) -> bool {
+        self.ctx.reloc.is_some_and(|reloc| {
+            addr >= reloc.image_base && addr < reloc.image_base + reloc.local_size
+        })
+    }
+
     fn signature(&self, name: &str) -> String {
         let mut params = vec!["X86 *c".to_string()];
+        if self.ctx.reloc.is_some() {
+            params.push("uint32_t base_".to_string());
+        }
         if let Some(private) = self.private {
             if let Some(argument) = private.input_argument {
                 params.push(format!("uint32_t {}_", argument.name().to_lowercase()));
@@ -472,8 +497,12 @@ impl<'a> Emitter<'a> {
 
     fn call_args(&self, entry: Option<Addr>, expected: Option<&str>) -> String {
         let mut args = vec!["c".to_string()];
+        if self.ctx.reloc.is_some() {
+            args.push("base_".to_string());
+        }
         if self.multi {
-            args.push(entry.map_or("0u".to_string(), |addr| format!("0x{addr:08x}u")));
+            let entry = entry.or_else(|| self.ctx.reloc.map(|_| self.s.addr));
+            args.push(entry.map_or("0u".to_string(), |addr| self.guest_addr(addr)));
         }
         if self.checked {
             args.push(expected.unwrap_or("0u").to_string());
@@ -487,25 +516,32 @@ impl<'a> Emitter<'a> {
         if self.private.is_some() {
             return;
         }
+        let base_param = if self.ctx.reloc.is_some() {
+            ", uint32_t base_"
+        } else {
+            ""
+        };
         if body != format!("fn_{addr:08x}") {
             let args = self.call_args(None, None);
-            let _ = writeln!(self.out, "void fn_{addr:08x}(X86 *c) {{ {body}({args}); }}");
+            let _ = writeln!(
+                self.out,
+                "void fn_{addr:08x}(X86 *c{base_param}) {{ {body}({args}); }}"
+            );
         }
         if self.checked {
             let args = self.call_args(None, Some("expected"));
             let _ = writeln!(
                 self.out,
-                "void fn_checked_{addr:08x}(X86 *c, uint32_t expected) {{ {body}({args}); }}"
+                "void fn_checked_{addr:08x}(X86 *c{base_param}, uint32_t expected) {{ {body}({args}); }}"
             );
         }
         if self.multi {
             if self.ctx.region_entries.values().any(|&owner| owner == addr) {
-                let args = self
-                    .call_args(Some(addr), None)
-                    .replace(&format!("0x{addr:08x}u"), "target");
+                let primary = self.guest_addr(addr);
+                let args = self.call_args(Some(addr), None).replace(&primary, "target");
                 let _ = writeln!(
                     self.out,
-                    "void region_{addr:08x}(X86 *c, uint32_t target) {{ {body}({args}); }}"
+                    "void region_{addr:08x}(X86 *c{base_param}, uint32_t target) {{ {body}({args}); }}"
                 );
             }
             for entry in &self.s.entries {
@@ -524,7 +560,7 @@ impl<'a> Emitter<'a> {
                 let args = self.call_args(Some(entry.addr), None);
                 let _ = writeln!(
                     self.out,
-                    "void fn_{:08x}(X86 *c) {{ {body}({args}); }}",
+                    "void fn_{:08x}(X86 *c{base_param}) {{ {body}({args}); }}",
                     entry.addr
                 );
             }
@@ -706,12 +742,21 @@ impl<'a> Emitter<'a> {
             .or_else(|| self.s.entries.first())
             .ok_or_else(|| self.error(self.s.addr, "SSA has no entry"))?;
         if self.multi {
-            self.out.push_str("switch (entry_) {\n");
+            if self.ctx.reloc.is_some() {
+                self.out.push_str("switch (entry_ - base_) {\n");
+            } else {
+                self.out.push_str("switch (entry_) {\n");
+            }
             for entry in &self.s.entries {
                 if entry.addr == primary.addr {
                     continue;
                 }
-                let _ = writeln!(self.out, "case 0x{:08x}u:", entry.addr);
+                let entry_addr = if let Some(reloc) = self.ctx.reloc {
+                    format!("0x{:x}u", entry.addr - reloc.image_base)
+                } else {
+                    self.guest_addr(entry.addr)
+                };
+                let _ = writeln!(self.out, "case {entry_addr}:");
                 self.edge(None, entry.target as usize)?;
             }
             let region = self
@@ -720,7 +765,12 @@ impl<'a> Emitter<'a> {
                 .values()
                 .any(|&owner| owner == self.s.addr);
             if region {
-                let _ = writeln!(self.out, "case 0u: case 0x{:08x}u:", primary.addr);
+                let primary_addr = if let Some(reloc) = self.ctx.reloc {
+                    format!("0x{:x}u", primary.addr - reloc.image_base)
+                } else {
+                    self.guest_addr(primary.addr)
+                };
+                let _ = writeln!(self.out, "case 0u: case {primary_addr}:");
             } else {
                 self.out.push_str("default:;\n");
             }
@@ -834,15 +884,18 @@ impl<'a> Emitter<'a> {
                     None if self.s.blocks[block].preds.is_empty() => {}
                     None if end_addr.is_some_and(|addr| self.ctx.known_entries.contains(&addr)) => {
                         let addr = end_addr.unwrap();
-                        self.declare_entry(addr);
-                        let _ = writeln!(self.out, "CALL_FN({addr:08x}); return;");
+                        if self.reloc_internal(addr) {
+                            let target = self.guest_addr(addr);
+                            let _ = writeln!(self.out, "recomp_jump(c, {target}); return;");
+                        } else {
+                            self.declare_entry(addr);
+                            let _ = writeln!(self.out, "CALL_FN({addr:08x}); return;");
+                        }
                     }
                     None if end_addr.is_some() => {
                         let addr = end_addr.unwrap();
-                        let _ = writeln!(
-                            self.out,
-                            "c->eip = 0x{addr:08x}u; recomp_jump(c, 0x{addr:08x}u); return;"
-                        );
+                        let at = self.guest_addr(addr);
+                        let _ = writeln!(self.out, "c->eip = {at}; recomp_jump(c, {at}); return;");
                     }
                     None => {
                         return Err(self.error(self.s.addr, "block falls through to no successor"))
@@ -906,22 +959,26 @@ impl<'a> Emitter<'a> {
             Op::CallInd => self.call_ind(value, addr).map(|_| true),
             Op::Tail { target } => {
                 self.publish(value)?;
-                if self.ctx.known_entries.contains(&target) {
+                let at = self.guest_addr(addr);
+                let target_expr = self.guest_addr(target);
+                if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
                     self.declare_entry(target);
                     let _ = writeln!(self.out, "CALL_FN({target:08x}); return;");
                 } else {
                     let _ = writeln!(
                         self.out,
-                        "c->eip = 0x{addr:08x}u; recomp_jump(c, 0x{target:08x}u); return;"
+                        "c->eip = {at}; recomp_jump(c, {target_expr}); return;"
                     );
                 }
                 Ok(false)
             }
             Op::ImportTail { slot } => {
                 self.publish(value)?;
+                let at = self.guest_addr(addr);
+                let slot_expr = self.guest_addr(slot);
                 let _ = writeln!(
                     self.out,
-                    "c->eip = 0x{addr:08x}u; recomp_jump(c, recomp_rd32_(arena_, 0x{slot:08x}u)); return;"
+                    "c->eip = {at}; recomp_jump(c, recomp_rd32_(arena_, {slot_expr})); return;"
                 );
                 Ok(false)
             }
@@ -930,12 +987,14 @@ impl<'a> Emitter<'a> {
             Op::BranchInd => self.branch_ind(value, addr).map(|_| true),
             Op::Return => self.return_value(value).map(|_| false),
             Op::Trap(target) => {
-                let _ = writeln!(self.out, "recomp_unmodelled(c, 0x{target:08x}u); return;");
+                let target = self.guest_addr(target);
+                let _ = writeln!(self.out, "recomp_unmodelled(c, {target}); return;");
                 Ok(false)
             }
             Op::Breakpoint => {
                 self.publish(value)?;
-                let _ = writeln!(self.out, "recomp_breakpoint(c, 0x{addr:08x}u); return;");
+                let at = self.guest_addr(addr);
+                let _ = writeln!(self.out, "recomp_breakpoint(c, {at}); return;");
                 Ok(false)
             }
             Op::Seh(kind) => {
@@ -955,7 +1014,8 @@ impl<'a> Emitter<'a> {
                     };
                     self.requires.seh_call = true;
                     let adopt = u8::from(kind == SehEffect::Adopt);
-                    let _ = writeln!(self.out, "{{ extern void {callback}(X86 *); c->eip = 0x{addr:08x}u; recomp_seh_frame_call_(c, {callback}, {adopt}); return; }}");
+                    let at = self.guest_addr(addr);
+                    let _ = writeln!(self.out, "{{ extern void {callback}(X86 *); c->eip = {at}; recomp_seh_frame_call_(c, {callback}, {adopt}); return; }}");
                     return Ok(false);
                 }
                 self.seh(kind, addr);
@@ -996,9 +1056,10 @@ impl<'a> Emitter<'a> {
     fn slow_trap(&mut self, addr: Addr, reason: &str) {
         let reason = reason.replace(['"', '\\'], "_");
         self.fallbacks.insert((addr, reason.clone()));
+        let at = self.guest_addr(addr);
         let _ = writeln!(
             self.out,
-            "recomp_unmodelled_named(c, 0x{addr:08x}u, \"{reason}\"); return;"
+            "recomp_unmodelled_named(c, {at}, \"{reason}\"); return;"
         );
     }
 
@@ -1157,7 +1218,10 @@ impl<'a> Emitter<'a> {
         let call = match mnemonic.as_str() {
             "FXSAVE" => format!("recomp_fxsave(c, (uint32_t)({address}));"),
             "STMXCSR" => format!("recomp_stmxcsr(c, (uint32_t)({address}));"),
-            _ => format!("recomp_ldmxcsr(c, 0x{addr:08x}u, (uint32_t)({address}));"),
+            _ => {
+                let at = self.guest_addr(addr);
+                format!("recomp_ldmxcsr(c, {at}, (uint32_t)({address}));")
+            }
         };
         let _ = writeln!(self.out, "{call}");
         Ok(true)
@@ -1627,7 +1691,14 @@ impl<'a> Emitter<'a> {
             return Ok(());
         }
         if !self.ctx.known_entries.contains(&target) {
-            let _ = writeln!(self.out, "recomp_call(c, 0x{target:08x}u);");
+            self.emit_call_target(value, target)?;
+            if self.plan.settle_sites.contains(&value) {
+                self.out.push_str("x86_cc_settle(c);\n");
+            }
+            return Ok(());
+        }
+        if self.reloc_internal(target) {
+            self.emit_call_target(value, target)?;
             if self.plan.settle_sites.contains(&value) {
                 self.out.push_str("x86_cc_settle(c);\n");
             }
@@ -1660,15 +1731,17 @@ impl<'a> Emitter<'a> {
                         mask,
                         input_argument: argument.map(|field| field.name().to_string()),
                     });
+                    let expected_addr = expected;
+                    let expected = self.guest_addr(expected_addr);
                     let args = argument.map_or_else(
-                        || format!("c, 0x{expected:08x}u"),
-                        |field| format!("c, c->r[{}], 0x{expected:08x}u", field as usize),
+                        || format!("c, {expected}"),
+                        |field| format!("c, c->r[{}], {expected}", field as usize),
                     );
                     let _ = writeln!(
                         self.out,
-                        "if (entry_contract_prepare_{target:08x}(c, 0)) {{ entry_contract_{target:08x}_{:04x}({args}); }} else {{ CALL_FN_CHECKED({target:08x}, 0x{expected:08x}u); }}", mask.0
+                        "if (entry_contract_prepare_{target:08x}(c, 0)) {{ entry_contract_{target:08x}_{:04x}({args}); }} else {{ CALL_FN_CHECKED({target:08x}, {expected}); }}", mask.0
                     );
-                    self.resume_check(value, target, expected);
+                    self.resume_check(value, target, expected_addr);
                     if self.plan.settle_sites.contains(&value) {
                         self.out.push_str("x86_cc_settle(c);\n");
                     }
@@ -1685,11 +1758,9 @@ impl<'a> Emitter<'a> {
                 )
             })?;
             self.declarations.insert(Declaration::Checked(target));
-            let _ = writeln!(
-                self.out,
-                "CALL_FN_CHECKED({target:08x}, 0x{expected:08x}u);"
-            );
-            self.resume_check(value, target, expected);
+            let expected = self.guest_addr(expected);
+            let _ = writeln!(self.out, "CALL_FN_CHECKED({target:08x}, {expected});");
+            self.resume_check(value, target, self.plan.return_addr[&value]);
         } else {
             self.declare_entry(target);
             let _ = writeln!(self.out, "CALL_FN({target:08x});");
@@ -1697,6 +1768,26 @@ impl<'a> Emitter<'a> {
         if self.plan.settle_sites.contains(&value) {
             self.out.push_str("x86_cc_settle(c);\n");
         }
+        Ok(())
+    }
+
+    fn emit_call_target(&mut self, value: ValueId, target: Addr) -> Result<()> {
+        let target = self.guest_addr(target);
+        if self.ctx.reloc.is_none() {
+            let _ = writeln!(self.out, "recomp_call(c, {target});");
+            return Ok(());
+        }
+        let returned = self.plan.return_addr.get(&value).copied().ok_or_else(|| {
+            self.error(
+                self.s.value_addr[value as usize],
+                "call without return address",
+            )
+        })?;
+        let returned = self.guest_addr(returned);
+        let _ = writeln!(
+            self.out,
+            "{{ unsigned reloc_depth_ = recomp_dynamic_return_push({returned}); recomp_call(c, {target}); recomp_dynamic_return_pop(reloc_depth_); }}"
+        );
         Ok(())
     }
 
@@ -1717,10 +1808,8 @@ impl<'a> Emitter<'a> {
         } else {
             "recomp_icall"
         };
-        let _ = writeln!(
-            self.out,
-            "{helper}(c, (uint32_t)({target}), 0x{addr:08x}u);"
-        );
+        let at = self.guest_addr(addr);
+        let _ = writeln!(self.out, "{helper}(c, (uint32_t)({target}), {at});");
         if self.plan.settle_sites.contains(&value) {
             self.out.push_str("x86_cc_settle(c);\n");
         }
@@ -1743,10 +1832,8 @@ impl<'a> Emitter<'a> {
             Op::Idiv { size: 2, .. } => "idiv16",
             _ => "idiv32",
         };
-        let _ = writeln!(
-            self.out,
-            "{helper}(c, (uint32_t)({divisor}), 0x{addr:08x}u);"
-        );
+        let at = self.guest_addr(addr);
+        let _ = writeln!(self.out, "{helper}(c, (uint32_t)({divisor}), {at});");
         let _ = writeln!(
             self.out,
             "{}",
@@ -1821,7 +1908,9 @@ impl<'a> Emitter<'a> {
             return self.edge(Some(current), target_block);
         }
         self.publish(value)?;
-        if self.ctx.known_entries.contains(&target) {
+        let at = self.guest_addr(self.s.value_addr[value as usize]);
+        let target_expr = self.guest_addr(target);
+        if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
             if self.checked && self.ctx.checked_returns.contains(&target) {
                 self.declarations.insert(Declaration::Checked(target));
                 if self.private.is_some() {
@@ -1838,10 +1927,9 @@ impl<'a> Emitter<'a> {
                 let _ = writeln!(self.out, "CALL_FN({target:08x}); return;");
             }
         } else {
-            let at = self.s.value_addr[value as usize];
             let _ = writeln!(
                 self.out,
-                "c->eip = 0x{at:08x}u; recomp_jump(c, 0x{target:08x}u); return;"
+                "c->eip = {at}; recomp_jump(c, {target_expr}); return;"
             );
         }
         Ok(())
@@ -1875,8 +1963,9 @@ impl<'a> Emitter<'a> {
             }
             return Ok(());
         }
-        let at = self.s.value_addr[value as usize];
-        if self.ctx.known_entries.contains(&target) {
+        let at = self.guest_addr(self.s.value_addr[value as usize]);
+        let target_expr = self.guest_addr(target);
+        if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
             self.declare_entry(target);
             let _ = writeln!(
                 self.out,
@@ -1885,7 +1974,7 @@ impl<'a> Emitter<'a> {
         } else {
             let _ = writeln!(
                 self.out,
-                "if ((uint32_t)({condition})) {{ c->eip = 0x{at:08x}u; recomp_jump(c, 0x{target:08x}u); return; }}"
+                "if ((uint32_t)({condition})) {{ c->eip = {at}; recomp_jump(c, {target_expr}); return; }}"
             );
         }
         let end_addr = self.block_end_addr(current);
@@ -1919,8 +2008,9 @@ impl<'a> Emitter<'a> {
         if dynamic && self.dispatch.is_some() {
             let dispatch = self.dispatch.unwrap();
             self.out.push_str("{\n");
+            let start = self.guest_addr(dispatch.start);
             let _ = writeln!(self.out, "uint32_t t_ = (uint32_t)({target});");
-            let _ = writeln!(self.out, "uint32_t o_ = t_ - 0x{:08x}u;", dispatch.start);
+            let _ = writeln!(self.out, "uint32_t o_ = t_ - {start};");
             let _ = writeln!(
                 self.out,
                 "if (o_ < 0x{:x}u) {{ uint32_t d_ = recomp_dispatch_[o_]; if (d_) goto *recomp_labels_{}[d_ - 1]; }}",
@@ -1931,20 +2021,15 @@ impl<'a> Emitter<'a> {
                 self.x87_lines(|x87, names| x87.default_lines(self.clone, value, names))?;
             self.write_x87(default_lines);
             self.publish(value)?;
-            let _ = writeln!(
-                self.out,
-                "c->eip = 0x{addr:08x}u; recomp_jump(c, t_); return;"
-            );
+            let at = self.guest_addr(addr);
+            let _ = writeln!(self.out, "c->eip = {at}; recomp_jump(c, t_); return;");
             self.out.push_str("}\n");
             return Ok(());
         }
         let _ = writeln!(self.out, "switch ((uint32_t)({target})) {{");
         for target_block in &successors {
-            let _ = writeln!(
-                self.out,
-                "case 0x{:08x}u:",
-                self.plan.block_addrs[*target_block]
-            );
+            let target = self.guest_addr(self.plan.block_addrs[*target_block]);
+            let _ = writeln!(self.out, "case {target}:");
             self.edge(Some(current), *target_block)?;
         }
         self.out.push_str("default:\n");
@@ -1952,9 +2037,10 @@ impl<'a> Emitter<'a> {
             self.x87_lines(|x87, names| x87.default_lines(self.clone, value, names))?;
         self.write_x87(default_lines);
         self.publish(value)?;
+        let at = self.guest_addr(addr);
         let _ = writeln!(
             self.out,
-            "c->eip = 0x{addr:08x}u; recomp_jump(c, (uint32_t)({target})); return;"
+            "c->eip = {at}; recomp_jump(c, (uint32_t)({target})); return;"
         );
         self.out.push_str("}\n");
         Ok(())
@@ -1962,10 +2048,11 @@ impl<'a> Emitter<'a> {
 
     fn resume_check(&mut self, value: ValueId, target: Addr, expected: Addr) {
         if self.ctx.effect_returns.contains(&target) {
-            let site = self.s.value_addr[value as usize];
+            let site = self.guest_addr(self.s.value_addr[value as usize]);
+            let expected = self.guest_addr(expected);
             let _ = writeln!(
                 self.out,
-                "if (RECOMP_UNLIKELY(c->eip != 0x{expected:08x}u)) {{ recomp_return_resume(c, 0x{site:08x}u, 0x{expected:08x}u, c->eip); return; }}"
+                "if (RECOMP_UNLIKELY(c->eip != {expected})) {{ recomp_return_resume(c, {site}, {expected}, c->eip); return; }}"
             );
         }
     }
@@ -2005,7 +2092,8 @@ impl<'a> Emitter<'a> {
             if !targets.is_empty() {
                 self.out.push_str("switch (c->eip) {\n");
                 for target in targets {
-                    let _ = writeln!(self.out, "case 0x{:08x}u:", self.plan.block_addrs[target]);
+                    let target_addr = self.guest_addr(self.plan.block_addrs[target]);
+                    let _ = writeln!(self.out, "case {target_addr}:");
                     self.edge(Some(current), target)?;
                 }
                 self.out.push_str("default:\n");
@@ -2061,15 +2149,17 @@ impl<'a> Emitter<'a> {
 
     fn seh(&mut self, kind: SehEffect, addr: Addr) {
         if kind == SehEffect::Leave {
-            let _ = writeln!(self.out, "c->eip = 0x{addr:08x}u;");
+            let at = self.guest_addr(addr);
+            let _ = writeln!(self.out, "c->eip = {at};");
         }
         match kind {
             SehEffect::Enter | SehEffect::Adopt => unreachable!(),
             SehEffect::Leave => self.out.push_str("recomp_seh_frame_leave(c);\n"),
             SehEffect::Landing => {
+                let at = self.guest_addr(addr);
                 let _ = writeln!(
                     self.out,
-                    "if (recomp_seh_pending_target()) recomp_seh_intercept(c, 0x{addr:08x}u);"
+                    "if (recomp_seh_pending_target()) recomp_seh_intercept(c, {at});"
                 );
             }
             SehEffect::Orphan => {
@@ -2507,7 +2597,7 @@ impl<'a> Emitter<'a> {
             Op::Const(data) => Ok(const_expr(data, item.size)),
             Op::Input(key) | Op::StateReload(key) => self.field_expr(key, item.size),
             Op::CcKind(kind) => Ok(cc_kind_name(kind).to_string()),
-            Op::Target(addr) => Ok(format!("0x{addr:08x}u")),
+            Op::Target(addr) => Ok(self.guest_addr(addr)),
             Op::Memory => Ok("0u".to_string()),
             Op::Byte(index) => Ok(format!(
                 "((({}) >> {}) & 0xffu)",
@@ -2595,7 +2685,7 @@ impl<'a> Emitter<'a> {
             Op::Const(data) => const_expr(data, item.size),
             Op::Input(key) => self.field_expr(key, item.size)?,
             Op::CcKind(kind) => cc_kind_name(kind).to_string(),
-            Op::Target(addr) => format!("0x{addr:08x}u"),
+            Op::Target(addr) => self.guest_addr(addr),
             Op::Byte(index) => format!("(({}) >> {})", a(0)?, index as u32 * 8),
             Op::Pack => match self.pack_lanes(args) {
                 Some(text) => text,

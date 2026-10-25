@@ -17,6 +17,8 @@ struct Input {
     code_map: Option<PathBuf>,
     image_base: Addr,
     sha256: String,
+    #[serde(default)]
+    reloc: Option<PathBuf>,
     translate: Translate,
     #[serde(default)]
     globals: BTreeMap<String, Global>,
@@ -274,6 +276,7 @@ pub struct Settings {
     pub fault_state: FaultState,
     pub msvc_x87_convention: bool,
     pub x87_cw_clone: bool,
+    pub reloc: Option<PathBuf>,
 }
 
 impl Settings {
@@ -438,6 +441,7 @@ impl Settings {
             fault_state: t.fault_state,
             msvc_x87_convention: t.msvc_x87_convention,
             x87_cw_clone: t.x87_cw_clone,
+            reloc: if main { input.reloc } else { None },
             game_dir: input.dir,
             module,
         })

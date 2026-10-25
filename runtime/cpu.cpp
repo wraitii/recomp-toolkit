@@ -12,6 +12,7 @@
 #include "win32.h"
 #include "thunks.h"
 #include "seh.h"
+#include "reloc.h"
 #include "linear_trace.h"
 #include "../platform/os.h"
 
@@ -342,6 +343,10 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
     }
     if (target >= GUEST_NULL_LIMIT && recomp_region_enter(c, target)) {
         observe_indirect(site, target, "region");
+        return;
+    }
+    if (recomp_reloc_call(c, target)) {
+        observe_indirect(site, target, "reloc");
         return;
     }
     // Code no translation covers runs in the interpreter when every

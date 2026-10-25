@@ -682,6 +682,7 @@ def load(game_dir, build_root=None):
     if code_map is not None and (not isinstance(code_map, str) or not code_map):
         raise ValueError("%s: [translate] code_map must be a non-empty path" % source)
     cfg["code_map_path"] = (game_dir / code_map).resolve() if code_map else None
+    cfg["reloc"] = load_reloc(cfg, game_dir, build_root, source)
     cfg["aux_modules"] = load_aux_modules(cfg, game_dir, source)
     lift_heap_above_aux(cfg, source)
     validate_installation_hints(cfg, source)
@@ -700,6 +701,28 @@ def load(game_dir, build_root=None):
     validate_guest_layout(cfg, source)
     return cfg
 
+
+
+def load_reloc(cfg, game_dir, build_root, source):
+    value = cfg.get("reloc")
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"extractor", "args"}:
+        raise ValueError("%s: [reloc] must be a table with extractor and optional args" % source)
+    extractor = value.get("extractor")
+    if not isinstance(extractor, str) or not extractor or "\0" in extractor:
+        raise ValueError("%s: [reloc] extractor must be a path relative to the game directory" % source)
+    path = Path(extractor.replace("\\", "/"))
+    if path.is_absolute():
+        raise ValueError("%s: [reloc] extractor must be relative to the game directory" % source)
+    path = (game_dir / path).resolve()
+    if not path.is_file():
+        raise ValueError("%s: [reloc] extractor names no file: %s" % (source, path))
+    args = value.get("args", [])
+    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        raise ValueError("%s: [reloc] args must be a list of strings" % source)
+    return {"extractor": path, "args": args,
+            "manifest_path": Path(build_root) / "recomp/reloc/manifest.json"}
 
 def load_aux_modules(cfg, game_dir, source):
     modules = []

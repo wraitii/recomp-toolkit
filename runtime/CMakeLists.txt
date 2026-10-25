@@ -1,7 +1,7 @@
 # The guest runtime. Object libraries, so every source is linked into every
 # consumer exactly as the shell scripts linked every object.
 set(RECOMP_RUNTIME_SOURCES
-  memory.cpp guest_strings.cpp loader.cpp imports.cpp cpu.cpp dispatch.cpp thunks.cpp seh.cpp profile.cpp kernel32.cpp kernel32_wide.cpp
+  memory.cpp guest_strings.cpp loader.cpp imports.cpp cpu.cpp dispatch.cpp thunks.cpp seh.cpp profile.cpp reloc.cpp kernel32.cpp kernel32_wide.cpp
   msvcr90.cpp steam_api.cpp
   resources.cpp oleaut32.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp user32_cursor.cpp user32_dialog.cpp user32_messagebox.cpp
   misc.cpp misc_dlls.cpp comctl32.cpp gdi32.cpp gdi32_draw.cpp gdi32_text.cpp gdi32_truetype.cpp msimg32.cpp
