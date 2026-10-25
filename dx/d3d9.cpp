@@ -5163,7 +5163,7 @@ static void buffer_unlock_wgpu(X86 *c) {
     }
     auto it = o->d3d9_resource->staging.find(0);
     if (it == o->d3d9_resource->staging.end() || !it->second.addr) {
-        com_ret(c, D3DERR_INVALIDCALL);
+        com_ret(c, D3D_OK9);
         return;
     }
     rust::Slice<const uint8_t> bytes(gm_ptr(it->second.addr), it->second.size);

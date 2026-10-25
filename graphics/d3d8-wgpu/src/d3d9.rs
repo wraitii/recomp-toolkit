@@ -646,7 +646,7 @@ pub fn d3d9_buffer_unlock(resource: &mut D3d9Resource, bytes: &[u8]) -> D3d9Buff
     };
     if b.lock_count.load(Ordering::Acquire) == 0 {
         return D3d9BufferUnlockResult {
-            status: status(StatusCode::InvalidArgument, "D3D9 buffer is not locked"),
+            status: status(StatusCode::Ok, ""),
             closed: false,
         };
     }
