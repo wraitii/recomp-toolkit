@@ -176,28 +176,38 @@ fn coverage(
     {
         return Err(unsupported("InterpreterDraw", "unsupported-multisample"));
     }
-    if ps.is_some_and(|s| s.program.samplers.is_empty()) {
-        return Ok(true);
-    }
-    let texture = snapshot
-        .textures
-        .iter()
-        .find(|t| t.stage == 0)
-        .ok_or_else(|| unsupported("InterpreterDraw", "unbound-texture s0"))?;
-    if texture.cube || texture.volume || texture.depth {
-        return Err(unsupported(
-            "InterpreterDraw",
-            "unsupported-texture-type s0",
-        ));
-    }
-    let format = super::super::format::device_format(texture.format, gpu.features())
-        .ok_or_else(|| unsupported("InterpreterDraw", "unsupported-texture-format s0"))?;
-    if !format
-        .guaranteed_format_features(gpu.features())
-        .flags
-        .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
-    {
-        return Err(unsupported("InterpreterDraw", "nonfilterable-texture s0"));
+    for (&stage, &kind) in &ps.unwrap().program.samplers {
+        let texture = snapshot
+            .textures
+            .iter()
+            .find(|t| t.stage == stage)
+            .ok_or_else(|| unsupported("InterpreterDraw", format!("unbound-texture s{stage}")))?;
+        if texture.volume
+            || texture.depth
+            || texture.cube != (kind == crate::shader::program::S_CUBE)
+        {
+            return Err(unsupported(
+                "InterpreterDraw",
+                format!("unsupported-texture-type s{stage}"),
+            ));
+        }
+        let format = super::super::format::device_format(texture.format, gpu.features())
+            .ok_or_else(|| {
+                unsupported(
+                    "InterpreterDraw",
+                    format!("unsupported-texture-format s{stage}"),
+                )
+            })?;
+        if !format
+            .guaranteed_format_features(gpu.features())
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
+        {
+            return Err(unsupported(
+                "InterpreterDraw",
+                format!("nonfilterable-texture s{stage}"),
+            ));
+        }
     }
     Ok(true)
 }
@@ -238,11 +248,17 @@ pub(super) fn specialize(
     });
     let [vertex, pixel] = shaders;
     let mut textures = [None; MAX_SAMPLERS];
-    textures[0] = Some(TextureLayout {
-        depth: false,
-        filterable: true,
-        dimension: wgpu::TextureViewDimension::D2,
-    });
+    for (&stage, &kind) in &ps.program.samplers {
+        textures[stage as usize] = Some(TextureLayout {
+            depth: false,
+            filterable: true,
+            dimension: if kind == crate::shader::program::S_CUBE {
+                wgpu::TextureViewDimension::Cube
+            } else {
+                wgpu::TextureViewDimension::D2
+            },
+        });
+    }
     let layout_key = LayoutKey::Draw {
         vs: vs.program.const_limit(),
         ps: ps.program.const_limit(),
@@ -351,26 +367,59 @@ pub(super) fn resolve(
         buffers.push(upload(gpu, &mut draw.interpreter_programs, program)?);
     }
     let programs = interpreted.then(|| [buffers[0].clone(), buffers[1].clone()]);
-    let binding = if ps.program.samplers.is_empty() {
-        PendingTexture {
-            stage: 0,
-            view: prepared.unused_texture.clone(),
-            sampler: prepared.unused_sampler.clone(),
+    let mapping = program::sampler_mapping(&ps.program);
+    let mut bindings = Vec::new();
+    if interpreted {
+        for physical in 0..program::TEXTURE_SLOTS {
+            let bound = mapping
+                .iter()
+                .find(|&&(_, slot)| slot == physical)
+                .map(|&(guest, _)| {
+                    snapshot
+                        .textures
+                        .iter()
+                        .find(|t| t.stage == guest)
+                        .ok_or_else(|| {
+                            unsupported("InterpreterDraw", format!("unbound-texture s{guest}"))
+                        })
+                })
+                .transpose()?;
+            let binding = if let Some(texture) = bound {
+                let (key, descriptor) = sampler(gpu, state, texture)?;
+                PendingTexture {
+                    stage: physical,
+                    view: texture.view.clone(),
+                    sampler: draw.sampler(gpu, key, descriptor)?,
+                }
+            } else {
+                PendingTexture {
+                    stage: physical,
+                    view: if physical < program::TEXTURES_2D {
+                        prepared.unused_texture.clone()
+                    } else {
+                        prepared.unused_cube.clone()
+                    },
+                    sampler: prepared.unused_sampler.clone(),
+                }
+            };
+            bindings.push(binding);
         }
     } else {
-        let texture = snapshot
-            .textures
-            .iter()
-            .find(|t| t.stage == 0)
-            .ok_or_else(|| unsupported("InterpreterDraw", "unbound-texture s0"))?;
-        let (key, descriptor) = sampler(gpu, state, texture)?;
-        PendingTexture {
-            stage: 0,
-            view: texture.view.clone(),
-            sampler: draw.sampler(gpu, key, descriptor)?,
+        for (guest, _) in mapping {
+            let texture = snapshot
+                .textures
+                .iter()
+                .find(|t| t.stage == guest)
+                .ok_or_else(|| unsupported("HybridDraw", format!("unbound-texture s{guest}")))?;
+            let (key, descriptor) = sampler(gpu, state, texture)?;
+            bindings.push(PendingTexture {
+                stage: guest,
+                view: texture.view.clone(),
+                sampler: draw.sampler(gpu, key, descriptor)?,
+            });
         }
-    };
-    let bindings = vec![binding].into();
+    }
+    let bindings = bindings.into();
     let recipes = [
         ShaderRecipe::Source(Arc::clone(&prepared.source)),
         ShaderRecipe::Source(Arc::clone(&prepared.source)),

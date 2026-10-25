@@ -2,30 +2,31 @@
 
 The opt-in interpreter implements a bounded SM2 VS/PS family; Spore rendering,
 native Metal compilation and GPU performance still require user-run validation.
-`src/shader/uber/` defines ABI v4 / interpreter v8. A program is 5136 bytes:
+`src/shader/uber/` defines ABI v5 / interpreter v11. A program is 9232 bytes:
 a four-u32 header (ABI version, pixel flag, instruction count, definition count),
-64 zero-padded 16-u32 instruction records and 32 definition records (index/padding
-and float bits). Opcode bits 8–10 mark immediate sources and bit 16 selects projected TEX; source records
+128 zero-padded 16-u32 instruction records and 32 definition records (index/padding
+and float bits). Opcode bits 8–10 mark immediate sources bit 16 selects projected TEX and bit 17 saturates the result before masked writes; source records
 hold type/index/swizzle/flags. Flag bit 0 negates, bit 8 selects relative addressing,
 and bits 9–10 select the address component. Original bytecode equality plus ABI
 version identifies program data; capacity overflow is excluded.
 
 Admitted arithmetic is MOV/ADD/MUL/MAD/DP3/DP4/RCP/RSQ/MIN/MAX/SLT/LRP/CMP/
-NRM/FRC, plus vertex MOVA and ordinary/projected pixel TEX through 2D s0.
-Capacities are eight temporaries, 64 instructions, 32 float DEFs, 256/32 float
-constants, vertex oPos/oD0–1/oT0–2/a0, pixel v0–1/t0–2 and oC0. Up to five
-consecutive vertex inputs admit position, normal, color0/1, UV0 and blend
+NRM/FRC/SGE/EXP/ABS/POW, plus vertex MOVA and pixel TEX through five 2D textures
+and one cube map. Projected sampling is limited to 2D textures.
+Capacities are eight temporaries, 128 instructions, 32 float DEFs, 256/32 float
+constants, vertex oPos/oD0–1/oT0–7/a0, pixel v0–1/t0–7 and oC0. Up to five
+consecutive vertex inputs admit position, normal, tangent, color0/1, UV0 and blend
 indices/weights. Source swizzles, negation and destination
-masks are supported. MOVA rounds using the existing specializer's nearest-integer
+masks and saturation are supported. MOVA rounds using the existing specializer's nearest-integer
 helper. Relative vertex constants use the selected a0 component and the same
 clamped index as specialization; shader DEFs override device constants even for
 relative reads. Direct DEF reads become immediate bits. TEX requires unmodified,
-identity-swizzled t0–2 or temporary coordinates and s0, a temporary destination and
+identity-swizzled t0–7 or temporary coordinates and a declared sampler, a temporary destination and
 full mask. Pixel partial-precision hints on instructions/declarations execute
 at full precision, as permitted by [D3D9](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx9-graphics-reference-asm-ps-instructions-modifiers-ps-2-0) and matching specialization.
 Integer/bool definitions, other modifiers, shifts, pixel relative
 addressing, flow control, coissue and other models/registers/samplers remain
-excluded. TEXKILL accepts full-mask temporary or t0–2 operands and records any negative
+excluded. TEXKILL accepts full-mask temporary or t0–7 operands and records any negative
 component (all four for SM2, matching specialization and vkd3d). Its destination
 record marks no write; its operand is encoded as an identity-swizzled source.
 Specialization remains unchanged.
@@ -34,29 +35,35 @@ All families use five Float32x4 attributes (80-byte stride), existing 42-compone
 varyings, smooth interpolation, CW triangles and one sample. Shorter declarations
 pad unused attributes with zero; lowering rejects reads of undeclared inputs.
 `compare-family11` prepares the original family; hybrid and interpreter-only
-prepare 14 exact captured states, including all five previous families. They use
-BGRA8/RGBA8, triangle list/strip, no culling/front culling, opaque/alpha/additive
+prepare 21 exact captured states, including all five previous families. They use
+BGRA8/RGBA8, triangle list/strip, no culling/front/back culling, opaque/alpha/additive
 blending and absent/LESS/LEQUAL/ALWAYS depth, with writes only where captured.
 The finite manifest is in `src/render/interpreter.rs`; other combinations fall back.
 
 All share one module, layout and program allocations. Existing input conversion,
 half-pixel correction, raster output processing and sampler state are reused;
-opaque texture alpha is a per-draw flag. Bound textures must be filterable ordinary
-2D resources. Texture-free shaders bind a private unused texture/sampler to the
-shared layout. Integer/bool banks, vertex textures, biased sampling,
+opaque texture alpha is a per-binding bit in the per-draw flags. Declared guest
+sampler slots s0–15 map deterministically to physical 2D slots 0–4 (ascending guest
+slot order) and cube slot 5. Bound resources must match those dimensions and be
+filterable; missing declared textures remain excluded. Unused bindings receive
+private 2D/cube views and samplers. Ready hybrid specializations retain guest
+sampler bindings and the same packed geometry. Integer/bool banks, vertex textures, biased sampling,
 shader depth output and MRT have no coverage. Stencil writes remain disabled.
 
 One bind group contains four dynamic uniforms (bindings 0/1: 4096-byte VS bank /
 272-byte parameters; 2/3: 512-byte PS bank / 64-byte parameters), texture/sampler
-4/20, and immutable 5136-byte program uniforms 36/37. It needs three uniforms per
-stage, four dynamic uniforms, five vertex attributes, one texture/sampler and
+4–9/20–25, and immutable 9232-byte program uniforms 36/37. It needs three uniforms per
+stage, four dynamic uniforms, five vertex attributes, six textures/samplers and
 42 inter-stage components; initialization checks the requested device limits.
 Prepared module/pipeline ownership follows the device. Queued draws and bindings
 retain their program buffers; reset clears program uploads and replacement devices
 prepare the selected manifest. Specialization cache eviction retains interpreter residency.
 
-Both stages execute a bounded loop through uniform instruction data, with a
-draw-uniform instruction index and a maximum of 64 admitted instructions. Guest
+Register-read helpers borrow the register state and skip unused operands using
+draw-uniform opcode decisions (TEX reads coordinates, not sampler metadata as a
+register). All required operand values are read
+before the instruction writes its destination. Both stages execute a bounded loop through uniform instruction data, with a
+draw-uniform instruction index and a maximum of 128 admitted instructions. Guest
 flow control remains excluded. TEXKILL accumulates a sticky kill flag at its
 instruction position; discard occurs after all instruction slots, preserving
 implicit sampling derivatives. Sampling remains implicit; alpha discard occurs

@@ -82,9 +82,29 @@ impl std::fmt::Display for Exclusion {
     }
 }
 
+pub(crate) fn sampler_mapping(p: &Program) -> Vec<(u32, u32)> {
+    let mut next_2d = 0;
+    p.samplers
+        .iter()
+        .map(|(&guest, &kind)| {
+            let physical = if kind == S_CUBE {
+                TEXTURES_2D
+            } else {
+                let slot = next_2d;
+                next_2d += 1;
+                slot
+            };
+            (guest, physical)
+        })
+        .collect()
+}
+
 pub(crate) fn interface_candidate(p: &Program) -> bool {
     if p.pixel {
-        (p.samplers.is_empty() || (p.samplers.len() == 1 && p.samplers.get(&0) == Some(&2)))
+        (p.samplers.keys().all(|&slot| slot < 16)
+            && p.samplers.values().all(|&kind| matches!(kind, 2 | S_CUBE))
+            && p.samplers.values().filter(|&&kind| kind == 2).count() <= TEXTURES_2D as usize
+            && p.samplers.values().filter(|&&kind| kind == S_CUBE).count() <= 1)
             && p.inputs.iter().all(|d| match d.ty {
                 R_INPUT => d.index < 2,
                 R_ADDR => d.index < TEXTURE_COORDINATES,
@@ -101,7 +121,7 @@ pub(crate) fn interface_candidate(p: &Program) -> bool {
                     && d.index < VERTEX_INPUTS
                     && matches!(
                         (d.usage, d.usage_index),
-                        (0, 0) | (1, 0) | (2, 0) | (3, 0) | (5, 0) | (10, 0) | (10, 1)
+                        (0, 0) | (1, 0) | (2, 0) | (3, 0) | (5, 0) | (6, 0) | (10, 0) | (10, 1)
                     )
             })
     }
@@ -128,8 +148,9 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
     {
         return Err(Exclusion::Definitions);
     }
-    let allowed_modifiers = if p.pixel { 2 } else { 0 };
-    if !interface_candidate(p) || p.declaration_modifiers & !allowed_modifiers != 0 {
+    let precision_modifier = if p.pixel { 2 } else { 0 };
+    let allowed_modifiers = precision_modifier | 1;
+    if !interface_candidate(p) || p.declaration_modifiers & !precision_modifier != 0 {
         return Err(Exclusion::Declarations);
     }
     let mut requirements = Requirements::default();
@@ -142,11 +163,11 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
     ]);
     for (instruction, inst) in p.code.iter().enumerate() {
         let expected = match inst.op {
-            OP_MOV | OP_FRC | OP_RCP | OP_RSQ | OP_NRM => 1,
+            OP_MOV | OP_FRC | OP_RCP | OP_RSQ | OP_NRM | OP_EXP | OP_ABS => 1,
             OP_MOVA if !p.pixel => 1,
             OP_TEXKILL if p.pixel => 1,
             OP_MAD | OP_LRP | OP_CMP => 3,
-            OP_MUL | OP_ADD | OP_DP3 | OP_DP4 | OP_MIN | OP_MAX | OP_SLT => 2,
+            OP_MUL | OP_ADD | OP_DP3 | OP_DP4 | OP_MIN | OP_MAX | OP_SLT | OP_SGE | OP_POW => 2,
             OP_TEX if p.pixel => 2,
             opcode => {
                 return Err(Exclusion::Opcode {
@@ -213,7 +234,9 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
         }
         let opcode_word = words.len();
         words.extend([
-            (inst.op & OPCODE_MASK) | (inst.ctrl << 16),
+            (inst.op & OPCODE_MASK)
+                | (inst.ctrl << 16)
+                | if d.saturate { SATURATE_FLAG } else { 0 },
             d.ty,
             d.index,
             d.mask,
@@ -260,10 +283,10 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                     if p.pixel
                         && inst.op == OP_TEX
                         && operand == 1
-                        && s.index == 0
-                        && p.samplers.get(&0) == Some(&2) =>
+                        && p.samplers.contains_key(&s.index)
+                        && (inst.ctrl == 0 || p.samplers.get(&s.index) == Some(&2)) =>
                 {
-                    requirements.sampled_slots |= 1;
+                    requirements.sampled_slots |= 1 << s.index;
                     true
                 }
                 _ => false,
@@ -294,7 +317,16 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                 }));
             } else {
                 let flags = s.md | (u32::from(s.rel) << 8) | (s.rel_comp << 9);
-                words.extend([s.ty, s.index, s.swz, flags]);
+                let index = if s.ty == R_SAMPLER {
+                    sampler_mapping(p)
+                        .into_iter()
+                        .find(|&(guest, _)| guest == s.index)
+                        .unwrap()
+                        .1
+                } else {
+                    s.index
+                };
+                words.extend([s.ty, index, s.swz, flags]);
             }
         }
     }

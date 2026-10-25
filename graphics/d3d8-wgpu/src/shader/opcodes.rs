@@ -16,3 +16,7 @@ pub(crate) const OP_LRP: u32 = 18;
 pub(crate) const OP_NRM: u32 = 36;
 pub(crate) const OP_CMP: u32 = 88;
 pub(crate) const OP_TEXKILL: u32 = 65;
+pub(crate) const OP_SGE: u32 = 13;
+pub(crate) const OP_EXP: u32 = 14;
+pub(crate) const OP_POW: u32 = 32;
+pub(crate) const OP_ABS: u32 = 35;

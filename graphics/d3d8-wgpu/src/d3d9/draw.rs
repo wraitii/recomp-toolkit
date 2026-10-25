@@ -3574,10 +3574,22 @@ pub(crate) fn execute(
     );
     let parameters = if interpreted {
         parameters.interpreter_flags(
-            snapshot
-                .textures
-                .iter()
-                .any(|t| t.stage == 0 && opaque_format(t.format)),
+            ps.map_or(0, |shader| {
+                crate::shader::uber::sampler_mapping(&shader.program)
+                    .into_iter()
+                    .fold(0, |flags, (guest, physical)| {
+                        flags
+                            | if snapshot
+                                .textures
+                                .iter()
+                                .any(|t| t.stage == guest && opaque_format(t.format))
+                            {
+                                1 << physical
+                            } else {
+                                0
+                            }
+                    })
+            }),
             uber::tint_enabled(),
         )
     } else {

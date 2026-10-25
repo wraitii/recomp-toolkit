@@ -23,6 +23,7 @@ pub(crate) struct PreparedInterpreter {
     pub(crate) module: wgpu::ShaderModule,
     pub(crate) layout: wgpu::BindGroupLayout,
     pub(crate) unused_texture: wgpu::TextureView,
+    pub(crate) unused_cube: wgpu::TextureView,
     pub(crate) unused_sampler: wgpu::Sampler,
 }
 
@@ -53,31 +54,36 @@ impl FamilyKey {
     pub(crate) fn mvp() -> Self {
         let vertex = wgpu::ShaderStages::VERTEX;
         let fragment = wgpu::ShaderStages::FRAGMENT;
-        let bindings: Arc<[_]> = vec![
+        let mut bindings = vec![
             uniform(0, u64::from(VERTEX_CONSTANTS) * 16, vertex, true),
             uniform(1, 272, vertex, true),
             uniform(2, u64::from(PIXEL_CONSTANTS) * 16, fragment, true),
             uniform(3, 64, fragment, true),
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
+            uniform(PROGRAM_BINDINGS[0], PROGRAM_BYTES, vertex, false),
+            uniform(PROGRAM_BINDINGS[1], PROGRAM_BYTES, fragment, false),
+        ];
+        for slot in 0..TEXTURE_SLOTS {
+            bindings.push(wgpu::BindGroupLayoutEntry {
+                binding: 4 + slot,
                 visibility: fragment,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    view_dimension: if slot < TEXTURES_2D {
+                        wgpu::TextureViewDimension::D2
+                    } else {
+                        wgpu::TextureViewDimension::Cube
+                    },
                     multisampled: false,
                 },
                 count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 20,
+            });
+            bindings.push(wgpu::BindGroupLayoutEntry {
+                binding: 20 + slot,
                 visibility: fragment,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
-            },
-            uniform(PROGRAM_BINDINGS[0], PROGRAM_BYTES, vertex, false),
-            uniform(PROGRAM_BINDINGS[1], PROGRAM_BYTES, fragment, false),
-        ]
-        .into();
+            });
+        }
         let component = wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::SrcAlpha,
             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
@@ -90,7 +96,7 @@ impl FamilyKey {
             temporaries: TEMP_REGISTERS,
             constants: [VERTEX_CONSTANTS, PIXEL_CONSTANTS],
             interface: InterfaceKey {
-                bindings,
+                bindings: bindings.into(),
                 vertex_buffers: smallvec::smallvec![(
                     VERTEX_STRIDE,
                     (0..VERTEX_INPUTS)
@@ -179,12 +185,12 @@ impl FamilyKey {
             (
                 "textures",
                 u64::from(limits.max_sampled_textures_per_shader_stage),
-                1,
+                u64::from(TEXTURE_SLOTS),
             ),
             (
                 "samplers",
                 u64::from(limits.max_samplers_per_shader_stage),
-                1,
+                u64::from(TEXTURE_SLOTS),
             ),
         ] {
             if available < required {
@@ -334,6 +340,49 @@ impl PreparedInterpreter {
                     None,
                     Some((false, wgpu::CompareFunction::Always)),
                 ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    None,
+                    Some((true, wgpu::CompareFunction::Less)),
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    None,
+                    Some((true, wgpu::CompareFunction::Less)),
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Back),
+                    None,
+                    Some((true, wgpu::CompareFunction::Less)),
+                ),
+                (wgpu::TextureFormat::Bgra8Unorm, None, None, None),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    None,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
+                    None,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    None,
+                ),
             ] {
                 let mut key = keys[0].clone();
                 let target = key.descriptor.target.as_mut().unwrap();
@@ -401,9 +450,29 @@ impl PreparedInterpreter {
                 view_formats: &[],
             })
             .create_view(&Default::default());
+        let unused_cube = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("d3d9-interpreter-unused-cube"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 6,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::Cube),
+                ..Default::default()
+            });
         let unused_sampler = device.create_sampler(&Default::default());
         Ok(Self {
             unused_texture,
+            unused_cube,
             unused_sampler,
             families,
             module,

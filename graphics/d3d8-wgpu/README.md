@@ -198,10 +198,11 @@ only the compiler worker, and logs `debug-delay`; unset it for performance captu
 
 Opt-in modes prepare one module during device initialization, including
 replacement devices: `compare-family11` creates one pipeline; hybrid and
-interpreter-only create 14 captured pipeline states, retaining the UI/video and
+interpreter-only create 21 captured pipeline states, retaining the UI/video and
 additive families. The interpreter supports straight-line arithmetic, relative
-vertex constants, five packed inputs, two color/three UV varyings, texture-free shaders
-and ordinary/projected 2D sampling, partial-precision hints and deferred TEXKILL; see [SHADERS.md](SHADERS.md) for exact limits.
+vertex constants, five packed inputs, two color/eight UV varyings, texture-free shaders
+and five 2D textures plus one cube map, projected 2D sampling, saturation,
+partial-precision hints and deferred TEXKILL; see [SHADERS.md](SHADERS.md) for exact limits.
 Program changes upload immutable data
 and reuse these prepared pipelines.
 `[d3d9-uber]` records include warmup time/manifest, program uploads and

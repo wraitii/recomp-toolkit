@@ -80,26 +80,28 @@ fn interpreter_source() {
                 },
             );
         }
-        resources.resources.insert(
-            naga::ResourceBinding {
-                group: 0,
-                binding: 4,
-            },
-            naga::back::msl::BindTarget {
-                texture: Some(0),
-                ..Default::default()
-            },
-        );
-        resources.resources.insert(
-            naga::ResourceBinding {
-                group: 0,
-                binding: 20,
-            },
-            naga::back::msl::BindTarget {
-                sampler: Some(naga::back::msl::BindSamplerTarget::Resource(0)),
-                ..Default::default()
-            },
-        );
+        for slot in 0..uber_abi::TEXTURE_SLOTS {
+            resources.resources.insert(
+                naga::ResourceBinding {
+                    group: 0,
+                    binding: 4 + slot,
+                },
+                naga::back::msl::BindTarget {
+                    texture: Some(slot as u8),
+                    ..Default::default()
+                },
+            );
+            resources.resources.insert(
+                naga::ResourceBinding {
+                    group: 0,
+                    binding: 20 + slot,
+                },
+                naga::back::msl::BindTarget {
+                    sampler: Some(naga::back::msl::BindSamplerTarget::Resource(slot as u8)),
+                    ..Default::default()
+                },
+            );
+        }
         options.per_entry_point_map.insert(name.into(), resources);
     }
     let (msl, translation) = naga::back::msl::write_string(

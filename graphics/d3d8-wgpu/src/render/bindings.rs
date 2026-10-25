@@ -26,8 +26,8 @@ impl DrawParameters {
         }
     }
 
-    pub(crate) fn interpreter_flags(mut self, opaque: bool, tint: bool) -> Self {
-        self.pixel[48..52].copy_from_slice(&u32::from(opaque).to_le_bytes());
+    pub(crate) fn interpreter_flags(mut self, opaque: u32, tint: bool) -> Self {
+        self.pixel[48..52].copy_from_slice(&opaque.to_le_bytes());
         self.pixel[52..56].copy_from_slice(&u32::from(tint).to_le_bytes());
         self.pixel_size = 64;
         self
