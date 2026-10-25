@@ -7,7 +7,9 @@ use crate::RenderError;
 use crate::fast_map::{FastHasher, FastMap};
 use crate::render::bindings::DrawParameters;
 use crate::render::interface::{InterfaceKey, LayoutAttribute, VertexAttributes, VertexLayouts};
-use crate::render::pipeline::{PipelineRecipe, PreparedPipeline as PipelineKey};
+use crate::render::pipeline::{
+    PipelineDescriptor, PipelineRecipe, PreparedPipeline as PipelineKey,
+};
 use crate::shader::identity::ProgramKey;
 use crate::shader::recipe::{ProgramSettings, ShaderRecipe, shading_source};
 use smallvec::{SmallVec, smallvec};
@@ -18,6 +20,7 @@ use std::time::Instant;
 
 mod ffvs;
 mod trace;
+pub(crate) mod uber;
 
 fn trace_compilation() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -698,6 +701,7 @@ fn pack_shader_vertices(
     command: &DrawCommand,
     linked: &[LinkedInput],
     order: &[u32],
+    canonical: bool,
 ) -> Result<PackedVertices, RenderError> {
     struct Copy<'a> {
         fetch: VertexFetch<'a>,
@@ -710,7 +714,9 @@ fn pack_shader_vertices(
     let mut stride = 0u64;
     let max_index = order.iter().copied().max();
     for input in linked {
-        let native = native_vertex_format(input.element_type);
+        let native = (!canonical)
+            .then(|| native_vertex_format(input.element_type))
+            .flatten();
         let format = native.unwrap_or(wgpu::VertexFormat::Float32x4);
         attributes.push(wgpu::VertexAttribute {
             format,
@@ -1429,21 +1435,7 @@ fn ff_vertices(
     Ok(out)
 }
 const V2F: &str = "struct V2F { @builtin(position) pos: vec4<f32>, @location(0) d0: vec4<f32>, @location(1) d1: vec4<f32>, @location(2) t0: vec4<f32>, @location(3) t1: vec4<f32>, @location(4) t2: vec4<f32>, @location(5) t3: vec4<f32>, @location(6) t4: vec4<f32>, @location(7) t5: vec4<f32>, @location(8) t6: vec4<f32>, @location(9) t7: vec4<f32>, @location(10) fog: f32, @location(11) fogz: f32 }\n";
-const OUTPUT: &str = r#"
-fn d9_output(input:vec4<f32>,vin:V2F)->vec4<f32> {
-    var col=input;
-    let a=clamp(col.a,0.0,1.0); let r=psp.alpha_ref;
-    var alpha_pass=true;
-    switch psp.alpha_func {case 1:{alpha_pass=false;} case 2:{alpha_pass=a<r;} case 3:{alpha_pass=a==r;} case 4:{alpha_pass=a<=r;} case 5:{alpha_pass=a>r;} case 6:{alpha_pass=a!=r;} case 7:{alpha_pass=a>=r;} default:{} }
-    if (!alpha_pass) {discard;}
-    var f=vin.fog;
-    let z=abs(vin.fogz);
-    switch psp.fog_mode {case 1:{f=exp(-psp.fog_density*z);} case 2:{let d=psp.fog_density*z;f=exp(-d*d);} case 3:{f=(psp.fog_end-z)/(psp.fog_end-psp.fog_start);} default:{} }
-    if (psp.pad0!=0) {col=vec4<f32>(mix(psp.fog_color.rgb,col.rgb,clamp(f,0.0,1.0)),col.a);}
-    if (psp.pad1!=0.0) {let c=clamp(col.rgb,vec3<f32>(0.0),vec3<f32>(1.0)); col=vec4<f32>(select(1.055*pow(c,vec3<f32>(1.0/2.4))-0.055,12.92*c,c<=vec3<f32>(0.0031308)),col.a);}
-    return col;
-}
-"#;
+const OUTPUT: &str = include_str!("../shader/raster.wgsl");
 fn ff_vertex_source() -> String {
     let mut source = String::from(V2F);
     source += "struct VSP { halfpix:vec4<f32>,ascale:array<vec4<f32>,16> }\n@group(0) @binding(1) var<uniform> vsp:VSP;\nstruct FfIn {\n";
@@ -2123,6 +2115,7 @@ struct PendingTexture {
 struct BindGroupKey {
     layout: wgpu::BindGroupLayout,
     uniform_sizes: [u64; 4],
+    programs: Option<[wgpu::Buffer; 2]>,
     textures: SmallVec<[(u32, wgpu::TextureView, wgpu::Sampler); 4]>,
 }
 
@@ -2131,6 +2124,7 @@ struct PendingDraw {
     layout: wgpu::BindGroupLayout,
     uniform_offsets: [u32; 4],
     uniform_sizes: [u64; 4],
+    programs: Option<[wgpu::Buffer; 2]>,
     textures: Arc<[PendingTexture]>,
     vertex_offset: u64,
     vertex_size: u64,
@@ -2147,6 +2141,7 @@ struct PendingDraw {
 fn same_bindings(a: &PendingDraw, b: &PendingDraw) -> bool {
     a.layout == b.layout
         && a.uniform_sizes == b.uniform_sizes
+        && a.programs == b.programs
         && a.textures.len() == b.textures.len()
         && a.textures
             .iter()
@@ -2184,6 +2179,7 @@ struct DrawMemo {
     bindings: Arc<[PendingTexture]>,
     vs_count: u32,
     ps_count: u32,
+    programs: Option<[wgpu::Buffer; 2]>,
     modules: [wgpu::ShaderModule; 2],
     recipes: [ShaderRecipe; 2],
     binding_entries: Arc<[wgpu::BindGroupLayoutEntry]>,
@@ -2219,6 +2215,9 @@ pub(crate) struct D3d9DrawState {
     mvp_capture: trace::MvpCapture,
     observed_families: FastMap<trace::Family, u64>,
     inventory_programs: std::collections::BTreeSet<Arc<[u32]>>,
+    interpreter_programs: FastMap<crate::shader::uber::EncodedKey, wgpu::Buffer>,
+    interpreter_draws: u64,
+    interpreter_frame: uber::FrameCounters,
     measured_draws: u64,
     draw_cpu_ms: f64,
     geometry_cpu_ms: f64,
@@ -2278,6 +2277,22 @@ impl D3d9DrawState {
                 self.pipeline_ms
             );
         }
+        if uber::enabled() {
+            let c = &self.interpreter_frame;
+            eprintln!(
+                "[d3d9-uber] frame frame={} draws={} interpreted_draws={} total_interpreted_draws={} timing={} cpu_ms={:.3} packing_ms={:.3} packed_bytes={} uniform_bytes={} resident_program_bytes={}",
+                self.frame,
+                self.measured_draws,
+                c.draws,
+                self.interpreter_draws,
+                trace_compilation(),
+                c.cpu_ms,
+                c.packing_ms,
+                c.packed_bytes,
+                c.uniform_bytes,
+                self.interpreter_programs.len() as u64 * crate::shader::uber::PROGRAM_BYTES
+            );
+        }
         self.measured_draws = 0;
         self.draw_cpu_ms = 0.0;
         self.geometry_cpu_ms = 0.0;
@@ -2286,6 +2301,7 @@ impl D3d9DrawState {
         self.batch_upload_bytes = 0;
         self.module_ms = 0.0;
         self.pipeline_ms = 0.0;
+        self.interpreter_frame = uber::FrameCounters::default();
         self.frame += 1;
         self.trace_frame_draw = 0;
         self.mvp_capture.end_frame();
@@ -2298,6 +2314,7 @@ impl D3d9DrawState {
     pub(crate) fn reset(&mut self) {
         self.clear("device-reset");
         self.discard_batch();
+        self.interpreter_programs.clear();
         self.upload = None;
         self.bind_groups.clear();
     }
@@ -2914,6 +2931,7 @@ fn resolve_shading(
         bindings: bindings.into(),
         vs_count,
         ps_count,
+        programs: None,
         modules: [
             draw.variant_shader(gpu, &vertex_source)?,
             draw.variant_shader(gpu, &pixel_source)?,
@@ -2946,6 +2964,42 @@ fn fill_mode(gpu: &D3d9Gpu, state: &D3d9State) -> Result<wgpu::PolygonMode, Rend
         ));
     }
     Ok(mode)
+}
+
+fn pipeline_descriptor(
+    gpu: &D3d9Gpu,
+    state: &D3d9State,
+    snapshot: &DrawSnapshot,
+    topology: wgpu::PrimitiveTopology,
+    strip_index_format: Option<wgpu::IndexFormat>,
+) -> Result<PipelineDescriptor, RenderError> {
+    let cull = match rs(state, 22) {
+        1 => None,
+        2 => Some(wgpu::Face::Front),
+        _ => Some(wgpu::Face::Back),
+    };
+    let target = wgpu::ColorTargetState {
+        format: snapshot.target.texture.format(),
+        blend: blend_state(state, opaque_format(snapshot.target.format))?,
+        write_mask: wgpu::ColorWrites::from_bits_truncate(rs(state, 168)),
+    };
+    Ok(PipelineDescriptor {
+        entry_points: ["vs_main", "ps_main"],
+        target: Some(target),
+        primitive: wgpu::PrimitiveState {
+            topology,
+            strip_index_format,
+            front_face: wgpu::FrontFace::Cw,
+            cull_mode: cull,
+            polygon_mode: fill_mode(gpu, state)?,
+            ..Default::default()
+        },
+        depth: depth_state(state, snapshot.depth.as_ref())?,
+        multisample: wgpu::MultisampleState {
+            mask: u64::from(rs(state, 162)),
+            ..Default::default()
+        },
+    })
 }
 
 pub(crate) fn execute(
@@ -3069,6 +3123,7 @@ pub(crate) fn execute(
             ps.map(|s| fingerprint(&s.code))
         );
     }
+    let interpreted = uber::select(gpu, state, snapshot, vs, ps)?;
     let geometry_started = trace_compilation().then(Instant::now);
     let mut linked_inputs = std::mem::take(&mut draw.linked);
     let mut ff_uniforms = std::mem::take(&mut draw.ff_uniforms);
@@ -3080,11 +3135,15 @@ pub(crate) fn execute(
     let linked = match vs {
         Some(v) => {
             link_inputs(declaration, &v.program, &mut linked_inputs)?;
+            if interpreted {
+                linked_inputs.sort_by_key(|input| input.location);
+            }
             Some(linked_inputs.as_slice())
         }
         None => ff_key.is_some().then_some(linked_inputs.as_slice()),
     };
     let direct = linked
+        .filter(|_| !interpreted)
         .map(|linked| native_geometry(gpu, draw, &snapshot.command, linked, vs.is_some()))
         .transpose()?
         .flatten();
@@ -3119,7 +3178,7 @@ pub(crate) fn execute(
                 &mut draw.index_slots,
             )?;
             let vertices = if let Some(linked) = linked {
-                pack_shader_vertices(&snapshot.command, linked, &order)?
+                pack_shader_vertices(&snapshot.command, linked, &order, interpreted)?
             } else {
                 PackedVertices {
                     bytes: ff_vertices(&snapshot.command, declaration, &order, state)?,
@@ -3136,8 +3195,15 @@ pub(crate) fn execute(
             (None, vertices, order, draw_indices, topology)
         };
     if let Some(started) = geometry_started {
-        draw.geometry_cpu_ms += started.elapsed().as_secs_f64() * 1000.0;
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        draw.geometry_cpu_ms += ms;
+        if interpreted {
+            draw.interpreter_frame.packing_ms += ms;
+        }
         draw.packed_bytes += vertices.bytes.len() as u64;
+    }
+    if interpreted {
+        draw.interpreter_frame.packed_bytes += vertices.bytes.len() as u64;
     }
     let trace_this = super::trace_enabled()
         && trace_selected(draw.frame, draw.trace_frame_draw, draw.trace_total_draw);
@@ -3343,11 +3409,12 @@ pub(crate) fn execute(
                     .iter()
                     .zip(&vertices.attributes)
                     .map(|(input, attribute)| {
-                        let element_type = if native_vertex_format(input.element_type).is_some() {
-                            input.element_type
-                        } else {
-                            D3DDECLTYPE_FLOAT4
-                        };
+                        let element_type =
+                            if !interpreted && native_vertex_format(input.element_type).is_some() {
+                                input.element_type
+                            } else {
+                                D3DDECLTYPE_FLOAT4
+                            };
                         expand_element(element_type, &vertex[attribute.offset as usize..])
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -3371,6 +3438,7 @@ pub(crate) fn execute(
         .iter()
         .rposition(|memo| {
             memo.fingerprint == fingerprint
+                && memo.programs.is_some() == interpreted
                 && memo.ff_key == ff_key
                 && memo.raw_inputs == raw_inputs
                 && memo.target == target_key
@@ -3380,6 +3448,14 @@ pub(crate) fn execute(
         .map(|index| draw.memos.remove(index));
     let mut memo = match memo {
         Some(memo) => memo,
+        None if interpreted => uber::resolve(
+            gpu,
+            draw,
+            state,
+            snapshot,
+            vs.ok_or_else(|| unsupported("InterpreterDraw", "missing vertex program"))?,
+            ps.ok_or_else(|| unsupported("InterpreterDraw", "missing pixel program"))?,
+        )?,
         None => resolve_shading(
             gpu,
             draw,
@@ -3443,6 +3519,16 @@ pub(crate) fn execute(
         [[1.0; 4]; 16],
         psp_words,
     );
+    let parameters = if interpreted {
+        parameters.interpreter_texture(
+            snapshot
+                .textures
+                .iter()
+                .any(|t| t.stage == 0 && opaque_format(t.format)),
+        )
+    } else {
+        parameters
+    };
     let has_attributes = !vertices.attributes.is_empty();
     let buffers = match native_geometry.as_mut() {
         Some(geometry) => std::mem::take(&mut geometry.layouts),
@@ -3464,35 +3550,23 @@ pub(crate) fn execute(
             pipeline.clone()
         }
         _ => {
-            let cull = match rs(state, 22) {
-                1 => None,
-                2 => Some(wgpu::Face::Front),
-                _ => Some(wgpu::Face::Back),
-            };
-            let target = wgpu::ColorTargetState {
-                format: snapshot.target.texture.format(),
-                blend: blend_state(state, opaque_format(snapshot.target.format))?,
-                write_mask: wgpu::ColorWrites::from_bits_truncate(rs(state, 168)),
-            };
+            if interpreted {
+                return Err(unsupported(
+                    "InterpreterDraw",
+                    "unprepared-interface family11",
+                ));
+            }
+            let descriptor =
+                pipeline_descriptor(gpu, state, snapshot, topology, strip_index_format)?;
             let key = PipelineKey {
-                entry_points: ["vs_main", "ps_main"],
+                entry_points: descriptor.entry_points,
                 modules: memo.modules.clone(),
                 layout: memo.layout.clone(),
                 buffers: buffers.clone(),
-                target: Some(target),
-                primitive: wgpu::PrimitiveState {
-                    topology,
-                    strip_index_format,
-                    front_face: wgpu::FrontFace::Cw,
-                    cull_mode: cull,
-                    polygon_mode: fill_mode(gpu, state)?,
-                    ..Default::default()
-                },
-                depth: depth_state(state, snapshot.depth.as_ref())?,
-                multisample: wgpu::MultisampleState {
-                    mask: u64::from(rs(state, 162)),
-                    ..Default::default()
-                },
+                target: descriptor.target,
+                primitive: descriptor.primitive,
+                depth: descriptor.depth,
+                multisample: descriptor.multisample,
             };
             let recipe = PipelineRecipe {
                 shaders: memo.recipes.clone(),
@@ -3517,7 +3591,28 @@ pub(crate) fn execute(
             draw.frame, draw.measured_draws
         );
     }
-    trace::capture_mvp(draw, state, snapshot, vs, ps, &pipeline);
+    trace::capture_mvp(gpu, draw, state, snapshot, vs, ps, &pipeline);
+    if interpreted {
+        draw.interpreter_draws += 1;
+        draw.interpreter_frame.draws += 1;
+        if trace_compilation() || trace_this {
+            eprintln!(
+                "[d3d9-uber] draw frame={} draw={} interpreted_draw={} family={:016x} vs={:?} ps={:?} target={:?} subresource={:?} texture0={} pipeline={:?}",
+                draw.frame,
+                draw.measured_draws,
+                draw.interpreter_draws,
+                gpu.interpreter
+                    .get()
+                    .map_or(0, |p| self::fingerprint(&p.key)),
+                vs.map(|s| &s.key),
+                ps.map(|s| &s.key),
+                snapshot.target.view,
+                snapshot.target.subresource,
+                state.texture(0)?,
+                pipeline
+            );
+        }
+    }
     if draw
         .batch
         .color_key_view
@@ -3536,6 +3631,12 @@ pub(crate) fn execute(
         },
         state.constants_f_bytes(true, memo.ps_count)?,
     );
+    if interpreted {
+        draw.interpreter_frame.uniform_bytes += uniform_values
+            .iter()
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>();
+    }
     if trace_this {
         eprintln!(
             "[d3d9-trace] submit frame={} draw={count} vs_count={} ps_count={} uniform_hashes={:016x?} depth={:?} blend={:?} packed_vertex_hash={:016x}",
@@ -3778,6 +3879,7 @@ pub(crate) fn execute(
         layout: memo.layout.clone(),
         uniform_offsets,
         uniform_sizes,
+        programs: memo.programs.clone(),
         textures: memo.bindings.clone(),
         vertex_offset: vertex_offset as u64,
         vertex_size: vertex_size as u64,
@@ -3800,9 +3902,13 @@ pub(crate) fn execute(
         flush(gpu, draw, queries)?;
     }
     if let Some(started) = draw_started {
-        draw.measured_draws += 1;
-        draw.draw_cpu_ms += started.elapsed().as_secs_f64() * 1000.0;
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        draw.draw_cpu_ms += ms;
+        if interpreted {
+            draw.interpreter_frame.cpu_ms += ms;
+        }
     }
+    draw.measured_draws += 1;
     if trace_this && trace_readback() {
         flush(gpu, draw, queries)?;
         if matches!(snapshot.target.format, 21 | 22 | 32) {
@@ -3908,6 +4014,7 @@ fn flush_inner(
             let key = BindGroupKey {
                 layout: pending.layout.clone(),
                 uniform_sizes: pending.uniform_sizes,
+                programs: pending.programs.clone(),
                 textures: pending
                     .textures
                     .iter()
@@ -3927,6 +4034,17 @@ fn flush_inner(
                             size: wgpu::BufferSize::new(pending.uniform_sizes[binding as usize]),
                         }),
                     });
+                }
+                if let Some(programs) = &pending.programs {
+                    for (binding, buffer) in crate::shader::uber::PROGRAM_BINDINGS
+                        .into_iter()
+                        .zip(programs)
+                    {
+                        entries.push(wgpu::BindGroupEntry {
+                            binding,
+                            resource: buffer.as_entire_binding(),
+                        });
+                    }
                 }
                 for texture in pending.textures.iter() {
                     entries.push(wgpu::BindGroupEntry {

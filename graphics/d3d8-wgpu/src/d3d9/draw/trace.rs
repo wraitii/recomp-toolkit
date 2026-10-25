@@ -14,6 +14,7 @@ impl MvpCapture {
 }
 
 pub(super) fn capture_mvp(
+    gpu: &D3d9Gpu,
     draw: &mut D3d9DrawState,
     state: &D3d9State,
     snapshot: &DrawSnapshot,
@@ -30,21 +31,44 @@ pub(super) fn capture_mvp(
     let (Some(vs), Some(ps)) = (vs, ps) else {
         return;
     };
-    if fingerprint(&vs.code) != 0xdc32dcdca4f64c33 || fingerprint(&ps.code) != 0xc49b28329a8ab277 {
+    let interpreted = gpu
+        .interpreter
+        .get()
+        .is_some_and(|p| p.pipeline == *pipeline);
+    if !interpreted
+        && (fingerprint(&vs.code) != 0xdc32dcdca4f64c33
+            || fingerprint(&ps.code) != 0xc49b28329a8ab277)
+    {
         return;
     }
-    let Some((_, recipe)) = draw.pipelines.values().find(|(p, _)| p == pipeline) else {
+    let description = draw
+        .pipelines
+        .values()
+        .find(|(p, _)| p == pipeline)
+        .map(|(_, recipe)| {
+            (
+                fingerprint(&recipe.key()),
+                &recipe.interface,
+                &recipe.descriptor,
+            )
+        })
+        .or_else(|| {
+            gpu.interpreter
+                .get()
+                .filter(|p| p.pipeline == *pipeline)
+                .map(|p| (fingerprint(&p.key), &p.key.interface, &p.key.descriptor))
+        });
+    let Some((recipe_id, interface, descriptor)) = description else {
         eprintln!(
             "[d3d9-uber] capture-missing-recipe frame={} draw={frame_draw}",
             draw.frame
         );
         return;
     };
-    let recipe_id = fingerprint(&recipe.key());
     if draw.mvp_capture.families.insert(recipe_id) {
         eprintln!(
             "[d3d9-uber] capture-family recipe={recipe_id:016x} interface={:?} descriptor={:?}",
-            recipe.interface, recipe.descriptor
+            interface, descriptor
         );
     }
     for shader in [vs, ps] {

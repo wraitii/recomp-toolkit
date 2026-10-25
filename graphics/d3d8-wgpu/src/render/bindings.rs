@@ -1,6 +1,7 @@
 pub(crate) struct DrawParameters {
     vertex: [f32; 68],
-    pixel: [u8; 48],
+    pixel: [u8; 64],
+    pixel_size: usize,
 }
 
 impl DrawParameters {
@@ -14,11 +15,21 @@ impl DrawParameters {
         for (slot, scale) in vertex[4..].chunks_exact_mut(4).zip(attribute_scales) {
             slot.copy_from_slice(&scale);
         }
-        let mut pixel = [0; 48];
+        let mut pixel = [0; 64];
         for (bytes, word) in pixel.chunks_exact_mut(4).zip(pixel_words) {
             bytes.copy_from_slice(&word.to_le_bytes());
         }
-        Self { vertex, pixel }
+        Self {
+            vertex,
+            pixel,
+            pixel_size: 48,
+        }
+    }
+
+    pub(crate) fn interpreter_texture(mut self, opaque: bool) -> Self {
+        self.pixel[48..52].copy_from_slice(&u32::from(opaque).to_le_bytes());
+        self.pixel_size = 64;
+        self
     }
 
     pub(crate) fn values<'a>(
@@ -30,7 +41,7 @@ impl DrawParameters {
             vertex_bank,
             bytemuck::cast_slice(&self.vertex),
             pixel_bank,
-            &self.pixel,
+            &self.pixel[..self.pixel_size],
         ]
     }
 }

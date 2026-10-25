@@ -1,3 +1,4 @@
+pub(crate) use super::opcodes::{OP_DP4, OP_MOV, OP_MUL, OP_TEX};
 use super::validate::shader_word_count;
 use crate::RenderError;
 use std::collections::BTreeMap;
@@ -16,15 +17,12 @@ pub(crate) const R_SAMPLER: u32 = 10;
 pub(crate) const R_CONSTBOOL: u32 = 14;
 
 pub(crate) const OP_NOP: u32 = 0;
-pub(crate) const OP_MOV: u32 = 1;
 pub(crate) const OP_ADD: u32 = 2;
 pub(crate) const OP_SUB: u32 = 3;
 pub(crate) const OP_MAD: u32 = 4;
-pub(crate) const OP_MUL: u32 = 5;
 pub(crate) const OP_RCP: u32 = 6;
 pub(crate) const OP_RSQ: u32 = 7;
 pub(crate) const OP_DP3: u32 = 8;
-pub(crate) const OP_DP4: u32 = 9;
 pub(crate) const OP_MIN: u32 = 10;
 pub(crate) const OP_MAX: u32 = 11;
 pub(crate) const OP_SLT: u32 = 12;
@@ -60,7 +58,6 @@ pub(crate) const OP_DEFB: u32 = 47;
 pub(crate) const OP_DEFI: u32 = 48;
 pub(crate) const OP_TEXCOORD: u32 = 64;
 pub(crate) const OP_TEXKILL: u32 = 65;
-pub(crate) const OP_TEX: u32 = 66;
 pub(crate) const OP_TEXREG2AR: u32 = 69;
 pub(crate) const OP_TEXREG2GB: u32 = 70;
 pub(crate) const OP_EXPP: u32 = 78;
@@ -89,6 +86,7 @@ pub struct Dst {
     pub index: u32,
     pub mask: u32,
     pub saturate: bool,
+    pub modifiers: u32,
     pub shift: i32,
 }
 
@@ -134,6 +132,7 @@ pub struct Program {
     pub bdefs: BTreeMap<u32, bool>,
     pub max_const: u32,
     pub relative: bool,
+    pub declaration_modifiers: u32,
 }
 
 impl Program {
@@ -205,6 +204,7 @@ fn dst_of(t: u32) -> Dst {
         index: t & 0x7ff,
         mask: (t >> 16) & 0xf,
         saturate: (t >> 20) & 1 != 0,
+        modifiers: (t >> 20) & 0xf,
         shift: if s > 7 { s - 16 } else { s },
     }
 }
@@ -445,6 +445,7 @@ impl Program {
             if op == OP_DCL {
                 let decl = words[at];
                 let d = dst_of(words[at + 1]);
+                p.declaration_modifiers |= d.modifiers;
                 let mut seen = false;
                 match d.ty {
                     R_SAMPLER => {

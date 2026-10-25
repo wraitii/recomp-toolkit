@@ -1752,7 +1752,11 @@ pub fn d3d9_create_device(
     };
     device.features = gpu.device.features();
     device.limits = gpu.device.limits();
-    device.d3d9_gpu = Some(D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone()));
+    let d3d9_gpu = D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone());
+    if let Err(error) = draw::uber::prepare(&d3d9_gpu) {
+        return fail_status(&present, bridge_error(error));
+    }
+    device.d3d9_gpu = Some(d3d9_gpu);
     device.gpu = Some(gpu);
     device.reservation = Some(reservation);
     device.adapter = request.adapter;
@@ -2151,6 +2155,10 @@ pub fn d3d9_reset(device: &mut D3d9Device, request: &D3d9ResetRequest) -> D3d9Re
             }
         };
         let d3d9_gpu = D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone());
+        if let Err(error) = draw::uber::prepare(&d3d9_gpu) {
+            device.replacement = Some((gpu, loss));
+            return reset_fail(present, bridge_error(error));
+        }
         device.restore = Some(RestorePlan {
             gpu: Some(gpu),
             d3d9_gpu,

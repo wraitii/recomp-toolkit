@@ -160,15 +160,34 @@ fingerprint of renderer sources, manifest, lockfile and build script, target and
 profile, plus enabled device features/limits. The normal adapter startup record
 supplies backend and adapter identifiers.
 
-`RECOMP_D3D9_UBER_CAPTURE=1` captures the M2 candidate program pair
-(`dc32dcdca4f64c33` / `c49b28329a8ab277`, observed families 9/11 in the
-baseline). It logs original words and CPU interpreter lowering once per content,
-each encountered complete recipe/interface, and matching draws with frame/draw,
-target/subresource, viewport, primitive and texture identities. Hashes select
-diagnostic capture only; they do not admit interpreter execution. This runs the
-specialized path and performs no readback. Use with pipeline tracing for device
-identity and ordinary family correlation; detailed bytecode logging perturbs
-timing. Frame/draw records help locate the content before scoped comparison.
+`RECOMP_D3D9_SHADER_MODE=compare-family11` enables the M2 scoped comparison:
+draws matching the supported SM2 program subset and baseline family-11 static
+interface/raster state use the prepared interpreter; other draws keep
+specialization. This is a scoped comparison, not whole-scene interpreter-only
+coverage. A selected draw with missing preparation or unsupported resources fails
+by name. `interpreter-only` rejects uncovered draws and never selects or schedules
+specialization. The default `specialized` creates no interpreter GPU resources;
+hybrid scheduling belongs to M3 and is not available yet. Unknown modes fail at
+initialization. See [SHADERS.md](SHADERS.md) for exact coverage and bindings.
+
+Opt-in modes prepare one module/pipeline during device initialization, including
+replacement devices. Program changes upload immutable data and reuse that
+pipeline. `[d3d9-uber]` records include warmup time/manifest, program uploads and
+resident buffer/retained-bytecode sizes, and per-frame selected/total draw counts.
+With pipeline tracing, they also identify interpreted draws by program content,
+prepared pipeline, target/subresource and texture; frame counters separate CPU
+preparation and packing, packed bytes and logical constant/parameter bytes.
+Logical uniform bytes precede batch deduplication; existing batch upload counters
+report actual total uploads. CPU timings include diagnostic overhead and require
+pipeline tracing; driver pipeline memory and GPU execution time are not measured.
+
+`RECOMP_D3D9_UBER_CAPTURE=1` additionally logs original words and lowering once
+per interpreted content or the known baseline candidate pair
+(`dc32dcdca4f64c33` / `c49b28329a8ab277`), complete recipes/interfaces, and
+frame/draw, target/subresource, viewport, primitive and texture identities. It
+performs no readback. Capture hashes select diagnostics only; interpreter admission
+uses actual decoded programs and complete draw requirements. These records help
+locate the content before a targeted visual/readback comparison.
 
 `observed-family` records group the existing specialized pipeline descriptors
 without shader contents or guest handles. They include resource layouts, input

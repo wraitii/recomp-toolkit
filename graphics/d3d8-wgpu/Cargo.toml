@@ -40,6 +40,7 @@ naga = { version = "27", features = ["wgsl-in"] }
 
 [build-dependencies]
 cxx-build = "=1.0.171"
+naga = { version = "27", features = ["wgsl-in", "msl-out", "termcolor", "stderr"] }
 
 [dependencies.cxx]
 version = "=1.0.171"

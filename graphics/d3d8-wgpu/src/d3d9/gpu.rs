@@ -237,6 +237,8 @@ impl Drop for PendingWork {
 
 pub struct D3d9Gpu {
     pub device: wgpu::Device,
+    pub(crate) interpreter:
+        Arc<std::sync::OnceLock<crate::render::interpreter::PreparedInterpreter>>,
     queue: wgpu::Queue,
     pending: Arc<Mutex<PendingWork>>,
     loss: D3d9Loss,
@@ -248,6 +250,7 @@ impl Clone for D3d9Gpu {
     fn clone(&self) -> Self {
         Self {
             device: self.device.clone(),
+            interpreter: Arc::clone(&self.interpreter),
             queue: self.queue.clone(),
             pending: Arc::clone(&self.pending),
             loss: self.loss.clone(),
@@ -265,6 +268,7 @@ impl D3d9Gpu {
     pub fn from_context_with_loss(gpu: &GpuContext, loss: D3d9Loss) -> Self {
         Self {
             device: gpu.device.clone(),
+            interpreter: Arc::new(std::sync::OnceLock::new()),
             queue: gpu.queue.clone(),
             pending: Arc::new(Mutex::new(PendingWork {
                 device: gpu.device.clone(),

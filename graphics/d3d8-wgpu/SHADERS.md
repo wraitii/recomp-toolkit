@@ -1,19 +1,52 @@
-# D3D9 interpreter preparation
+# D3D9 interpreter MVP
 
-CPU lowering in `src/shader/uber.rs` prepares an M2 candidate; GPU execution and
-whole-draw coverage are not implemented yet. ABI v1 is a four-u32 header
-(version, pixel flag, instruction count, reserved zero) followed by 16 zero-padded
-12-u32 records: opcode/destination type/index/mask, then two source
-type/index/swizzle/modifier records. Encoding uses explicit words, with original
-bytecode equality and ABI version in identity. Oversized programs are excluded.
-The candidate admits SM2 MOV/MUL, vertex DP4 and ordinary pixel TEX through 2D
-s0; four temporaries, vertex v0/1/2 (position/color/texcoord), pixel v0/t0,
-256/32 float constants, vertex oPos/oD0/oT0 and pixel oC0. Arbitrary source
-swizzles and destination masks are encoded. Definitions, source/destination
-modifiers, shifts, relative addressing, flow control, coissue, other registers,
-samplers and output families are excluded. Lowering results do not establish
-derivative correctness or interpreter eligibility; raw operand/byte review,
-binding/limit checks and complete draw classification precede execution.
+The opt-in interpreter implements a bounded SM2 VS/PS family; Spore rendering,
+native Metal compilation and GPU performance still require user-run validation.
+`src/shader/uber/` defines ABI/interpreter v1. A program is 784 bytes: a four-u32
+header (ABI version, pixel flag, instruction count, reserved zero), then 16
+zero-padded 12-u32 records (opcode/destination type/index/mask, then two source
+type/index/swizzle/modifier records). Original bytecode equality plus ABI version
+identifies immutable program data; overflow is excluded, never truncated.
+
+Admitted instructions are MOV/MUL, vertex DP4 and ordinary pixel TEX through 2D
+s0. Capacities are four temporaries, vertex v0/1/2 (position/color/texcoord), pixel
+v0/t0, 256/32 float constants, vertex oPos/oD0/oT0 and pixel oC0. Arithmetic admits
+source swizzles and destination masks. TEX requires an identity-swizzled t0 or
+temporary coordinate, identity-swizzled s0, a temporary destination and full mask.
+Definitions, source/destination/declaration modifiers (including partial precision
+and centroid), shifts, relative addressing, flow control, coissue, other models,
+registers, samplers and output families remain excluded. Shader admission and
+specialization are unchanged; interpreter exclusions are separate results.
+
+The one manifest family uses three Float32x4 attributes (48-byte stride), existing
+42-component varyings, smooth interpolation, a BGRA8 target with SrcAlpha /
+OneMinusSrcAlpha blending for color and alpha, CW triangles without culling,
+Depth24PlusStencil8 with LESS and no depth/stencil writes, and one sample. Existing
+input conversion, half-pixel correction, raster output processing and sampler
+state are reused; opaque texture alpha is a per-draw flag. Bound textures must be
+filterable ordinary 2D resources. Integer/bool banks, vertex textures, projected
+or biased sampling, depth output and MRT have no coverage.
+
+One bind group contains four dynamic uniforms (bindings 0/1: 4096-byte VS bank /
+272-byte parameters; 2/3: 512-byte PS bank / 64-byte parameters), texture/sampler
+4/20, and immutable 784-byte program uniforms 36/37. It needs three uniforms per
+stage, four dynamic uniforms, three vertex attributes, one texture/sampler and
+42 inter-stage components; initialization checks the requested device limits.
+Prepared module/pipeline ownership follows the device. Queued draws and bindings
+retain their program buffers; reset clears program uploads and replacement devices
+prepare a new family. Specialization cache clears retain interpreter residency.
+
+Fragment instruction slots are expanded at build time. Each instruction count
+and opcode comes directly from uniform program data, without a mutable fragment
+program counter or early discard. Sampling remains implicit; alpha discard occurs
+after instruction execution. The build validates the generated WGSL with all Naga
+27 validation flags, verifies uploaded ABI layouts and translates both entry
+points to Metal with real binding maps. No derivative diagnostic is suppressed
+and no fixed LOD is substituted. Native compiler acceptance, rendering agreement,
+two-program switching and execution cost remain capture gates.
+Semantic references: Microsoft's [DP4](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dp4---vs),
+[TEXLD](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/texld---ps-2-0)
+and [WGSL uniformity](https://www.w3.org/TR/WGSL/#uniformity).
 
 # D3D8 shader-model 1.1
 

@@ -2,18 +2,19 @@ use super::identity::ProgramKey;
 use super::program::*;
 use std::sync::Arc;
 
-pub(crate) const ABI_VERSION: u32 = 1;
-pub(crate) const MAX_INSTRUCTIONS: usize = 16;
-pub(crate) const INSTRUCTION_WORDS: usize = 12;
-pub(crate) const TEMP_REGISTERS: u32 = 4;
-pub(crate) const VERTEX_INPUTS: u32 = 3;
-pub(crate) const VERTEX_CONSTANTS: u32 = 256;
-pub(crate) const PIXEL_CONSTANTS: u32 = 32;
+mod abi;
+pub(crate) use abi::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct EncodedKey {
     version: u32,
     original: ProgramKey,
+}
+
+impl EncodedKey {
+    pub(crate) fn retained_bytecode_bytes(&self) -> usize {
+        self.original.byte_len()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -81,17 +82,8 @@ impl std::fmt::Display for Exclusion {
     }
 }
 
-pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram, Exclusion> {
-    if p.major != 2 || p.minor > 1 {
-        return Err(Exclusion::ShaderModel);
-    }
-    if p.code.is_empty() || p.code.len() > MAX_INSTRUCTIONS {
-        return Err(Exclusion::InstructionCapacity);
-    }
-    if !p.defs.is_empty() || !p.idefs.is_empty() || !p.bdefs.is_empty() {
-        return Err(Exclusion::Definitions);
-    }
-    let declarations = if p.pixel {
+pub(crate) fn interface_candidate(p: &Program) -> bool {
+    if p.pixel {
         p.samplers.len() == 1
             && p.samplers.get(&0) == Some(&2)
             && p.inputs
@@ -105,8 +97,20 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                     d.ty == R_INPUT && d.index == index && d.usage == usage && d.usage_index == 0
                 })
             })
-    };
-    if !declarations || p.relative {
+    }
+}
+
+pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram, Exclusion> {
+    if p.major != 2 || p.minor > 1 {
+        return Err(Exclusion::ShaderModel);
+    }
+    if p.code.is_empty() || p.code.len() > MAX_INSTRUCTIONS {
+        return Err(Exclusion::InstructionCapacity);
+    }
+    if !p.defs.is_empty() || !p.idefs.is_empty() || !p.bdefs.is_empty() {
+        return Err(Exclusion::Definitions);
+    }
+    if !interface_candidate(p) || p.relative || p.declaration_modifiers != 0 {
         return Err(Exclusion::Declarations);
     }
     let mut requirements = Requirements::default();
@@ -141,7 +145,13 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
             R_RASTOUT | R_ATTROUT | R_TEXCRDOUT => !p.pixel && d.index == 0,
             _ => false,
         };
-        if !destination || d.mask == 0 || d.mask > 15 || d.saturate || d.shift != 0 {
+        if !destination
+            || d.mask == 0
+            || d.mask > 15
+            || d.modifiers != 0
+            || d.shift != 0
+            || (inst.op == OP_TEX && d.mask != 15)
+        {
             return Err(Exclusion::Destination { instruction });
         }
         words.extend([inst.op, d.ty, d.index, d.mask]);
@@ -189,6 +199,8 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                 || s.rel
                 || s.swz > 255
                 || (inst.op == OP_TEX && (operand == 1) != (s.ty == R_SAMPLER))
+                || (inst.op == OP_TEX
+                    && (s.swz != 0xe4 || (operand == 0 && !matches!(s.ty, R_TEMP | R_ADDR))))
             {
                 return Err(Exclusion::Source {
                     instruction,

@@ -10,6 +10,10 @@ pub(crate) struct ProgramKey {
 }
 
 impl ProgramKey {
+    pub(crate) fn byte_len(&self) -> usize {
+        self.words.len() * 4
+    }
+
     pub(crate) fn new(words: Arc<[u32]>) -> Self {
         let mut hasher = FastHasher::default();
         words.hash(&mut hasher);
