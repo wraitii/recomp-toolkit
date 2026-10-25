@@ -2,48 +2,49 @@
 
 The opt-in interpreter implements a bounded SM2 VS/PS family; Spore rendering,
 native Metal compilation and GPU performance still require user-run validation.
-`src/shader/uber/` defines ABI v2 / interpreter v3. A program is 1040 bytes: a
-four-u32 header (ABI version, pixel flag, instruction count, reserved zero), then
-16 zero-padded 16-u32 records (opcode/destination type/index/mask and three source
-records). Opcode bits 8–10 mark immediate sources: their four words contain
-swizzled float bits instead of type/index/swizzle/modifier. Original bytecode
-equality plus ABI version identifies program data; overflow is excluded.
+`src/shader/uber/` defines ABI v4 / interpreter v5. A program is 5136 bytes:
+a four-u32 header (ABI version, pixel flag, instruction count, definition count),
+64 zero-padded 16-u32 instruction records and 32 definition records (index/padding
+and float bits). Opcode bits 8–10 mark immediate sources and bit 16 selects projected TEX; source records
+hold type/index/swizzle/flags. Flag bit 0 negates, bit 8 selects relative addressing,
+and bits 9–10 select the address component. Original bytecode equality plus ABI
+version identifies program data; capacity overflow is excluded.
 
-Admitted instructions are MOV/MUL/MAD, vertex DP4 and ordinary pixel TEX through
-2D s0. Capacities are four temporaries, vertex v0/1/2 (position/color/texcoord) or
-v0/1 (position/texcoord), pixel v0/t0, 256/32 float constants, vertex oPos/oD0/oT0
-and pixel oC0. Float DEF values become immediate operands during lowering and
-override device constants without changing the per-draw bank. Arithmetic admits
-source swizzles and destination masks. TEX requires an identity-swizzled t0 or
-temporary coordinate, identity-swizzled s0, a temporary destination and full mask.
-Integer/bool definitions, source/destination/declaration modifiers (including
-partial precision and centroid), shifts, relative addressing, flow control,
-coissue, other models/registers/samplers remain excluded. Shader admission and
-specialization are unchanged; interpreter exclusions are separate results.
+Admitted arithmetic is MOV/ADD/MUL/MAD/DP3/DP4/RCP/RSQ/MIN/MAX/SLT/LRP/CMP/
+NRM/FRC, plus vertex MOVA and ordinary/projected pixel TEX through 2D s0.
+Capacities are eight temporaries, 64 instructions, 32 float DEFs, 256/32 float
+constants, vertex oPos/oD0–1/oT0–1/a0, pixel v0–1/t0–1 and oC0. Up to five
+consecutive vertex inputs admit position, normal, color0/1, UV0 and blend
+indices/weights. Source swizzles, negation and destination
+masks are supported. MOVA rounds using the existing specializer's nearest-integer
+helper. Relative vertex constants use the selected a0 component and the same
+clamped index as specialization; shader DEFs override device constants even for
+relative reads. Direct DEF reads become immediate bits. TEX requires unmodified,
+identity-swizzled t0–1 or temporary coordinates and s0, a temporary destination and
+full mask. Integer/bool definitions, other modifiers, shifts, pixel relative
+addressing, flow control, coissue and other models/registers/samplers remain
+excluded. Specialization remains unchanged.
 
-All families use three Float32x4 attributes (48-byte stride), existing 42-component
-varyings, smooth interpolation, CW triangles without culling, one sample and
-Depth24PlusStencil8. Two-input draws pad the unused third attribute with zero;
-lowering rejects reads of undeclared inputs. `compare-family11` prepares the
-first family only; hybrid and interpreter-only prepare all four:
-
-| Target | Topology | Color/alpha blending | Depth comparison | Depth writes |
-| --- | --- | --- | --- | --- |
-| BGRA8 | Triangle list | SrcAlpha / OneMinusSrcAlpha | LESS | No |
-| BGRA8 | Triangle list | SrcAlpha / One | LESS | No |
-| BGRA8 | Triangle list | SrcAlpha / One | ALWAYS | No |
-| RGBA8 | Triangle strip | SrcAlpha / OneMinusSrcAlpha | LESS | Yes |
+All families use five Float32x4 attributes (80-byte stride), existing 42-component
+varyings, smooth interpolation, CW triangles and one sample. Shorter declarations
+pad unused attributes with zero; lowering rejects reads of undeclared inputs.
+`compare-family11` prepares the original family; hybrid and interpreter-only
+prepare 14 exact captured states, including all five previous families. They use
+BGRA8/RGBA8, triangle list/strip, no culling/front culling, opaque/alpha/additive
+blending and absent/LESS/LEQUAL/ALWAYS depth, with writes only where captured.
+The finite manifest is in `src/render/interpreter.rs`; other combinations fall back.
 
 All share one module, layout and program allocations. Existing input conversion,
 half-pixel correction, raster output processing and sampler state are reused;
 opaque texture alpha is a per-draw flag. Bound textures must be filterable ordinary
-2D resources. Integer/bool banks, vertex textures, projected/biased sampling,
+2D resources. Texture-free shaders bind a private unused texture/sampler to the
+shared layout. Integer/bool banks, vertex textures, biased sampling,
 shader depth output and MRT have no coverage. Stencil writes remain disabled.
 
 One bind group contains four dynamic uniforms (bindings 0/1: 4096-byte VS bank /
 272-byte parameters; 2/3: 512-byte PS bank / 64-byte parameters), texture/sampler
-4/20, and immutable 1040-byte program uniforms 36/37. It needs three uniforms per
-stage, four dynamic uniforms, three vertex attributes, one texture/sampler and
+4/20, and immutable 5136-byte program uniforms 36/37. It needs three uniforms per
+stage, four dynamic uniforms, five vertex attributes, one texture/sampler and
 42 inter-stage components; initialization checks the requested device limits.
 Prepared module/pipeline ownership follows the device. Queued draws and bindings
 retain their program buffers; reset clears program uploads and replacement devices
@@ -57,8 +58,12 @@ after instruction execution. The build validates the generated WGSL with all Nag
 points to Metal with real binding maps. No derivative diagnostic is suppressed
 and no fixed LOD is substituted. Native compiler acceptance, rendering agreement,
 two-program switching and execution cost remain capture gates.
-Semantic references: Microsoft's [DP4](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dp4---vs),
-[TEXLD](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/texld---ps-2-0)
+Semantic references: Microsoft's [MOVA](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/mova---vs),
+[FRC](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/frc---vs), [DP4](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dp4---vs),
+[TEXLD](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/texld---ps-2-0),
+[TEXLDP](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/texldp---ps),
+[RCP](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/rcp---vs) and
+[RSQ](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/rsq---ps)
 and [WGSL uniformity](https://www.w3.org/TR/WGSL/#uniformity).
 
 # D3D8 shader-model 1.1

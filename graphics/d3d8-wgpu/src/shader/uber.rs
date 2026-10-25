@@ -84,26 +84,26 @@ impl std::fmt::Display for Exclusion {
 
 pub(crate) fn interface_candidate(p: &Program) -> bool {
     if p.pixel {
-        p.samplers.len() == 1
-            && p.samplers.get(&0) == Some(&2)
-            && p.inputs
-                .iter()
-                .all(|d| d.index == 0 && matches!(d.ty, R_INPUT | R_ADDR))
+        (p.samplers.is_empty() || (p.samplers.len() == 1 && p.samplers.get(&0) == Some(&2)))
+            && p.inputs.iter().all(|d| match d.ty {
+                R_INPUT => d.index < 2,
+                R_ADDR => d.index < 2,
+                _ => false,
+            })
     } else {
         p.samplers.is_empty()
-            && [&[(0, 0), (1, 10), (2, 5)][..], &[(0, 0), (1, 5)][..]]
-                .iter()
-                .any(|inputs| {
-                    p.inputs.len() == inputs.len()
-                        && inputs.iter().all(|&(index, usage)| {
-                            p.inputs.iter().any(|d| {
-                                d.ty == R_INPUT
-                                    && d.index == index
-                                    && d.usage == usage
-                                    && d.usage_index == 0
-                            })
-                        })
-                })
+            && !p.inputs.is_empty()
+            && p.inputs.len() <= VERTEX_INPUTS as usize
+            && (0..p.inputs.len() as u32)
+                .all(|index| p.inputs.iter().filter(|d| d.index == index).count() == 1)
+            && p.inputs.iter().all(|d| {
+                d.ty == R_INPUT
+                    && d.index < VERTEX_INPUTS
+                    && matches!(
+                        (d.usage, d.usage_index),
+                        (0, 0) | (1, 0) | (2, 0) | (3, 0) | (5, 0) | (10, 0) | (10, 1)
+                    )
+            })
     }
 }
 
@@ -116,6 +116,7 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
     }
     if !p.idefs.is_empty()
         || !p.bdefs.is_empty()
+        || p.defs.len() > MAX_DEFINITIONS
         || p.defs.keys().any(|&index| {
             index
                 >= if p.pixel {
@@ -127,18 +128,23 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
     {
         return Err(Exclusion::Definitions);
     }
-    if !interface_candidate(p) || p.relative || p.declaration_modifiers != 0 {
+    if !interface_candidate(p) || p.declaration_modifiers != 0 {
         return Err(Exclusion::Declarations);
     }
     let mut requirements = Requirements::default();
     let mut words = Vec::with_capacity(4 + p.code.len() * INSTRUCTION_WORDS);
-    words.extend([ABI_VERSION, u32::from(p.pixel), p.code.len() as u32, 0]);
+    words.extend([
+        ABI_VERSION,
+        u32::from(p.pixel),
+        p.code.len() as u32,
+        p.defs.len() as u32,
+    ]);
     for (instruction, inst) in p.code.iter().enumerate() {
         let expected = match inst.op {
-            OP_MOV => 1,
-            OP_MAD => 3,
-            OP_MUL => 2,
-            OP_DP4 if !p.pixel => 2,
+            OP_MOV | OP_FRC | OP_RCP | OP_RSQ | OP_NRM => 1,
+            OP_MOVA if !p.pixel => 1,
+            OP_MAD | OP_LRP | OP_CMP => 3,
+            OP_MUL | OP_ADD | OP_DP3 | OP_DP4 | OP_MIN | OP_MAX | OP_SLT => 2,
             OP_TEX if p.pixel => 2,
             opcode => {
                 return Err(Exclusion::Opcode {
@@ -147,7 +153,7 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                 });
             }
         };
-        if inst.ctrl != 0 || inst.coissue {
+        if (inst.ctrl != 0 && !(p.pixel && inst.op == OP_TEX && inst.ctrl == 1)) || inst.coissue {
             return Err(Exclusion::Control { instruction });
         }
         if inst.nsrc != expected {
@@ -160,10 +166,14 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                 true
             }
             R_COLOROUT => p.pixel && d.index == 0 && inst.op != OP_TEX,
-            R_RASTOUT | R_ATTROUT | R_TEXCRDOUT => !p.pixel && d.index == 0,
+            R_RASTOUT => !p.pixel && d.index == 0,
+            R_TEXCRDOUT => !p.pixel && d.index < 2,
+            R_ATTROUT => !p.pixel && d.index < 2,
+            R_ADDR => !p.pixel && d.index == 0 && inst.op == OP_MOVA,
             _ => false,
         };
         if !destination
+            || (inst.op == OP_MOVA && d.ty != R_ADDR)
             || d.mask == 0
             || d.mask > 15
             || d.modifiers != 0
@@ -173,7 +183,12 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
             return Err(Exclusion::Destination { instruction });
         }
         let opcode_word = words.len();
-        words.extend([inst.op & OPCODE_MASK, d.ty, d.index, d.mask]);
+        words.extend([
+            (inst.op & OPCODE_MASK) | (inst.ctrl << 16),
+            d.ty,
+            d.index,
+            d.mask,
+        ]);
         for operand in 0..3 {
             if operand >= inst.nsrc {
                 words.extend([0; 4]);
@@ -185,7 +200,7 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                     requirements.temporaries = requirements.temporaries.max(s.index + 1);
                     true
                 }
-                R_INPUT if s.index < if p.pixel { 1 } else { VERTEX_INPUTS } => {
+                R_INPUT if s.index < if p.pixel { 2 } else { VERTEX_INPUTS } => {
                     requirements.inputs = requirements.inputs.max(s.index + 1);
                     p.pixel
                         || p.inputs
@@ -200,45 +215,66 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                             VERTEX_CONSTANTS
                         } =>
                 {
-                    requirements.constants = requirements.constants.max(s.index + 1);
+                    requirements.constants = requirements.constants.max(if s.rel {
+                        VERTEX_CONSTANTS
+                    } else {
+                        s.index + 1
+                    });
                     true
                 }
-                R_ADDR if p.pixel && s.index == 0 => {
-                    requirements.texture_coordinates = 1;
+                R_ADDR if p.pixel && s.index < 2 => {
+                    requirements.texture_coordinates =
+                        requirements.texture_coordinates.max(s.index + 1);
                     true
                 }
-                R_SAMPLER if p.pixel && inst.op == OP_TEX && operand == 1 && s.index == 0 => {
+                R_SAMPLER
+                    if p.pixel
+                        && inst.op == OP_TEX
+                        && operand == 1
+                        && s.index == 0
+                        && p.samplers.get(&0) == Some(&2) =>
+                {
                     requirements.sampled_slots |= 1;
                     true
                 }
                 _ => false,
             };
             if !source
-                || s.md != 0
-                || s.rel
+                || s.md > 1
+                || (s.rel && (p.pixel || s.ty != R_CONST || s.rel_comp > 3))
                 || s.swz > 255
                 || (inst.op == OP_TEX && (operand == 1) != (s.ty == R_SAMPLER))
                 || (inst.op == OP_TEX
-                    && (s.swz != 0xe4 || (operand == 0 && !matches!(s.ty, R_TEMP | R_ADDR))))
+                    && (s.md != 0
+                        || s.swz != 0xe4
+                        || (operand == 0 && !matches!(s.ty, R_TEMP | R_ADDR))))
             {
                 return Err(Exclusion::Source {
                     instruction,
                     operand,
                 });
             }
-            if let Some(value) = (s.ty == R_CONST).then(|| p.defs.get(&s.index)).flatten() {
+            if let Some(value) = (s.ty == R_CONST && !s.rel)
+                .then(|| p.defs.get(&s.index))
+                .flatten()
+            {
                 words[opcode_word] |= 1 << (IMMEDIATE_SOURCE_SHIFT + operand);
-                words.extend(
-                    (0..4).map(|component| {
-                        value[((s.swz >> (component * 2)) & 3) as usize].to_bits()
-                    }),
-                );
+                words.extend((0..4).map(|component| {
+                    value[((s.swz >> (component * 2)) & 3) as usize].to_bits()
+                        ^ if s.md == 1 { 0x8000_0000 } else { 0 }
+                }));
             } else {
-                words.extend([s.ty, s.index, s.swz, s.md]);
+                let flags = s.md | (u32::from(s.rel) << 8) | (s.rel_comp << 9);
+                words.extend([s.ty, s.index, s.swz, flags]);
             }
         }
     }
     words.resize(4 + MAX_INSTRUCTIONS * INSTRUCTION_WORDS, 0);
+    for (&index, value) in &p.defs {
+        words.extend([index, 0, 0, 0]);
+        words.extend(value.map(f32::to_bits));
+    }
+    words.resize(PROGRAM_BYTES as usize / 4, 0);
     Ok(EncodedProgram {
         key: EncodedKey {
             version: ABI_VERSION,

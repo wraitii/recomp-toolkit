@@ -26,9 +26,12 @@ pub(super) fn capture_pair() -> Result<[u64; 2], RenderError> {
         let fail = || {
             invalid(
                 "InterpreterCapture",
-                "RECOMP_D3D9_UBER_CAPTURE_PAIR must be VS_HEX:PS_HEX",
+                "RECOMP_D3D9_UBER_CAPTURE_PAIR must be VS_HEX:PS_HEX or all",
             )
         };
+        if value == "all" {
+            return Ok([0, 0]);
+        }
         let (vs, ps) = value.split_once(':').ok_or_else(fail)?;
         Ok([
             u64::from_str_radix(vs, 16).map_err(|_| fail())?,
@@ -67,8 +70,36 @@ pub(super) fn capture_mvp(
         .interpreter
         .get()
         .is_some_and(|p| p.for_pipeline(pipeline).is_some());
-    if !interpreted && (fingerprint(&vs.code) != pair[0] || fingerprint(&ps.code) != pair[1]) {
+    if !interpreted
+        && pair != [0, 0]
+        && (fingerprint(&vs.code) != pair[0] || fingerprint(&ps.code) != pair[1])
+    {
         return;
+    }
+    for shader in [vs, ps] {
+        if draw.mvp_capture.programs.insert(Arc::clone(&shader.code)) {
+            let code = fingerprint(&shader.code);
+            eprintln!(
+                "[d3d9-uber] capture-program code={code:016x} model={} build={} abi={} words={:08x?}",
+                shader.program.version(),
+                env!("RECOMP_RENDERER_BUILD"),
+                crate::shader::uber::ABI_VERSION,
+                shader.code
+            );
+            match &shader.interpreter {
+                Ok(program) => eprintln!(
+                    "[d3d9-uber] lowered-program code={code:016x} identity={:?} requirements={:?} bytes={} words={:08x?}",
+                    program.key,
+                    program.requirements,
+                    program.words.len() * 4,
+                    program.words
+                ),
+                Err(reason) => eprintln!(
+                    "[d3d9-uber] excluded-program code={code:016x} reason={} detail={reason}",
+                    reason.reason()
+                ),
+            }
+        }
     }
     let description = draw
         .pipelines
@@ -105,31 +136,6 @@ pub(super) fn capture_mvp(
             "[d3d9-uber] capture-family recipe={recipe_id:016x} interface={:?} descriptor={:?}",
             interface, descriptor
         );
-    }
-    for shader in [vs, ps] {
-        if draw.mvp_capture.programs.insert(Arc::clone(&shader.code)) {
-            let code = fingerprint(&shader.code);
-            eprintln!(
-                "[d3d9-uber] capture-program code={code:016x} model={} build={} abi={} words={:08x?}",
-                shader.program.version(),
-                env!("RECOMP_RENDERER_BUILD"),
-                crate::shader::uber::ABI_VERSION,
-                shader.code
-            );
-            match &shader.interpreter {
-                Ok(program) => eprintln!(
-                    "[d3d9-uber] lowered-program code={code:016x} identity={:?} requirements={:?} bytes={} words={:08x?}",
-                    program.key,
-                    program.requirements,
-                    program.words.len() * 4,
-                    program.words
-                ),
-                Err(reason) => eprintln!(
-                    "[d3d9-uber] excluded-program code={code:016x} reason={} detail={reason}",
-                    reason.reason()
-                ),
-            }
-        }
     }
     eprintln!(
         "[d3d9-uber] capture-draw frame={} draw={frame_draw} recipe={recipe_id:016x} target={:?} subresource={:?} size={}x{} viewport={:?} primitives={} indexed={} texture0={} texture_details={:?}",

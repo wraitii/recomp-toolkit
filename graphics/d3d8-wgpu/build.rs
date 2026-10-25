@@ -24,6 +24,7 @@ fn interpreter_source() {
     for (name, size) in [
         ("Program", uber_abi::PROGRAM_BYTES),
         ("Instruction", (uber_abi::INSTRUCTION_WORDS * 4) as u64),
+        ("Definition", 32),
         ("VIn", uber_abi::VERTEX_STRIDE),
         ("VSP", 272),
         ("PSP", 64),

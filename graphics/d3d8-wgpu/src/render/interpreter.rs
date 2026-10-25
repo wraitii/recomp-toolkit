@@ -22,6 +22,8 @@ pub(crate) struct PreparedInterpreter {
     pub(crate) families: Vec<PreparedFamily>,
     pub(crate) module: wgpu::ShaderModule,
     pub(crate) layout: wgpu::BindGroupLayout,
+    pub(crate) unused_texture: wgpu::TextureView,
+    pub(crate) unused_sampler: wgpu::Sampler,
 }
 
 pub(crate) struct PreparedFamily {
@@ -135,12 +137,12 @@ impl FamilyKey {
             (
                 "uniform-bank-bytes",
                 u64::from(limits.max_uniform_buffer_binding_size),
-                u64::from(VERTEX_CONSTANTS) * 16,
+                (u64::from(VERTEX_CONSTANTS) * 16).max(PROGRAM_BYTES),
             ),
             (
                 "buffer-bytes",
                 limits.max_buffer_size,
-                u64::from(VERTEX_CONSTANTS) * 16,
+                (u64::from(VERTEX_CONSTANTS) * 16).max(PROGRAM_BYTES),
             ),
             (
                 "dynamic-uniforms",
@@ -216,10 +218,16 @@ impl PreparedInterpreter {
             label: Some("d3d9-interpreter"),
             entries: &key.interface.bindings,
         });
+        let module_started = std::time::Instant::now();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("d3d9-interpreter"),
             source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
         });
+        eprintln!(
+            "[d3d9-uber] prepare-module ms={:.3} source_bytes={}",
+            module_started.elapsed().as_secs_f64() * 1000.0,
+            SOURCE.len()
+        );
         let mut keys = vec![key];
         if expanded {
             for compare in [wgpu::CompareFunction::Less, wgpu::CompareFunction::Always] {
@@ -242,10 +250,122 @@ impl PreparedInterpreter {
             key.descriptor.primitive.topology = wgpu::PrimitiveTopology::TriangleStrip;
             key.descriptor.depth.as_mut().unwrap().depth_write_enabled = Some(true);
             keys.push(key);
+            let mut key = keys[0].clone();
+            key.descriptor.target.as_mut().unwrap().format = wgpu::TextureFormat::Rgba8Unorm;
+            key.descriptor.depth.as_mut().unwrap().depth_compare =
+                Some(wgpu::CompareFunction::Always);
+            keys.push(key);
+            for (format, cull_mode, blend, depth) in [
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    None,
+                    None,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    None,
+                    Some((false, wgpu::CompareFunction::Always)),
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    None,
+                    Some((true, wgpu::CompareFunction::LessEqual)),
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    Some((wgpu::BlendFactor::One, wgpu::BlendFactor::One)),
+                    Some((false, wgpu::CompareFunction::Always)),
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((wgpu::BlendFactor::One, wgpu::BlendFactor::One)),
+                    Some((false, wgpu::CompareFunction::Always)),
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
+                    Some((false, wgpu::CompareFunction::Less)),
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::Always)),
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::Less)),
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::Always)),
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((true, wgpu::CompareFunction::LessEqual)),
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    Some(wgpu::Face::Front),
+                    None,
+                    Some((false, wgpu::CompareFunction::Always)),
+                ),
+            ] {
+                let mut key = keys[0].clone();
+                let target = key.descriptor.target.as_mut().unwrap();
+                target.format = format;
+                target.blend = blend.map(|(src_factor, dst_factor)| {
+                    let component = wgpu::BlendComponent {
+                        src_factor,
+                        dst_factor,
+                        operation: wgpu::BlendOperation::Add,
+                    };
+                    wgpu::BlendState {
+                        color: component,
+                        alpha: component,
+                    }
+                });
+                key.descriptor.primitive.cull_mode = cull_mode;
+                key.descriptor.depth = depth.map(|(write, compare)| {
+                    let mut state = keys[0].descriptor.depth.clone().unwrap();
+                    state.depth_write_enabled = Some(write);
+                    state.depth_compare = Some(compare);
+                    state
+                });
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
         }
         let families = keys
             .into_iter()
-            .map(|key| {
+            .enumerate()
+            .map(|(index, key)| {
+                let started = std::time::Instant::now();
                 let d = &key.descriptor;
                 let pipeline = PreparedPipeline {
                     entry_points: d.entry_points,
@@ -258,10 +378,33 @@ impl PreparedInterpreter {
                     multisample: d.multisample,
                 }
                 .create(device, "d3d9-interpreter");
+                eprintln!(
+                    "[d3d9-uber] prepare-pipeline index={index} ms={:.3} descriptor={d:?}",
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
                 PreparedFamily { key, pipeline }
             })
             .collect();
+        let unused_texture = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("d3d9-interpreter-unused-texture"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let unused_sampler = device.create_sampler(&Default::default());
         Ok(Self {
+            unused_texture,
+            unused_sampler,
             families,
             module,
             layout,

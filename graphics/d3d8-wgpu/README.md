@@ -198,8 +198,12 @@ only the compiler worker, and logs `debug-delay`; unset it for performance captu
 
 Opt-in modes prepare one module during device initialization, including
 replacement devices: `compare-family11` creates one pipeline; hybrid and
-interpreter-only create four, adding additive blending with LESS or ALWAYS
-depth and the captured RGBA8 video-quad triangle strip with depth writes. Program changes upload immutable data and reuse these prepared pipelines.
+interpreter-only create 14 captured pipeline states, retaining the UI/video and
+additive families. The interpreter supports straight-line arithmetic, relative
+vertex constants, five packed inputs, two color/UV varyings, texture-free shaders
+and ordinary/projected 2D sampling; see [SHADERS.md](SHADERS.md) for exact limits.
+Program changes upload immutable data
+and reuse these prepared pipelines.
 `[d3d9-uber]` records include warmup time/manifest, program uploads and
 resident buffer/retained-bytecode sizes, and per-frame selected/total draw counts.
 With pipeline tracing, they also identify interpreted draws by program content,
@@ -214,7 +218,8 @@ per interpreted content or the known baseline candidate pair
 (`dc32dcdca4f64c33` / `c49b28329a8ab277`), complete recipes/interfaces, and
 frame/draw, target/subresource, viewport, primitive and texture identities. It
 accepts `RECOMP_D3D9_UBER_CAPTURE_PAIR=VS_HEX:PS_HEX` to replace the baseline
-candidate with another pair; malformed selectors fail at initialization. It
+candidate with another pair, or `all` to capture every encountered program once;
+malformed selectors fail at initialization. It
 performs no readback. Capture hashes select diagnostics only; interpreter admission
 uses actual decoded programs and complete draw requirements. These records help
 locate the content before a targeted visual/readback comparison.

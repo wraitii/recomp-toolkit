@@ -176,6 +176,9 @@ fn coverage(
     {
         return Err(unsupported("InterpreterDraw", "unsupported-multisample"));
     }
+    if ps.is_some_and(|s| s.program.samplers.is_empty()) {
+        return Ok(true);
+    }
     let texture = snapshot
         .textures
         .iter()
@@ -348,18 +351,26 @@ pub(super) fn resolve(
         buffers.push(upload(gpu, &mut draw.interpreter_programs, program)?);
     }
     let programs = interpreted.then(|| [buffers[0].clone(), buffers[1].clone()]);
-    let texture = snapshot
-        .textures
-        .iter()
-        .find(|t| t.stage == 0)
-        .ok_or_else(|| unsupported("InterpreterDraw", "unbound-texture s0"))?;
-    let (key, descriptor) = sampler(gpu, state, texture)?;
-    let bindings = vec![PendingTexture {
-        stage: 0,
-        view: texture.view.clone(),
-        sampler: draw.sampler(gpu, key, descriptor)?,
-    }]
-    .into();
+    let binding = if ps.program.samplers.is_empty() {
+        PendingTexture {
+            stage: 0,
+            view: prepared.unused_texture.clone(),
+            sampler: prepared.unused_sampler.clone(),
+        }
+    } else {
+        let texture = snapshot
+            .textures
+            .iter()
+            .find(|t| t.stage == 0)
+            .ok_or_else(|| unsupported("InterpreterDraw", "unbound-texture s0"))?;
+        let (key, descriptor) = sampler(gpu, state, texture)?;
+        PendingTexture {
+            stage: 0,
+            view: texture.view.clone(),
+            sampler: draw.sampler(gpu, key, descriptor)?,
+        }
+    };
+    let bindings = vec![binding].into();
     let recipes = [
         ShaderRecipe::Source(Arc::clone(&prepared.source)),
         ShaderRecipe::Source(Arc::clone(&prepared.source)),
