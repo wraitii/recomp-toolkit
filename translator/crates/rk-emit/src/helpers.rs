@@ -3,8 +3,16 @@ use crate::model::Preludes;
 pub const RETURN_HELPERS: &str = "\
 RECOMP_COLD void recomp_return_slow_(X86 *c) { recomp_return(c); }
 static inline void recomp_return_fast_(X86 *c) {
-    if (RECOMP_UNLIKELY(c->eip == GUEST_RETURN_SENTINEL) ||
-        RECOMP_UNLIKELY(!recomp_is_call_return(c->eip)))
+    if (RECOMP_UNLIKELY(c->eip == GUEST_RETURN_SENTINEL)) {
+        recomp_return_slow_(c);
+        return;
+    }
+    if (c->dynamic_return_count &&
+        c->dynamic_returns[c->dynamic_return_count - 1] == c->eip) {
+        --c->dynamic_return_count;
+        return;
+    }
+    if (RECOMP_UNLIKELY(!recomp_is_call_return(c->eip)))
         recomp_return_slow_(c);
 }
 ";

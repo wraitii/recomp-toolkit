@@ -382,6 +382,8 @@ enum {
     X86_CCF_OF = 1u << 5,
 };
 
+enum { X86_DYNAMIC_RETURNS = 64 };
+
 struct X86 {
     uint32_t r[8]; /* EAX ECX EDX EBX ESP EBP ESI EDI */
     uint32_t eip;
@@ -394,6 +396,13 @@ struct X86 {
      * cc_res the wrapped result; cc_carry is the incoming ADC/SBB carry. */
     uint8_t cc_op, cc_size, cc_mask, cc_carry;
     uint32_t cc_a, cc_b, cc_res;
+    /* Translated calls until this guest thread's next scheduler checkpoint. */
+    uint32_t checkpoint_countdown;
+    /* MXCSR. Initialise to 0x1f80 (round to nearest, every exception masked). */
+    uint32_t mxcsr;
+    uint32_t fs_base;
+    /* CALL continuations inside code executed by the interpreter. */
+    uint32_t dynamic_return_count;
     double st[8]; /* x87 stack, physical slots */
     /* FILD integers retain all 64 mantissa bits until arithmetic replaces
      * them. The double alone cannot preserve qword copies above 2^53. */
@@ -404,9 +413,6 @@ struct X86 {
     /* x87 tag word, 2 bits per PHYSICAL register st[i]: 3 = empty, else in
      * use.  Initialise to 0xffff (the post-FINIT all-empty state). */
     uint16_t fpu_tag;
-    uint32_t fs_base;
-    /* MXCSR. Initialise to 0x1f80 (round to nearest, every exception masked). */
-    uint32_t mxcsr;
     /* Held as dwords: SSE arithmetic and moves address the register in
      * dword lanes, and on a little-endian host the byte order of a copy then
      * takes care of itself. Lane 0 is the low four bytes. */
@@ -415,8 +421,7 @@ struct X86 {
      * leaves MMX without EMMS and then uses the FPU sees its old values, not
      * the MMX ones, which no game this runtime serves relies on. */
     uint64_t mm[8];
-    /* Translated calls until this guest thread's next scheduler checkpoint. */
-    uint32_t checkpoint_countdown;
+    uint32_t dynamic_returns[X86_DYNAMIC_RETURNS];
 };
 typedef struct X86 X86;
 
@@ -822,9 +827,25 @@ void recomp_unknown_call(X86 *c, uint32_t target);
 /* A checked return adjusted the target to an address that is not resumable. */
 void recomp_unexpected_return(X86 *c, uint32_t site, uint32_t expected, uint32_t target);
 /* CALL continuations inside code executed by the interpreter. */
-unsigned recomp_dynamic_return_push(uint32_t target);
-void recomp_dynamic_return_pop(unsigned depth);
-int recomp_dynamic_return_accept(uint32_t target);
+RECOMP_HOT_INLINE unsigned recomp_dynamic_return_push(X86 *c, uint32_t target) {
+    const unsigned depth = c->dynamic_return_count;
+    if (depth < X86_DYNAMIC_RETURNS)
+        c->dynamic_returns[c->dynamic_return_count++] = target;
+    return depth;
+}
+RECOMP_HOT_INLINE void recomp_dynamic_return_pop(X86 *c, unsigned depth) {
+    if (c->dynamic_return_count > depth)
+        c->dynamic_return_count = depth;
+}
+RECOMP_HOT_INLINE int recomp_dynamic_return_accept(X86 *c, uint32_t target) {
+    for (unsigned i = c->dynamic_return_count; i; --i) {
+        if (c->dynamic_returns[i - 1] != target)
+            continue;
+        c->dynamic_return_count = i - 1;
+        return 1;
+    }
+    return 0;
+}
 void recomp_region_missing(X86 *c, uint32_t target);
 /* A popped callback sentinel can bypass translated callers. The innermost
  * guest_call owns the live host return checkpoint and its guest stack range. */
@@ -1005,7 +1026,7 @@ static inline void recomp_return(X86 *c) {
     }
     if (recomp_is_call_return(c->eip) || recomp_module_is_call_return(c->eip))
         return;
-    if (recomp_dynamic_return_accept(c->eip))
+    if (recomp_dynamic_return_accept(c, c->eip))
         return;
     if ((c->eip >= GUEST_SHIM_BASE && c->eip < GUEST_SHIM_END) || recomp_index_of(c->eip) >= 0 ||
         recomp_module_lookup(c->eip) >= 0)

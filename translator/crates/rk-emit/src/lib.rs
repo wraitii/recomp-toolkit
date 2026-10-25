@@ -1798,7 +1798,7 @@ impl<'a> Emitter<'a> {
         let returned = self.guest_addr(returned);
         let _ = writeln!(
             self.out,
-            "{{ unsigned reloc_depth_ = recomp_dynamic_return_push({returned}); recomp_call(c, {target}); recomp_dynamic_return_pop(reloc_depth_); }}"
+            "{{ unsigned reloc_depth_ = recomp_dynamic_return_push(c, {returned}); recomp_call(c, {target}); recomp_dynamic_return_pop(c, reloc_depth_); }}"
         );
         Ok(())
     }

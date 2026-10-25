@@ -422,12 +422,12 @@ class X86Host final : public PcodeHost {
         const bool dynamic_return = !recomp_is_call_return((uint32_t)expected) &&
                                     !recomp_module_is_call_return((uint32_t)expected);
         const unsigned dynamic_depth =
-            dynamic_return ? recomp_dynamic_return_push((uint32_t)expected) : 0;
+            dynamic_return ? recomp_dynamic_return_push(c_, (uint32_t)expected) : 0;
         ++g_depth;
         recomp_call(c_, target);
         --g_depth;
         if (dynamic_return)
-            recomp_dynamic_return_pop(dynamic_depth);
+            recomp_dynamic_return_pop(c_, dynamic_depth);
         x86_cc_settle(c_);
         next_pc = c_->eip;
         handled = next_pc != expected;
