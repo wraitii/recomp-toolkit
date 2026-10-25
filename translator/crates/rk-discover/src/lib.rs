@@ -1400,10 +1400,20 @@ impl<'a> Recovery<'a> {
                 }
             }
         }
+        let mut branch_targets = BTreeSet::new();
+        for (&at, ins) in &self.instructions {
+            if let Some((target, false)) = ins.direct {
+                if self.instructions.contains_key(&target) {
+                    branch_targets.insert(target);
+                }
+            }
+            if let Some((_, _, cases)) = self.switches.get(&at) {
+                branch_targets.extend(cases);
+            }
+        }
         let mut groups: BTreeMap<Addr, Vec<(Addr, u8)>> = BTreeMap::new();
         let mut owner: Option<Addr> = None;
         let mut previous: Option<(Addr, bool)> = None;
-        let mut targets = BTreeSet::new();
         for (&at, ins) in &self.instructions {
             let falls = previous.is_some_and(|(end, stops)| end == at && !stops);
             if !falls && !self.seeds.contains_key(&at) && ins.padding {
@@ -1412,19 +1422,14 @@ impl<'a> Recovery<'a> {
             }
             let joins = owner.is_some_and(|current| {
                 falls
-                    || (!roots.contains(&at) && targets.contains(&at) && at < current + BODY_BYTES)
+                    || (!roots.contains(&at)
+                        && branch_targets.contains(&at)
+                        && at < current + BODY_BYTES)
             });
             if !joins {
                 owner = Some(at);
-                targets.clear();
             }
             let current = owner.unwrap();
-            if let Some((target, false)) = ins.flow_target() {
-                targets.insert(target);
-            }
-            if let Some((_, _, cases)) = self.switches.get(&at) {
-                targets.extend(cases);
-            }
             groups.entry(current).or_default().push((at, ins.size));
             previous = Some((ins.end(), self.stops(ins)));
         }
@@ -2142,8 +2147,27 @@ fn decode_one(bytes: &[u8], at: Addr, folded: Option<u8>) -> Option<Insn> {
         direct,
         imm4,
         disp4,
-        padding: bytes[..insn.len()].iter().all(|&b| b == 0x90 || b == 0xcc),
+        padding: bytes[..insn.len()].iter().all(|&b| b == 0x90 || b == 0xcc)
+            || is_alignment_padding(&insn, &ops),
     })
+}
+
+fn is_alignment_padding(insn: &Instruction, ops: &[SimpleOp; 4]) -> bool {
+    if matches!(insn.mnemonic(), Mnemonic::Nop) {
+        return true;
+    }
+    match (ops[0], ops[1]) {
+        (SimpleOp::Reg(a), SimpleOp::Reg(b)) => {
+            a == b && matches!(insn.mnemonic(), Mnemonic::Mov | Mnemonic::Xchg)
+        }
+        (SimpleOp::Reg(a), SimpleOp::Mem(m)) => {
+            matches!(insn.mnemonic(), Mnemonic::Lea)
+                && a == m.base
+                && m.index == Register::None
+                && m.displacement == 0
+        }
+        _ => false,
+    }
 }
 
 fn mnemonic_name(mnemonic: Mnemonic) -> String {
