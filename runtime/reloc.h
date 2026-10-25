@@ -30,6 +30,7 @@ typedef struct RecompRelocTemplate {
     uint32_t entry_count;
 } RecompRelocTemplate;
 void recomp_reloc_register(const RecompRelocTemplate *templates, uint32_t count);
+int recomp_reloc_cached(X86 *c, uint32_t target);
 int recomp_reloc_call(X86 *c, uint32_t target);
 
 #ifdef __cplusplus

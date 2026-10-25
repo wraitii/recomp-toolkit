@@ -20,6 +20,15 @@ bool thunk_bytes(uint32_t at, uint32_t size) {
 struct StackWrite {
     uint32_t at, old;
 };
+constexpr unsigned kFailedTargets = 256;
+uint32_t failed_targets[kFailedTargets];
+bool failed_target_seen(uint32_t target) {
+    uint32_t &slot = failed_targets[(target * 2654435761u) >> 24];
+    if (__atomic_load_n(&slot, __ATOMIC_RELAXED) == target)
+        return true;
+    __atomic_store_n(&slot, target, __ATOMIC_RELAXED);
+    return false;
+}
 } // namespace
 
 extern "C" int recomp_run_thunk(X86 *c, uint32_t target) {
@@ -91,6 +100,8 @@ extern "C" int recomp_run_thunk(X86 *c, uint32_t target) {
         const StackWrite &w = writes[--nwrites];
         wr32(w.at, w.old);
     }
+    if (failed_target_seen(target))
+        return 0;
     char bytes[49] = {};
     for (unsigned i = 0; i < 16 && pc < GUEST_SIZE && i < GUEST_SIZE - pc; ++i)
         snprintf(bytes + i * 3, 4, "%02x ", rd8(pc + i));

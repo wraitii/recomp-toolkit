@@ -337,6 +337,10 @@ void recomp_region_missing(X86 *c, uint32_t target) {
 
 void recomp_unknown_call(X86 *c, uint32_t target) {
     uint32_t site = observe_take();
+    if (recomp_reloc_cached(c, target)) {
+        observe_indirect(site, target, "reloc");
+        return;
+    }
     if (recomp_run_thunk(c, target)) {
         observe_indirect(site, target, "thunk");
         return;

@@ -200,6 +200,14 @@ bool bind(Index *index, uint32_t target, uint32_t &template_index, uint32_t &ent
     return true;
 }
 
+bool invoke(Index *index, X86 *c, uint32_t target, uint32_t template_index, uint32_t entry_index) {
+    const RecompRelocTemplate *t = index->templates[template_index];
+    uint32_t base = target - t->entries[entry_index].offset;
+    recomp_execution_checkpoint(c);
+    t->entries[entry_index].fn(c, base);
+    return true;
+}
+
 } // namespace
 
 extern "C" void recomp_reloc_register(const RecompRelocTemplate *table, uint32_t count) {
@@ -213,6 +221,18 @@ extern "C" void recomp_reloc_register(const RecompRelocTemplate *table, uint32_t
     __atomic_store_n(&g_index, index, __ATOMIC_RELEASE);
 }
 
+extern "C" int recomp_reloc_cached(X86 *c, uint32_t target) {
+    if (!reloc_enabled())
+        return 0;
+    Index *index = __atomic_load_n(&g_index, __ATOMIC_ACQUIRE);
+    if (!index)
+        return 0;
+    uint32_t template_index, entry_index;
+    if (!cached(index, target, template_index, entry_index))
+        return 0;
+    return invoke(index, c, target, template_index, entry_index);
+}
+
 extern "C" int recomp_reloc_call(X86 *c, uint32_t target) {
     if (!reloc_enabled())
         return 0;
@@ -220,12 +240,9 @@ extern "C" int recomp_reloc_call(X86 *c, uint32_t target) {
     if (!index)
         return 0;
     uint32_t template_index, entry_index;
-    if (!cached(index, target, template_index, entry_index) &&
-        !bind(index, target, template_index, entry_index))
-        return 0;
-    const RecompRelocTemplate *t = index->templates[template_index];
-    uint32_t base = target - t->entries[entry_index].offset;
-    recomp_execution_checkpoint(c);
-    t->entries[entry_index].fn(c, base);
-    return 1;
+    if (!cached(index, target, template_index, entry_index)) {
+        if (!bind(index, target, template_index, entry_index))
+            return 0;
+    }
+    return invoke(index, c, target, template_index, entry_index);
 }

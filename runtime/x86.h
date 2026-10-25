@@ -426,24 +426,24 @@ typedef struct X86 X86;
  * in its low lanes is read and written through these. Scalar SSE arithmetic
  * leaves the lanes above its result alone, which is why nothing here clears
  * them. */
-static inline double xmm_f64(const X86 *c, int reg) {
+RECOMP_HOT_INLINE double xmm_f64(const X86 *c, int reg) {
     uint64_t bits = (uint64_t)c->xmm[reg][0] | ((uint64_t)c->xmm[reg][1] << 32);
     double v;
     memcpy(&v, &bits, 8);
     return v;
 }
-static inline void xmm_set_f64(X86 *c, int reg, double v) {
+RECOMP_HOT_INLINE void xmm_set_f64(X86 *c, int reg, double v) {
     uint64_t bits;
     memcpy(&bits, &v, 8);
     c->xmm[reg][0] = (uint32_t)bits;
     c->xmm[reg][1] = (uint32_t)(bits >> 32);
 }
-static inline float xmm_f32(const X86 *c, int reg) {
+RECOMP_HOT_INLINE float xmm_f32(const X86 *c, int reg) {
     float v;
     memcpy(&v, &c->xmm[reg][0], 4);
     return v;
 }
-static inline void xmm_set_f32(X86 *c, int reg, float v) {
+RECOMP_HOT_INLINE void xmm_set_f32(X86 *c, int reg, float v) {
     memcpy(&c->xmm[reg][0], &v, 4);
 }
 
@@ -454,7 +454,7 @@ static inline void xmm_set_f32(X86 *c, int reg, float v) {
  * that may assume a NaN's payload is unspecified folds the comparison away
  * and leaves the host's own sqrt to produce its own NaN - which on ARM is the
  * positive one. */
-static inline double recomp_sse_sqrt(double v) {
+RECOMP_HOT_INLINE double recomp_sse_sqrt(double v) {
     uint64_t bits;
     memcpy(&bits, &v, 8);
     if ((bits >> 63) && (bits << 1) != 0) { /* negative, and not -0.0 */
@@ -465,10 +465,10 @@ static inline double recomp_sse_sqrt(double v) {
     }
     return sqrt(v);
 }
-static inline int recomp_sse_nan_bits(uint32_t bits) {
+RECOMP_HOT_INLINE int recomp_sse_nan_bits(uint32_t bits) {
     return (bits & 0x7fffffffu) > 0x7f800000u;
 }
-static inline float recomp_sse_sqrtf(float v) {
+RECOMP_HOT_INLINE float recomp_sse_sqrtf(float v) {
     float r = sqrtf(v);
     if (RECOMP_UNLIKELY(isnan(r))) {
         uint32_t bits;
@@ -482,30 +482,30 @@ static inline float recomp_sse_sqrtf(float v) {
 /* CVTSS2SI/CVTSD2SI round according to MXCSR, which recomp_ldmxcsr holds at
  * round-to-nearest-even. Values that round outside int32 produce the
  * indefinite result. */
-static inline int32_t recomp_sse_cvtsd2si(double v) {
+RECOMP_HOT_INLINE int32_t recomp_sse_cvtsd2si(double v) {
     double rounded = nearbyint(v);
     if (!(rounded >= -2147483648.0 && rounded <= 2147483647.0))
         return INT32_MIN;
     return (int32_t)rounded;
 }
-static inline int32_t recomp_sse_cvtss2si(float v) {
+RECOMP_HOT_INLINE int32_t recomp_sse_cvtss2si(float v) {
     return recomp_sse_cvtsd2si((double)v);
 }
-static inline int32_t recomp_sse_cvttsd2si(double v) {
+RECOMP_HOT_INLINE int32_t recomp_sse_cvttsd2si(double v) {
     if (!(v >= -2147483648.0 && v < 2147483648.0))
         return INT32_MIN;
     return (int32_t)v;
 }
-static inline int32_t recomp_sse_cvttss2si(float v) {
+RECOMP_HOT_INLINE int32_t recomp_sse_cvttss2si(float v) {
     return recomp_sse_cvttsd2si((double)v);
 }
 
-static inline float recomp_sse_f32(uint32_t bits) {
+RECOMP_HOT_INLINE float recomp_sse_f32(uint32_t bits) {
     float v;
     memcpy(&v, &bits, 4);
     return v;
 }
-static inline uint32_t recomp_sse_f32_bits(float v) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_f32_bits(float v) {
     uint32_t bits;
     memcpy(&bits, &v, 4);
     return bits;
@@ -515,54 +515,80 @@ static inline uint32_t recomp_sse_f32_bits(float v) {
  * rounds up to the smallest normal can still flush; the exact value, which
  * double precision holds for these operations, scaled out of the denormal
  * range, decides it. */
-static inline uint32_t recomp_sse_result(const X86 *c, uint32_t a, uint32_t b, float r,
-                                         double exact) {
+enum {
+    RECOMP_SSE_RESULT_ADD,
+    RECOMP_SSE_RESULT_SUB,
+    RECOMP_SSE_RESULT_MUL,
+    RECOMP_SSE_RESULT_DIV,
+};
+RECOMP_COLD uint32_t recomp_sse_result_slow(const X86 *c, uint32_t a, uint32_t b, float r,
+                                            unsigned operation) {
     uint32_t bits = recomp_sse_f32_bits(r), magnitude = bits & 0x7fffffffu;
     if (RECOMP_UNLIKELY(magnitude - 1u < 0x00800000u)) {
+        double x = (double)recomp_sse_f32(a), y = (double)recomp_sse_f32(b), exact;
+        switch (operation) {
+        case RECOMP_SSE_RESULT_ADD:
+            exact = x + y;
+            break;
+        case RECOMP_SSE_RESULT_SUB:
+            exact = x - y;
+            break;
+        case RECOMP_SSE_RESULT_MUL:
+            exact = x * y;
+            break;
+        default:
+            exact = x / y;
+            break;
+        }
         if ((c->mxcsr & 0x8000u) && fabsf((float)(exact * 0x1p64)) < 0x1p-62f)
             return bits & 0x80000000u;
         return bits;
     }
-    if (!RECOMP_UNLIKELY(magnitude > 0x7f800000u))
-        return bits;
     if (recomp_sse_nan_bits(a))
         return a | 0x00400000u;
     if (recomp_sse_nan_bits(b))
         return b | 0x00400000u;
     return 0xffc00000u;
 }
-static inline uint32_t recomp_sse_addps(const X86 *c, uint32_t a, uint32_t b) {
-    float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
-    return recomp_sse_result(c, a, b, x + y, (double)x + (double)y);
+RECOMP_HOT_INLINE uint32_t recomp_sse_result(const X86 *c, uint32_t a, uint32_t b, float r,
+                                             unsigned operation) {
+    uint32_t bits = recomp_sse_f32_bits(r), magnitude = bits & 0x7fffffffu;
+    if (RECOMP_UNLIKELY(magnitude - 1u < 0x00800000u || magnitude > 0x7f800000u))
+        return recomp_sse_result_slow(c, a, b, r, operation);
+    return bits;
 }
-static inline uint32_t recomp_sse_subps(const X86 *c, uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_addps(const X86 *c, uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
-    return recomp_sse_result(c, a, b, x - y, (double)x - (double)y);
+    return recomp_sse_result(c, a, b, x + y, RECOMP_SSE_RESULT_ADD);
 }
-static inline uint32_t recomp_sse_mulps(const X86 *c, uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_subps(const X86 *c, uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
-    return recomp_sse_result(c, a, b, x * y, (double)x * (double)y);
+    return recomp_sse_result(c, a, b, x - y, RECOMP_SSE_RESULT_SUB);
 }
-static inline uint32_t recomp_sse_divps(const X86 *c, uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_mulps(const X86 *c, uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
-    return recomp_sse_result(c, a, b, x / y, (double)x / (double)y);
+    return recomp_sse_result(c, a, b, x * y, RECOMP_SSE_RESULT_MUL);
 }
-static inline uint32_t recomp_sse_minps(uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_divps(const X86 *c, uint32_t a, uint32_t b) {
+    float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
+    return recomp_sse_result(c, a, b, x / y, RECOMP_SSE_RESULT_DIV);
+}
+RECOMP_HOT_INLINE uint32_t recomp_sse_minps(uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
     return x < y ? a : b;
 }
-static inline uint32_t recomp_sse_maxps(uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_maxps(uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
     return x > y ? a : b;
 }
-static inline uint32_t recomp_sse_sqrtps(uint32_t a) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_sqrtps(uint32_t a) {
     return recomp_sse_f32_bits(recomp_sse_sqrtf(recomp_sse_f32(a)));
 }
 /* The original RCPPS/RSQRTPS are approximate. These return the IEEE result,
  * which is also what the Unicorn oracle produces. DIVERGENCE(original): the
  * low bits may differ from a real x86 approximation instruction. RCPPS
  * flushes a tiny result to zero whatever MXCSR says. */
-static inline uint32_t recomp_sse_rcpps(uint32_t a) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_rcpps(uint32_t a) {
     float r = 1.0f / recomp_sse_f32(a);
     uint32_t bits = recomp_sse_f32_bits(r);
     if (RECOMP_UNLIKELY(isnan(r)))
@@ -571,19 +597,19 @@ static inline uint32_t recomp_sse_rcpps(uint32_t a) {
         return bits & 0x80000000u;
     return bits;
 }
-static inline uint32_t recomp_sse_rsqrtps(uint32_t a) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_rsqrtps(uint32_t a) {
     float r = 1.0f / recomp_sse_sqrtf(recomp_sse_f32(a));
     if (RECOMP_UNLIKELY(isnan(r)))
         return recomp_sse_nan_bits(a) ? (a | 0x00400000u) : 0xffc00000u;
     return recomp_sse_f32_bits(r);
 }
-static inline float recomp_sse_rcpss(float v) {
+RECOMP_HOT_INLINE float recomp_sse_rcpss(float v) {
     return recomp_sse_f32(recomp_sse_rcpps(recomp_sse_f32_bits(v)));
 }
-static inline float recomp_sse_rsqrtss(float v) {
+RECOMP_HOT_INLINE float recomp_sse_rsqrtss(float v) {
     return recomp_sse_f32(recomp_sse_rsqrtps(recomp_sse_f32_bits(v)));
 }
-static inline uint32_t recomp_sse_cmpps(unsigned pred, uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_cmpps(unsigned pred, uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
     int r;
     switch (pred & 7u) {
@@ -620,7 +646,7 @@ static inline uint32_t recomp_sse_cmpps(unsigned pred, uint32_t a, uint32_t b) {
  * together, and the rest of EFLAGS is cleared either way. The difference
  * between the two forms is only which NaNs raise an exception, and this kit
  * raises none. */
-static inline void recomp_comis(X86 *c, double a, double b) {
+RECOMP_HOT_INLINE void recomp_comis(X86 *c, double a, double b) {
     c->cc_op = X86_CC_NONE;
     c->eflags_of = c->eflags_af = c->eflags_sf = 0;
     if (a != a || b != b) {
