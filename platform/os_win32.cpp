@@ -779,6 +779,10 @@ int os_strcasecmp(const char *a, const char *b) {
     return _stricmp(a, b);
 }
 
+int os_backtrace(int, OsFrameFn, void *) {
+    return 0;
+}
+
 int os_compare_utf16(uint32_t lcid, uint32_t flags, const uint16_t *a, int a_len, const uint16_t *b,
                      int b_len) {
     if (a_len < 0 || b_len < 0 || (a_len && !a) || (b_len && !b)) {

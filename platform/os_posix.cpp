@@ -32,6 +32,9 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#if !defined(__ANDROID__)
+#include <execinfo.h>
+#endif
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
@@ -776,6 +779,28 @@ void os_sleep_us(uint64_t us) {
 int os_strcasecmp(const char *a, const char *b) {
     return strcasecmp(a, b);
 }
+
+#if defined(__ANDROID__)
+int os_backtrace(int, OsFrameFn, void *) {
+    return 0;
+}
+#else
+int os_backtrace(int max_frames, OsFrameFn fn, void *ctx) {
+    if (max_frames > 64)
+        max_frames = 64;
+    if (max_frames <= 0)
+        return 0;
+    void *frames[64];
+    const int n = backtrace(frames, max_frames);
+    char **names = backtrace_symbols(frames, n);
+    if (!names)
+        return 0;
+    for (int i = 0; i < n; ++i)
+        fn(names[i], ctx);
+    free(names);
+    return n;
+}
+#endif
 
 int os_compare_utf16(uint32_t lcid, uint32_t flags, const uint16_t *a, int a_len, const uint16_t *b,
                      int b_len) {

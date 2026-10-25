@@ -5,9 +5,6 @@
 #include "loader.h"
 
 #include "../platform/os.h"
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
-#include <execinfo.h>
-#endif
 #include <algorithm>
 #include <deque>
 #include <map>
@@ -74,29 +71,24 @@ WatchArm g_watch_arm;
 // written thousands of times, and a report long enough to read is a report too
 // slow to reach the moment worth reading.
 const char *watch_writer() {
-#if defined(__APPLE__) || (defined(__linux__) && !defined(__ANDROID__))
     static char out[128];
-    void *frames[32];
-    const int n = backtrace(frames, 32);
-    char **names = backtrace_symbols(frames, n);
-    if (!names)
-        return "?";
     out[0] = 0;
-    for (int i = 1; i < n; ++i) {
-        const char *fn = strstr(names[i], "fn_00");
-        if (!fn)
-            continue;
-        size_t k = 0;
-        while (k + 1 < sizeof out && fn[k] && fn[k] != ' ')
-            ++k;
-        snprintf(out, sizeof out, "%.*s", (int)k, fn);
-        break;
-    }
-    free(names);
+    os_backtrace(
+        32,
+        [](const char *frame, void *ctx) {
+            char *dst = static_cast<char *>(ctx);
+            if (dst[0])
+                return;
+            const char *fn = strstr(frame, "fn_00");
+            if (!fn)
+                return;
+            size_t k = 0;
+            while (k + 1 < sizeof out && fn[k] && fn[k] != ' ')
+                ++k;
+            snprintf(dst, sizeof out, "%.*s", (int)k, fn);
+        },
+        out);
     return out[0] ? out : "?";
-#else
-    return "(no backtrace)";
-#endif
 }
 } // namespace
 

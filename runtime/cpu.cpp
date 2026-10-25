@@ -12,6 +12,7 @@
 #include "win32.h"
 #include "thunks.h"
 #include "seh.h"
+#include "linear_trace.h"
 #include "../platform/os.h"
 
 #include <setjmp.h>
@@ -306,10 +307,20 @@ extern "C" int recomp_dynamic_return_accept(uint32_t target) {
 __attribute__((cold, noinline))
 #endif
 void recomp_unexpected_return(X86 *c, uint32_t site, uint32_t expected, uint32_t target) {
+    recomp_linear_trace_on_fault();
     fprintf(
         stderr,
         "recomp: unexpected guest return to 0x%08x from site 0x%08x (expected 0x%08x, ESP=%08x)\n",
         target, site, expected, c ? c->r[R_ESP] : 0);
+    os_backtrace(
+        48, [](const char *frame, void *) { fprintf(stderr, "  host frame: %s\n", frame); },
+        nullptr);
+    if (c) {
+        for (int i = -2; i < 8; ++i) {
+            const uint32_t at = c->r[R_ESP] + (uint32_t)(i * 4);
+            fprintf(stderr, "  stack[%+d] @%08x = %08x\n", i, at, rd32(at));
+        }
+    }
     fflush(stdout);
     fflush(stderr);
     abort();
