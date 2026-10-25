@@ -1067,8 +1067,11 @@ pub mod ffi {
             data: &[u8],
         ) -> Status;
         fn d3dx_effect_get(effect: &D3dxEffect, handle: u32, kind: u32) -> D3dxBytesResult;
-        fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) -> Status;
+        fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) -> ValueResult;
         fn d3dx_effect_texture(effect: &D3dxEffect, handle: u32) -> ValueResult;
+        fn d3dx_effect_texture_shared(effect: &D3dxEffect, handle: u32) -> bool;
+        fn d3dx_effect_texture_ref_count(effect: &D3dxEffect, id: u32) -> u32;
+        fn d3dx_effect_pool_texture_ref_count(pool: &D3dxEffectPool, id: u32) -> u32;
         fn d3dx_effect_set_technique(effect: &mut D3dxEffect, handle: u32) -> Status;
         fn d3dx_effect_current_technique(effect: &D3dxEffect) -> u32;
         fn d3dx_effect_validate_technique(effect: &D3dxEffect, handle: u32) -> Status;
@@ -1781,13 +1784,13 @@ use crate::d3d9::d3dx_effect::{
     d3dx_effect_get, d3dx_effect_is_parameter_used, d3dx_effect_join_pool, d3dx_effect_on_lost,
     d3dx_effect_on_reset, d3dx_effect_param_desc, d3dx_effect_param_name,
     d3dx_effect_param_semantic, d3dx_effect_pass_desc, d3dx_effect_pass_shader,
-    d3dx_effect_pool_id, d3dx_effect_pool_id_of, d3dx_effect_pool_texture_refs,
-    d3dx_effect_prepare_shaders, d3dx_effect_recycle, d3dx_effect_release,
-    d3dx_effect_saved_bindings, d3dx_effect_set, d3dx_effect_set_raw,
+    d3dx_effect_pool_id, d3dx_effect_pool_id_of, d3dx_effect_pool_texture_ref_count,
+    d3dx_effect_pool_texture_refs, d3dx_effect_prepare_shaders, d3dx_effect_recycle,
+    d3dx_effect_release, d3dx_effect_saved_bindings, d3dx_effect_set, d3dx_effect_set_raw,
     d3dx_effect_set_state_manager, d3dx_effect_set_technique, d3dx_effect_set_texture,
     d3dx_effect_shutdown, d3dx_effect_technique_desc, d3dx_effect_texture,
-    d3dx_effect_texture_refs, d3dx_effect_validate_technique, new_d3dx_effect,
-    new_d3dx_effect_pool,
+    d3dx_effect_texture_ref_count, d3dx_effect_texture_refs, d3dx_effect_texture_shared,
+    d3dx_effect_validate_technique, new_d3dx_effect, new_d3dx_effect_pool,
 };
 use crate::d3d9::{
     D3d9Device, D3d9Resource, D3dxSurfaceData, d3d9_abort_reset, d3d9_adapter_caps,

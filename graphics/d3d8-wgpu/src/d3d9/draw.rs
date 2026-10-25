@@ -234,6 +234,7 @@ pub(crate) type Streams = SmallVec<[StreamData; 2]>;
 #[derive(Clone, PartialEq)]
 pub(crate) struct BoundTexture {
     pub stage: u32,
+    pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub width: u32,
     pub height: u32,
@@ -956,7 +957,7 @@ fn native_geometry(
         layouts.push((stride, attributes));
     }
     draw.native_streams = streams;
-    Ok(Some(Box::new(NativeGeometry {
+    let geometry = NativeGeometry {
         vertices,
         layouts,
         topology,
@@ -967,7 +968,14 @@ fn native_geometry(
         index_format,
         base_vertex: -(min_raw as i32),
         count,
-    })))
+    };
+    Ok(Some(match draw.native_geometry_pool.pop() {
+        Some(mut slot) => {
+            *slot = geometry;
+            slot
+        }
+        None => Box::new(geometry),
+    }))
 }
 
 fn flat_to_u8(values: &[f32]) -> Vec<u8> {
@@ -2148,6 +2156,7 @@ struct SamplerKey {
 #[derive(Clone)]
 struct PendingTexture {
     stage: u32,
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     sampler: wgpu::Sampler,
 }
@@ -2156,7 +2165,7 @@ struct PendingTexture {
 struct BindGroupKey {
     layout: wgpu::BindGroupLayout,
     uniform_sizes: [u64; 4],
-    textures: SmallVec<[(u32, wgpu::TextureView, wgpu::Sampler); 4]>,
+    textures: SmallVec<[(u32, wgpu::Texture, wgpu::TextureView, wgpu::Sampler); 4]>,
 }
 
 struct PendingDraw {
@@ -2175,6 +2184,34 @@ struct PendingDraw {
     stencil_reference: u32,
     blend_constant: [f32; 4],
     scissor: Option<[u32; 4]>,
+}
+
+fn cached_bind_group(
+    groups: &mut FastMap<BindGroupKey, wgpu::BindGroup>,
+    previous: &mut FastMap<BindGroupKey, wgpu::BindGroup>,
+    key: &BindGroupKey,
+) -> Option<wgpu::BindGroup> {
+    if let Some(group) = groups.get(key) {
+        return Some(group.clone());
+    }
+    let group = previous.remove(key)?;
+    if groups.len() >= BIND_GROUP_CACHE_LIMIT {
+        *previous = std::mem::take(groups);
+    }
+    groups.insert(key.clone(), group.clone());
+    Some(group)
+}
+
+fn store_bind_group(
+    groups: &mut FastMap<BindGroupKey, wgpu::BindGroup>,
+    previous: &mut FastMap<BindGroupKey, wgpu::BindGroup>,
+    key: BindGroupKey,
+    group: &wgpu::BindGroup,
+) {
+    if groups.len() >= BIND_GROUP_CACHE_LIMIT {
+        *previous = std::mem::take(groups);
+    }
+    groups.insert(key, group.clone());
 }
 
 fn same_bindings(a: &PendingDraw, b: &PendingDraw) -> bool {
@@ -2206,6 +2243,7 @@ struct PaddedColor {
 }
 
 const DRAW_MEMOS: usize = 16;
+const BIND_GROUP_CACHE_LIMIT: usize = 4096;
 
 struct DrawMemo {
     fingerprint: u64,
@@ -2246,11 +2284,13 @@ pub(crate) struct D3d9DrawState {
     trace_shaders: std::collections::BTreeSet<u32>,
     upload: Option<wgpu::Buffer>,
     bind_groups: FastMap<BindGroupKey, wgpu::BindGroup>,
+    bind_groups_previous: FastMap<BindGroupKey, wgpu::BindGroup>,
     bind_group_scratch: Vec<wgpu::BindGroup>,
     linked: Vec<LinkedInput>,
     ff_uniforms: Vec<f32>,
     index_slots: FastMap<u32, u32>,
     native_streams: SmallVec<[(u32, VertexAttributes); 2]>,
+    native_geometry_pool: Vec<Box<NativeGeometry>>,
     pipeline_memo: Option<(PipelineKey, wgpu::RenderPipeline)>,
     memos: Vec<Box<DrawMemo>>,
 }
@@ -2276,6 +2316,7 @@ impl D3d9DrawState {
         self.shader_variants.clear();
         self.samplers.clear();
         self.bind_groups.clear();
+        self.bind_groups_previous.clear();
         self.geometry.clear();
         self.geometry_seen.clear();
     }
@@ -2286,16 +2327,28 @@ impl D3d9DrawState {
     }
 
     pub(crate) fn discard_batch(&mut self) {
+        for pending in &mut self.batch.draws {
+            if let Some(geometry) = pending.native_geometry.take() {
+                self.native_geometry_pool.push(geometry);
+            }
+        }
         self.batch = DrawBatch::default();
     }
 
     pub(crate) fn reset(&mut self) {
         self.clear("device-reset");
         self.discard_batch();
+        self.native_geometry_pool.clear();
         self.upload = None;
         self.bind_groups.clear();
+        self.bind_groups_previous.clear();
     }
-    pub fn drop_resource(&mut self, _id: u32) {}
+    pub fn drop_texture(&mut self, texture: &wgpu::Texture) {
+        self.bind_groups
+            .retain(|key, _| !key.textures.iter().any(|entry| &entry.1 == texture));
+        self.bind_groups_previous
+            .retain(|key, _| !key.textures.iter().any(|entry| &entry.1 == texture));
+    }
 
     fn geometry_source(
         &mut self,
@@ -2944,6 +2997,7 @@ fn resolve_shading(
         let (key, descriptor) = sampler(gpu, state, texture)?;
         bindings.push(PendingTexture {
             stage: texture.stage,
+            texture: texture.texture.clone(),
             view: texture.view.clone(),
             sampler: draw.sampler(gpu, key, descriptor)?,
         });
@@ -3872,6 +3926,7 @@ fn flush_inner(
         .is_none_or(|buffer| buffer.size() < needed)
     {
         draw.bind_groups.clear();
+        draw.bind_groups_previous.clear();
         let size = needed
             .next_power_of_two()
             .max(4096)
@@ -3890,9 +3945,12 @@ fn flush_inner(
     let upload = draw
         .upload
         .as_ref()
-        .expect("draw upload buffer was created");
+        .expect("draw upload buffer was created")
+        .clone();
     let mut bind_groups = std::mem::take(&mut draw.bind_group_scratch);
     bind_groups.clear();
+    let mut bind_group_cache = std::mem::take(&mut draw.bind_groups);
+    let mut bind_group_previous = std::mem::take(&mut draw.bind_groups_previous);
     for (index, pending) in draw.batch.draws.iter().enumerate() {
         let bind_group = if index > 0 && same_bindings(&draw.batch.draws[index - 1], pending) {
             bind_groups[index - 1].clone()
@@ -3903,18 +3961,27 @@ fn flush_inner(
                 textures: pending
                     .textures
                     .iter()
-                    .map(|texture| (texture.stage, texture.view.clone(), texture.sampler.clone()))
+                    .map(|texture| {
+                        (
+                            texture.stage,
+                            texture.texture.clone(),
+                            texture.view.clone(),
+                            texture.sampler.clone(),
+                        )
+                    })
                     .collect(),
             };
-            if let Some(bind_group) = draw.bind_groups.get(&key) {
-                bind_group.clone()
+            if let Some(bind_group) =
+                cached_bind_group(&mut bind_group_cache, &mut bind_group_previous, &key)
+            {
+                bind_group
             } else {
                 let mut entries = Vec::with_capacity(4 + pending.textures.len() * 2);
                 for binding in 0..4 {
                     entries.push(wgpu::BindGroupEntry {
                         binding,
                         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: upload,
+                            buffer: &upload,
                             offset: 0,
                             size: wgpu::BufferSize::new(pending.uniform_sizes[binding as usize]),
                         }),
@@ -3935,15 +4002,19 @@ fn flush_inner(
                     layout: &pending.layout,
                     entries: &entries,
                 });
-                if draw.bind_groups.len() >= 512 {
-                    draw.bind_groups.clear();
-                }
-                draw.bind_groups.insert(key, bind_group.clone());
+                store_bind_group(
+                    &mut bind_group_cache,
+                    &mut bind_group_previous,
+                    key,
+                    &bind_group,
+                );
                 bind_group
             }
         };
         bind_groups.push(bind_group);
     }
+    draw.bind_groups = bind_group_cache;
+    draw.bind_groups_previous = bind_group_previous;
     let color_view = draw
         .batch
         .color_view
@@ -3990,7 +4061,7 @@ fn flush_inner(
             staging
                 .write_buffer(
                     encoder,
-                    upload,
+                    &upload,
                     0,
                     wgpu::BufferSize::new(needed).expect("draw upload is nonempty"),
                     &gpu.device,
@@ -4025,7 +4096,7 @@ fn flush_inner(
                     for (slot, vertex) in geometry.vertices.iter().enumerate() {
                         pass.set_vertex_buffer(
                             slot as u32,
-                            vertex.data.slice(upload, vertex.offset, vertex.size),
+                            vertex.data.slice(&upload, vertex.offset, vertex.size),
                         );
                     }
                 } else if pending.has_attributes {
@@ -4082,7 +4153,7 @@ fn flush_inner(
                     pass.set_index_buffer(
                         geometry
                             .index
-                            .slice(upload, geometry.index_offset, geometry.index_size),
+                            .slice(&upload, geometry.index_offset, geometry.index_size),
                         geometry.index_format,
                     );
                     pass.draw_indexed(0..geometry.count, geometry.base_vertex, 0..1);
@@ -4126,6 +4197,11 @@ fn flush_inner(
     );
     bind_groups.clear();
     draw.bind_group_scratch = bind_groups;
+    for pending in &mut draw.batch.draws {
+        if let Some(geometry) = pending.native_geometry.take() {
+            draw.native_geometry_pool.push(geometry);
+        }
+    }
     draw.batch.draws.clear();
     draw.batch.data.clear();
     draw.batch.color_view = None;

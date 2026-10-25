@@ -236,6 +236,7 @@ struct EfxParam {
     flags: u32,
     annotations: Vec<u32>,
     version: u64,
+    pool_slot: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -313,22 +314,26 @@ struct PoolEntry {
 #[derive(Default)]
 struct PoolState {
     device_id: Option<u32>,
-    entries: BTreeMap<Vec<u8>, Vec<PoolEntry>>,
+    entries: Vec<Option<PoolEntry>>,
+    names: BTreeMap<Vec<u8>, Vec<usize>>,
+    free: Vec<usize>,
 }
 
 impl PoolState {
-    fn entry(&self, t: &EfxType) -> Option<&PoolEntry> {
-        self.entries
-            .get(&t.name)?
-            .iter()
-            .find(|entry| entry.shape.matches(t))
+    fn slot(&self, slot: usize) -> Option<&PoolEntry> {
+        self.entries.get(slot)?.as_ref()
     }
 
-    fn entry_mut(&mut self, t: &EfxType) -> Option<&mut PoolEntry> {
-        self.entries
-            .get_mut(&t.name)?
-            .iter_mut()
-            .find(|entry| entry.shape.matches(t))
+    fn slot_mut(&mut self, slot: usize) -> Option<&mut PoolEntry> {
+        self.entries.get_mut(slot)?.as_mut()
+    }
+
+    fn find_slot(&self, t: &EfxType) -> Option<usize> {
+        self.names
+            .get(&t.name)?
+            .iter()
+            .copied()
+            .find(|&slot| self.slot(slot).is_some_and(|entry| entry.shape.matches(t)))
     }
 
     fn insert(
@@ -338,25 +343,52 @@ impl PoolState {
         objects: Vec<u32>,
         member: u32,
         version: u64,
-    ) {
-        self.entries
-            .entry(t.name.clone())
-            .or_default()
-            .push(PoolEntry {
-                shape: ParamShape::of(t),
-                value,
-                objects,
-                members: BTreeSet::from([member]),
-                version,
-            });
+    ) -> usize {
+        let entry = PoolEntry {
+            shape: ParamShape::of(t),
+            value,
+            objects,
+            members: BTreeSet::from([member]),
+            version,
+        };
+        let slot = if let Some(slot) = self.free.pop() {
+            self.entries[slot] = Some(entry);
+            slot
+        } else {
+            self.entries.push(Some(entry));
+            self.entries.len() - 1
+        };
+        self.names.entry(t.name.clone()).or_default().push(slot);
+        slot
+    }
+
+    fn remove_member(&mut self, id: u32) {
+        for slot in 0..self.entries.len() {
+            let Some(entry) = self.entries[slot].as_mut() else {
+                continue;
+            };
+            entry.members.remove(&id);
+            if !entry.members.is_empty() {
+                continue;
+            }
+            let name = entry.shape.name.clone();
+            self.entries[slot] = None;
+            self.free.push(slot);
+            if let Some(slots) = self.names.get_mut(&name) {
+                slots.retain(|&candidate| candidate != slot);
+                if slots.is_empty() {
+                    self.names.remove(&name);
+                }
+            }
+        }
     }
 
     fn values(&self) -> impl Iterator<Item = &PoolEntry> {
-        self.entries.values().flatten()
+        self.entries.iter().flatten()
     }
 
     fn values_mut(&mut self) -> impl Iterator<Item = &mut PoolEntry> {
-        self.entries.values_mut().flatten()
+        self.entries.iter_mut().flatten()
     }
 }
 
@@ -409,6 +441,7 @@ pub struct D3dxEffect {
     pass_version: u64,
     spare_commands: Vec<D3dxEffectCommand>,
     spare_values: Vec<f32>,
+    preshader_inputs: RefCell<Vec<[f32; 4]>>,
     targets: RefCell<FastMap<u32, ParamTarget>>,
 }
 
@@ -438,6 +471,7 @@ impl Default for D3dxEffect {
             pass_version: 0,
             spare_commands: Vec::new(),
             spare_values: Vec::new(),
+            preshader_inputs: RefCell::default(),
             targets: RefCell::default(),
         }
     }
@@ -637,6 +671,7 @@ fn read_annotations(
             flags: 0,
             annotations: Vec::new(),
             version: 0,
+            pool_slot: None,
         });
     }
     Ok(())
@@ -687,6 +722,7 @@ fn parse_effect(blob: &[u8]) -> Result<D3dxEffect, RenderError> {
             flags,
             annotations: param_annotations,
             version: 0,
+            pool_slot: None,
         });
     }
     for _ in 0..ntech {
@@ -1209,9 +1245,9 @@ impl D3dxEffect {
     fn param_version(&self, index: usize) -> u64 {
         let param = &self.params[index];
         let mut version = param.version;
-        if param.flags & FX_PARAM_SHARED != 0 {
+        if let Some(slot) = param.pool_slot {
             if let Some(pool) = &self.pool {
-                if let Some(entry) = pool.lock().unwrap().entry(&param.type_) {
+                if let Some(entry) = pool.lock().unwrap().slot(slot) {
                     version = version.max(entry.version);
                 }
             }
@@ -1224,8 +1260,9 @@ impl D3dxEffect {
         if !self.shared(index) {
             return None;
         }
+        let slot = param.pool_slot?;
         let state = self.pool.as_ref()?.lock().unwrap();
-        state.entry(&param.type_).map(f)
+        state.slot(slot).map(f)
     }
 
     fn with_numeric<R>(&self, index: usize, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
@@ -1293,8 +1330,11 @@ impl D3dxEffect {
             EfxValue::Numeric(_) => {
                 let Some(pool) = &self.pool else { return };
                 let param = &mut self.params[index];
+                let Some(slot) = param.pool_slot else {
+                    return;
+                };
                 let state = pool.lock().unwrap();
-                let Some(entry) = state.entry(&param.type_) else {
+                let Some(entry) = state.slot(slot) else {
                     return;
                 };
                 if param.version != 0 && entry.version == param.version {
@@ -1325,8 +1365,11 @@ impl D3dxEffect {
         };
         let id = self.id;
         let param = &self.params[index];
+        let Some(slot) = param.pool_slot else {
+            return;
+        };
         let mut state = pool.lock().unwrap();
-        if let Some(entry) = state.entry_mut(&param.type_) {
+        if let Some(entry) = state.slot_mut(slot) {
             if let EfxValue::Numeric(bytes) = &param.value {
                 let copy = entry.value.len().min(bytes.len());
                 entry.value[..copy].copy_from_slice(&bytes[..copy]);
@@ -1476,7 +1519,8 @@ pub fn d3dx_effect_join_pool(
             );
         }
         let param = &mut effect.params[index];
-        if let Some(entry) = state.entry_mut(&param.type_) {
+        let slot = if let Some(slot) = state.find_slot(&param.type_) {
+            let entry = state.slot_mut(slot).expect("pool slot is live");
             match &mut param.value {
                 EfxValue::Numeric(bytes) => {
                     let copy = entry.value.len().min(bytes.len());
@@ -1486,14 +1530,16 @@ pub fn d3dx_effect_join_pool(
                 EfxValue::Sampler(_) => {}
             }
             entry.members.insert(id);
+            slot
         } else {
             let (value, objects) = match &param.value {
                 EfxValue::Numeric(bytes) => (bytes.clone(), Vec::new()),
                 EfxValue::Object(ids) => (Vec::new(), ids.clone()),
                 EfxValue::Sampler(_) => (Vec::new(), Vec::new()),
             };
-            state.insert(&param.type_, value, objects, id, 0);
-        }
+            state.insert(&param.type_, value, objects, id, 0)
+        };
+        param.pool_slot = Some(slot);
     }
     ok()
 }
@@ -1504,13 +1550,7 @@ pub fn d3dx_effect_release(effect: &mut D3dxEffect) {
     };
     let id = effect.id;
     let mut state = pool.lock().unwrap();
-    state.entries.retain(|_, entries| {
-        entries.retain_mut(|entry| {
-            entry.members.remove(&id);
-            !entry.members.is_empty()
-        });
-        !entries.is_empty()
-    });
+    state.remove_member(id);
 }
 
 pub fn d3dx_effect_texture_refs(effect: &D3dxEffect) -> Vec<u32> {
@@ -1906,22 +1946,37 @@ fn get_string(effect: &D3dxEffect, target: &ParamTarget) -> D3dxBytesResult {
     }
 }
 
-pub fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) -> Status {
+pub fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) -> ValueResult {
     let Some(target) = effect.target(handle) else {
-        return invalid_call("ID3DXEffect::SetTexture");
+        return ValueResult {
+            status: invalid_call("ID3DXEffect::SetTexture"),
+            value: 0,
+        };
     };
     if !target.ty.texture() {
-        return invalid_call("ID3DXEffect::SetTexture");
+        return ValueResult {
+            status: invalid_call("ID3DXEffect::SetTexture"),
+            value: 0,
+        };
     }
     let Some(root) = target.root else {
-        return invalid_call("ID3DXEffect::SetTexture");
+        return ValueResult {
+            status: invalid_call("ID3DXEffect::SetTexture"),
+            value: 0,
+        };
     };
     effect.sync_shared(target.root);
+    let previous = effect.target_object(&target);
     match target.object {
         Some(index) => match &mut effect.params[root].value {
             EfxValue::Object(ids) if index < ids.len() => ids[index] = id,
             EfxValue::Object(ids) => ids.push(id),
-            _ => return invalid_call("ID3DXEffect::SetTexture"),
+            _ => {
+                return ValueResult {
+                    status: invalid_call("ID3DXEffect::SetTexture"),
+                    value: 0,
+                };
+            }
         },
         None => match &mut effect.params[root].value {
             EfxValue::Object(ids) => {
@@ -1931,11 +1986,58 @@ pub fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) ->
                     ids[0] = id;
                 }
             }
-            _ => return invalid_call("ID3DXEffect::SetTexture"),
+            _ => {
+                return ValueResult {
+                    status: invalid_call("ID3DXEffect::SetTexture"),
+                    value: 0,
+                };
+            }
         },
     }
     effect.touch(target.root);
-    ok()
+    ValueResult {
+        status: ok(),
+        value: previous,
+    }
+}
+
+pub fn d3dx_effect_texture_shared(effect: &D3dxEffect, handle: u32) -> bool {
+    effect
+        .target(handle)
+        .and_then(|target| target.root)
+        .is_some_and(|root| effect.shared(root))
+}
+
+pub fn d3dx_effect_texture_ref_count(effect: &D3dxEffect, id: u32) -> u32 {
+    if id == 0 {
+        return 0;
+    }
+    let pooled = effect.pool.is_some();
+    effect
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(index, param)| !(effect.shared(*index) && pooled) && param.type_.texture())
+        .filter_map(|(_, param)| match &param.value {
+            EfxValue::Object(ids) => Some(ids),
+            _ => None,
+        })
+        .flatten()
+        .filter(|&&candidate| candidate == id)
+        .count() as u32
+}
+
+pub fn d3dx_effect_pool_texture_ref_count(pool: &D3dxEffectPool, id: u32) -> u32 {
+    if id == 0 {
+        return 0;
+    }
+    let state = pool.state.lock().unwrap();
+    state
+        .values()
+        .filter(|entry| texture_type(entry.shape.type_))
+        .flat_map(|entry| &entry.objects)
+        .filter(|&&candidate| candidate == id)
+        .count() as u32
 }
 
 pub fn d3dx_effect_texture(effect: &D3dxEffect, handle: u32) -> ValueResult {
@@ -2871,7 +2973,8 @@ fn run_preshader<'a>(
         .get_or_init(|| compile_preshader(effect, code))
         .as_ref()
         .map_err(Clone::clone)?;
-    let inputs = ctab_inputs_with(effect, &compiled.constants, &compiled.params)?;
+    let mut inputs = effect.preshader_inputs.borrow_mut();
+    ctab_inputs_with(effect, &compiled.constants, &compiled.params, &mut inputs)?;
     preshader::evaluate(&compiled.program, &inputs)
 }
 
@@ -2879,8 +2982,10 @@ fn ctab_inputs_with(
     effect: &D3dxEffect,
     ctab: &[CtabConst],
     params: &[usize],
-) -> Result<Vec<[f32; 4]>, RenderError> {
-    let mut inputs = vec![[0.0f32; 4]; 256];
+    inputs: &mut Vec<[f32; 4]>,
+) -> Result<(), RenderError> {
+    inputs.clear();
+    inputs.resize(256, [0.0f32; 4]);
     for (constant, &index) in ctab.iter().zip(params) {
         if constant.set != D3DXRS_FLOAT4 {
             return Err(unsupported(
@@ -2898,7 +3003,7 @@ fn ctab_inputs_with(
         }
         constant_registers_into(effect, index, constant, &mut flat[range])?;
     }
-    Ok(inputs)
+    Ok(())
 }
 
 fn sampler_state_parameter(effect: &D3dxEffect, state: &EfxState) -> Result<usize, RenderError> {
@@ -3447,7 +3552,8 @@ fn apply_shader_constants(
         .map_err(Clone::clone)?;
     if let Some(compiled) = compiled {
         if compiled.params.iter().any(|&index| stale(index)) {
-            let inputs = ctab_inputs_with(effect, &compiled.constants, &compiled.params)?;
+            let mut inputs = effect.preshader_inputs.borrow_mut();
+            ctab_inputs_with(effect, &compiled.constants, &compiled.params, &mut inputs)?;
             let values = preshader::evaluate(&compiled.program, &inputs)?;
             for &register in &compiled.outputs {
                 let start = register as usize * 4;

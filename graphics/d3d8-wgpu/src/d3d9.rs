@@ -296,7 +296,11 @@ struct DrawViews {
     key: (u32, u32, u64),
     target: SurfaceView,
     depth: Option<SurfaceView>,
-    textures: [Option<CachedBinding>; state::MAX_SAMPLERS],
+}
+
+struct DrawTextures {
+    epoch: u64,
+    bindings: [Option<CachedBinding>; state::MAX_SAMPLERS],
 }
 
 struct CachedBinding {
@@ -355,6 +359,7 @@ pub struct D3d9Device {
     registry: FastMap<u32, GpuRegistryEntry>,
     registry_epoch: u64,
     draw_views: Option<Box<DrawViews>>,
+    draw_textures: Option<Box<DrawTextures>>,
     view_cache: RefCell<FastMap<TextureViewKey, wgpu::TextureView>>,
     locks: BTreeMap<u32, Vec<Arc<AtomicU32>>>,
     draw: draw::D3d9DrawState,
@@ -1361,6 +1366,7 @@ impl Default for D3d9Device {
             registry: FastMap::default(),
             registry_epoch: 0,
             draw_views: None,
+            draw_textures: None,
             view_cache: RefCell::new(FastMap::default()),
             locks: BTreeMap::new(),
             draw: draw::D3d9DrawState::default(),
@@ -1852,6 +1858,16 @@ fn gpu_entry_from_staged(
     }
 }
 
+fn registry_texture(entry: &GpuRegistryEntry) -> Option<&wgpu::Texture> {
+    match entry {
+        GpuRegistryEntry::Texture { texture, .. } | GpuRegistryEntry::Surface { texture, .. } => {
+            Some(texture)
+        }
+        GpuRegistryEntry::TextureAlias { gpu, .. } => gpu.as_ref(),
+        GpuRegistryEntry::Buffer { .. } => None,
+    }
+}
+
 fn buffer_entry(b: &resource::BufferState) -> GpuRegistryEntry {
     GpuRegistryEntry::Buffer {
         uploaded: Arc::clone(&b.uploaded),
@@ -1977,10 +1993,24 @@ pub fn d3d9_register_implicit_targets(
 
 pub fn d3d9_unregister_resource(device: &mut D3d9Device, id: u32) -> Status {
     device.resources.remove(&id);
-    device.registry.remove(&id);
+    let released = device.registry.remove(&id);
+    if let Some(texture) = released.as_ref().and_then(registry_texture) {
+        device.draw.drop_texture(texture);
+        if !device
+            .registry
+            .values()
+            .any(|entry| registry_texture(entry) == Some(texture))
+        {
+            device
+                .view_cache
+                .borrow_mut()
+                .retain(|key, _| &key.texture != texture);
+        }
+    }
     device.registry_epoch += 1;
     device.locks.remove(&id);
-    device.draw.drop_resource(id);
+    device.draw_views = None;
+    device.draw_textures = None;
     if device.render_target_id == id {
         device.render_target_id = 0;
     }
@@ -4311,9 +4341,6 @@ fn cached_texture_view(
     if let Some(view) = views.get(&key) {
         return view.clone();
     }
-    if views.len() >= 256 {
-        views.clear();
-    }
     let view = texture.create_view(&descriptor);
     views.insert(key, view.clone());
     view
@@ -4605,6 +4632,7 @@ fn resolve_binding(device: &D3d9Device, id: u32, stage: u32) -> Result<CachedBin
     let is_depth = format::is_depth(format);
     let binding = draw::BoundTexture {
         stage,
+        texture: texture.clone(),
         view: sampling_view(&device.view_cache, &texture, kind, is_depth),
         width,
         height,
@@ -4763,12 +4791,7 @@ fn resolve_draw_views(
             "depth surface is smaller than the render target",
         ));
     }
-    Ok(Box::new(DrawViews {
-        key,
-        target,
-        depth,
-        textures: Default::default(),
-    }))
+    Ok(Box::new(DrawViews { key, target, depth }))
 }
 
 fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<(), RenderError> {
@@ -4782,13 +4805,20 @@ fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<
         device.depth_target_id,
         device.registry_epoch,
     );
-    let mut views = match device.draw_views.take() {
+    let views = match device.draw_views.take() {
         Some(views) if views.key == key => views,
         _ => resolve_draw_views(device, key)?,
     };
-    let textures = bound_textures_cached(
+    let mut textures = match device.draw_textures.take() {
+        Some(textures) if textures.epoch == device.registry_epoch => textures,
+        _ => Box::new(DrawTextures {
+            epoch: device.registry_epoch,
+            bindings: Default::default(),
+        }),
+    };
+    let bindings = bound_textures_cached(
         device,
-        &mut views.textures,
+        &mut textures.bindings,
         &views.target,
         views.depth.as_ref(),
     )?;
@@ -4796,9 +4826,10 @@ fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<
         command,
         target: views.target.clone(),
         depth: views.depth.clone(),
-        textures,
+        textures: bindings,
     };
     device.draw_views = Some(views);
+    device.draw_textures = Some(textures);
     if gpu.is_physical() {
         return Err(RenderError::new("Draw", gpu.loss().physical_message()));
     }
