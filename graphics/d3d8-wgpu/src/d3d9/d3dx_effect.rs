@@ -263,6 +263,7 @@ struct EfxObject {
 }
 
 struct ParamShape {
+    name: Vec<u8>,
     type_: u32,
     class: u32,
     rows: u32,
@@ -274,6 +275,7 @@ struct ParamShape {
 impl ParamShape {
     fn of(t: &EfxType) -> Self {
         Self {
+            name: t.name.clone(),
             type_: t.type_,
             class: t.class,
             rows: t.rows,
@@ -284,7 +286,8 @@ impl ParamShape {
     }
 
     fn matches(&self, t: &EfxType) -> bool {
-        self.type_ == t.type_
+        self.name == t.name
+            && self.type_ == t.type_
             && self.class == t.class
             && self.rows == t.rows
             && self.cols == t.cols

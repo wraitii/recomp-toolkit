@@ -879,6 +879,7 @@ impl<'a> Gen<'a> {
             }
             R_COLOROUT => {
                 if d.index != 0 {
+                    // DIVERGENCE(original): writes to oC1-oC3 are dropped; multiple render targets are not implemented.
                     eprintln!(
                         "d3d9: dropping color output oC{}; multiple render targets are not implemented",
                         d.index
@@ -1435,6 +1436,7 @@ impl<'a> Gen<'a> {
                 let value = format!("ov[{}]", d.index);
                 match d.usage {
                     0 | 9 => position = value,
+                    // DIVERGENCE(original): point size output is ignored; point sprites are rejected at draw time.
                     4 => {}
                     5 if d.usage_index < 8 => {
                         s += &format!("    o.t{} = {value};\n", d.usage_index);

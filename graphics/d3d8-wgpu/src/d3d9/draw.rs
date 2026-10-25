@@ -3420,6 +3420,20 @@ pub(crate) fn execute(
             "viewport depth range cannot be represented by wgpu",
         ));
     }
+    let max = u64::from(gpu.device.limits().max_texture_dimension_2d);
+    if u64::from(vp.width) > max
+        || u64::from(vp.height) > max
+        || u64::from(vp.x) + u64::from(vp.width) > 2 * max - 1
+        || u64::from(vp.y) + u64::from(vp.height) > 2 * max - 1
+    {
+        return Err(unsupported(
+            "Draw",
+            format!(
+                "viewport {}x{} at ({}, {}) exceeds wgpu limits for max dimension {max}",
+                vp.width, vp.height, vp.x, vp.y
+            ),
+        ));
+    }
     let mut vsp = [1.0f32; 68];
     vsp[..4].copy_from_slice(&[1.0 / vp.width as f32, -1.0 / vp.height as f32, 0.0, 0.0]);
     let fog_color = color(rs(state, 34));
