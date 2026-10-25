@@ -237,7 +237,7 @@ pub fn translate(
             &analysis,
             None,
             &global,
-            &facts.call_targets,
+            &facts.guest_calls,
             &facts.host_calls,
             &reloc_settings,
             X87Mode::Auto,
