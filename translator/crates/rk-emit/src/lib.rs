@@ -825,7 +825,11 @@ impl<'a> Emitter<'a> {
             self.write_x87(block_lines);
             let ops = item.ops.clone();
             let mut continues = true;
+            let mut grouped = 0usize;
             for (position, value) in ops.iter().copied().enumerate() {
+                if position < grouped {
+                    continue;
+                }
                 let live = self.plan.live.contains(&value);
                 let addr = self.s.value_addr[value as usize];
                 if (live || self.reload_defs.contains_key(&value)) && commented_addr != Some(addr) {
@@ -836,6 +840,14 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 if live {
+                    if let Some(code) = self.packed_float4(&ops, position)? {
+                        self.packed_float4_emit(code, &ops[position..position + 4])?;
+                        for &lane in &ops[position..position + 4] {
+                            self.materialize_defs(lane)?;
+                        }
+                        grouped = position + 4;
+                        continue;
+                    }
                     if let (Op::Branch { target: branch }, Some(Op::Tail { target: tail })) = (
                         self.s.value(value).op,
                         ops.get(position + 1).map(|next| self.s.value(*next).op),
@@ -2640,6 +2652,83 @@ impl<'a> Emitter<'a> {
             ),
             _ => Ok(format!("v{value}")),
         }
+    }
+
+    fn packed_float_arg_ok(&self, value: ValueId) -> bool {
+        if self.materialized[value as usize] {
+            return self.plan.live.contains(&value);
+        }
+        match self.s.value(value).op {
+            Op::Const(_) | Op::Target(_) | Op::Memory => true,
+            Op::Input(StateKey::Register(_)) | Op::StateReload(StateKey::Register(_)) => true,
+            Op::Byte(_) | Op::Pack | Op::P(OpCode::Copy | OpCode::IntZExt) => self
+                .s
+                .args(value)
+                .iter()
+                .all(|arg| self.packed_float_arg_ok(*arg)),
+            _ => false,
+        }
+    }
+
+    fn packed_float4(&self, ops: &[ValueId], position: usize) -> Result<Option<OpCode>> {
+        let code = match self.s.value(ops[position]).op {
+            Op::P(
+                code @ (OpCode::FloatAdd | OpCode::FloatSub | OpCode::FloatMult | OpCode::FloatDiv),
+            ) => code,
+            _ => return Ok(None),
+        };
+        let Some(group) = ops.get(position..position + 4) else {
+            return Ok(None);
+        };
+        let addr = self.s.value_addr[ops[position] as usize];
+        for &value in group {
+            let item = self.s.value(value);
+            if !self.plan.live.contains(&value)
+                || !self.materialized[value as usize]
+                || item.op != Op::P(code)
+                || item.size != 4
+                || self.s.value_addr[value as usize] != addr
+                || self.reload_defs.contains_key(&value)
+                || self.keep_lane.get(&value).is_some()
+            {
+                return Ok(None);
+            }
+            let args = self.s.args(value);
+            if args.len() != 2
+                || args.iter().any(|arg| self.s.value(*arg).size != 4)
+                || !args.iter().all(|arg| self.packed_float_arg_ok(*arg))
+            {
+                return Ok(None);
+            }
+            let lines = self.x87_lines(|x87, names| x87.event_lines(self.clone, value, names))?;
+            if !lines.is_empty() {
+                return Ok(None);
+            }
+        }
+        Ok(Some(code))
+    }
+
+    fn packed_float4_emit(&mut self, code: OpCode, values: &[ValueId]) -> Result<()> {
+        let helper = match code {
+            OpCode::FloatAdd => "add",
+            OpCode::FloatSub => "sub",
+            OpCode::FloatMult => "mul",
+            _ => "div",
+        };
+        let mut args = Vec::with_capacity(8);
+        for &value in values {
+            for &arg in self.s.args(value) {
+                args.push(format!("(uint32_t)({})", self.expr(arg)?));
+            }
+        }
+        let outputs: Vec<_> = values.iter().map(|value| format!("&v{value}")).collect();
+        let _ = writeln!(
+            self.out,
+            "recomp_sse_{helper}ps4(c, {}, {});",
+            args.join(", "),
+            outputs.join(", ")
+        );
+        Ok(())
     }
 
     fn operation(&self, value: ValueId) -> Result<String> {

@@ -573,6 +573,93 @@ RECOMP_HOT_INLINE uint32_t recomp_sse_divps(const X86 *c, uint32_t a, uint32_t b
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
     return recomp_sse_result(c, a, b, x / y, RECOMP_SSE_RESULT_DIV);
 }
+#if defined(__GNUC__) || defined(__clang__)
+typedef float recomp_sse_f32x4 __attribute__((vector_size(16)));
+typedef uint32_t recomp_sse_u32x4 __attribute__((vector_size(16)));
+RECOMP_HOT_INLINE recomp_sse_u32x4 recomp_sse_bits4(recomp_sse_f32x4 v) {
+    recomp_sse_u32x4 bits;
+    memcpy(&bits, &v, sizeof bits);
+    return bits;
+}
+RECOMP_HOT_INLINE void recomp_sse_result4(const X86 *c, uint32_t a0, uint32_t b0, uint32_t a1,
+                                          uint32_t b1, uint32_t a2, uint32_t b2, uint32_t a3,
+                                          uint32_t b3, uint32_t *r0, uint32_t *r1, uint32_t *r2,
+                                          uint32_t *r3, unsigned operation) {
+    recomp_sse_f32x4 x = {recomp_sse_f32(a0), recomp_sse_f32(a1), recomp_sse_f32(a2),
+                          recomp_sse_f32(a3)};
+    recomp_sse_f32x4 y = {recomp_sse_f32(b0), recomp_sse_f32(b1), recomp_sse_f32(b2),
+                          recomp_sse_f32(b3)};
+    recomp_sse_f32x4 result;
+    switch (operation) {
+    case RECOMP_SSE_RESULT_ADD:
+        result = x + y;
+        break;
+    case RECOMP_SSE_RESULT_SUB:
+        result = x - y;
+        break;
+    case RECOMP_SSE_RESULT_MUL:
+        result = x * y;
+        break;
+    default:
+        result = x / y;
+        break;
+    }
+    recomp_sse_u32x4 bits = recomp_sse_bits4(result);
+    const recomp_sse_u32x4 one = {1u, 1u, 1u, 1u};
+    const recomp_sse_u32x4 normal = {0x00800000u, 0x00800000u, 0x00800000u, 0x00800000u};
+    const recomp_sse_u32x4 infinity = {0x7f800000u, 0x7f800000u, 0x7f800000u, 0x7f800000u};
+    const recomp_sse_u32x4 sign = {0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u};
+    recomp_sse_u32x4 magnitude = bits & ~sign;
+    recomp_sse_u32x4 slow = ((magnitude - one) < normal) | (magnitude > infinity);
+    if (RECOMP_UNLIKELY(slow[0] | slow[1] | slow[2] | slow[3])) {
+        uint32_t a[4] = {a0, a1, a2, a3}, b[4] = {b0, b1, b2, b3};
+        uint32_t *out[4] = {r0, r1, r2, r3};
+        for (unsigned lane = 0; lane < 4; lane++) {
+            uint32_t lane_bits = bits[lane], lane_magnitude = lane_bits & 0x7fffffffu;
+            if (lane_magnitude - 1u < 0x00800000u || lane_magnitude > 0x7f800000u)
+                lane_bits = recomp_sse_result_slow(c, a[lane], b[lane], result[lane], operation);
+            *out[lane] = lane_bits;
+        }
+        return;
+    }
+    *r0 = bits[0];
+    *r1 = bits[1];
+    *r2 = bits[2];
+    *r3 = bits[3];
+}
+#define RECOMP_SSE_PS4_PARAMS                                                                      \
+    const X86 *c, uint32_t a0, uint32_t b0, uint32_t a1, uint32_t b1, uint32_t a2, uint32_t b2,    \
+        uint32_t a3, uint32_t b3, uint32_t *r0, uint32_t *r1, uint32_t *r2, uint32_t *r3
+#define RECOMP_SSE_PS4_ARGS a0, b0, a1, b1, a2, b2, a3, b3, r0, r1, r2, r3
+#define RECOMP_SSE_PS4(name, operation)                                                            \
+    RECOMP_HOT_INLINE void name(RECOMP_SSE_PS4_PARAMS) {                                           \
+        recomp_sse_result4(c, RECOMP_SSE_PS4_ARGS, operation);                                     \
+    }
+RECOMP_SSE_PS4(recomp_sse_addps4, RECOMP_SSE_RESULT_ADD)
+RECOMP_SSE_PS4(recomp_sse_subps4, RECOMP_SSE_RESULT_SUB)
+RECOMP_SSE_PS4(recomp_sse_mulps4, RECOMP_SSE_RESULT_MUL)
+RECOMP_SSE_PS4(recomp_sse_divps4, RECOMP_SSE_RESULT_DIV)
+#undef RECOMP_SSE_PS4
+#undef RECOMP_SSE_PS4_ARGS
+#undef RECOMP_SSE_PS4_PARAMS
+#else
+#define RECOMP_SSE_PS4_PARAMS                                                                      \
+    const X86 *c, uint32_t a0, uint32_t b0, uint32_t a1, uint32_t b1, uint32_t a2, uint32_t b2,    \
+        uint32_t a3, uint32_t b3, uint32_t *r0, uint32_t *r1, uint32_t *r2, uint32_t *r3
+#define RECOMP_SSE_PS4(name, scalar)                                                               \
+    RECOMP_HOT_INLINE void name(RECOMP_SSE_PS4_PARAMS) {                                           \
+        *r0 = scalar(c, a0, b0);                                                                   \
+        *r1 = scalar(c, a1, b1);                                                                   \
+        *r2 = scalar(c, a2, b2);                                                                   \
+        *r3 = scalar(c, a3, b3);                                                                   \
+    }
+RECOMP_SSE_PS4(recomp_sse_addps4, recomp_sse_addps)
+RECOMP_SSE_PS4(recomp_sse_subps4, recomp_sse_subps)
+RECOMP_SSE_PS4(recomp_sse_mulps4, recomp_sse_mulps)
+RECOMP_SSE_PS4(recomp_sse_divps4, recomp_sse_divps)
+#undef RECOMP_SSE_PS4
+#undef RECOMP_SSE_PS4_PARAMS
+#endif
 RECOMP_HOT_INLINE uint32_t recomp_sse_minps(uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
     return x < y ? a : b;
