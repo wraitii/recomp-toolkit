@@ -652,7 +652,6 @@ void crt_qsort(X86 *c) {
                 if (!reached_pivot)
                     goto scan_low;
             }
-        scan_high:
             do {
                 low += width;
                 if (low > high_bound)
@@ -2339,6 +2338,7 @@ void crt_iswctype(X86 *c) {
 }
 
 uint32_t g_iob_addr;
+constexpr uint32_t kCrtFileSize = 0x20;
 void crt_bind_iob(uint32_t base);
 
 void crt_strlen(X86 *c) {
@@ -2354,7 +2354,7 @@ void crt_setlocale(X86 *c) {
 
 void crt_iob_func(X86 *c) {
     if (!g_iob_addr)
-        g_iob_addr = heap_alloc(3 * 0x40, true);
+        g_iob_addr = heap_alloc(3 * kCrtFileSize, true);
     crt_bind_iob(g_iob_addr);
     set_eax(c, g_iob_addr);
 }
@@ -2392,7 +2392,7 @@ FILE *crt_file(uint32_t handle) {
 uint32_t crt_add_file(FILE *fp, bool owned) {
     if (!fp)
         return 0;
-    uint32_t handle = heap_alloc(0x40, true);
+    uint32_t handle = heap_alloc(kCrtFileSize, true);
     if (!handle)
         return 0;
     g_crt_files[handle] = {fp, owned};
@@ -2403,8 +2403,8 @@ void crt_bind_iob(uint32_t base) {
     if (!base)
         return;
     g_crt_files[base] = {stdin, false};
-    g_crt_files[base + 0x40] = {stdout, false};
-    g_crt_files[base + 0x80] = {stderr, false};
+    g_crt_files[base + kCrtFileSize] = {stdout, false};
+    g_crt_files[base + 2 * kCrtFileSize] = {stderr, false};
 }
 
 bool crt_guest_file(uint32_t guest, bool write, std::string &host) {
@@ -2470,7 +2470,8 @@ void crt_fclose(X86 *c) {
 void crt_fread(X86 *c) {
     uint32_t dst = arg(c, 0), size = arg(c, 1), count = arg(c, 2);
     FILE *fp = crt_file(arg(c, 3));
-    if (!fp || !size || !count || !gm_valid(dst, size * count)) {
+    const uint64_t bytes = (uint64_t)size * count;
+    if (!fp || !size || !count || bytes > 0xffffffffu || !gm_valid(dst, (uint32_t)bytes)) {
         set_eax(c, 0);
         return;
     }
@@ -2480,7 +2481,8 @@ void crt_fread(X86 *c) {
 void crt_fwrite(X86 *c) {
     uint32_t src = arg(c, 0), size = arg(c, 1), count = arg(c, 2);
     FILE *fp = crt_file(arg(c, 3));
-    if (!fp || !size || !count || !gm_valid(src, size * count)) {
+    const uint64_t bytes = (uint64_t)size * count;
+    if (!fp || !size || !count || bytes > 0xffffffffu || !gm_valid(src, (uint32_t)bytes)) {
         set_eax(c, 0);
         return;
     }
@@ -2540,7 +2542,7 @@ void crt_clearerr(X86 *c) {
 }
 
 void crt_printf(X86 *c) {
-    std::string text = guest_format(arg(c, 0), c->r[R_ESP] + 4);
+    std::string text = guest_format(arg(c, 0), c->r[R_ESP] + 8);
     fwrite(text.data(), 1, text.size(), stdout);
     set_eax(c, (uint32_t)text.size());
 }
@@ -2642,14 +2644,14 @@ void crt_open(X86 *c) {
 void crt_read(X86 *c) {
     int fd = (int)arg(c, 0);
     uint32_t dst = arg(c, 1), count = arg(c, 2);
-    int64_t n = count && gm_valid(dst, count) ? os_fd_read(fd, g_mem + dst, count) : -1;
+    int64_t n = !count ? 0 : gm_valid(dst, count) ? os_fd_read(fd, g_mem + dst, count) : -1;
     set_eax(c, n < 0 ? 0xffffffffu : (uint32_t)n);
 }
 
 void crt_write(X86 *c) {
     int fd = (int)arg(c, 0);
     uint32_t src = arg(c, 1), count = arg(c, 2);
-    int64_t n = count && gm_valid(src, count) ? os_fd_write(fd, g_mem + src, count) : -1;
+    int64_t n = !count ? 0 : gm_valid(src, count) ? os_fd_write(fd, g_mem + src, count) : -1;
     set_eax(c, n < 0 ? 0xffffffffu : (uint32_t)n);
 }
 
@@ -3125,8 +3127,9 @@ void msvcr71_register() {
             shim.dll = "MSVCR71.dll";
     }
     imports_register(shims.data(), shims.size());
+    imports_register_strict("MSVCR71.dll");
     imports_register_data("MSVCR71.dll", "_acmdln", 4);
-    imports_register_data("MSVCR71.dll", "_iob", 3 * 0x40);
+    imports_register_data("MSVCR71.dll", "_iob", 3 * kCrtFileSize);
 }
 
 void msvcr90_init() {
