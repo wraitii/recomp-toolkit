@@ -67,6 +67,7 @@ pub(super) fn recipe(
     let recipe = fingerprint(&(
         sources,
         layout,
+        key.entry_points,
         &key.buffers,
         &key.target,
         key.primitive,

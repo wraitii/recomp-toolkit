@@ -11,6 +11,9 @@ or COM types and no game addresses. C++ owns guest dispatch, interface identity,
 reference counts and guest staging allocations; Rust owns CPU resource bytes,
 mip layout calculations, indexed-draw preparation, render state and GPU work.
 The native resource tests link the same Rust storage without creating a GPU.
+D3D9 decoding/admission and specialized WGSL emission live in `src/shader/`;
+`src/render/` owns immutable vertex layouts and prepared pipeline descriptors.
+D3D9 retains state interpretation, caches, submission and validation ownership.
 
 - Lives in recomp-kit and is built by `dx/CMakeLists.txt` when `RECOMP_D3D8_WGPU` is on
   (or a game ships its own `graphics/d3d8-wgpu`). Game-specific usage inventories and
@@ -134,7 +137,11 @@ compilation, every module creation, and shader variants. Records include frame
 numbers, source hashes and byte counts (vertex then pixel), pipeline recipe
 hashes derived from sources/layout/state, timings and cache sizes. Matching
 recipe hashes expose recompilation across cache clears; missing source/layout
-metadata is reported as `None`. The same flag records each drawn program's model,
+metadata is reported as `None`. Guest shader variant origins use content keys
+(fingerprint plus full bytecode equality), so identical programs can share
+variants across handles. Entry points now participate in recipe fingerprints;
+recipe hashes from earlier revisions differ even for unchanged rendering.
+The same flag records each drawn program's model,
 numeric opcode histogram, encoded register indices, modifiers, declarations and
 constant/texture metadata once per bytecode content, plus VS/PS content hashes
 for every draw. These inventory records contain no bytecode or WGSL. Destination

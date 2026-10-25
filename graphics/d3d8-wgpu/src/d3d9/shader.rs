@@ -1,7 +1,9 @@
 use super::wgsl as shader_wgsl;
 use crate::RenderError;
+use crate::shader::identity::ProgramKey;
 pub use crate::shader::validate::{PS_OPCODES, VS_OPCODES, shader_word_count};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub const MAX_SHADER_WORDS: usize = 4096;
 pub const MAX_DECL_ELEMENTS: usize = 64;
@@ -56,7 +58,8 @@ pub struct VertexElement {
 
 pub struct ShaderRecord {
     pub pixel: bool,
-    pub code: Vec<u32>,
+    pub code: Arc<[u32]>,
+    pub(crate) key: ProgramKey,
     pub program: shader_wgsl::Program,
     pub wgsl: String,
 }
@@ -93,13 +96,16 @@ impl D3d9Objects {
         let program = shader_wgsl::Program::decode(&code[..count], pixel)?;
         let wgsl = shader_wgsl::translate(&program, &shader_wgsl::Variant::default())?;
         shader_wgsl::validate(&wgsl)?;
+        let code: Arc<[u32]> = code[..count].into();
+        let key = ProgramKey::new(Arc::clone(&code));
         let handle = self.next_shader;
         self.next_shader += 1;
         self.shaders.insert(
             handle,
             ShaderRecord {
                 pixel,
-                code: code[..count].to_vec(),
+                code,
+                key,
                 program,
                 wgsl,
             },

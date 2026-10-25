@@ -5,6 +5,9 @@ use super::state::{D3d9State, MAX_ANISOTROPY, MAX_SAMPLERS};
 use super::{SurfaceView, TargetRect, wgsl};
 use crate::RenderError;
 use crate::fast_map::{FastHasher, FastMap};
+use crate::render::interface::{LayoutAttribute, VertexAttributes, VertexLayouts};
+use crate::render::pipeline::PreparedPipeline as PipelineKey;
+use crate::shader::identity::ProgramKey;
 use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::hash::{Hash, Hasher};
@@ -657,35 +660,6 @@ impl GeometryData {
         }
     }
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct LayoutAttribute {
-    format: wgpu::VertexFormat,
-    offset: u32,
-    location: u32,
-}
-
-impl LayoutAttribute {
-    fn new(attribute: &wgpu::VertexAttribute) -> Result<Self, RenderError> {
-        Ok(Self {
-            format: attribute.format,
-            offset: u32::try_from(attribute.offset)
-                .map_err(|_| invalid("Draw", "vertex attribute offset exceeds 32 bits"))?,
-            location: attribute.shader_location,
-        })
-    }
-
-    fn wgpu(self) -> wgpu::VertexAttribute {
-        wgpu::VertexAttribute {
-            format: self.format,
-            offset: u64::from(self.offset),
-            shader_location: self.location,
-        }
-    }
-}
-
-type VertexAttributes = SmallVec<[LayoutAttribute; 8]>;
-type VertexLayouts = SmallVec<[(u64, VertexAttributes); 2]>;
 
 struct NativeStream {
     data: GeometryData,
@@ -2085,17 +2059,6 @@ impl LayoutKey {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct PipelineKey {
-    modules: [wgpu::ShaderModule; 2],
-    layout: wgpu::BindGroupLayout,
-    buffers: VertexLayouts,
-    target: Option<wgpu::ColorTargetState>,
-    primitive: wgpu::PrimitiveState,
-    depth: Option<wgpu::DepthStencilState>,
-    multisample: wgpu::MultisampleState,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum KeyWords {
     Inline(u8, [u32; 8]),
@@ -2114,9 +2077,9 @@ impl KeyWords {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ShaderOrigin {
-    Guest(u32),
+    Guest(ProgramKey),
     FixedFunction,
     DeclaredFixedFunction,
 }
@@ -2249,7 +2212,7 @@ pub(crate) struct D3d9DrawState {
     trace_shaders: std::collections::BTreeSet<u32>,
     trace_identity: bool,
     observed_families: FastMap<trace::Family, u64>,
-    inventory_programs: std::collections::BTreeSet<Vec<u32>>,
+    inventory_programs: std::collections::BTreeSet<Arc<[u32]>>,
     measured_draws: u64,
     draw_cpu_ms: f64,
     geometry_cpu_ms: f64,
@@ -2583,52 +2546,7 @@ impl D3d9DrawState {
     }
 
     fn create_pipeline(&mut self, gpu: &D3d9Gpu, key: PipelineKey) -> wgpu::RenderPipeline {
-        let layout = gpu
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("d3d9-cached"),
-                bind_group_layouts: &[&key.layout],
-                push_constant_ranges: &[],
-            });
-        let attributes: Vec<Vec<_>> = key
-            .buffers
-            .iter()
-            .map(|(_, attributes)| attributes.iter().map(|a| a.wgpu()).collect())
-            .collect();
-        let buffers: Vec<_> = key
-            .buffers
-            .iter()
-            .zip(&attributes)
-            .map(|((stride, _), attributes)| wgpu::VertexBufferLayout {
-                array_stride: *stride,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes,
-            })
-            .collect();
-        let targets = key.target.clone().map(|target| [Some(target)]);
-        let pipeline = gpu
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("d3d9-cached"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &key.modules[0],
-                    entry_point: Some("vs_main"),
-                    buffers: &buffers,
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &key.modules[1],
-                    entry_point: Some("ps_main"),
-                    targets: targets.as_ref().map_or(&[], |targets| targets.as_slice()),
-                    compilation_options: Default::default(),
-                }),
-                primitive: key.primitive,
-                depth_stencil: key.depth.clone(),
-                multisample: key.multisample,
-                multiview: None,
-                cache: None,
-            });
+        let pipeline = key.create(&gpu.device, "d3d9-cached");
         if self.pipelines.len() >= 512 {
             self.log_cache_clear("pipeline-limit-pipelines");
             self.pipelines.clear();
@@ -2892,7 +2810,7 @@ fn resolve_shading(
 ) -> Result<Box<DrawMemo>, RenderError> {
     let vertex_key = if let Some(v) = vs {
         translated_key(
-            ShaderOrigin::Guest(state.shader(false)),
+            ShaderOrigin::Guest(v.key.clone()),
             &v.program,
             state,
             &snapshot.textures,
@@ -2920,7 +2838,7 @@ fn resolve_shading(
     })?;
     let pixel_key = if let Some(p) = ps {
         translated_key(
-            ShaderOrigin::Guest(state.shader(true)),
+            ShaderOrigin::Guest(p.key.clone()),
             &p.program,
             state,
             &snapshot.textures,
@@ -3136,8 +3054,8 @@ pub(crate) fn execute(
     };
     if trace_compilation() {
         for shader in [vs, ps].into_iter().flatten() {
-            if !draw.inventory_programs.contains(shader.code.as_slice()) {
-                draw.inventory_programs.insert(shader.code.clone());
+            if !draw.inventory_programs.contains(shader.code.as_ref()) {
+                draw.inventory_programs.insert(Arc::clone(&shader.code));
                 let p = &shader.program;
                 let mut opcodes = std::collections::BTreeMap::<u32, u32>::new();
                 let mut reads = std::collections::BTreeMap::<u32, u32>::new();
@@ -3594,6 +3512,7 @@ pub(crate) fn execute(
                 write_mask: wgpu::ColorWrites::from_bits_truncate(rs(state, 168)),
             };
             let key = PipelineKey {
+                entry_points: ["vs_main", "ps_main"],
                 modules: memo.modules.clone(),
                 layout: memo.layout.clone(),
                 buffers: buffers.clone(),
@@ -4405,6 +4324,7 @@ pub(crate) fn clear(
         Some(draw.pipeline(
             gpu,
             PipelineKey {
+                entry_points: ["vs_main", "ps_main"],
                 modules: [shader.clone(), shader.clone()],
                 layout: layout.clone(),
                 buffers: SmallVec::new(),
@@ -4432,6 +4352,7 @@ pub(crate) fn clear(
             Some(draw.pipeline(
                 gpu,
                 PipelineKey {
+                    entry_points: ["vs_main", "ps_main"],
                     modules: [shader.clone(), shader],
                     layout: layout.clone(),
                     buffers: SmallVec::new(),

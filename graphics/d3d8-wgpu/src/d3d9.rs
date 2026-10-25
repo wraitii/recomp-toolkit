@@ -4027,7 +4027,7 @@ pub fn d3d9_get_shader(device: &D3d9Device, pixel: bool) -> ValueResult {
 
 pub fn d3d9_shader_function(device: &D3d9Device, pixel: bool, handle: u32) -> ValuesResult {
     match device.objects.shader(pixel, handle) {
-        Ok(record) => ok_values(record.code.clone()),
+        Ok(record) => ok_values(record.code.to_vec()),
         Err(error) => err_values(error),
     }
 }
