@@ -1,3 +1,20 @@
+# D3D9 interpreter preparation
+
+CPU lowering in `src/shader/uber.rs` prepares an M2 candidate; GPU execution and
+whole-draw coverage are not implemented yet. ABI v1 is a four-u32 header
+(version, pixel flag, instruction count, reserved zero) followed by 16 zero-padded
+12-u32 records: opcode/destination type/index/mask, then two source
+type/index/swizzle/modifier records. Encoding uses explicit words, with original
+bytecode equality and ABI version in identity. Oversized programs are excluded.
+The candidate admits SM2 MOV/MUL, vertex DP4 and ordinary pixel TEX through 2D
+s0; four temporaries, vertex v0/1/2 (position/color/texcoord), pixel v0/t0,
+256/32 float constants, vertex oPos/oD0/oT0 and pixel oC0. Arbitrary source
+swizzles and destination masks are encoded. Definitions, source/destination
+modifiers, shifts, relative addressing, flow control, coissue, other registers,
+samplers and output families are excluded. Lowering results do not establish
+derivative correctness or interpreter eligibility; raw operand/byte review,
+binding/limit checks and complete draw classification precede execution.
+
 # D3D8 shader-model 1.1
 
 The guest bridge implements Create/Set/Get/DeleteVertexShader and PixelShader,

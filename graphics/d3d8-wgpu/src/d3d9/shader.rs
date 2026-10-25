@@ -61,6 +61,8 @@ pub struct ShaderRecord {
     pub code: Arc<[u32]>,
     pub(crate) key: ProgramKey,
     pub program: Arc<shader_wgsl::Program>,
+    pub(crate) interpreter:
+        Result<crate::shader::uber::EncodedProgram, crate::shader::uber::Exclusion>,
     pub wgsl: String,
 }
 
@@ -98,6 +100,7 @@ impl D3d9Objects {
         shader_wgsl::validate(&wgsl)?;
         let code: Arc<[u32]> = code[..count].into();
         let key = ProgramKey::new(Arc::clone(&code));
+        let interpreter = crate::shader::uber::lower(&program, key.clone());
         let handle = self.next_shader;
         self.next_shader += 1;
         self.shaders.insert(
@@ -107,6 +110,7 @@ impl D3d9Objects {
                 code,
                 key,
                 program: Arc::new(program),
+                interpreter,
                 wgsl,
             },
         );

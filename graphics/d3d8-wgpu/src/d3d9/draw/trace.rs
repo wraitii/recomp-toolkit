@@ -1,5 +1,96 @@
 use super::*;
 
+#[derive(Default)]
+pub(super) struct MvpCapture {
+    frame_draw: u32,
+    programs: std::collections::BTreeSet<Arc<[u32]>>,
+    families: std::collections::BTreeSet<u64>,
+}
+
+impl MvpCapture {
+    pub(super) fn end_frame(&mut self) {
+        self.frame_draw = 0;
+    }
+}
+
+pub(super) fn capture_mvp(
+    draw: &mut D3d9DrawState,
+    state: &D3d9State,
+    snapshot: &DrawSnapshot,
+    vs: Option<&super::super::shader::ShaderRecord>,
+    ps: Option<&super::super::shader::ShaderRecord>,
+    pipeline: &wgpu::RenderPipeline,
+) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var("RECOMP_D3D9_UBER_CAPTURE").is_ok_and(|v| v == "1")) {
+        return;
+    }
+    let frame_draw = draw.mvp_capture.frame_draw;
+    draw.mvp_capture.frame_draw = frame_draw.saturating_add(1);
+    let (Some(vs), Some(ps)) = (vs, ps) else {
+        return;
+    };
+    if fingerprint(&vs.code) != 0xdc32dcdca4f64c33 || fingerprint(&ps.code) != 0xc49b28329a8ab277 {
+        return;
+    }
+    let Some((_, recipe)) = draw.pipelines.values().find(|(p, _)| p == pipeline) else {
+        eprintln!(
+            "[d3d9-uber] capture-missing-recipe frame={} draw={frame_draw}",
+            draw.frame
+        );
+        return;
+    };
+    let recipe_id = fingerprint(&recipe.key());
+    if draw.mvp_capture.families.insert(recipe_id) {
+        eprintln!(
+            "[d3d9-uber] capture-family recipe={recipe_id:016x} interface={:?} descriptor={:?}",
+            recipe.interface, recipe.descriptor
+        );
+    }
+    for shader in [vs, ps] {
+        if draw.mvp_capture.programs.insert(Arc::clone(&shader.code)) {
+            let code = fingerprint(&shader.code);
+            eprintln!(
+                "[d3d9-uber] capture-program code={code:016x} model={} build={} abi={} words={:08x?}",
+                shader.program.version(),
+                env!("RECOMP_RENDERER_BUILD"),
+                crate::shader::uber::ABI_VERSION,
+                shader.code
+            );
+            match &shader.interpreter {
+                Ok(program) => eprintln!(
+                    "[d3d9-uber] lowered-program code={code:016x} identity={:?} requirements={:?} bytes={} words={:08x?}",
+                    program.key,
+                    program.requirements,
+                    program.words.len() * 4,
+                    program.words
+                ),
+                Err(reason) => eprintln!(
+                    "[d3d9-uber] excluded-program code={code:016x} reason={} detail={reason}",
+                    reason.reason()
+                ),
+            }
+        }
+    }
+    eprintln!(
+        "[d3d9-uber] capture-draw frame={} draw={frame_draw} recipe={recipe_id:016x} target={:?} subresource={:?} size={}x{} viewport={:?} primitives={} indexed={} texture0={} texture_details={:?}",
+        draw.frame,
+        snapshot.target.view,
+        snapshot.target.subresource,
+        snapshot.target.width,
+        snapshot.target.height,
+        state.viewport(),
+        snapshot.command.primitive_count,
+        snapshot.command.indexed,
+        state.texture(0).unwrap_or(0),
+        snapshot
+            .textures
+            .iter()
+            .map(|t| (t.stage, t.width, t.height, t.format, t.lod))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Interface {
     pub stages: [(u8, KeyWords); 2],

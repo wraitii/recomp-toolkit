@@ -2216,6 +2216,7 @@ pub(crate) struct D3d9DrawState {
     trace_total_draw: u64,
     trace_shaders: std::collections::BTreeSet<u32>,
     trace_identity: bool,
+    mvp_capture: trace::MvpCapture,
     observed_families: FastMap<trace::Family, u64>,
     inventory_programs: std::collections::BTreeSet<Arc<[u32]>>,
     measured_draws: u64,
@@ -2287,6 +2288,7 @@ impl D3d9DrawState {
         self.pipeline_ms = 0.0;
         self.frame += 1;
         self.trace_frame_draw = 0;
+        self.mvp_capture.end_frame();
     }
 
     pub(crate) fn discard_batch(&mut self) {
@@ -3515,6 +3517,7 @@ pub(crate) fn execute(
             draw.frame, draw.measured_draws
         );
     }
+    trace::capture_mvp(draw, state, snapshot, vs, ps, &pipeline);
     if draw
         .batch
         .color_key_view

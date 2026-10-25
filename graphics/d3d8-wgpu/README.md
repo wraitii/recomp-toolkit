@@ -160,6 +160,16 @@ fingerprint of renderer sources, manifest, lockfile and build script, target and
 profile, plus enabled device features/limits. The normal adapter startup record
 supplies backend and adapter identifiers.
 
+`RECOMP_D3D9_UBER_CAPTURE=1` captures the M2 candidate program pair
+(`dc32dcdca4f64c33` / `c49b28329a8ab277`, observed families 9/11 in the
+baseline). It logs original words and CPU interpreter lowering once per content,
+each encountered complete recipe/interface, and matching draws with frame/draw,
+target/subresource, viewport, primitive and texture identities. Hashes select
+diagnostic capture only; they do not admit interpreter execution. This runs the
+specialized path and performs no readback. Use with pipeline tracing for device
+identity and ordinary family correlation; detailed bytecode logging perturbs
+timing. Frame/draw records help locate the content before scoped comparison.
+
 `observed-family` records group the existing specialized pipeline descriptors
 without shader contents or guest handles. They include resource layouts, input
 linkage, stage variant state, vertex layouts and raster/output state. Family IDs
