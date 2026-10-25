@@ -15,7 +15,7 @@ extern "C" int recomp_thunk_target_kind(uint32_t);
 namespace {
 const uint32_t kMaxDepth = 64;
 const uint32_t kMaxInstruction = 15;
-const uint32_t kMaxCache = 4096;
+const uint32_t kMaxCache = 65536;
 const uint64_t kNativeRdtsc = UINT64_MAX;
 const uint64_t kNativeCpuid = UINT64_MAX - 1;
 
