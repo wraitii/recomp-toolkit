@@ -14,10 +14,6 @@ namespace {
 constexpr uint32_t kBuckets = 4096;
 constexpr uint32_t kCacheSize = 1u << 14;
 
-struct Run {
-    uint32_t start, length;
-};
-
 struct Key {
     uint32_t template_index;
     uint32_t entry;
@@ -26,7 +22,6 @@ struct Key {
 
 struct Index {
     std::vector<const RecompRelocTemplate *> templates;
-    std::vector<std::vector<Run>> runs;
     std::vector<Key> candidates;
     std::vector<uint32_t> heads;
     std::vector<uint32_t> next;
@@ -61,30 +56,16 @@ uint32_t cache_slot(uint32_t target) {
     return (target * 2654435761u) >> (32 - 14);
 }
 
-bool masked_at(const RecompRelocTemplate *t, uint32_t offset) {
-    uint32_t lo = 0, hi = t->masked_count;
+bool verified_at(const RecompRelocTemplate *t, uint32_t offset) {
+    uint32_t lo = 0, hi = t->run_count;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
-        if (t->masked[mid] < offset)
+        if (t->runs[mid].start + t->runs[mid].length <= offset)
             lo = mid + 1;
         else
             hi = mid;
     }
-    return lo < t->masked_count && t->masked[lo] == offset;
-}
-
-std::vector<Run> unmasked_runs(const RecompRelocTemplate *t) {
-    std::vector<Run> runs;
-    uint32_t start = 0;
-    for (uint32_t i = 0; i < t->masked_count; ++i) {
-        uint32_t mask = t->masked[i];
-        if (mask > start)
-            runs.push_back({start, mask - start});
-        start = mask + 1;
-    }
-    if (start < t->code_len)
-        runs.push_back({start, t->code_len - start});
-    return runs;
+    return lo < t->run_count && t->runs[lo].start <= offset;
 }
 
 bool verify_body(const Index *index, uint32_t template_index, uint32_t base) {
@@ -94,8 +75,8 @@ bool verify_body(const Index *index, uint32_t template_index, uint32_t base) {
     if (loader_in_image(base) || loader_in_image(base + t->code_len - 1))
         return false;
     const uint8_t *guest = g_mem + base;
-    for (const Run &run : index->runs[template_index])
-        if (memcmp(guest + run.start, t->code + run.start, run.length) != 0)
+    for (uint32_t i = 0; i < t->run_count; ++i)
+        if (memcmp(guest + t->runs[i].start, t->code + t->runs[i].start, t->runs[i].length) != 0)
             return false;
     for (uint32_t i = 0; i < t->import_count; ++i) {
         const RecompRelocImport &import = t->imports[i];
@@ -112,7 +93,7 @@ bool verify_body(const Index *index, uint32_t template_index, uint32_t base) {
 uint32_t candidate_key(const RecompRelocTemplate *t, uint32_t offset) {
     uint32_t key = 0;
     for (uint32_t i = 0; i < 4; ++i) {
-        uint8_t byte = masked_at(t, offset + i) ? 0 : t->code[offset + i];
+        uint8_t byte = verified_at(t, offset + i) ? t->code[offset + i] : 0;
         key |= (uint32_t)byte << (8 * i);
     }
     return key;
@@ -141,7 +122,6 @@ Index *build_index() {
     index->logged.assign(index->templates.size(), 0);
     for (uint32_t template_index = 0; template_index < index->templates.size(); ++template_index) {
         const RecompRelocTemplate *t = index->templates[template_index];
-        index->runs.push_back(unmasked_runs(t));
         for (uint32_t entry = 0; entry < t->entry_count; ++entry)
             add_candidate(*index, template_index, entry);
     }

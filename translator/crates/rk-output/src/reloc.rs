@@ -20,7 +20,7 @@ pub struct Template {
     pub id: String,
     pub base: Addr,
     pub code: Vec<u8>,
-    pub masked: Vec<u32>,
+    pub runs: Vec<(u32, u32)>,
     pub imports: Vec<(u32, u32)>,
     pub entries: Vec<u32>,
     pub bodies: Vec<Body>,
@@ -85,12 +85,12 @@ fn template_table(translation: &Translation) -> String {
         let _ = writeln!(text, "static const uint8_t {label}_code[] = {{");
         text.push_str(&hex_lines(&template.code));
         text.push_str("};\n");
-        let _ = writeln!(text, "static const uint32_t {label}_masked[] = {{");
-        for offset in &template.masked {
-            let _ = writeln!(text, "0x{offset:x}u,");
+        let _ = writeln!(text, "static const RecompRelocRun {label}_runs[] = {{");
+        for (start, length) in &template.runs {
+            let _ = writeln!(text, "{{0x{start:x}u, 0x{length:x}u}},");
         }
-        if template.masked.is_empty() {
-            text.push_str("0u,\n");
+        if template.runs.is_empty() {
+            text.push_str("{0u, 0u},\n");
         }
         text.push_str("};\n");
         let _ = writeln!(
@@ -120,9 +120,9 @@ fn template_table(translation: &Translation) -> String {
         let name = serde_json::to_string(&template.id).unwrap_or_default();
         let _ = writeln!(
             text,
-            "{{{name}, {label}_code, {}, {label}_masked, {}, {label}_imports, {}, {label}_entries, {}}},",
+            "{{{name}, {label}_code, {}, {label}_runs, {}, {label}_imports, {}, {label}_entries, {}}},",
             template.code.len(),
-            template.masked.len(),
+            template.runs.len(),
             template.imports.len(),
             template.entries.len()
         );

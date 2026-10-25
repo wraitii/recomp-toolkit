@@ -11,6 +11,9 @@ extern "C" {
 typedef struct RecompRelocImport {
     uint32_t slot, target;
 } RecompRelocImport;
+typedef struct RecompRelocRun {
+    uint32_t start, length;
+} RecompRelocRun;
 typedef struct RecompRelocEntry {
     uint32_t offset;
     void (*fn)(X86 *, uint32_t);
@@ -19,8 +22,8 @@ typedef struct RecompRelocTemplate {
     const char *name;
     const uint8_t *code;
     uint32_t code_len;
-    const uint32_t *masked;
-    uint32_t masked_count;
+    const RecompRelocRun *runs;
+    uint32_t run_count;
     const RecompRelocImport *imports;
     uint32_t import_count;
     const RecompRelocEntry *entries;

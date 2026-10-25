@@ -134,6 +134,44 @@ fn merge_trusted(program: &mut Program, discovered: &rk_discover::Discovered) ->
     Ok(rk_image::index_entries(program)?)
 }
 
+/// Byte runs the translation depends on: decoded instruction bytes, less masked slots. Other
+/// bytes in the loaded range are data the guest may rewrite and are not verified.
+fn verified_runs(
+    program: &Program,
+    analysis: &rk_frontend::Analysis,
+    masked: &[u32],
+) -> Vec<(u32, u32)> {
+    let base = program.image.base;
+    let mut covered = vec![false; program.image.size as usize];
+    for ir in analysis
+        .ir
+        .values()
+        .filter_map(|result| result.as_ref().ok())
+    {
+        for insn in &ir.insns {
+            let start = (insn.addr - base) as usize;
+            covered[start..start + insn.length as usize].fill(true);
+        }
+    }
+    for &offset in masked {
+        covered[offset as usize] = false;
+    }
+    let mut runs = Vec::new();
+    let mut offset = 0;
+    while offset < covered.len() {
+        if !covered[offset] {
+            offset += 1;
+            continue;
+        }
+        let start = offset;
+        while offset < covered.len() && covered[offset] {
+            offset += 1;
+        }
+        runs.push((start as u32, (offset - start) as u32));
+    }
+    runs
+}
+
 fn reloc_settings(settings: &Settings) -> Settings {
     let mut reloc = settings.clone();
     reloc.analysis_facts = None;
@@ -276,7 +314,7 @@ pub fn translate(
                     id: template.id.clone(),
                     base: program.image.base,
                     code: rk_image::reloc::code_bytes(template)?,
-                    masked: template.masked.clone(),
+                    runs: verified_runs(&program, &analysis, &template.masked),
                     imports: template
                         .imports
                         .iter()
