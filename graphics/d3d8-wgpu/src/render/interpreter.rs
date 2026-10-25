@@ -19,9 +19,13 @@ pub(crate) struct FamilyKey {
 
 pub(crate) struct PreparedInterpreter {
     pub(crate) source: Arc<str>,
-    pub(crate) key: FamilyKey,
+    pub(crate) families: Vec<PreparedFamily>,
     pub(crate) module: wgpu::ShaderModule,
     pub(crate) layout: wgpu::BindGroupLayout,
+}
+
+pub(crate) struct PreparedFamily {
+    pub(crate) key: FamilyKey,
     pub(crate) pipeline: wgpu::RenderPipeline,
 }
 
@@ -193,7 +197,19 @@ impl FamilyKey {
 }
 
 impl PreparedInterpreter {
-    pub(crate) fn new(device: &wgpu::Device) -> Result<Self, RenderError> {
+    pub(crate) fn find(&self, descriptor: &PipelineDescriptor) -> Option<&PreparedFamily> {
+        self.families
+            .iter()
+            .find(|family| family.key.descriptor == *descriptor)
+    }
+
+    pub(crate) fn for_pipeline(&self, pipeline: &wgpu::RenderPipeline) -> Option<&PreparedFamily> {
+        self.families
+            .iter()
+            .find(|family| family.pipeline == *pipeline)
+    }
+
+    pub(crate) fn new(device: &wgpu::Device, expanded: bool) -> Result<Self, RenderError> {
         let key = FamilyKey::mvp();
         key.check_limits(&device.limits())?;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -204,23 +220,51 @@ impl PreparedInterpreter {
             label: Some("d3d9-interpreter"),
             source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
         });
-        let d = &key.descriptor;
-        let pipeline = PreparedPipeline {
-            entry_points: d.entry_points,
-            modules: [module.clone(), module.clone()],
-            layout: layout.clone(),
-            buffers: key.interface.vertex_buffers.clone(),
-            target: d.target.clone(),
-            primitive: d.primitive,
-            depth: d.depth.clone(),
-            multisample: d.multisample,
+        let mut keys = vec![key];
+        if expanded {
+            for compare in [wgpu::CompareFunction::Less, wgpu::CompareFunction::Always] {
+                let mut key = keys[0].clone();
+                let blend = key
+                    .descriptor
+                    .target
+                    .as_mut()
+                    .unwrap()
+                    .blend
+                    .as_mut()
+                    .unwrap();
+                blend.color.dst_factor = wgpu::BlendFactor::One;
+                blend.alpha.dst_factor = wgpu::BlendFactor::One;
+                key.descriptor.depth.as_mut().unwrap().depth_compare = Some(compare);
+                keys.push(key);
+            }
+            let mut key = keys[0].clone();
+            key.descriptor.target.as_mut().unwrap().format = wgpu::TextureFormat::Rgba8Unorm;
+            key.descriptor.primitive.topology = wgpu::PrimitiveTopology::TriangleStrip;
+            key.descriptor.depth.as_mut().unwrap().depth_write_enabled = Some(true);
+            keys.push(key);
         }
-        .create(device, "d3d9-interpreter");
+        let families = keys
+            .into_iter()
+            .map(|key| {
+                let d = &key.descriptor;
+                let pipeline = PreparedPipeline {
+                    entry_points: d.entry_points,
+                    modules: [module.clone(), module.clone()],
+                    layout: layout.clone(),
+                    buffers: key.interface.vertex_buffers.clone(),
+                    target: d.target.clone(),
+                    primitive: d.primitive,
+                    depth: d.depth.clone(),
+                    multisample: d.multisample,
+                }
+                .create(device, "d3d9-interpreter");
+                PreparedFamily { key, pipeline }
+            })
+            .collect();
         Ok(Self {
-            key,
+            families,
             module,
             layout,
-            pipeline,
             source: SOURCE.into(),
         })
     }

@@ -13,6 +13,31 @@ impl MvpCapture {
     }
 }
 
+pub(super) fn capture_pair() -> Result<[u64; 2], RenderError> {
+    static PAIR: std::sync::OnceLock<Result<[u64; 2], RenderError>> = std::sync::OnceLock::new();
+    PAIR.get_or_init(|| {
+        let value = match std::env::var("RECOMP_D3D9_UBER_CAPTURE_PAIR") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => {
+                return Ok([0xdc32dcdca4f64c33, 0xc49b28329a8ab277]);
+            }
+            Err(error) => return Err(invalid("InterpreterCapture", error.to_string())),
+        };
+        let fail = || {
+            invalid(
+                "InterpreterCapture",
+                "RECOMP_D3D9_UBER_CAPTURE_PAIR must be VS_HEX:PS_HEX",
+            )
+        };
+        let (vs, ps) = value.split_once(':').ok_or_else(fail)?;
+        Ok([
+            u64::from_str_radix(vs, 16).map_err(|_| fail())?,
+            u64::from_str_radix(ps, 16).map_err(|_| fail())?,
+        ])
+    })
+    .clone()
+}
+
 pub(super) fn capture_mvp(
     gpu: &D3d9Gpu,
     draw: &mut D3d9DrawState,
@@ -31,14 +56,18 @@ pub(super) fn capture_mvp(
     let (Some(vs), Some(ps)) = (vs, ps) else {
         return;
     };
+    let pair = match capture_pair() {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("[d3d9-uber] capture-error {error}");
+            return;
+        }
+    };
     let interpreted = gpu
         .interpreter
         .get()
-        .is_some_and(|p| p.pipeline == *pipeline);
-    if !interpreted
-        && (fingerprint(&vs.code) != 0xdc32dcdca4f64c33
-            || fingerprint(&ps.code) != 0xc49b28329a8ab277)
-    {
+        .is_some_and(|p| p.for_pipeline(pipeline).is_some());
+    if !interpreted && (fingerprint(&vs.code) != pair[0] || fingerprint(&ps.code) != pair[1]) {
         return;
     }
     let description = draw
@@ -55,8 +84,14 @@ pub(super) fn capture_mvp(
         .or_else(|| {
             gpu.interpreter
                 .get()
-                .filter(|p| p.pipeline == *pipeline)
-                .map(|p| (fingerprint(&p.key), &p.key.interface, &p.key.descriptor))
+                .and_then(|p| p.for_pipeline(pipeline))
+                .map(|family| {
+                    (
+                        fingerprint(&family.key),
+                        &family.key.interface,
+                        &family.key.descriptor,
+                    )
+                })
         });
     let Some((recipe_id, interface, descriptor)) = description else {
         eprintln!(

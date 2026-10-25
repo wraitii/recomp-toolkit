@@ -196,9 +196,11 @@ For a visible handoff, `RECOMP_D3D9_ASYNC_DELAY_MS=5000` holds each successful
 worker result for five seconds before publication. It defaults to zero, delays
 only the compiler worker, and logs `debug-delay`; unset it for performance captures.
 
-Opt-in modes prepare one module/pipeline during device initialization, including
-replacement devices. Program changes upload immutable data and reuse that
-pipeline. `[d3d9-uber]` records include warmup time/manifest, program uploads and
+Opt-in modes prepare one module during device initialization, including
+replacement devices: `compare-family11` creates one pipeline; hybrid and
+interpreter-only create four, adding additive blending with LESS or ALWAYS
+depth and the captured RGBA8 video-quad triangle strip with depth writes. Program changes upload immutable data and reuse these prepared pipelines.
+`[d3d9-uber]` records include warmup time/manifest, program uploads and
 resident buffer/retained-bytecode sizes, and per-frame selected/total draw counts.
 With pipeline tracing, they also identify interpreted draws by program content,
 prepared pipeline, target/subresource and texture; frame counters separate CPU
@@ -211,6 +213,8 @@ pipeline tracing; driver pipeline memory and GPU execution time are not measured
 per interpreted content or the known baseline candidate pair
 (`dc32dcdca4f64c33` / `c49b28329a8ab277`), complete recipes/interfaces, and
 frame/draw, target/subresource, viewport, primitive and texture identities. It
+accepts `RECOMP_D3D9_UBER_CAPTURE_PAIR=VS_HEX:PS_HEX` to replace the baseline
+candidate with another pair; malformed selectors fail at initialization. It
 performs no readback. Capture hashes select diagnostics only; interpreter admission
 uses actual decoded programs and complete draw requirements. These records help
 locate the content before a targeted visual/readback comparison.

@@ -50,6 +50,7 @@ fn mode() -> Result<Mode, RenderError> {
 
 pub(crate) fn prepare(gpu: &D3d9Gpu) -> Result<(), RenderError> {
     let mode = mode()?;
+    trace::capture_pair()?;
     if mode == Mode::Hybrid && gpu.backend != wgpu::Backend::Metal {
         return Err(unsupported(
             "HybridPrepare",
@@ -61,19 +62,25 @@ pub(crate) fn prepare(gpu: &D3d9Gpu) -> Result<(), RenderError> {
     }
     let started = Instant::now();
     let prepared = gpu.validate("InterpreterPrepare", || {
-        PreparedInterpreter::new(&gpu.device)
+        PreparedInterpreter::new(&gpu.device, mode != Mode::CompareFamily11)
     })?;
     eprintln!(
-        "[d3d9-uber] prepare mode={mode:?} family={:016x} abi={} tint={} modules=1 pipelines=1 ms={:.3} source_bytes={} program_bytes={} limits={:?} manifest={:?}",
-        fingerprint(&prepared.key),
+        "[d3d9-uber] prepare mode={mode:?} abi={} tint={} modules=1 pipelines={} ms={:.3} source_bytes={} program_bytes={} limits={:?}",
         program::ABI_VERSION,
         tint_enabled(),
+        prepared.families.len(),
         started.elapsed().as_secs_f64() * 1000.0,
         prepared.source.len(),
         program::PROGRAM_BYTES,
-        gpu.limits(),
-        prepared.key
+        gpu.limits()
     );
+    for family in &prepared.families {
+        eprintln!(
+            "[d3d9-uber] prepare-family family={:016x} manifest={:?}",
+            fingerprint(&family.key),
+            family.key
+        );
+    }
     gpu.interpreter
         .set(prepared)
         .map_err(|_| unsupported("InterpreterPrepare", "family already prepared"))
@@ -102,6 +109,14 @@ pub(super) fn select(
     result
 }
 
+fn topology(snapshot: &DrawSnapshot) -> wgpu::PrimitiveTopology {
+    if snapshot.command.primitive == D3DPT_TRIANGLESTRIP {
+        wgpu::PrimitiveTopology::TriangleStrip
+    } else {
+        wgpu::PrimitiveTopology::TriangleList
+    }
+}
+
 fn coverage(
     gpu: &D3d9Gpu,
     state: &D3d9State,
@@ -113,20 +128,16 @@ fn coverage(
     if mode == Mode::Specialized {
         return Ok(false);
     }
-    let descriptor = pipeline_descriptor(
-        gpu,
-        state,
-        snapshot,
-        wgpu::PrimitiveTopology::TriangleList,
-        None,
-    )?;
+    let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
     let prepared = gpu
         .interpreter
         .get()
         .ok_or_else(|| unsupported("InterpreterDraw", "unprepared-family family11"))?;
-    let candidate = snapshot.command.primitive == D3DPT_TRIANGLELIST
-        && rs(state, 9) == 2
-        && descriptor == prepared.key.descriptor
+    let candidate = matches!(
+        snapshot.command.primitive,
+        D3DPT_TRIANGLELIST | D3DPT_TRIANGLESTRIP
+    ) && rs(state, 9) == 2
+        && prepared.find(&descriptor).is_some()
         && vs.is_some_and(|s| program::interface_candidate(&s.program))
         && ps.is_some_and(|s| program::interface_candidate(&s.program));
     if mode == Mode::CompareFamily11
@@ -204,6 +215,10 @@ pub(super) fn specialize(
         .interpreter
         .get()
         .ok_or_else(|| unsupported("HybridDraw", "unprepared-family family11"))?;
+    let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
+    let family = prepared
+        .find(&descriptor)
+        .ok_or_else(|| unsupported("HybridDraw", "unprepared-family"))?;
     let shaders = [vs, ps].map(|shader| {
         let (_, settings) = translated_snapshot(
             ShaderOrigin::Guest(shader.key.clone()),
@@ -234,9 +249,9 @@ pub(super) fn specialize(
         shaders: [vertex?, pixel?],
         interface: InterfaceKey {
             bindings: layout_key.entries().into(),
-            vertex_buffers: prepared.key.interface.vertex_buffers.clone(),
+            vertex_buffers: family.key.interface.vertex_buffers.clone(),
         },
-        descriptor: prepared.key.descriptor.clone(),
+        descriptor: family.key.descriptor.clone(),
     };
     if draw.compiler.is_none() {
         draw.compiler = Some(crate::render::compile::Compiler::new(
@@ -261,8 +276,8 @@ pub(super) fn specialize(
     memo.ps_count = ps.program.const_limit();
     memo.pipeline = Some((
         (
-            prepared.key.interface.vertex_buffers.clone(),
-            wgpu::PrimitiveTopology::TriangleList,
+            family.key.interface.vertex_buffers.clone(),
+            family.key.descriptor.primitive.topology,
             None,
         ),
         compiled.pipeline,
@@ -320,6 +335,10 @@ pub(super) fn resolve(
         .interpreter
         .get()
         .ok_or_else(|| unsupported("InterpreterDraw", "unprepared-family family11"))?;
+    let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
+    let family = prepared
+        .find(&descriptor)
+        .ok_or_else(|| unsupported("InterpreterDraw", "unprepared-family"))?;
     let mut buffers = Vec::with_capacity(2);
     for shader in [vs, ps].into_iter().filter(|_| interpreted) {
         let program = shader
@@ -360,18 +379,18 @@ pub(super) fn resolve(
         ps_count: program::PIXEL_CONSTANTS,
         modules: [prepared.module.clone(), prepared.module.clone()],
         recipes,
-        binding_entries: Arc::clone(&prepared.key.interface.bindings),
+        binding_entries: Arc::clone(&family.key.interface.bindings),
         layout: prepared.layout.clone(),
         programs,
         trace_interface: None,
         trace_pipeline: None,
         pipeline: Some((
             (
-                prepared.key.interface.vertex_buffers.clone(),
-                wgpu::PrimitiveTopology::TriangleList,
+                family.key.interface.vertex_buffers.clone(),
+                family.key.descriptor.primitive.topology,
                 None,
             ),
-            prepared.pipeline.clone(),
+            family.pipeline.clone(),
         )),
     }))
 }

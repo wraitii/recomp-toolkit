@@ -1,4 +1,4 @@
-pub(crate) use super::opcodes::{OP_DP4, OP_MOV, OP_MUL, OP_TEX};
+pub(crate) use super::opcodes::{OP_DP4, OP_MAD, OP_MOV, OP_MUL, OP_TEX};
 use super::validate::shader_word_count;
 use crate::RenderError;
 use std::collections::BTreeMap;
@@ -19,7 +19,6 @@ pub(crate) const R_CONSTBOOL: u32 = 14;
 pub(crate) const OP_NOP: u32 = 0;
 pub(crate) const OP_ADD: u32 = 2;
 pub(crate) const OP_SUB: u32 = 3;
-pub(crate) const OP_MAD: u32 = 4;
 pub(crate) const OP_RCP: u32 = 6;
 pub(crate) const OP_RSQ: u32 = 7;
 pub(crate) const OP_DP3: u32 = 8;

@@ -756,6 +756,23 @@ fn pack_shader_vertices(
             });
         }
     }
+    let padding = if canonical {
+        let target = crate::shader::uber::VERTEX_STRIDE;
+        let padding = target
+            .checked_sub(stride)
+            .ok_or_else(|| invalid("Draw", "canonical vertex input capacity exceeded"))?;
+        while attributes.len() < crate::shader::uber::VERTEX_INPUTS as usize {
+            attributes.push(wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: attributes.len() as u64 * 16,
+                shader_location: attributes.len() as u32,
+            });
+        }
+        stride = target;
+        padding as usize
+    } else {
+        0
+    };
     let total = order
         .len()
         .checked_mul(stride as usize)
@@ -790,6 +807,7 @@ fn pack_shader_vertices(
                 append_f32_le(&mut bytes, &copy.fetch.fetch(index)?);
             }
         }
+        bytes.resize(bytes.len() + padding, 0);
     }
     Ok(PackedVertices {
         bytes,
@@ -3639,7 +3657,8 @@ pub(crate) fn execute(
                 draw.interpreter_draws,
                 gpu.interpreter
                     .get()
-                    .map_or(0, |p| self::fingerprint(&p.key)),
+                    .and_then(|p| p.for_pipeline(&pipeline))
+                    .map_or(0, |family| self::fingerprint(&family.key)),
                 vs.map(|s| &s.key),
                 ps.map(|s| &s.key),
                 snapshot.target.view,

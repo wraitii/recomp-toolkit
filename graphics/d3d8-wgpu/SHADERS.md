@@ -2,45 +2,58 @@
 
 The opt-in interpreter implements a bounded SM2 VS/PS family; Spore rendering,
 native Metal compilation and GPU performance still require user-run validation.
-`src/shader/uber/` defines ABI v1 / interpreter v2. A program is 784 bytes: a four-u32
-header (ABI version, pixel flag, instruction count, reserved zero), then 16
-zero-padded 12-u32 records (opcode/destination type/index/mask, then two source
-type/index/swizzle/modifier records). Original bytecode equality plus ABI version
-identifies immutable program data; overflow is excluded, never truncated.
+`src/shader/uber/` defines ABI v2 / interpreter v3. A program is 1040 bytes: a
+four-u32 header (ABI version, pixel flag, instruction count, reserved zero), then
+16 zero-padded 16-u32 records (opcode/destination type/index/mask and three source
+records). Opcode bits 8–10 mark immediate sources: their four words contain
+swizzled float bits instead of type/index/swizzle/modifier. Original bytecode
+equality plus ABI version identifies program data; overflow is excluded.
 
-Admitted instructions are MOV/MUL, vertex DP4 and ordinary pixel TEX through 2D
-s0. Capacities are four temporaries, vertex v0/1/2 (position/color/texcoord), pixel
-v0/t0, 256/32 float constants, vertex oPos/oD0/oT0 and pixel oC0. Arithmetic admits
+Admitted instructions are MOV/MUL/MAD, vertex DP4 and ordinary pixel TEX through
+2D s0. Capacities are four temporaries, vertex v0/1/2 (position/color/texcoord) or
+v0/1 (position/texcoord), pixel v0/t0, 256/32 float constants, vertex oPos/oD0/oT0
+and pixel oC0. Float DEF values become immediate operands during lowering and
+override device constants without changing the per-draw bank. Arithmetic admits
 source swizzles and destination masks. TEX requires an identity-swizzled t0 or
 temporary coordinate, identity-swizzled s0, a temporary destination and full mask.
-Definitions, source/destination/declaration modifiers (including partial precision
-and centroid), shifts, relative addressing, flow control, coissue, other models,
-registers, samplers and output families remain excluded. Shader admission and
+Integer/bool definitions, source/destination/declaration modifiers (including
+partial precision and centroid), shifts, relative addressing, flow control,
+coissue, other models/registers/samplers remain excluded. Shader admission and
 specialization are unchanged; interpreter exclusions are separate results.
 
-The one manifest family uses three Float32x4 attributes (48-byte stride), existing
-42-component varyings, smooth interpolation, a BGRA8 target with SrcAlpha /
-OneMinusSrcAlpha blending for color and alpha, CW triangles without culling,
-Depth24PlusStencil8 with LESS and no depth/stencil writes, and one sample. Existing
-input conversion, half-pixel correction, raster output processing and sampler
-state are reused; opaque texture alpha is a per-draw flag. Bound textures must be
-filterable ordinary 2D resources. Integer/bool banks, vertex textures, projected
-or biased sampling, depth output and MRT have no coverage.
+All families use three Float32x4 attributes (48-byte stride), existing 42-component
+varyings, smooth interpolation, CW triangles without culling, one sample and
+Depth24PlusStencil8. Two-input draws pad the unused third attribute with zero;
+lowering rejects reads of undeclared inputs. `compare-family11` prepares the
+first family only; hybrid and interpreter-only prepare all four:
+
+| Target | Topology | Color/alpha blending | Depth comparison | Depth writes |
+| --- | --- | --- | --- | --- |
+| BGRA8 | Triangle list | SrcAlpha / OneMinusSrcAlpha | LESS | No |
+| BGRA8 | Triangle list | SrcAlpha / One | LESS | No |
+| BGRA8 | Triangle list | SrcAlpha / One | ALWAYS | No |
+| RGBA8 | Triangle strip | SrcAlpha / OneMinusSrcAlpha | LESS | Yes |
+
+All share one module, layout and program allocations. Existing input conversion,
+half-pixel correction, raster output processing and sampler state are reused;
+opaque texture alpha is a per-draw flag. Bound textures must be filterable ordinary
+2D resources. Integer/bool banks, vertex textures, projected/biased sampling,
+shader depth output and MRT have no coverage. Stencil writes remain disabled.
 
 One bind group contains four dynamic uniforms (bindings 0/1: 4096-byte VS bank /
 272-byte parameters; 2/3: 512-byte PS bank / 64-byte parameters), texture/sampler
-4/20, and immutable 784-byte program uniforms 36/37. It needs three uniforms per
+4/20, and immutable 1040-byte program uniforms 36/37. It needs three uniforms per
 stage, four dynamic uniforms, three vertex attributes, one texture/sampler and
 42 inter-stage components; initialization checks the requested device limits.
 Prepared module/pipeline ownership follows the device. Queued draws and bindings
 retain their program buffers; reset clears program uploads and replacement devices
-prepare a new family. Specialization cache clears retain interpreter residency.
+prepare the selected manifest. Specialization cache eviction retains interpreter residency.
 
 Fragment instruction slots are expanded at build time. Each instruction count
 and opcode comes directly from uniform program data, without a mutable fragment
 program counter or early discard. Sampling remains implicit; alpha discard occurs
 after instruction execution. The build validates the generated WGSL with all Naga
-27 validation flags, verifies uploaded ABI layouts and translates both entry
+30 validation flags, verifies uploaded ABI layouts and translates both entry
 points to Metal with real binding maps. No derivative diagnostic is suppressed
 and no fixed LOD is substituted. Native compiler acceptance, rendering agreement,
 two-program switching and execution cost remain capture gates.

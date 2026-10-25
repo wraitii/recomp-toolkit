@@ -5,7 +5,7 @@ pub fn source() -> String {
     let mut source = format!(
         "const ABI_VERSION: u32 = {ABI_VERSION}u;\n\
          const INTERPRETER_VERSION: u32 = {INTERPRETER_VERSION}u;\n\
-         struct Instruction {{ dst: vec4<u32>, a: vec4<u32>, b: vec4<u32> }}\n\
+         struct Instruction {{ dst: vec4<u32>, a: vec4<u32>, b: vec4<u32>, c: vec4<u32> }}\n\
          struct Program {{ header: vec4<u32>, code: array<Instruction, {MAX_INSTRUCTIONS}> }}\n\
          struct VSP {{ halfpix: vec4<f32>, ascale: array<vec4<f32>, 16> }}\n\
          struct PSP {{ alpha_ref: f32, alpha_func: i32, fog_mode: i32, pad0: i32, fog_color: vec4<f32>, fog_start: f32, fog_end: f32, fog_density: f32, pad1: f32, texture_flags: vec4<u32> }}\n\
@@ -25,7 +25,8 @@ pub fn source() -> String {
 fn swizzle(v: vec4<f32>, s: u32) -> vec4<f32> {
     return vec4<f32>(v[s & 3u], v[(s >> 2u) & 3u], v[(s >> 4u) & 3u], v[(s >> 6u) & 3u]);
 }
-fn vertex_read(s: vec4<u32>, r: Registers) -> vec4<f32> {
+fn vertex_read(s: vec4<u32>, r: Registers, immediate: bool) -> vec4<f32> {
+    if (immediate) { return bitcast<vec4<f32>>(s); }
     var value = vec4<f32>(0.0);
     switch s.x {
         case 0u: { value = r.temp[s.y]; }
@@ -35,7 +36,8 @@ fn vertex_read(s: vec4<u32>, r: Registers) -> vec4<f32> {
     }
     return swizzle(value, s.z);
 }
-fn pixel_read(s: vec4<u32>, r: Registers) -> vec4<f32> {
+fn pixel_read(s: vec4<u32>, r: Registers, immediate: bool) -> vec4<f32> {
+    if (immediate) { return bitcast<vec4<f32>>(s); }
     var value = vec4<f32>(0.0);
     switch s.x {
         case 0u: { value = r.temp[s.y]; }
@@ -76,16 +78,20 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
         source += &format!(
             "if (vp.header.z > {index}u) {{\n\
              let i = vp.code[{index}];\n\
-             let a = vertex_read(i.a, r); let b = vertex_read(i.b, r);\n\
+             let a = vertex_read(i.a, r, (i.dst.x & {}u) != 0u); let b = vertex_read(i.b, r, (i.dst.x & {}u) != 0u); let c = vertex_read(i.c, r, (i.dst.x & {}u) != 0u);\n\
              var value = a;\n\
-             switch i.dst.x {{\n\
+             switch (i.dst.x & {OPCODE_MASK}u) {{\n\
              case {OP_MOV}u: {{}}\n\
              case {OP_MUL}u: {{ value = a * b; }}\n\
+             case {OP_MAD}u: {{ value = a * b + c; }}\n\
              case {OP_DP4}u: {{ value = vec4<f32>(dot(a, b)); }}\n\
              default: {{}}\n\
              }}\n\
              vertex_write(&r, i.dst, value);\n\
-             }}\n"
+             }}\n",
+            1u32 << IMMEDIATE_SOURCE_SHIFT,
+            1u32 << (IMMEDIATE_SOURCE_SHIFT + 1),
+            1u32 << (IMMEDIATE_SOURCE_SHIFT + 2),
         );
     }
     source += r#"
@@ -106,16 +112,20 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
         source += &format!(
             "if (pp.header.z > {index}u) {{\n\
              let i = pp.code[{index}];\n\
-             let a = pixel_read(i.a, r); let b = pixel_read(i.b, r);\n\
+             let a = pixel_read(i.a, r, (i.dst.x & {}u) != 0u); let b = pixel_read(i.b, r, (i.dst.x & {}u) != 0u); let c = pixel_read(i.c, r, (i.dst.x & {}u) != 0u);\n\
              var value = a;\n\
-             switch i.dst.x {{\n\
+             switch (i.dst.x & {OPCODE_MASK}u) {{\n\
              case {OP_MOV}u: {{}}\n\
              case {OP_MUL}u: {{ value = a * b; }}\n\
+             case {OP_MAD}u: {{ value = a * b + c; }}\n\
              case {OP_TEX}u: {{ value = textureSample(tx0, sm0, a.xy); if (psp.texture_flags.x != 0u) {{ value = vec4<f32>(value.rgb, 1.0); }} }}\n\
              default: {{}}\n\
              }}\n\
              pixel_write(&r, i.dst, value);\n\
-             }}\n"
+             }}\n",
+            1u32 << IMMEDIATE_SOURCE_SHIFT,
+            1u32 << (IMMEDIATE_SOURCE_SHIFT + 1),
+            1u32 << (IMMEDIATE_SOURCE_SHIFT + 2),
         );
     }
     source += "let col = d9_output(r.color, v);\n\
