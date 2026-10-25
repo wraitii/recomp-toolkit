@@ -3732,6 +3732,7 @@ void sched_leave_critsec(uint32_t cs) {
         --rec;
     wr32(cs + CS_OFF_RECURSION, rec);
     wr32(cs + CS_OFF_LOCK_COUNT, rec ? rec - 1 : 0xffffffffu);
+    bool contended = false;
     if (!rec) {
         wr32(cs + CS_OFF_OWNER, 0);
         // Only a thread blocked on this very section can be released by it, and
@@ -3741,10 +3742,15 @@ void sched_leave_critsec(uint32_t cs) {
         for (GuestThread *t : threads())
             if (t->blocked && t->wait_kind == W_CRITSEC && t->wait_cs == cs) {
                 g_sched_cv.notify_all();
+                contended = true;
                 break;
             }
     }
     g_sched_m.unlock();
+    // The yield hands the section to its waiter; without it the releaser can
+    // loop back and retake it before any checkpoint, starving the waiter.
+    if (contended)
+        guest_yield();
 }
 
 // Everything a guest thread must do before it may be seen as finished, run
