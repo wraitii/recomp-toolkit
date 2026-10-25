@@ -23,8 +23,12 @@ struct Readback {
 }
 
 impl Readback {
-    fn count(&self) -> u32 {
-        let data = self.buffer.slice(..).get_mapped_range();
+    fn count(&self) -> Result<u32, RenderError> {
+        let data = self
+            .buffer
+            .slice(..)
+            .get_mapped_range()
+            .map_err(|error| RenderError::new("GetData", error.to_string()))?;
         let total: u64 = data
             .chunks_exact(OCCLUSION_STRIDE as usize)
             .zip(&self.areas)
@@ -41,7 +45,7 @@ impl Readback {
             .sum();
         drop(data);
         self.buffer.unmap();
-        total.min(u64::from(u32::MAX)) as u32
+        Ok(total.min(u64::from(u32::MAX)) as u32)
     }
 }
 
@@ -446,7 +450,7 @@ impl D3d9Queries {
             }
             Some(true) => {}
         }
-        let value = readback.count();
+        let value = readback.count()?;
         let previous = std::mem::replace(&mut record.occlusion, Occlusion::Done(value));
         if let Some(pool) = self.occlusion.as_mut() {
             pool.release(&previous);

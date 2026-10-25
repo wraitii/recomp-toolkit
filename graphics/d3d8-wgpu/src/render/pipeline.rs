@@ -17,8 +17,8 @@ impl PreparedPipeline {
     pub(crate) fn create(&self, device: &wgpu::Device, label: &str) -> wgpu::RenderPipeline {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(label),
-            bind_group_layouts: &[&self.layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&self.layout)],
+            immediate_size: 0,
         });
         let attributes: Vec<Vec<_>> = self
             .buffers
@@ -29,10 +29,12 @@ impl PreparedPipeline {
             .buffers
             .iter()
             .zip(&attributes)
-            .map(|((stride, _), attributes)| wgpu::VertexBufferLayout {
-                array_stride: *stride,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes,
+            .map(|((stride, _), attributes)| {
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: *stride,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes,
+                })
             })
             .collect();
         let targets = self.target.clone().map(|target| [Some(target)]);
@@ -54,7 +56,7 @@ impl PreparedPipeline {
             primitive: self.primitive,
             depth_stencil: self.depth.clone(),
             multisample: self.multisample,
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         })
     }

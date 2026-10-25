@@ -113,8 +113,8 @@ impl FamilyKey {
                 },
                 depth: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth24PlusStencil8,
-                    depth_write_enabled: false,
-                    depth_compare: wgpu::CompareFunction::Less,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -166,9 +166,9 @@ impl FamilyKey {
                 VERTEX_STRIDE,
             ),
             (
-                "inter-stage-components",
-                u64::from(limits.max_inter_stage_shader_components),
-                u64::from(INTER_STAGE_COMPONENTS),
+                "inter-stage-variables",
+                u64::from(limits.max_inter_stage_shader_variables),
+                u64::from(INTER_STAGE_VARIABLES),
             ),
             (
                 "textures",

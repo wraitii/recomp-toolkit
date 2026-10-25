@@ -47,12 +47,19 @@ fn interpreter_source() {
     let naga::TypeInner::Struct { members, .. } = &varyings.inner else {
         unreachable!()
     };
+    assert_eq!(
+        members
+            .iter()
+            .filter(|member| matches!(member.binding, Some(naga::Binding::Location { .. })))
+            .count() as u32,
+        uber_abi::INTER_STAGE_VARIABLES,
+    );
     let components: u32 = members
         .iter()
         .filter(|member| matches!(member.binding, Some(naga::Binding::Location { .. })))
         .map(|member| layouts[member.ty].size / 4)
         .sum();
-    assert_eq!(components, uber_abi::INTER_STAGE_COMPONENTS);
+    assert_eq!(components, 42);
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     std::fs::write(out.join("d3d9-interpreter.wgsl"), &source).unwrap();
     let mut options = naga::back::msl::Options {

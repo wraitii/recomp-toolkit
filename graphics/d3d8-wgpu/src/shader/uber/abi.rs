@@ -10,4 +10,4 @@ pub(crate) const PIXEL_CONSTANTS: u32 = 32;
 pub(crate) const PROGRAM_BYTES: u64 = ((4 + MAX_INSTRUCTIONS * INSTRUCTION_WORDS) * 4) as u64;
 pub(crate) const PROGRAM_BINDINGS: [u32; 2] = [36, 37];
 pub(crate) const VERTEX_STRIDE: u64 = VERTEX_INPUTS as u64 * 16;
-pub(crate) const INTER_STAGE_COMPONENTS: u32 = 42;
+pub(crate) const INTER_STAGE_VARIABLES: u32 = 12;

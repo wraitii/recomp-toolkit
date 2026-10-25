@@ -1728,12 +1728,12 @@ fn depth_state(
     }
     Ok(Some(wgpu::DepthStencilState {
         format: depth.texture.format(),
-        depth_write_enabled: rs(state, 7) != 0 && rs(state, 14) != 0,
-        depth_compare: if rs(state, 7) != 0 {
+        depth_write_enabled: Some(rs(state, 7) != 0 && rs(state, 14) != 0),
+        depth_compare: Some(if rs(state, 7) != 0 {
             compare(rs(state, 23))
         } else {
             wgpu::CompareFunction::Always
-        },
+        }),
         stencil,
         bias: wgpu::DepthBiasState {
             constant: 0,
@@ -1904,13 +1904,16 @@ fn sampler(
         t.levels.saturating_sub(1) as f32
     };
     let anisotropic = [5, 6].iter().any(|&id| ss(state, t.stage, id) == 3);
-    let mipmap_filter = filter(7)?;
+    let mipmap_filter = match filter(7)? {
+        wgpu::FilterMode::Nearest => wgpu::MipmapFilterMode::Nearest,
+        wgpu::FilterMode::Linear => wgpu::MipmapFilterMode::Linear,
+    };
     let (mag_filter, min_filter) = if anisotropic {
         (wgpu::FilterMode::Linear, wgpu::FilterMode::Linear)
     } else {
         (filter(5)?, filter(6)?)
     };
-    let anisotropy_clamp = if anisotropic && mipmap_filter == wgpu::FilterMode::Linear {
+    let anisotropy_clamp = if anisotropic && mipmap_filter == wgpu::MipmapFilterMode::Linear {
         ss(state, t.stage, 10).clamp(1, MAX_ANISOTROPY) as u16
     } else {
         1
@@ -4120,7 +4123,6 @@ fn flush_inner(
                     upload,
                     0,
                     wgpu::BufferSize::new(needed).expect("draw upload is nonempty"),
-                    &gpu.device,
                 )
                 .copy_from_slice(&draw.batch.data);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -4129,6 +4131,7 @@ fn flush_inner(
                 depth_stencil_attachment: depth,
                 timestamp_writes: None,
                 occlusion_query_set: segment.and(queries.occlusion_set()),
+                multiview_mask: None,
             });
             if let Some(index) = segment {
                 pass.begin_occlusion_query(index);
@@ -4398,8 +4401,8 @@ pub(crate) fn clear(
     let depth_state = |d: &SurfaceView| {
         Ok::<_, RenderError>(wgpu::DepthStencilState {
             format: d.texture.format(),
-            depth_write_enabled: flags & 2 != 0,
-            depth_compare: wgpu::CompareFunction::Always,
+            depth_write_enabled: Some(flags & 2 != 0),
+            depth_compare: Some(wgpu::CompareFunction::Always),
             stencil: wgpu::StencilState {
                 front: face,
                 back: face,
@@ -4501,6 +4504,7 @@ pub(crate) fn clear(
                 depth_stencil_attachment: depth,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind, &[]);
@@ -4538,6 +4542,7 @@ pub(crate) fn clear(
                 depth_stencil_attachment: depth,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind, &[]);

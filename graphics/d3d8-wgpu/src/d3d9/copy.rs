@@ -406,7 +406,7 @@ fn blit(
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: filter_mode,
             min_filter: filter_mode,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             lod_min_clamp: 0.0,
             lod_max_clamp: 0.0,
             ..Default::default()
@@ -433,8 +433,8 @@ fn blit(
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("d3d9-copy"),
-                bind_group_layouts: &[&layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
             });
         let pipeline = gpu
             .device
@@ -460,7 +460,7 @@ fn blit(
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             });
         gpu.record(|encoder, _| {
@@ -478,6 +478,7 @@ fn blit(
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
@@ -803,8 +804,8 @@ pub(crate) fn color_fill(
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("d3d9-fill"),
-                bind_group_layouts: &[&layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
             });
         let pipeline = gpu
             .device
@@ -830,7 +831,7 @@ pub(crate) fn color_fill(
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             });
         gpu.record(|encoder, _| {
@@ -848,6 +849,7 @@ pub(crate) fn color_fill(
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
