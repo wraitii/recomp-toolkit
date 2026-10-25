@@ -709,8 +709,8 @@ void recomp_unknown_call(X86 *c, uint32_t target);
 /* A checked return adjusted the target to an address that is not resumable. */
 void recomp_unexpected_return(X86 *c, uint32_t site, uint32_t expected, uint32_t target);
 /* CALL continuations inside code executed by the interpreter. */
-void recomp_dynamic_return_push(uint32_t target);
-void recomp_dynamic_return_pop(uint32_t target);
+unsigned recomp_dynamic_return_push(uint32_t target);
+void recomp_dynamic_return_pop(unsigned depth);
 int recomp_dynamic_return_accept(uint32_t target);
 void recomp_region_missing(X86 *c, uint32_t target);
 /* A popped callback sentinel can bypass translated callers. The innermost

@@ -280,14 +280,16 @@ thread_local uint32_t dynamic_returns[kDynamicReturns];
 thread_local unsigned dynamic_return_count;
 } // namespace
 
-extern "C" void recomp_dynamic_return_push(uint32_t target) {
-    if (dynamic_return_count < kDynamicReturns)
+extern "C" unsigned recomp_dynamic_return_push(uint32_t target) {
+    const unsigned depth = dynamic_return_count;
+    if (depth < kDynamicReturns)
         dynamic_returns[dynamic_return_count++] = target;
+    return depth;
 }
 
-extern "C" void recomp_dynamic_return_pop(uint32_t target) {
-    if (dynamic_return_count && dynamic_returns[dynamic_return_count - 1] == target)
-        --dynamic_return_count;
+extern "C" void recomp_dynamic_return_pop(unsigned depth) {
+    if (dynamic_return_count > depth)
+        dynamic_return_count = depth;
 }
 
 extern "C" int recomp_dynamic_return_accept(uint32_t target) {
