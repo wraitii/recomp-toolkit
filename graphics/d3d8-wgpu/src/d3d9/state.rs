@@ -1001,36 +1001,6 @@ impl D3d9State {
                 "viewport depth range must be finite",
             ));
         }
-        if self.target_width != 0 {
-            let right = viewport
-                .x
-                .checked_add(viewport.width)
-                .ok_or_else(|| invalid("SetViewport", "viewport X range overflows"))?;
-            if right > self.target_width {
-                return Err(invalid(
-                    "SetViewport",
-                    format!(
-                        "viewport X range {right} exceeds target width {}",
-                        self.target_width
-                    ),
-                ));
-            }
-        }
-        if self.target_height != 0 {
-            let bottom = viewport
-                .y
-                .checked_add(viewport.height)
-                .ok_or_else(|| invalid("SetViewport", "viewport Y range overflows"))?;
-            if bottom > self.target_height {
-                return Err(invalid(
-                    "SetViewport",
-                    format!(
-                        "viewport Y range {bottom} exceeds target height {}",
-                        self.target_height
-                    ),
-                ));
-            }
-        }
         if self.recording.is_some() {
             self.recording.as_mut().unwrap().viewport = Some(viewport);
         } else {
