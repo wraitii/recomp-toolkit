@@ -262,14 +262,12 @@ struct EfxObject {
     const_version: Cell<u64>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
 struct ParamShape {
     type_: u32,
     class: u32,
     rows: u32,
     cols: u32,
     elements: u32,
-    bytes: u32,
     members: Vec<ParamShape>,
 }
 
@@ -281,27 +279,16 @@ impl ParamShape {
             rows: t.rows,
             cols: t.cols,
             elements: t.elements,
-            bytes: t.bytes,
             members: t.members.iter().map(ParamShape::of).collect(),
         }
-    }
-
-    fn describe(&self) -> String {
-        format!(
-            "type {} class {} rows {} cols {} elements {} members {}",
-            self.type_,
-            self.class,
-            self.rows,
-            self.cols,
-            self.elements,
-            self.members.len()
-        )
     }
 
     fn matches(&self, t: &EfxType) -> bool {
         self.type_ == t.type_
             && self.class == t.class
-            && (self.class == FXC_VECTOR || (self.rows == t.rows && self.cols == t.cols))
+            && self.rows == t.rows
+            && self.cols == t.cols
+            && self.elements == t.elements
             && self.members.len() == t.members.len()
             && self
                 .members
@@ -319,10 +306,55 @@ struct PoolEntry {
     version: u64,
 }
 
+// Parameters sharing a name but not a shape get separate pool entries.
 #[derive(Default)]
 struct PoolState {
     device_id: Option<u32>,
-    entries: BTreeMap<Vec<u8>, PoolEntry>,
+    entries: BTreeMap<Vec<u8>, Vec<PoolEntry>>,
+}
+
+impl PoolState {
+    fn entry(&self, t: &EfxType) -> Option<&PoolEntry> {
+        self.entries
+            .get(&t.name)?
+            .iter()
+            .find(|entry| entry.shape.matches(t))
+    }
+
+    fn entry_mut(&mut self, t: &EfxType) -> Option<&mut PoolEntry> {
+        self.entries
+            .get_mut(&t.name)?
+            .iter_mut()
+            .find(|entry| entry.shape.matches(t))
+    }
+
+    fn insert(
+        &mut self,
+        t: &EfxType,
+        value: Vec<u8>,
+        objects: Vec<u32>,
+        member: u32,
+        version: u64,
+    ) {
+        self.entries
+            .entry(t.name.clone())
+            .or_default()
+            .push(PoolEntry {
+                shape: ParamShape::of(t),
+                value,
+                objects,
+                members: BTreeSet::from([member]),
+                version,
+            });
+    }
+
+    fn values(&self) -> impl Iterator<Item = &PoolEntry> {
+        self.entries.values().flatten()
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut PoolEntry> {
+        self.entries.values_mut().flatten()
+    }
 }
 
 pub struct D3dxEffectPool {
@@ -1176,7 +1208,7 @@ impl D3dxEffect {
         let mut version = param.version;
         if param.flags & FX_PARAM_SHARED != 0 {
             if let Some(pool) = &self.pool {
-                if let Some(entry) = pool.lock().unwrap().entries.get(&param.type_.name) {
+                if let Some(entry) = pool.lock().unwrap().entry(&param.type_) {
                     version = version.max(entry.version);
                 }
             }
@@ -1190,12 +1222,7 @@ impl D3dxEffect {
             return None;
         }
         let state = self.pool.as_ref()?.lock().unwrap();
-        let entry = state.entries.get(&param.type_.name)?;
-        if entry.shape.matches(&param.type_) {
-            Some(f(entry))
-        } else {
-            None
-        }
+        state.entry(&param.type_).map(f)
     }
 
     fn with_numeric<R>(&self, index: usize, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
@@ -1264,12 +1291,10 @@ impl D3dxEffect {
                 let Some(pool) = &self.pool else { return };
                 let param = &mut self.params[index];
                 let state = pool.lock().unwrap();
-                let Some(entry) = state.entries.get(&param.type_.name) else {
+                let Some(entry) = state.entry(&param.type_) else {
                     return;
                 };
-                if !entry.shape.matches(&param.type_)
-                    || (param.version != 0 && entry.version == param.version)
-                {
+                if param.version != 0 && entry.version == param.version {
                     return;
                 }
                 if let EfxValue::Numeric(bytes) = &mut param.value {
@@ -1298,9 +1323,7 @@ impl D3dxEffect {
         let id = self.id;
         let param = &self.params[index];
         let mut state = pool.lock().unwrap();
-        if let Some(entry) = state.entries.get_mut(&param.type_.name)
-            && entry.shape.matches(&param.type_)
-        {
+        if let Some(entry) = state.entry_mut(&param.type_) {
             if let EfxValue::Numeric(bytes) = &param.value {
                 let copy = entry.value.len().min(bytes.len());
                 entry.value[..copy].copy_from_slice(&bytes[..copy]);
@@ -1312,25 +1335,12 @@ impl D3dxEffect {
             entry.members.insert(id);
             return;
         }
-        let name = param.type_.name.clone();
-        let shape = ParamShape::of(&param.type_);
         let (value, objects) = match &param.value {
             EfxValue::Numeric(bytes) => (bytes.clone(), Vec::new()),
             EfxValue::Object(ids) => (Vec::new(), ids.clone()),
             EfxValue::Sampler(_) => (Vec::new(), Vec::new()),
         };
-        let mut members = BTreeSet::new();
-        members.insert(id);
-        state.entries.insert(
-            name,
-            PoolEntry {
-                shape,
-                value,
-                objects,
-                members,
-                version: param.version,
-            },
-        );
+        state.insert(&param.type_, value, objects, id, param.version);
     }
 
     fn target_numeric(&self, target: &ParamTarget) -> Option<Vec<u8>> {
@@ -1462,35 +1472,9 @@ pub fn d3dx_effect_join_pool(
                 ),
             );
         }
-        let name = effect.params[index].type_.name.clone();
-        let shape = ParamShape::of(&effect.params[index].type_);
-        if let Some(entry) = state.entries.get_mut(&name) {
-            if entry.shape != shape {
-                if !entry.shape.matches(&effect.params[index].type_) {
-                    return status(
-                        StatusCode::InvalidArgument,
-                        format!(
-                            "shared parameter '{}' shape does not match the pool (effect {}; pool {})",
-                            String::from_utf8_lossy(&name),
-                            shape.describe(),
-                            entry.shape.describe()
-                        ),
-                    );
-                }
-                eprintln!(
-                    "d3d9: shared parameter '{}' differs in shape (effect {}; pool {}); sharing the common bytes",
-                    String::from_utf8_lossy(&name),
-                    shape.describe(),
-                    entry.shape.describe()
-                );
-                if entry.value.len() < shape.bytes as usize {
-                    entry.value.resize(shape.bytes as usize, 0);
-                }
-                if shape.bytes > entry.shape.bytes {
-                    entry.shape = shape.clone();
-                }
-            }
-            match &mut effect.params[index].value {
+        let param = &mut effect.params[index];
+        if let Some(entry) = state.entry_mut(&param.type_) {
+            match &mut param.value {
                 EfxValue::Numeric(bytes) => {
                     let copy = entry.value.len().min(bytes.len());
                     bytes[..copy].copy_from_slice(&entry.value[..copy]);
@@ -1500,23 +1484,12 @@ pub fn d3dx_effect_join_pool(
             }
             entry.members.insert(id);
         } else {
-            let (value, objects) = match &effect.params[index].value {
+            let (value, objects) = match &param.value {
                 EfxValue::Numeric(bytes) => (bytes.clone(), Vec::new()),
                 EfxValue::Object(ids) => (Vec::new(), ids.clone()),
                 EfxValue::Sampler(_) => (Vec::new(), Vec::new()),
             };
-            let mut members = BTreeSet::new();
-            members.insert(id);
-            state.entries.insert(
-                name,
-                PoolEntry {
-                    shape,
-                    value,
-                    objects,
-                    members,
-                    version: 0,
-                },
-            );
+            state.insert(&param.type_, value, objects, id, 0);
         }
     }
     ok()
@@ -1528,9 +1501,12 @@ pub fn d3dx_effect_release(effect: &mut D3dxEffect) {
     };
     let id = effect.id;
     let mut state = pool.lock().unwrap();
-    state.entries.retain(|_, entry| {
-        entry.members.remove(&id);
-        !entry.members.is_empty()
+    state.entries.retain(|_, entries| {
+        entries.retain_mut(|entry| {
+            entry.members.remove(&id);
+            !entry.members.is_empty()
+        });
+        !entries.is_empty()
     });
 }
 
@@ -1554,7 +1530,7 @@ pub fn d3dx_effect_texture_refs(effect: &D3dxEffect) -> Vec<u32> {
 pub fn d3dx_effect_pool_texture_refs(pool: &D3dxEffectPool) -> Vec<u32> {
     let state = pool.state.lock().unwrap();
     let mut refs = BTreeSet::new();
-    for entry in state.entries.values() {
+    for entry in state.values() {
         if entry.members.is_empty() || !texture_type(entry.shape.type_) {
             continue;
         }
@@ -4050,7 +4026,7 @@ fn clear_lost_textures(effect: &mut D3dxEffect, device: &D3d9Device) {
     }
     if let Some(pool) = &effect.pool {
         let mut state = pool.lock().unwrap();
-        for entry in state.entries.values_mut() {
+        for entry in state.values_mut() {
             for id in &mut entry.objects {
                 if *id != 0 && device.resource_pool(*id) == Some(D3DPOOL_DEFAULT) {
                     *id = 0;
