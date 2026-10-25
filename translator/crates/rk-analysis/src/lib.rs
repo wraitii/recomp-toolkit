@@ -271,9 +271,25 @@ pub fn run(args: Args) -> Result<()> {
             parse_observations(path, &bytes, &mut observations)?;
         }
     }
+    let guest_preferences: BTreeSet<Addr> = observations
+        .iter()
+        .filter(|(_, row)| !row.kinds.is_empty()
+            && row.kinds.iter().all(|kind| kind == "known" || kind == "module"))
+        .filter_map(|(&site, _)| {
+            let function = program.functions.get(&program.containing(site)?)?;
+            let span = function.spans.iter().find(|span| span.start <= site && site < span.end())?;
+            let insn = decode_mapped(&program, &decoder, span, site).ok()?;
+            (insn.mnemonic.eq_ignore_ascii_case("CALL")
+                && insn.operands.first().is_some_and(|operand|
+                    matches!(operand.kind, OperandKind::Reg { .. } | OperandKind::Mem { .. })))
+                .then_some(site)
+        })
+        .collect();
     let mut generated = Vec::new();
     let mut rejected = Vec::new();
     let mut unresolved: BTreeMap<String, usize> = BTreeMap::new();
+    let mut com_analysis = None;
+    let mut com_slots = BTreeMap::new();
     for (&site, observed) in &observations {
         if observed.identities.is_empty() {
             continue;
@@ -340,7 +356,14 @@ pub fn run(args: Args) -> Result<()> {
             ));
             continue;
         }
-        if let Err(reason) = validate_site(&program, &decoder, site, meta) {
+        if let Err(reason) = validate_site(
+            &program,
+            &decoder,
+            site,
+            meta,
+            &mut com_analysis,
+            &mut com_slots,
+        ) {
             rejected.push(json_reject(site, Some(identity), &reason));
             continue;
         }
@@ -450,6 +473,7 @@ pub fn run(args: Args) -> Result<()> {
         &method_bytes,
         &effect_bytes,
         &observation_inputs,
+        &guest_preferences,
         generated,
         guest,
         &discovery,
@@ -688,6 +712,8 @@ fn validate_site(
     decoder: &Decoder,
     site: Addr,
     meta: &MethodMeta,
+    analysis: &mut Option<rk_frontend::Analysis>,
+    slots: &mut BTreeMap<Addr, std::result::Result<BTreeMap<Addr, i32>, String>>,
 ) -> std::result::Result<(), String> {
     let owner = program
         .containing(site)
@@ -708,23 +734,36 @@ fn validate_site(
     let Some(operand) = insn.operands.first() else {
         return Err("call has no operand".to_string());
     };
-    let OperandKind::Mem {
-        base: Some(_),
-        index: None,
-        seg: None,
-        disp,
-        ..
-    } = &operand.kind
-    else {
-        return Err("COM call is not a memory-indirect call".to_string());
-    };
     if operand.size != Some(32) || insn.address_size != 4 {
         return Err("COM call is not a 32-bit transfer".to_string());
     }
-    if *disp < 0 || *disp as u32 != meta.slot {
+    let slot = match &operand.kind {
+        OperandKind::Mem {
+            base: Some(_),
+            index: None,
+            seg: None,
+            disp,
+            ..
+        } => *disp,
+        OperandKind::Reg { part: None, .. } => {
+            let found = slots.entry(owner).or_insert_with(|| {
+                let analysis = analysis.get_or_insert_with(|| rk_frontend::analyze(program));
+                guest::com_slots(program, analysis, owner)
+            });
+            i64::from(
+                *found
+                    .as_ref()
+                    .map_err(Clone::clone)?
+                    .get(&site)
+                    .ok_or("COM register target has no unambiguous vtable slot")?,
+            )
+        }
+        _ => return Err("COM call has an unsupported target operand".to_string()),
+    };
+    if slot < 0 || slot as u64 != u64::from(meta.slot) {
         return Err(format!(
             "COM slot {:#x} does not match catalog slot {:#x}",
-            *disp, meta.slot
+            slot, meta.slot
         ));
     }
     Ok(())
@@ -1008,6 +1047,7 @@ fn build_artifacts(
     method_bytes: &[u8],
     effect_bytes: &[u8],
     observation_inputs: &BTreeMap<String, String>,
+    guest_preferences: &BTreeSet<Addr>,
     selected: Vec<Selected>,
     guest: guest::Output,
     discovery: &serde_json::Value,
@@ -1100,6 +1140,17 @@ fn build_artifacts(
             "t": target_sets[&site.targets],
         })
     }));
+    let indices: BTreeMap<String, usize> = sites_json.iter().enumerate()
+        .map(|(index, row)| (row["s"].as_str().unwrap().to_string(), index)).collect();
+    for &site in guest_preferences {
+        let site = Hex(site).to_string();
+        if let Some(&index) = indices.get(&site) {
+            sites_json[index]["prefer_guest"] = serde_json::json!(true);
+        } else {
+            sites_json.push(serde_json::json!({"s": site, "prefer_guest": true}));
+        }
+    }
+    sites_json.sort_by(|a, b| a["s"].as_str().cmp(&b["s"].as_str()));
     let targets_json: Vec<serde_json::Value> = {
         let mut rows: Vec<_> = target_sets.iter().collect();
         rows.sort_by_key(|(_, id)| **id);
@@ -1212,6 +1263,7 @@ fn build_artifacts(
             "evidence": evidence_count,
             "target_sets": target_count,
             "target_entries": target_entries,
+            "guest_preferences": guest_preferences.len(),
         },
         "guest": guest.report,
         "discovery": discovery,

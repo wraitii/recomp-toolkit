@@ -21,6 +21,7 @@ pub enum TransferKind {
 #[derive(Clone, Debug)]
 pub struct SiteFacts {
     pub kind: TransferKind,
+    pub prefer_guest: bool,
     pub targets: Option<Vec<Addr>>,
     pub effect: Option<CallEffect>,
     pub method: Option<u32>,
@@ -184,6 +185,8 @@ struct RawSite {
     site: RawAddr,
     #[serde(default, rename = "k")]
     kind: TransferKind,
+    #[serde(default)]
+    prefer_guest: bool,
     #[serde(default, rename = "t")]
     targets: Option<u32>,
     #[serde(default, rename = "e")]
@@ -542,9 +545,15 @@ impl AnalysisFacts {
         let mut site_effects = 0;
         for row in raw.sites {
             let site = row.site.0;
-            if row.targets.is_none() && row.effect.is_none() {
+            if row.targets.is_none() && row.effect.is_none() && !row.prefer_guest {
                 return Err(Error::input(format!(
-                    "{}: site {site:08x} has neither bound nor effect",
+                    "{}: site {site:08x} has neither bound, effect nor dispatch preference",
+                    path.display()
+                )));
+            }
+            if row.prefer_guest && (!v2 || row.kind != TransferKind::Call) {
+                return Err(Error::input(format!(
+                    "{}: site {site:08x} guest dispatch preference requires a v2 call site",
                     path.display()
                 )));
             }
@@ -618,6 +627,7 @@ impl AnalysisFacts {
             }
             let row = SiteFacts {
                 kind: row.kind,
+                prefer_guest: row.prefer_guest,
                 targets,
                 effect,
                 method,

@@ -49,7 +49,7 @@ pub struct EmitContext<'a> {
     pub known_entries: &'a BTreeSet<Addr>,
     pub region_entries: &'a BTreeMap<Addr, Addr>,
     pub setjmp_targets: &'a BTreeSet<Addr>,
-    pub guest_calls: &'a BTreeMap<Addr, Vec<Addr>>,
+    pub guest_calls: &'a BTreeSet<Addr>,
     pub host_calls: &'a BTreeSet<Addr>,
     pub private: Option<&'a PrivateEmit>,
     pub reloc: Option<RelocEmit>,
@@ -1801,7 +1801,7 @@ impl<'a> Emitter<'a> {
             .copied()
             .ok_or_else(|| self.error(addr, "indirect call without target"))?;
         let target = self.expr(target)?;
-        let helper = if self.ctx.guest_calls.contains_key(&addr) {
+        let helper = if self.ctx.guest_calls.contains(&addr) {
             "recomp_icall_guest"
         } else if self.ctx.host_calls.contains(&addr) {
             "recomp_icall_host"
