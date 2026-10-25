@@ -9,6 +9,25 @@
 #include <limits>
 #include <string>
 
+uint32_t d3dx_make_buffer(const void *data, uint32_t size) {
+    uint32_t guest_data = heap_alloc(size ? size : 1, true, 16);
+    if (!guest_data)
+        return 0;
+    if (size)
+        std::memcpy(gm_ptr(guest_data), data, size);
+    ComObj *object = com_new(K_D3DXCONSTANTTABLE);
+    if (!object) {
+        heap_free(guest_data);
+        return 0;
+    }
+    object->d3dx_ctab_buffer = guest_data;
+    object->d3dx_ctab_size = size;
+    uint32_t view = com_view(object, IF_D3DXBUFFER);
+    if (!view)
+        com_release(object);
+    return view;
+}
+
 #ifdef RECOMP_NULL_HOST
 void X_D3DXCompileShader(X86 *c) {
     LOGW("D3DXCompileShader: unavailable on the null host");
@@ -43,25 +62,6 @@ bool guest_string(uint32_t address, size_t limit, std::string &value) {
     return false;
 }
 
-uint32_t make_buffer(const void *data, uint32_t size) {
-    uint32_t guest_data = heap_alloc(size ? size : 1, true, 16);
-    if (!guest_data)
-        return 0;
-    if (size)
-        std::memcpy(gm_ptr(guest_data), data, size);
-    ComObj *object = com_new(K_D3DXCONSTANTTABLE);
-    if (!object) {
-        heap_free(guest_data);
-        return 0;
-    }
-    object->d3dx_ctab_buffer = guest_data;
-    object->d3dx_ctab_size = size;
-    uint32_t view = com_view(object, IF_D3DXBUFFER);
-    if (!view)
-        com_release(object);
-    return view;
-}
-
 void error_buffer(uint32_t output, const char *message) {
     if (!output || !message)
         return;
@@ -69,7 +69,7 @@ void error_buffer(uint32_t output, const char *message) {
     if (length >= std::numeric_limits<uint32_t>::max())
         return;
     uint32_t size = uint32_t(length + 1);
-    uint32_t view = make_buffer(message, size);
+    uint32_t view = d3dx_make_buffer(message, size);
     if (view)
         wr32(output, view);
 }
@@ -167,7 +167,7 @@ void X_D3DXCompileShader(X86 *c) {
         vkd3d_shader_free_messages(messages);
         return;
     }
-    uint32_t shader_view = make_buffer(bytecode.code, uint32_t(bytecode.size));
+    uint32_t shader_view = d3dx_make_buffer(bytecode.code, uint32_t(bytecode.size));
     if (!shader_view) {
         fail(c, kEOutOfMemory, errors_output,
              "D3DXCompileShader: could not allocate shader buffer");

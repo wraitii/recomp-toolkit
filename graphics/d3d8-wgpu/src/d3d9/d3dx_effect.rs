@@ -2999,7 +2999,6 @@ impl StateSink<'_> {
         match self {
             StateSink::Device(device) => {
                 if format == 0 {
-                    device.state.set_declaration(0, 0);
                     return Ok(());
                 }
                 let result = crate::d3d9::d3d9_create_fvf_declaration(device, format);

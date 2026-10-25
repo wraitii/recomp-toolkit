@@ -395,7 +395,7 @@ static const ImportShim g_d3dx9_30_exports[] = {
     {"d3dx9_30.dll", "D3DXVec3TransformCoordArray", 6, X_D3DXVec3TransformCoordArray},
     {"d3dx9_30.dll", "D3DXVec3Normalize", 2, X_D3DXVec3Normalize},
     {"d3dx9_30.dll", "D3DXVec3TransformNormal", 3, X_D3DXVec3TransformNormal},
-    {"d3dx9_30.dll", "D3DXSaveSurfaceToFileInMemory", 5, nullptr},
+    {"d3dx9_30.dll", "D3DXSaveSurfaceToFileInMemory", 5, X_D3DXSaveSurfaceToFileInMemory},
     {"d3dx9_30.dll", "D3DXFillVolumeTexture", 3, X_D3DXFillVolumeTexture},
     {"d3dx9_30.dll", "D3DXMatrixMultiply", 3, X_D3DX33MatrixMultiply},
     {"d3dx9_30.dll", "D3DXMatrixOrthoLH", 5, X_D3DXMatrixOrthoLH},

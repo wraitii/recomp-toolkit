@@ -1887,43 +1887,73 @@ void X_D3DXLoadSurfaceFromSurface(X86 *c) {
     com_ret(c, bridge_result(c, status));
 }
 
-void X_D3DXSaveSurfaceToFileA(X86 *c) {
-    uint32_t file_addr = arg(c, 0), format = arg(c, 1);
+static bool d3dx_encode_surface(X86 *c, recomp::d3d::D3dxBytesResult &result) {
+    uint32_t format = arg(c, 1);
     ComObj *src = com_this(arg(c, 2));
     if (!src || src->kind != K_D3D9SURFACE) {
         com_ret(c, D3DERR_INVALIDCALL);
-        return;
+        return false;
     }
     if (!d3dx_palette_ok(arg(c, 3))) {
         com_ret(c, D3DERR_INVALIDCALL);
-        return;
+        return false;
     }
     recomp::d3d::D3d9Rect rect{};
     bool present = false;
     if (!d3dx_rect(arg(c, 4), rect, present)) {
         com_ret(c, D3DERR_INVALIDCALL);
-        return;
+        return false;
     }
     uint32_t face = 0, level = 0;
     bool volume = false;
     ComObj *owner = level_owner(src, &face, &level, &volume);
     ComObj *dev = d3dx_device_of(owner);
-    if (!owner || !owner->d3d9_resource || !dev || !file_addr || !gm_valid(file_addr, 1) ||
-        volume) {
+    if (!owner || !owner->d3d9_resource || !dev || volume) {
+        com_ret(c, D3DERR_INVALIDCALL);
+        return false;
+    }
+    result = dev->d3d9_device->d3dx_save_surface(*owner->d3d9_resource, face, level, rect, present,
+                                                 format);
+    if (result.status.code != recomp::d3d::StatusCode::Ok) {
+        com_ret(c, bridge_result(c, result.status));
+        return false;
+    }
+    return true;
+}
+
+void X_D3DXSaveSurfaceToFileA(X86 *c) {
+    uint32_t file_addr = arg(c, 0);
+    if (!file_addr || !gm_valid(file_addr, 1)) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
-    recomp::d3d::D3dxBytesResult result = dev->d3d9_device->d3dx_save_surface(
-        *owner->d3d9_resource, face, level, rect, present, format);
-    if (result.status.code != recomp::d3d::StatusCode::Ok) {
-        com_ret(c, bridge_result(c, result.status));
+    recomp::d3d::D3dxBytesResult result;
+    if (!d3dx_encode_surface(c, result))
         return;
-    }
     std::string path = win32_host_path_op(gm_str(file_addr, 1024), WIN32_FILE_WRITE);
     if (!d3dx_write_file(path, result.bytes.data(), result.bytes.size())) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
+    com_ret(c, D3D_OK9);
+}
+
+void X_D3DXSaveSurfaceToFileInMemory(X86 *c) {
+    uint32_t out = arg(c, 0);
+    if (!out || !gm_valid(out, 4)) {
+        com_ret(c, D3DERR_INVALIDCALL);
+        return;
+    }
+    wr32(out, 0);
+    recomp::d3d::D3dxBytesResult result;
+    if (!d3dx_encode_surface(c, result))
+        return;
+    uint32_t view = d3dx_make_buffer(result.bytes.data(), (uint32_t)result.bytes.size());
+    if (!view) {
+        com_ret(c, E_OUTOFMEMORY);
+        return;
+    }
+    wr32(out, view);
     com_ret(c, D3D_OK9);
 }
 
@@ -3678,6 +3708,24 @@ static uint32_t efx_dispatch_commands(X86 *c, ComObj *fx, ComObj *dev,
     return failure;
 }
 
+static bool d3d9_fvf_decl_view(ComObj *dev, uint32_t handle) {
+    if (dev->d3d9_device->decl_views.find(handle) != dev->d3d9_device->decl_views.end())
+        return true;
+    ComObj *d = com_new(K_D3D9DECL);
+    if (!d)
+        return false;
+    d->dev_d3d = dev->id;
+    d->d3d9_state_handle = handle;
+    com_internalize(d);
+    if (!com_view(d, IF_D3DVERTEXDECL9)) {
+        com_release_internal(d);
+        return false;
+    }
+    dev->d3d9_device->decl_views[handle] = d->id;
+    dev->d3d9_device->fvf_decls.insert(d->id);
+    return true;
+}
+
 static uint32_t efx_run(X86 *c, ComObj *fx, ComObj *dev, recomp::d3d::D3dxEffectRunResult &result) {
     D3dxEffectHost *host = efx_host(fx);
     uint32_t hr;
@@ -3693,8 +3741,12 @@ static uint32_t efx_run(X86 *c, ComObj *fx, ComObj *dev, recomp::d3d::D3dxEffect
         hr = efx_dispatch_commands(c, fx, dev, result.commands, result.values);
         if (result.reserved)
             recomp::d3d::d3dx_effect_batch_finish(*host->value, !efx_hr_failed(hr));
-        else
+        else {
+            recomp::d3d::ValueResult decl = dev->d3d9_device->vertex_declaration();
+            if (d3d_bridge_ok(decl.status) && decl.value)
+                d3d9_fvf_decl_view(dev, decl.value);
             d3d9_refresh_bindings(dev);
+        }
     }
     recomp::d3d::d3dx_effect_recycle(*host->value, std::move(result.commands),
                                      std::move(result.values));
@@ -6228,24 +6280,10 @@ void Dev_SetFVF(X86 *c) {
         com_ret(c, bridge_result(c, result.status));
         return;
     }
-    if (dev->d3d9_device->decl_views.find(result.value) == dev->d3d9_device->decl_views.end()) {
-        ComObj *d = com_new(K_D3D9DECL);
-        if (!d) {
-            dev->d3d9_device->destroy_declaration(result.value);
-            com_ret(c, E_OUTOFMEMORY);
-            return;
-        }
-        d->dev_d3d = dev->id;
-        d->d3d9_state_handle = result.value;
-        com_internalize(d);
-        uint32_t view = com_view(d, IF_D3DVERTEXDECL9);
-        if (!view) {
-            com_release_internal(d);
-            com_ret(c, E_OUTOFMEMORY);
-            return;
-        }
-        dev->d3d9_device->decl_views[result.value] = d->id;
-        dev->d3d9_device->fvf_decls.insert(d->id);
+    if (!d3d9_fvf_decl_view(dev, result.value)) {
+        dev->d3d9_device->destroy_declaration(result.value);
+        com_ret(c, E_OUTOFMEMORY);
+        return;
     }
     recomp::d3d::Status status = dev->d3d9_device->set_fvf_binding(result.value, fvf);
     if (d3d_bridge_ok(status))
