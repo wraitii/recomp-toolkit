@@ -134,7 +134,53 @@ compilation, every module creation, and shader variants. Records include frame
 numbers, source hashes and byte counts (vertex then pixel), pipeline recipe
 hashes derived from sources/layout/state, timings and cache sizes. Matching
 recipe hashes expose recompilation across cache clears; missing source/layout
-metadata is reported as `None`.
+metadata is reported as `None`. The same flag records each drawn program's model,
+numeric opcode histogram, encoded register indices, modifiers, declarations and
+constant/texture metadata once per bytecode content, plus VS/PS content hashes
+for every draw. These inventory records contain no bytecode or WGSL. Destination
+indices describe decoded fields, including unused fields on control instructions;
+they are not inferred register capacities. A schema/build identity includes a
+fingerprint of renderer sources, manifest, lockfile and build script, target and
+profile, plus enabled device features/limits. The normal adapter startup record
+supplies backend and adapter identifiers.
+
+`observed-family` records group the existing specialized pipeline descriptors
+without shader contents or guest handles. They include resource layouts, input
+linkage, stage variant state, vertex layouts and raster/output state. Family IDs
+use content equality and remain valid across cache clears; hashes are diagnostic
+fingerprints. `draw-family` records include memoized/cache-hit draws and correlate
+families with source-based recipe hashes. These conservative observed families
+are inventory, not interpreter eligibility or the eventual interpreter family
+manifest. Current constant bank sizes and native vertex layouts can split them.
+
+Summarize a timing/inventory log without launching the renderer:
+
+```sh
+ tools/.venv/bin/python recomp-kit/tools/analyze_d3d9_trace.py build/capture.log \
+   --start 0 --count 600 > build/ubershader/report.json
+```
+
+Run from the game repository root and create the output directory first. Omit
+`--count` to include all completed frames. The report ranks families by draw
+count, lists their program pairs and attributed synchronous compile cost, and
+reports p50/p95/p99/max frame counters. Compile costs are assigned to the draw
+causing each miss, including shared modules; unattributed costs remain explicit.
+Split captures at device replacement or process boundaries. GPU timing remains
+unavailable in this trace; rendering/performance acceptance requires separate
+matched GPU measurements.
+
+Per-frame records report successful nonempty draws, CPU time inside draw
+preparation (including synchronous compilation, trace logging and any batch
+flush), geometry preparation time and packed vertex bytes. Module and pipeline
+CPU times are separate, overlapping components of draw CPU time. These records
+are neither wall-clock frame durations nor GPU timings. Geometry time includes
+input linkage/native-fetch selection as well as packing; packed bytes exclude
+native streams, indices, constants and cached geometry uploads. Separate upload
+byte counters measure cached geometry creation and staged draw batches (including
+constants, streamed geometry, indices and alignment padding), attributed to the
+frame of upload. Texture transfers are excluded. Timing traces retain observed
+program bytecode and family metadata for content equality until device destruction; use bounded
+capture sessions when measuring memory.
 
 `RECOMP_D3D9_TRACE=1` logs draw state, shader bytecode/WGSL, constant values,
 buffer hashes and decoded vertex samples. `RECOMP_D3D9_TRACE_FRAME_START=<n>`

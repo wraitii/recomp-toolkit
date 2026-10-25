@@ -12,6 +12,7 @@ use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 mod ffvs;
+mod trace;
 
 fn trace_compilation() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2018,14 +2019,14 @@ fn make_buffer(
             usage,
         })
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TextureLayout {
     depth: bool,
     filterable: bool,
     dimension: wgpu::TextureViewDimension,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum LayoutKey {
     Clear,
     Draw {
@@ -2219,6 +2220,8 @@ struct DrawMemo {
     ps_count: u32,
     modules: [wgpu::ShaderModule; 2],
     layout: wgpu::BindGroupLayout,
+    trace_interface: Option<trace::Interface>,
+    trace_pipeline: Option<(u64, u64)>,
     pipeline: Option<(
         (
             VertexLayouts,
@@ -2244,6 +2247,17 @@ pub(crate) struct D3d9DrawState {
     trace_frame_draw: u32,
     trace_total_draw: u64,
     trace_shaders: std::collections::BTreeSet<u32>,
+    trace_identity: bool,
+    observed_families: FastMap<trace::Family, u64>,
+    inventory_programs: std::collections::BTreeSet<Vec<u32>>,
+    measured_draws: u64,
+    draw_cpu_ms: f64,
+    geometry_cpu_ms: f64,
+    packed_bytes: u64,
+    geometry_upload_bytes: u64,
+    batch_upload_bytes: u64,
+    module_ms: f64,
+    pipeline_ms: f64,
     upload: Option<wgpu::Buffer>,
     bind_groups: FastMap<BindGroupKey, wgpu::BindGroup>,
     bind_group_scratch: Vec<wgpu::BindGroup>,
@@ -2281,6 +2295,28 @@ impl D3d9DrawState {
     }
 
     pub(crate) fn end_frame(&mut self) {
+        if trace_compilation() {
+            eprintln!(
+                "[d3d9-compile] frame frame={} draws={} draw_cpu_ms={:.3} geometry_cpu_ms={:.3} packed_bytes={} geometry_upload_bytes={} batch_upload_bytes={} module_ms={:.3} pipeline_ms={:.3}",
+                self.frame,
+                self.measured_draws,
+                self.draw_cpu_ms,
+                self.geometry_cpu_ms,
+                self.packed_bytes,
+                self.geometry_upload_bytes,
+                self.batch_upload_bytes,
+                self.module_ms,
+                self.pipeline_ms
+            );
+        }
+        self.measured_draws = 0;
+        self.draw_cpu_ms = 0.0;
+        self.geometry_cpu_ms = 0.0;
+        self.packed_bytes = 0;
+        self.geometry_upload_bytes = 0;
+        self.batch_upload_bytes = 0;
+        self.module_ms = 0.0;
+        self.pipeline_ms = 0.0;
         self.frame += 1;
         self.trace_frame_draw = 0;
     }
@@ -2358,6 +2394,9 @@ impl D3d9DrawState {
                 wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::INDEX,
             ))
         })?;
+        if trace_compilation() {
+            self.geometry_upload_bytes += bytes.len() as u64;
+        }
         self.geometry.insert(
             key,
             CachedGeometry {
@@ -2449,6 +2488,7 @@ impl D3d9DrawState {
                 }))
         })?;
         let ms = started.elapsed().as_secs_f64() * 1000.0;
+        self.module_ms += ms;
         if trace_compilation() || ms >= 50.0 {
             eprintln!(
                 "[d3d9-compile] module frame={} source={:016x} bytes={} ms={ms:.3}",
@@ -2513,26 +2553,7 @@ impl D3d9DrawState {
         gpu: &D3d9Gpu,
         key: PipelineKey,
     ) -> Result<wgpu::RenderPipeline, RenderError> {
-        let sources = key.modules.each_ref().map(|module| {
-            self.shaders
-                .iter()
-                .find(|(_, cached)| *cached == module)
-                .map(|(source, _)| (fingerprint(source), source.len()))
-        });
-        let layout = self
-            .layouts
-            .iter()
-            .find(|(_, cached)| *cached == &key.layout)
-            .map(|(layout, _)| fingerprint(layout));
-        let recipe = fingerprint(&(
-            sources,
-            layout,
-            &key.buffers,
-            &key.target,
-            key.primitive,
-            &key.depth,
-            key.multisample,
-        ));
+        let (recipe, sources, layout) = trace::recipe(self, &key);
         if trace_compilation() {
             eprintln!(
                 "[d3d9-compile] pipeline-begin frame={} recipe={recipe:016x} sources={sources:x?} layout={layout:x?} cached={}",
@@ -2543,6 +2564,7 @@ impl D3d9DrawState {
         let started = Instant::now();
         let result = gpu.validate("Draw", || Ok(self.create_pipeline(gpu, key.clone())));
         let ms = started.elapsed().as_secs_f64() * 1000.0;
+        self.pipeline_ms += ms;
         if trace_compilation() || ms >= 50.0 || result.is_err() {
             eprintln!(
                 "[d3d9-compile] pipeline-end frame={} recipe={recipe:016x} sources={sources:x?} layout={layout:x?} ms={ms:.3} ok={} cached={} buffers={:016x} vertex_layouts={:?} target={:?} primitive={:?} depth={:?} multisample={:?}",
@@ -2885,6 +2907,7 @@ fn resolve_shading(
     } else {
         fixed_function_key(false, state, &snapshot.textures)
     };
+    let trace_vertex = trace_compilation().then(|| trace::stage(&vertex_key));
     let vertex_source = draw.source(vertex_key, || {
         let source = if let Some(v) = vs {
             translated_source(&v.program, state, &snapshot.textures, raw_inputs)?
@@ -2906,6 +2929,7 @@ fn resolve_shading(
     } else {
         fixed_function_key(true, state, &snapshot.textures)
     };
+    let trace_pixel = trace_compilation().then(|| trace::stage(&pixel_key));
     let pixel_source = draw.source(pixel_key, || {
         let source = if let Some(p) = ps {
             translated_source(&p.program, state, &snapshot.textures, 0)?
@@ -2979,14 +3003,27 @@ fn resolve_shading(
             dimension: texture_dimension(t),
         });
     }
-    let layout = draw.layout(
-        gpu,
-        LayoutKey::Draw {
-            vs: vs_count,
-            ps: ps_count,
-            textures: texture_layouts,
-        },
-    )?;
+    let layout_key = LayoutKey::Draw {
+        vs: vs_count,
+        ps: ps_count,
+        textures: texture_layouts,
+    };
+    let layout = draw.layout(gpu, layout_key)?;
+    let trace_interface = trace_vertex
+        .zip(trace_pixel)
+        .map(|(vertex, pixel)| trace::Interface {
+            stages: [vertex, pixel],
+            layout: layout_key,
+            inputs: vs
+                .map(|v| {
+                    v.program
+                        .inputs
+                        .iter()
+                        .map(|i| (i.usage, i.usage_index, i.ty, i.index))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        });
     Ok(Box::new(DrawMemo {
         fingerprint: state.pipeline_fingerprint(),
         ff_key,
@@ -3002,6 +3039,8 @@ fn resolve_shading(
             draw.variant_shader(gpu, &pixel_source)?,
         ],
         layout,
+        trace_interface,
+        trace_pipeline: None,
         pipeline: None,
     }))
 }
@@ -3035,6 +3074,16 @@ pub(crate) fn execute(
     objects: &super::shader::D3d9Objects,
     snapshot: &DrawSnapshot,
 ) -> Result<(), RenderError> {
+    let draw_started = trace_compilation().then(Instant::now);
+    if trace_compilation() && !draw.trace_identity {
+        eprintln!(
+            "[d3d9-compile] identity schema=1 build={} limits={:?} features={:?}",
+            env!("RECOMP_RENDERER_BUILD"),
+            gpu.limits(),
+            gpu.features()
+        );
+        draw.trace_identity = true;
+    }
     if snapshot.command.primitive_count == 0 {
         return Ok(());
     }
@@ -3085,6 +3134,60 @@ pub(crate) fn execute(
     } else {
         Some(objects.shader(true, state.shader(true))?)
     };
+    if trace_compilation() {
+        for shader in [vs, ps].into_iter().flatten() {
+            if !draw.inventory_programs.contains(shader.code.as_slice()) {
+                draw.inventory_programs.insert(shader.code.clone());
+                let p = &shader.program;
+                let mut opcodes = std::collections::BTreeMap::<u32, u32>::new();
+                let mut reads = std::collections::BTreeMap::<u32, u32>::new();
+                let mut writes = std::collections::BTreeMap::<u32, u32>::new();
+                let mut modifiers = std::collections::BTreeSet::new();
+                let mut shifts = std::collections::BTreeSet::new();
+                let mut controls = std::collections::BTreeSet::new();
+                for inst in &p.code {
+                    *opcodes.entry(inst.op).or_default() += 1;
+                    shifts.insert(inst.dst.shift);
+                    controls.insert((inst.op, inst.ctrl));
+                    for src in &inst.src[..inst.nsrc as usize] {
+                        reads
+                            .entry(src.ty)
+                            .and_modify(|n| *n = (*n).max(src.index))
+                            .or_insert(src.index);
+                        modifiers.insert(src.md);
+                    }
+                    writes
+                        .entry(inst.dst.ty)
+                        .and_modify(|n| *n = (*n).max(inst.dst.index))
+                        .or_insert(inst.dst.index);
+                }
+                eprintln!(
+                    "[d3d9-compile] program code={:016x} model={} words={} instructions={} opcodes={opcodes:?} source_max_indices={reads:?} encoded_dst_max_indices={writes:?} modifiers={modifiers:?} shifts={shifts:?} controls={controls:?} saturate={} coissue={} relative={} inputs={:?} samplers={:?} float_bank={} defs={} idefs={} bdefs={}",
+                    fingerprint(&shader.code),
+                    p.version(),
+                    shader.code.len(),
+                    p.code.len(),
+                    p.code.iter().any(|i| i.dst.saturate),
+                    p.code.iter().any(|i| i.coissue),
+                    p.relative,
+                    p.inputs,
+                    p.samplers,
+                    p.const_limit(),
+                    p.defs.len(),
+                    p.idefs.len(),
+                    p.bdefs.len()
+                );
+            }
+        }
+        eprintln!(
+            "[d3d9-compile] draw-programs frame={} draw={} vs={:016x?} ps={:016x?}",
+            draw.frame,
+            draw.measured_draws,
+            vs.map(|s| fingerprint(&s.code)),
+            ps.map(|s| fingerprint(&s.code))
+        );
+    }
+    let geometry_started = trace_compilation().then(Instant::now);
     let mut linked_inputs = std::mem::take(&mut draw.linked);
     let mut ff_uniforms = std::mem::take(&mut draw.ff_uniforms);
     let ff_key = if vs.is_none() {
@@ -3150,6 +3253,10 @@ pub(crate) fn execute(
             };
             (None, vertices, order, draw_indices, topology)
         };
+    if let Some(started) = geometry_started {
+        draw.geometry_cpu_ms += started.elapsed().as_secs_f64() * 1000.0;
+        draw.packed_bytes += vertices.bytes.len() as u64;
+    }
     let trace_this = super::trace_enabled()
         && trace_selected(draw.frame, draw.trace_frame_draw, draw.trace_total_draw);
     let count = draw.trace_total_draw;
@@ -3486,32 +3593,40 @@ pub(crate) fn execute(
                 blend: blend_state(state, opaque_format(snapshot.target.format))?,
                 write_mask: wgpu::ColorWrites::from_bits_truncate(rs(state, 168)),
             };
-            let pipeline = draw.pipeline(
-                gpu,
-                PipelineKey {
-                    modules: memo.modules.clone(),
-                    layout: memo.layout.clone(),
-                    buffers: buffers.clone(),
-                    target: Some(target),
-                    primitive: wgpu::PrimitiveState {
-                        topology,
-                        strip_index_format,
-                        front_face: wgpu::FrontFace::Cw,
-                        cull_mode: cull,
-                        polygon_mode: fill_mode(gpu, state)?,
-                        ..Default::default()
-                    },
-                    depth: depth_state(state, snapshot.depth.as_ref())?,
-                    multisample: wgpu::MultisampleState {
-                        mask: u64::from(rs(state, 162)),
-                        ..Default::default()
-                    },
+            let key = PipelineKey {
+                modules: memo.modules.clone(),
+                layout: memo.layout.clone(),
+                buffers: buffers.clone(),
+                target: Some(target),
+                primitive: wgpu::PrimitiveState {
+                    topology,
+                    strip_index_format,
+                    front_face: wgpu::FrontFace::Cw,
+                    cull_mode: cull,
+                    polygon_mode: fill_mode(gpu, state)?,
+                    ..Default::default()
                 },
-            )?;
+                depth: depth_state(state, snapshot.depth.as_ref())?,
+                multisample: wgpu::MultisampleState {
+                    mask: u64::from(rs(state, 162)),
+                    ..Default::default()
+                },
+            };
+            if let Some(interface) = &memo.trace_interface {
+                let family = trace::observe(draw, interface, &key);
+                memo.trace_pipeline = Some((family, trace::recipe(draw, &key).0));
+            }
+            let pipeline = draw.pipeline(gpu, key)?;
             memo.pipeline = Some(((buffers, topology, strip_index_format), pipeline.clone()));
             pipeline
         }
     };
+    if let Some((family, recipe)) = memo.trace_pipeline {
+        eprintln!(
+            "[d3d9-compile] draw-family frame={} draw={} family={family} recipe={recipe:016x}",
+            draw.frame, draw.measured_draws
+        );
+    }
     if draw
         .batch
         .color_key_view
@@ -3794,6 +3909,10 @@ pub(crate) fn execute(
     draw.ff_uniforms = ff_uniforms;
     if draw.batch.data.len() >= 32 << 20 {
         flush(gpu, draw, queries)?;
+    }
+    if let Some(started) = draw_started {
+        draw.measured_draws += 1;
+        draw.draw_cpu_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
     if trace_this && trace_readback() {
         flush(gpu, draw, queries)?;
@@ -4124,6 +4243,9 @@ fn flush_inner(
             }
         },
     );
+    if trace_compilation() {
+        draw.batch_upload_bytes += needed;
+    }
     bind_groups.clear();
     draw.bind_group_scratch = bind_groups;
     draw.batch.draws.clear();
