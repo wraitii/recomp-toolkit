@@ -2,7 +2,7 @@
 
 The opt-in interpreter implements a bounded SM2 VS/PS family; Spore rendering,
 native Metal compilation and GPU performance still require user-run validation.
-`src/shader/uber/` defines ABI v4 / interpreter v5. A program is 5136 bytes:
+`src/shader/uber/` defines ABI v4 / interpreter v8. A program is 5136 bytes:
 a four-u32 header (ABI version, pixel flag, instruction count, definition count),
 64 zero-padded 16-u32 instruction records and 32 definition records (index/padding
 and float bits). Opcode bits 8–10 mark immediate sources and bit 16 selects projected TEX; source records
@@ -13,17 +13,22 @@ version identifies program data; capacity overflow is excluded.
 Admitted arithmetic is MOV/ADD/MUL/MAD/DP3/DP4/RCP/RSQ/MIN/MAX/SLT/LRP/CMP/
 NRM/FRC, plus vertex MOVA and ordinary/projected pixel TEX through 2D s0.
 Capacities are eight temporaries, 64 instructions, 32 float DEFs, 256/32 float
-constants, vertex oPos/oD0–1/oT0–1/a0, pixel v0–1/t0–1 and oC0. Up to five
+constants, vertex oPos/oD0–1/oT0–2/a0, pixel v0–1/t0–2 and oC0. Up to five
 consecutive vertex inputs admit position, normal, color0/1, UV0 and blend
 indices/weights. Source swizzles, negation and destination
 masks are supported. MOVA rounds using the existing specializer's nearest-integer
 helper. Relative vertex constants use the selected a0 component and the same
 clamped index as specialization; shader DEFs override device constants even for
 relative reads. Direct DEF reads become immediate bits. TEX requires unmodified,
-identity-swizzled t0–1 or temporary coordinates and s0, a temporary destination and
-full mask. Integer/bool definitions, other modifiers, shifts, pixel relative
+identity-swizzled t0–2 or temporary coordinates and s0, a temporary destination and
+full mask. Pixel partial-precision hints on instructions/declarations execute
+at full precision, as permitted by [D3D9](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx9-graphics-reference-asm-ps-instructions-modifiers-ps-2-0) and matching specialization.
+Integer/bool definitions, other modifiers, shifts, pixel relative
 addressing, flow control, coissue and other models/registers/samplers remain
-excluded. Specialization remains unchanged.
+excluded. TEXKILL accepts full-mask temporary or t0–2 operands and records any negative
+component (all four for SM2, matching specialization and vkd3d). Its destination
+record marks no write; its operand is encoded as an identity-swizzled source.
+Specialization remains unchanged.
 
 All families use five Float32x4 attributes (80-byte stride), existing 42-component
 varyings, smooth interpolation, CW triangles and one sample. Shorter declarations
@@ -50,14 +55,16 @@ Prepared module/pipeline ownership follows the device. Queued draws and bindings
 retain their program buffers; reset clears program uploads and replacement devices
 prepare the selected manifest. Specialization cache eviction retains interpreter residency.
 
-Fragment instruction slots are expanded at build time. Each instruction count
-and opcode comes directly from uniform program data, without a mutable fragment
-program counter or early discard. Sampling remains implicit; alpha discard occurs
+Both stages execute a bounded loop through uniform instruction data, with a
+draw-uniform instruction index and a maximum of 64 admitted instructions. Guest
+flow control remains excluded. TEXKILL accumulates a sticky kill flag at its
+instruction position; discard occurs after all instruction slots, preserving
+implicit sampling derivatives. Sampling remains implicit; alpha discard occurs
 after instruction execution. The build validates the generated WGSL with all Naga
 30 validation flags, verifies uploaded ABI layouts and translates both entry
 points to Metal with real binding maps. No derivative diagnostic is suppressed
 and no fixed LOD is substituted. Native compiler acceptance, rendering agreement,
-two-program switching and execution cost remain capture gates.
+gameplay agreement and execution cost remain capture gates.
 Semantic references: Microsoft's [MOVA](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/mova---vs),
 [FRC](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/frc---vs), [DP4](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dp4---vs),
 [TEXLD](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/texld---ps-2-0),

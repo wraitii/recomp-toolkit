@@ -15,3 +15,4 @@ pub(crate) const OP_SLT: u32 = 12;
 pub(crate) const OP_LRP: u32 = 18;
 pub(crate) const OP_NRM: u32 = 36;
 pub(crate) const OP_CMP: u32 = 88;
+pub(crate) const OP_TEXKILL: u32 = 65;

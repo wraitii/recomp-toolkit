@@ -3,9 +3,7 @@ use crate::uber_abi::*;
 
 pub fn source() -> String {
     let mut source = format!(
-        "const ABI_VERSION: u32 = {ABI_VERSION}u;\n\
-         const INTERPRETER_VERSION: u32 = {INTERPRETER_VERSION}u;\n\
-         struct Instruction {{ dst: vec4<u32>, a: vec4<u32>, b: vec4<u32>, c: vec4<u32> }}\n\
+        "struct Instruction {{ dst: vec4<u32>, a: vec4<u32>, b: vec4<u32>, c: vec4<u32> }}\n\
          struct Definition {{ index: vec4<u32>, value: vec4<f32> }}\n\
          struct Program {{ header: vec4<u32>, code: array<Instruction, {MAX_INSTRUCTIONS}>, definitions: array<Definition, {MAX_DEFINITIONS}> }}\n\
          struct VSP {{ halfpix: vec4<f32>, ascale: array<vec4<f32>, 16> }}\n\
@@ -19,7 +17,7 @@ pub fn source() -> String {
          @group(0) @binding(20) var sm0: sampler;\n\
          @group(0) @binding({}) var<uniform> vp: Program;\n\
          @group(0) @binding({}) var<uniform> pp: Program;\n\
-         struct Registers {{ temp: array<vec4<f32>, {TEMP_REGISTERS}>, input: array<vec4<f32>, {VERTEX_INPUTS}>, pos: vec4<f32>, color: array<vec4<f32>, 2>, address: vec4<f32>, tex: array<vec4<f32>, 2> }}\n",
+         struct Registers {{ temp: array<vec4<f32>, {TEMP_REGISTERS}>, input: array<vec4<f32>, {VERTEX_INPUTS}>, pos: vec4<f32>, color: array<vec4<f32>, 2>, address: vec4<f32>, tex: array<vec4<f32>, {TEXTURE_COORDINATES}> }}\n",
         PROGRAM_BINDINGS[0], PROGRAM_BINDINGS[1]
     );
     source += r#"
@@ -91,10 +89,9 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
     r.input[3] = v.v3 * vsp.ascale[3];
     r.input[4] = v.v4 * vsp.ascale[4];
 "#;
-    for index in 0..MAX_INSTRUCTIONS {
-        source += &format!(
-            "if (vp.header.z > {index}u) {{\n\
-             let i = vp.code[{index}];\n\
+    source += &format!(
+        "for (var index = 0u; index < min(vp.header.z, {MAX_INSTRUCTIONS}u); index++) {{\n\
+             let i = vp.code[index];\n\
              let a = vertex_read(i.a, r, (i.dst.x & {}u) != 0u); let b = vertex_read(i.b, r, (i.dst.x & {}u) != 0u); let c = vertex_read(i.c, r, (i.dst.x & {}u) != 0u);\n\
              var value = a;\n\
              switch (i.dst.x & {OPCODE_MASK}u) {{\n\
@@ -118,11 +115,10 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
              }}\n\
              vertex_write(&r, i.dst, value);\n\
              }}\n",
-            1u32 << IMMEDIATE_SOURCE_SHIFT,
-            1u32 << (IMMEDIATE_SOURCE_SHIFT + 1),
-            1u32 << (IMMEDIATE_SOURCE_SHIFT + 2),
-        );
-    }
+        1u32 << IMMEDIATE_SOURCE_SHIFT,
+        1u32 << (IMMEDIATE_SOURCE_SHIFT + 1),
+        1u32 << (IMMEDIATE_SOURCE_SHIFT + 2),
+    );
     source += r#"
     var o: V2F;
     o.pos = vec4<f32>(r.pos.xy + vsp.halfpix.xy * r.pos.w, r.pos.zw);
@@ -130,6 +126,7 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
     o.d1 = r.color[1];
     o.t0 = r.tex[0];
     o.t1 = r.tex[1];
+    o.t2 = r.tex[2];
     o.fog = 1.0;
     o.fogz = r.pos.z;
     return o;
@@ -140,14 +137,16 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
     r.input[1] = v.d1;
     r.tex[0] = v.t0;
     r.tex[1] = v.t1;
+    r.tex[2] = v.t2;
+    var killed = false;
 "#;
-    for index in 0..MAX_INSTRUCTIONS {
-        source += &format!(
-            "if (pp.header.z > {index}u) {{\n\
-             let i = pp.code[{index}];\n\
+    source += &format!(
+        "for (var index = 0u; index < min(pp.header.z, {MAX_INSTRUCTIONS}u); index++) {{\n\
+             let i = pp.code[index];\n\
              let a = pixel_read(i.a, r, (i.dst.x & {}u) != 0u); let b = pixel_read(i.b, r, (i.dst.x & {}u) != 0u); let c = pixel_read(i.c, r, (i.dst.x & {}u) != 0u);\n\
              var value = a;\n\
              switch (i.dst.x & {OPCODE_MASK}u) {{\n\
+             case {OP_TEXKILL}u: {{ killed = killed || any(a < vec4<f32>(0.0)); }}\n\
              case {OP_MOV}u: {{}}\n\
              case {OP_FRC}u: {{ value = fract(a); }}\n\
              case {OP_ADD}u: {{ value = a + b; }}\n\
@@ -168,12 +167,12 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
              }}\n\
              pixel_write(&r, i.dst, value);\n\
              }}\n",
-            1u32 << IMMEDIATE_SOURCE_SHIFT,
-            1u32 << (IMMEDIATE_SOURCE_SHIFT + 1),
-            1u32 << (IMMEDIATE_SOURCE_SHIFT + 2),
-        );
-    }
-    source += "let col = d9_output(r.color[0], v);\n\
+        1u32 << IMMEDIATE_SOURCE_SHIFT,
+        1u32 << (IMMEDIATE_SOURCE_SHIFT + 1),
+        1u32 << (IMMEDIATE_SOURCE_SHIFT + 2),
+    );
+    source += "if (killed) { discard; }\n\
+        let col = d9_output(r.color[0], v);\n\
         if (psp.texture_flags.y != 0u) { return vec4<f32>(mix(col.rgb, vec3<f32>(1.0, 0.0, 0.0), 0.15), col.a); }\n\
         return col;\n}\n";
     source += include_str!("../raster.wgsl");

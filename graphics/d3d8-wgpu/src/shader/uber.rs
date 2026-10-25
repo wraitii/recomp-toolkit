@@ -87,7 +87,7 @@ pub(crate) fn interface_candidate(p: &Program) -> bool {
         (p.samplers.is_empty() || (p.samplers.len() == 1 && p.samplers.get(&0) == Some(&2)))
             && p.inputs.iter().all(|d| match d.ty {
                 R_INPUT => d.index < 2,
-                R_ADDR => d.index < 2,
+                R_ADDR => d.index < TEXTURE_COORDINATES,
                 _ => false,
             })
     } else {
@@ -128,7 +128,8 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
     {
         return Err(Exclusion::Definitions);
     }
-    if !interface_candidate(p) || p.declaration_modifiers != 0 {
+    let allowed_modifiers = if p.pixel { 2 } else { 0 };
+    if !interface_candidate(p) || p.declaration_modifiers & !allowed_modifiers != 0 {
         return Err(Exclusion::Declarations);
     }
     let mut requirements = Requirements::default();
@@ -143,6 +144,7 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
         let expected = match inst.op {
             OP_MOV | OP_FRC | OP_RCP | OP_RSQ | OP_NRM => 1,
             OP_MOVA if !p.pixel => 1,
+            OP_TEXKILL if p.pixel => 1,
             OP_MAD | OP_LRP | OP_CMP => 3,
             OP_MUL | OP_ADD | OP_DP3 | OP_DP4 | OP_MIN | OP_MAX | OP_SLT => 2,
             OP_TEX if p.pixel => 2,
@@ -159,6 +161,33 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
         if inst.nsrc != expected {
             return Err(Exclusion::SourceCount { instruction });
         }
+        if inst.op == OP_TEXKILL {
+            let s = inst.src[0];
+            match s.ty {
+                R_TEMP if s.index < TEMP_REGISTERS => {
+                    requirements.temporaries = requirements.temporaries.max(s.index + 1);
+                }
+                R_ADDR if s.index < TEXTURE_COORDINATES => {
+                    requirements.texture_coordinates =
+                        requirements.texture_coordinates.max(s.index + 1);
+                }
+                _ => {
+                    return Err(Exclusion::Source {
+                        instruction,
+                        operand: 0,
+                    });
+                }
+            }
+            if s.rel || s.md != 0 || s.swz != 15 {
+                return Err(Exclusion::Source {
+                    instruction,
+                    operand: 0,
+                });
+            }
+            words.extend([OP_TEXKILL, u32::MAX, 0, 0, s.ty, s.index, 0xe4, 0]);
+            words.extend([0; 8]);
+            continue;
+        }
         let d = inst.dst;
         let destination = match d.ty {
             R_TEMP if d.index < TEMP_REGISTERS => {
@@ -167,7 +196,7 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
             }
             R_COLOROUT => p.pixel && d.index == 0 && inst.op != OP_TEX,
             R_RASTOUT => !p.pixel && d.index == 0,
-            R_TEXCRDOUT => !p.pixel && d.index < 2,
+            R_TEXCRDOUT => !p.pixel && d.index < TEXTURE_COORDINATES,
             R_ATTROUT => !p.pixel && d.index < 2,
             R_ADDR => !p.pixel && d.index == 0 && inst.op == OP_MOVA,
             _ => false,
@@ -176,7 +205,7 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
             || (inst.op == OP_MOVA && d.ty != R_ADDR)
             || d.mask == 0
             || d.mask > 15
-            || d.modifiers != 0
+            || d.modifiers & !allowed_modifiers != 0
             || d.shift != 0
             || (inst.op == OP_TEX && d.mask != 15)
         {
@@ -222,7 +251,7 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                     });
                     true
                 }
-                R_ADDR if p.pixel && s.index < 2 => {
+                R_ADDR if p.pixel && s.index < TEXTURE_COORDINATES => {
                     requirements.texture_coordinates =
                         requirements.texture_coordinates.max(s.index + 1);
                     true

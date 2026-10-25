@@ -45,7 +45,6 @@ pub(crate) const OP_SINCOS: u32 = 37;
 pub(crate) const OP_DEFB: u32 = 47;
 pub(crate) const OP_DEFI: u32 = 48;
 pub(crate) const OP_TEXCOORD: u32 = 64;
-pub(crate) const OP_TEXKILL: u32 = 65;
 pub(crate) const OP_TEXREG2AR: u32 = 69;
 pub(crate) const OP_TEXREG2GB: u32 = 70;
 pub(crate) const OP_EXPP: u32 = 78;
