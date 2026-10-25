@@ -53,6 +53,7 @@ bool win32_signal_event(uint32_t handle, bool pulse);
 // and close like one CreateEventA returned.
 uint32_t win32_create_event(bool manual_reset, bool signalled);
 bool win32_reset_event(uint32_t handle);
+bool win32_close_event(uint32_t handle);
 uint32_t get_last_error();
 
 // DirectDraw supplies the current accepted mode when linked. The runtime-only
@@ -435,6 +436,10 @@ uint32_t user32_message_box_show(X86 *c, uint32_t owner, const std::string &titl
 // answers from the current state, taking what it reports as Windows does.
 uint32_t guest_wait_objects(const uint32_t *handles, uint32_t count, bool wait_all,
                             uint32_t timeout_ms);
+// WaitForMultipleObjectsEx: as above, and an alertable wait delivers queued
+// APCs and reports WAIT_IO_COMPLETION (0xc0).
+uint32_t guest_wait_objects_ex(X86 *c, const uint32_t *handles, uint32_t count, bool wait_all,
+                               uint32_t timeout_ms, bool alertable);
 // Hands the baton to whatever else can run and takes it back; false means
 // nothing else could have run. A host that blocks inside a callback the guest
 // made - a message waiter, most obviously - must yield rather than spin or

@@ -1623,33 +1623,48 @@ void w_WSARecvFrom(X86 *c) {
     wsa_call_failed(c, "WSARecvFrom", WSAENETDOWN_);
 }
 
-// Event and overlapped results are not sockets: WSACreateEvent returns
-// WSA_INVALID_EVENT and the rest report FALSE or WSA_WAIT_FAILED.
+// WS2_32 events are kernel events: manual-reset, created unsignalled. They work
+// without a network host, so a guest that waits on one times out or is woken by
+// its own WSASetEvent as on Windows. The WSA error mirrors the Win32 one.
+void wsa_event_result(X86 *c, bool ok) {
+    if (!ok)
+        g_wsa_last_error = 6; // WSA_INVALID_HANDLE
+    set_eax(c, ok);
+}
 void w_WSACreateEvent(X86 *c) {
-    log_once("WSACreateEvent",
-             "WS2_32!WSACreateEvent: no network host; WSA_INVALID_EVENT, WSAGetLastError=%d",
-             WSAENETDOWN_);
-    g_wsa_last_error = WSAENETDOWN_;
-    set_eax(c, 0);
+    set_eax(c, win32_create_event(true, false));
 }
 void w_WSACloseEvent(X86 *c) {
-    log_once("WSACloseEvent", "WS2_32!WSACloseEvent: no network host; FALSE");
-    g_wsa_last_error = WSAENETDOWN_;
-    set_eax(c, 0);
+    wsa_event_result(c, win32_close_event(arg(c, 0)));
 }
 void w_WSASetEvent(X86 *c) {
-    g_wsa_last_error = WSAENETDOWN_;
-    set_eax(c, 0);
+    wsa_event_result(c, win32_signal_event(arg(c, 0), false));
 }
 void w_WSAResetEvent(X86 *c) {
-    g_wsa_last_error = WSAENETDOWN_;
-    set_eax(c, 0);
+    wsa_event_result(c, win32_reset_event(arg(c, 0)));
 }
 void w_WSAWaitForMultipleEvents(X86 *c) {
-    log_once("WSAWaitForMultipleEvents",
-             "WS2_32!WSAWaitForMultipleEvents: no network host; WSA_WAIT_FAILED");
-    g_wsa_last_error = WSAENETDOWN_;
-    set_eax(c, 0xffffffffu); // WSA_WAIT_FAILED
+    uint32_t count = arg(c, 0), events = arg(c, 1);
+    bool wait_all = arg(c, 2) != 0;
+    uint32_t timeout = arg(c, 3);
+    bool alertable = arg(c, 4) != 0;
+    if (!count || count > 64) {
+        g_wsa_last_error = 87; // WSA_INVALID_PARAMETER
+        set_eax(c, 0xffffffffu); // WSA_WAIT_FAILED
+        return;
+    }
+    if (!events || !gm_valid(events, 4 * count)) {
+        g_wsa_last_error = WSAEFAULT_;
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    uint32_t handles[64];
+    for (uint32_t i = 0; i < count; ++i)
+        handles[i] = rd32(events + 4 * i);
+    uint32_t result = guest_wait_objects_ex(c, handles, count, wait_all, timeout, alertable);
+    if (result == 0xffffffffu)
+        g_wsa_last_error = (int)get_last_error();
+    set_eax(c, result);
 }
 void w_WSAGetOverlappedResult(X86 *c) {
     g_wsa_last_error = WSAENETDOWN_;

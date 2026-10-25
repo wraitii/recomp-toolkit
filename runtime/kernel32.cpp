@@ -643,6 +643,15 @@ bool win32_reset_event(uint32_t handle) {
     return true;
 }
 
+bool win32_close_event(uint32_t handle) {
+    HObj *o = handle_get(handle, H_EVENT);
+    if (!o)
+        return false;
+    if (!--o->references)
+        handles().erase(handle);
+    return true;
+}
+
 bool win32_signal_event(uint32_t handle, bool pulse) {
     HObj *o = handle_get(handle, H_EVENT);
     if (!o)
@@ -3390,6 +3399,10 @@ void guest_sleep_ms(uint32_t ms) {
 uint32_t guest_wait_objects(const uint32_t *handles, uint32_t count, bool wait_all,
                             uint32_t timeout_ms) {
     return sched_wait_objects(handles, count, wait_all, timeout_ms);
+}
+uint32_t guest_wait_objects_ex(X86 *c, const uint32_t *handles, uint32_t count, bool wait_all,
+                               uint32_t timeout_ms, bool alertable) {
+    return sched_wait_objects_ex(c, handles, count, wait_all, timeout_ms, alertable);
 }
 
 // Installs what the run thread does instead of parking in the scheduler. See
