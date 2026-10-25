@@ -31,6 +31,13 @@ impl Relations {
         Address::Unknown
     }
 
+    pub fn offset_of(&self, outer: Range, inner: Range) -> Option<u32> {
+        outer.offset_of(inner).or_else(|| {
+            Range::new(self.bounds(outer.address), outer.size)
+                .offset_of(Range::new(self.bounds(inner.address), inner.size))
+        })
+    }
+
     pub fn disjoint(&self, left: Range, right: Range) -> bool {
         if left.disjoint(right) {
             return true;
@@ -610,9 +617,17 @@ impl<'a> Addresses<'a> {
                     Op::P(OpCode::Store) => {
                         let at = self.get(inputs[1]);
                         let size = u32::from(self.ssa.value(inputs[2]).size);
-                        if size == 4 && at == address {
+                        if size == 4
+                            && self
+                                .relations
+                                .offset_of(Range::new(at, size), Range::new(address, 4))
+                                == Some(0)
+                        {
                             self.get(inputs[2])
-                        } else if Range::new(at, size).disjoint(Range::new(address, 4)) {
+                        } else if self
+                            .relations
+                            .disjoint(Range::new(at, size), Range::new(address, 4))
+                        {
                             self.memory_value(inputs[0], address, active, depth + 1)
                         } else {
                             Address::Unknown

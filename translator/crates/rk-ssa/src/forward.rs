@@ -6,7 +6,7 @@ use rk_core::{Lookup, LookupSet};
 use rk_ir::x87::{MemoryEffect, X87Op};
 use rk_ir::Op;
 
-use crate::address::Addresses;
+use crate::address::{Addresses, Relations};
 use crate::canonical::{canonicalize, rewrite_aliases};
 use crate::{CallFacts, Ssa, ValueId};
 
@@ -286,6 +286,7 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
             }
         }
     }
+    let relations = addresses.relations;
     let owners: Lookup<ValueId, usize> = s
         .blocks
         .iter()
@@ -300,6 +301,7 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
         let mut projection = Values {
             s,
             locations: &locations,
+            relations: &relations,
             owners: &owners,
             target: Range::new(target, u32::from(width)),
             load,
@@ -412,6 +414,7 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
 struct Values<'a> {
     s: &'a mut Ssa,
     locations: &'a Lookup<ValueId, Address>,
+    relations: &'a Relations,
     owners: &'a Lookup<ValueId, usize>,
     target: Range,
     load: ValueId,
@@ -471,27 +474,10 @@ impl Values<'_> {
                             effect
                         };
                         let part = self.locations.get(&effect).and_then(|&address| {
-                            let Address::Known {
-                                base,
-                                offset,
-                                span: 0,
-                            } = address
-                            else {
-                                return None;
-                            };
-                            let Address::Known {
-                                base: target_base,
-                                offset: target_offset,
-                                span: 0,
-                            } = self.target.address
-                            else {
-                                return None;
-                            };
-                            let offset = target_offset.wrapping_sub(offset);
-                            (base == target_base
-                                && offset.checked_add(self.target.size)?
-                                    <= u32::from(self.s.value(candidate).size))
-                            .then_some(offset)
+                            self.relations.offset_of(
+                                Range::new(address, u32::from(self.s.value(candidate).size)),
+                                self.target,
+                            )
                         });
                         if let Some(offset) = part {
                             self.anchored |= candidate != self.load;

@@ -185,12 +185,14 @@ of the frame; proved callee ranges can narrow exposure and include negative acce
 Each exempted write needs a proved current ESP below the entire negative-offset
 slot; arguments and the return address remain conservative. Forwarding retains
 guest stores, and original-code analysis summaries do not use this assumption.
+With relaxed fault state, eligible x87 accesses split into rounded value and memory
+effects independently of lazy writes, preserving pop, status and ESP provenance.
+Loads can forward contained slices of wider values; dead-store elimination also
+recognizes earlier stores fully covered by a later exact write.
 
 `[translate] lazy_stack_writes` defaults to true when the private-stack assumption
 is enabled, fault state is relaxed, and store hooks are disabled. Exact negative
-frame slots carry pending values through ordinary SSA phis. Eligible x87 stores
-produce rounded bits and retain ESP provenance while preserving their pop and status effects;
-local loads forward those bits, including contained slices of wider values, through memory SSA. A backward pass keeps
+frame slots carry pending values through ordinary SSA phis. A backward pass keeps
 a store eager unless it can be overwritten across an access separated by the
 private-stack assumption. Proved direct calls retain disjoint pending slots on
 their ordinary path. Preparation consumes checkpoint credit only when accepted;

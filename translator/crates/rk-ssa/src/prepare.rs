@@ -140,7 +140,7 @@ fn prepare_using(
         .and_then(|_| crate::memory::dump_stack(&ssa, opts.call_facts, *out))
         .map_err(|error| rk_core::Error::io("stack dump", error))?;
     }
-    if lazy_stack_writes {
+    if ssa.assume_private_stack && opts.fault_state == FaultState::Relaxed {
         crate::stack::split_x87(&mut ssa, opts.call_facts);
     }
     forward(&mut ssa, Some(opts.call_facts));

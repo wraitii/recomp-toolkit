@@ -103,6 +103,7 @@ struct Emitter<'a> {
     stack_state: bool,
     skipped_writes: BTreeSet<ValueId>,
     call_writes: BTreeMap<ValueId, Vec<ValueId>>,
+    call_refreshes: BTreeMap<ValueId, Vec<ValueId>>,
     value_block: Vec<u32>,
     successors: Vec<Vec<usize>>,
     transfers: Transfers,
@@ -233,10 +234,19 @@ impl<'a> Emitter<'a> {
         let mut materialized = vec![false; s.values.len()];
         let mut value_block = vec![0u32; s.values.len()];
         let mut successors = vec![Vec::new(); s.blocks.len()];
+        let mut call_refreshes: BTreeMap<ValueId, Vec<ValueId>> = BTreeMap::new();
         for (index, block) in s.blocks.iter().enumerate() {
             for value in block.phis.iter().chain(block.ops.iter()) {
                 materialized[*value as usize] = true;
                 value_block[*value as usize] = index as u32;
+                if matches!(s.value(*value).op, Op::StackRefresh { .. })
+                    && plan.live.contains(value)
+                {
+                    call_refreshes
+                        .entry(s.args(*value)[0])
+                        .or_default()
+                        .push(*value);
+                }
             }
             for pred in &block.preds {
                 if *pred != DISPATCH_BLOCK {
@@ -405,6 +415,7 @@ impl<'a> Emitter<'a> {
                 }),
             skipped_writes,
             call_writes,
+            call_refreshes,
             value_block,
             transfers: Transfers::new(plan, &successors, has_dynamic),
             successors,
@@ -1903,16 +1914,7 @@ impl<'a> Emitter<'a> {
                 )
             };
             let guard = self.expr(guard)?;
-            let refreshes: Vec<_> = self.s.blocks[self.value_block[value as usize] as usize]
-                .ops
-                .iter()
-                .copied()
-                .filter(|&id| {
-                    matches!(self.s.value(id).op, Op::StackRefresh { .. })
-                        && self.s.args(id)[0] == value
-                        && self.plan.live.contains(&id)
-                })
-                .collect();
+            let refreshes = self.call_refreshes.get(&value).cloned().unwrap_or_default();
             if refreshes.is_empty() && self.stack_state {
                 let _ = writeln!(self.out,
                     "if (RECOMP_UNLIKELY(!({guard}))) {{ stack_valid_ = 0; {fallback} }} else {{ {fast} }}");

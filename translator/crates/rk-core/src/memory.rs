@@ -127,6 +127,30 @@ impl Range {
         Self { address, size }
     }
 
+    pub fn offset_of(self, other: Self) -> Option<u32> {
+        let (
+            Address::Known {
+                base,
+                offset,
+                span: 0,
+            },
+            Address::Known {
+                base: other_base,
+                offset: other_offset,
+                span: 0,
+            },
+        ) = (self.address, other.address)
+        else {
+            return None;
+        };
+        let delta = other_offset.wrapping_sub(offset);
+        (base == other_base
+            && self.size != 0
+            && other.size != 0
+            && delta.checked_add(other.size)? <= self.size)
+            .then_some(delta)
+    }
+
     pub fn disjoint(self, other: Self) -> bool {
         let (
             Address::Known {

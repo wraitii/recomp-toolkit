@@ -158,9 +158,11 @@ pub(crate) fn eliminate_dead_stores(s: &mut Ssa, facts: Option<&dyn CallFacts>) 
                 continue;
             };
             if op == Op::P(OpCode::Store)
-                && access
-                    .location
-                    .is_some_and(|range| overwritten.contains(&range))
+                && access.location.is_some_and(|range| {
+                    overwritten
+                        .iter()
+                        .any(|&later| relations.offset_of(later, range).is_some())
+                })
             {
                 aliases.insert(id, s.args(id)[0]);
                 continue;
