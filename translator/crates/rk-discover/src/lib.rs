@@ -750,13 +750,12 @@ impl<'a> Recovery<'a> {
             );
         }
         if let Some(target) = ins.pointer_immediate().filter(|&t| self.clean_start(t)) {
-            self.seed_from(
-                ins.addr,
-                target,
-                "immediate",
-                rank.min(RANK_IMMEDIATE),
-                true,
-            );
+            let (immediate_rank, root) = if self.clean_pointer_start(target) {
+                (rank.min(RANK_IMMEDIATE), true)
+            } else {
+                (RANK_INTERIOR_POINTER, false)
+            };
+            self.seed_from(ins.addr, target, "immediate", immediate_rank, root);
         }
         if let Some((index, table)) = ins.switch_jump() {
             let previous = self.previous_instructions(ins.addr);
