@@ -23,6 +23,11 @@ pub(super) fn enabled() -> bool {
     mode().is_ok_and(|m| m != Mode::Specialized)
 }
 
+pub(super) fn tint_enabled() -> bool {
+    static TINT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TINT.get_or_init(|| std::env::var("RECOMP_D3D9_UBER_TINT").is_ok_and(|value| value == "1"))
+}
+
 fn mode() -> Result<Mode, RenderError> {
     static MODE: std::sync::OnceLock<Result<Mode, RenderError>> = std::sync::OnceLock::new();
     MODE.get_or_init(|| match std::env::var("RECOMP_D3D9_SHADER_MODE") {
@@ -51,9 +56,10 @@ pub(crate) fn prepare(gpu: &D3d9Gpu) -> Result<(), RenderError> {
         PreparedInterpreter::new(&gpu.device)
     })?;
     eprintln!(
-        "[d3d9-uber] prepare mode={mode:?} family={:016x} abi={} modules=1 pipelines=1 ms={:.3} source_bytes={} program_bytes={} limits={:?} manifest={:?}",
+        "[d3d9-uber] prepare mode={mode:?} family={:016x} abi={} tint={} modules=1 pipelines=1 ms={:.3} source_bytes={} program_bytes={} limits={:?} manifest={:?}",
         fingerprint(&prepared.key),
         program::ABI_VERSION,
+        tint_enabled(),
         started.elapsed().as_secs_f64() * 1000.0,
         prepared.source.len(),
         program::PROGRAM_BYTES,

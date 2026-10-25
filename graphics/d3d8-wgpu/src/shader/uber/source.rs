@@ -118,7 +118,9 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
              }}\n"
         );
     }
-    source += "return d9_output(r.color, v);\n}\n";
+    source += "let col = d9_output(r.color, v);\n\
+        if (psp.texture_flags.y != 0u) { return vec4<f32>(mix(col.rgb, vec3<f32>(1.0, 0.0, 0.0), 0.15), col.a); }\n\
+        return col;\n}\n";
     source += include_str!("../raster.wgsl");
     source
 }

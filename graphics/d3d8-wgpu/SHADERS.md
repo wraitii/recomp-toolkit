@@ -2,7 +2,7 @@
 
 The opt-in interpreter implements a bounded SM2 VS/PS family; Spore rendering,
 native Metal compilation and GPU performance still require user-run validation.
-`src/shader/uber/` defines ABI/interpreter v1. A program is 784 bytes: a four-u32
+`src/shader/uber/` defines ABI v1 / interpreter v2. A program is 784 bytes: a four-u32
 header (ABI version, pixel flag, instruction count, reserved zero), then 16
 zero-padded 12-u32 records (opcode/destination type/index/mask, then two source
 type/index/swizzle/modifier records). Original bytecode equality plus ABI version

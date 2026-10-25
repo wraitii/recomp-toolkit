@@ -3520,11 +3520,12 @@ pub(crate) fn execute(
         psp_words,
     );
     let parameters = if interpreted {
-        parameters.interpreter_texture(
+        parameters.interpreter_flags(
             snapshot
                 .textures
                 .iter()
                 .any(|t| t.stage == 0 && opaque_format(t.format)),
+            uber::tint_enabled(),
         )
     } else {
         parameters

@@ -1,5 +1,5 @@
 pub(crate) const ABI_VERSION: u32 = 1;
-pub(crate) const INTERPRETER_VERSION: u32 = 1;
+pub(crate) const INTERPRETER_VERSION: u32 = 2;
 pub(crate) const MAX_INSTRUCTIONS: usize = 16;
 pub(crate) const INSTRUCTION_WORDS: usize = 12;
 pub(crate) const TEMP_REGISTERS: u32 = 4;

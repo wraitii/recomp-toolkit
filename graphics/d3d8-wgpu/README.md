@@ -170,6 +170,12 @@ specialization. The default `specialized` creates no interpreter GPU resources;
 hybrid scheduling belongs to M3 and is not available yet. Unknown modes fail at
 initialization. See [SHADERS.md](SHADERS.md) for exact coverage and bindings.
 
+Add `RECOMP_D3D9_UBER_TINT=1` to mix 15% red into interpreted fragment results
+after raster output processing, preserving alpha. The tint is a diagnostic to
+locate interpreted content; disable it for rendering comparisons. It is a
+per-draw uniform flag and creates no additional pipeline variant. Startup records
+include `tint=true` when enabled.
+
 Opt-in modes prepare one module/pipeline during device initialization, including
 replacement devices. Program changes upload immutable data and reuse that
 pipeline. `[d3d9-uber]` records include warmup time/manifest, program uploads and
