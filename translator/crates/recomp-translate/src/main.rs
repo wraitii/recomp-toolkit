@@ -44,6 +44,11 @@ struct Args {
     jobs: Option<usize>,
     #[arg(long, value_parser = parse_addr, help = "restrict dumps to these functions or entries")]
     only: Vec<Addr>,
+    #[arg(
+        long,
+        help = "JSON selection containing functions with hexadecimal addr fields"
+    )]
+    selection: Option<PathBuf>,
     #[arg(long, value_enum)]
     dump: Vec<Stage>,
     #[arg(long, value_enum, default_value_t = X87Mode::Auto)]
@@ -79,6 +84,7 @@ enum Stage {
     Fir,
     Ssa,
     Prepared,
+    Stack,
     Global,
     Bodies,
     All,
@@ -860,8 +866,9 @@ fn dump_ssa(
     program: &Program,
     analysis: &rk_frontend::Analysis,
     settings: &Settings,
+    global: &rk_global::GlobalFacts,
     only: &[Addr],
-    prepared: bool,
+    stage: Stage,
     switches: Switches,
     out: &mut impl std::io::Write,
 ) -> Result<()> {
@@ -877,9 +884,13 @@ fn dump_ssa(
         if !seen.insert(owner) {
             continue;
         }
-        let cg = rk_ir::lower(ir, &program.image, &rk_ir::NoX87)?;
-        if prepared {
+        if matches!(stage, Stage::Prepared | Stage::Stack) {
+            let stack = stage == Stage::Stack;
+            let cg = rk_ir::lower(ir, &program.image, &rk_x87::Recipes)?;
+            let facts = global.call_facts();
             let options = rk_ssa::PrepareOptions {
+                call_facts: &facts,
+                fault_state: settings.fault_state,
                 coalesce_roots: switches.coalesce_roots,
                 lazy_stack_writes: settings.lazy_stack_writes,
                 assume_stack_pointer_bases: settings.assume_stack_pointer_bases,
@@ -887,12 +898,19 @@ fn dump_ssa(
                     && !settings.exposed_stack_functions.contains(&owner),
                 ..Default::default()
             };
-            match rk_ssa::prepare(&cg, &options) {
-                Ok(ssa) => rk_ssa::dump(&ssa, out)?,
+            let result = if stack {
+                rk_ssa::prepare_with_stack_dump(&cg, &options, out)
+            } else {
+                rk_ssa::prepare(&cg, &options)
+            };
+            match result {
+                Ok(ssa) if !stack => rk_ssa::dump(&ssa, out)?,
+                Ok(_) => {}
                 Err(error) => writeln!(out, "== prepared {owner:08x}: {error}")?,
             }
             continue;
         }
+        let cg = rk_ir::lower(ir, &program.image, &rk_ir::NoX87)?;
         let options = rk_ssa::BuildOptions {
             policy: rk_core::ir::Policy::Conservative,
             call_facts: &rk_ssa::ConservativeCallFacts,
@@ -922,7 +940,16 @@ fn dump_global(
         .map(|a| format!("{a:08x}"))
         .collect();
     for line in text.lines() {
-        if owners.is_empty() || owners.iter().any(|o| line.contains(o.as_str())) {
+        let rejection =
+            line.starts_with("return-rejected ") || line.starts_with("cleanup-rejected ");
+        let selected = if rejection {
+            line.split_whitespace()
+                .nth(1)
+                .is_some_and(|owner| owners.contains(owner))
+        } else {
+            owners.iter().any(|o| line.contains(o.as_str()))
+        };
+        if owners.is_empty() || selected {
             writeln!(out, "{line}")?;
         }
     }
@@ -1145,7 +1172,23 @@ fn write_discovery_report(
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+    if let Some(path) = &args.selection {
+        let selection: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        for row in selection["functions"]
+            .as_array()
+            .context("selection needs a functions array")?
+        {
+            let text = row["addr"]
+                .as_str()
+                .context("selection function needs a hexadecimal addr")?;
+            args.only
+                .push(parse_addr(text).map_err(anyhow::Error::msg)?);
+        }
+        if args.only.is_empty() {
+            bail!("selection contains no functions");
+        }
+    }
     let switches = Switches::from_env();
     if let Some(jobs) = args.jobs {
         rayon::ThreadPoolBuilder::new()
@@ -1183,7 +1226,10 @@ fn main() -> Result<()> {
     let facts = facts::load(&settings, &program, &analysis)?;
     phases.mark("facts");
     let whole = args.out.is_some() || args.dump.is_empty();
-    let wants_global = whole || args.wants(Stage::Global);
+    let wants_global = whole
+        || [Stage::Global, Stage::Prepared, Stage::Stack, Stage::Bodies]
+            .into_iter()
+            .any(|stage| args.wants(stage));
     let mut global = if wants_global {
         rk_global::GlobalFacts::analyze(&rk_global::GlobalInput {
             settings: &settings,
@@ -1292,15 +1338,12 @@ fn main() -> Result<()> {
         if args.wants(Stage::Fir) {
             dump_fir(&program, &analysis, &args.only, &mut out)?;
         }
-        if args.wants(Stage::Ssa) {
-            dump_ssa(
-                &program, &analysis, &settings, &args.only, false, switches, &mut out,
-            )?;
-        }
-        if args.wants(Stage::Prepared) {
-            dump_ssa(
-                &program, &analysis, &settings, &args.only, true, switches, &mut out,
-            )?;
+        for stage in [Stage::Ssa, Stage::Prepared, Stage::Stack] {
+            if args.wants(stage) {
+                dump_ssa(
+                    &program, &analysis, &settings, &global, &args.only, stage, switches, &mut out,
+                )?;
+            }
         }
         if args.wants(Stage::Global) {
             dump_global(&program, &global, &args.only, &mut out)?;

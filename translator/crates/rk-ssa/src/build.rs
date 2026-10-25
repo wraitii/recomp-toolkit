@@ -33,6 +33,9 @@ impl CallEffect {
 }
 
 pub trait CallFacts: Sync {
+    fn readonly_memory(&self, _site: Addr, _target: Option<Addr>) -> bool {
+        false
+    }
     fn checkpoints(&self, site: Addr, target: Option<Addr>) -> Option<u32> {
         self.borrowed_stack(site, target)?.checkpoints
     }
@@ -57,6 +60,7 @@ pub trait CallFacts: Sync {
 pub struct BorrowedStack {
     pub effects: rk_core::memory::Effects,
     pub captures: BTreeMap<rk_core::memory::Base, i32>,
+    pub unknown_captures: std::collections::BTreeSet<rk_core::memory::Base>,
     pub checkpoints: Option<u32>,
 }
 
@@ -596,6 +600,7 @@ impl<'a> Builder<'a> {
             value_addr: self.value_addr,
             stack_states: self.stack_states,
             stack_guards: BTreeMap::new(),
+            stack_flush_sources: BTreeMap::new(),
             stack_calls: self.lazy_stack_writes,
             memory_partitioned: false,
             assume_private_stack: false,
@@ -956,6 +961,14 @@ impl<'a> Builder<'a> {
                 }
                 let size = cg_op.output.map_or(0, |v| v.size as u8);
                 let value = self.value(Op::X87(x87), size, &args);
+                if x87.memory() == Some(rk_ir::x87::MemoryEffect::Write) && self.lazy_stack_writes {
+                    let mut lanes = [0; 4];
+                    for (lane, key) in rk_ir::lanes(Field::Esp).iter().enumerate() {
+                        lanes[lane] =
+                            self.state_slot(state, *self.key_index.get(key).unwrap(), block)?;
+                    }
+                    self.stack_states.insert(value, lanes);
+                }
                 if matches!(x87, rk_ir::x87::X87Op::Conditional(..)) {
                     self.boundary(value, state, block, false)?;
                 }
@@ -1153,6 +1166,7 @@ impl<'a> Builder<'a> {
             | Op::StackBoundary
             | Op::StackCallGuard { .. }
             | Op::StackLoad
+            | Op::StackRefresh { .. }
             | Op::StackStore
             | Op::StackCommit
             | Op::StackFlush

@@ -217,6 +217,22 @@ impl Printer<'_> {
                         lines.push(format!("{text};"));
                     }
                 }
+                Event::Bitcast {
+                    bits,
+                    target,
+                    value,
+                    floating,
+                } => {
+                    let source_type = match (*floating, *bits) {
+                        (true, 32) => "uint32_t",
+                        (true, 64) => "uint64_t",
+                        (false, 32) => "float",
+                        (false, 64) => "double",
+                        _ => unreachable!(),
+                    };
+                    lines.push(format!("{{ {source_type} x87_bits_ = ({}); RECOMP_BITCOPY(&{}, &x87_bits_, {}); }}",
+                        self.expr(value)?, self.expr(target)?, bits / 8));
+                }
                 Event::Store {
                     bits,
                     address,

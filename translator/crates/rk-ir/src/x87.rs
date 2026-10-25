@@ -93,8 +93,16 @@ pub enum X87Op {
     PushIntegerValue {
         bits: u16,
     },
+    PushValue {
+        bits: u16,
+    },
     Store {
         dst: Option<u8>,
+        bits: u16,
+        pop: bool,
+        integer: bool,
+    },
+    StoreValue {
         bits: u16,
         pop: bool,
         integer: bool,
@@ -152,8 +160,7 @@ impl X87Op {
             X87Op::Push { src: None, .. }
             | X87Op::PushInteger { .. }
             | X87Op::Arithmetic(Arithmetic { bits: 1.., .. })
-            | X87Op::Compare { bits: 1.., .. }
-            | X87Op::Compare { zero: true, .. } => Some(MemoryEffect::Read),
+            | X87Op::Compare { bits: 1.., .. } => Some(MemoryEffect::Read),
             X87Op::Store {
                 dst: None,
                 bits: 1..,
@@ -179,9 +186,42 @@ impl X87Op {
         }
     }
 
+    pub fn memory_size(self) -> Option<u32> {
+        match self {
+            X87Op::Push {
+                src: None,
+                bits: bits @ (32 | 64 | 80),
+            }
+            | X87Op::PushInteger {
+                bits: bits @ (16 | 32 | 64),
+            }
+            | X87Op::Store {
+                dst: None,
+                bits: bits @ (16 | 32 | 64 | 80),
+                ..
+            }
+            | X87Op::Arithmetic(Arithmetic {
+                bits: bits @ (16 | 32 | 64),
+                ..
+            })
+            | X87Op::Compare {
+                bits: bits @ (16 | 32 | 64),
+                ..
+            } => Some(u32::from(bits / 8)),
+            X87Op::Environment(
+                X87Environment::LoadCw | X87Environment::StoreCw | X87Environment::StoreSw,
+            ) => Some(2),
+            X87Op::Eager(X87Eager::Fbstp) | X87Op::LegacyEnvironment(X87Legacy::BcdStore) => {
+                Some(10)
+            }
+            _ => None,
+        }
+    }
+
     pub fn result_size(self) -> u8 {
         match self {
             X87Op::Status | X87Op::CompareFlags { .. } => 2,
+            X87Op::StoreValue { bits, .. } => (bits / 8) as u8,
             _ => 0,
         }
     }
@@ -206,9 +246,15 @@ impl X87Op {
             X87Op::Arithmetic(Arithmetic { integer: true, .. })
             | X87Op::Unary(X87Unary::Sqrt | X87Unary::Round)
             | X87Op::Store { integer: true, .. }
+            | X87Op::StoreValue { integer: true, .. }
             | X87Op::CompareFlags { .. } => true,
             X87Op::Store {
                 dst: None,
+                bits: 32,
+                integer: false,
+                ..
+            }
+            | X87Op::StoreValue {
                 bits: 32,
                 integer: false,
                 ..

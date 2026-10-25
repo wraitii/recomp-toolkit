@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use rk_core::contract::Field;
 use rk_core::ir::OpCode;
 use rk_core::memory::{Address, Base, Range};
-use rk_ir::{Op, StateKey};
+use rk_ir::{x87::X87Op, Op, StateKey};
 
 use crate::address::Addresses;
-use crate::memory::{accesses, PrivateFrame};
+use crate::memory::{local_accesses, PrivateFrame};
 use crate::{Ssa, ValueId, DISPATCH_BLOCK};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,242 @@ const OVERWRITE: u8 = 1;
 const SEPARATED_OVERWRITE: u8 = 2;
 const CLEAN: u8 = 1;
 const PENDING: u8 = 2;
+
+fn returned_stack_offset(s: &Ssa, mut id: ValueId, call: ValueId) -> Option<u32> {
+    let mut offset = 0u32;
+    for _ in 0..256 {
+        let value = s.value(id);
+        let args = s.args(id);
+        match value.op {
+            Op::StateKeep(key) | Op::StateReload(key)
+                if value.size == 4 && key == rk_ir::lanes(Field::Esp)[0] && args[0] == call =>
+            {
+                return Some(offset)
+            }
+            Op::P(OpCode::Copy) if value.size == 4 => id = args[0],
+            Op::Pack if value.size == 4 => {
+                let root = *s.args(*args.first()?).first()?;
+                if !args.iter().enumerate().all(|(lane, &arg)| {
+                    s.value(arg).op == Op::Byte(lane as u8) && s.args(arg) == [root]
+                }) {
+                    return None;
+                }
+                id = root;
+            }
+            Op::P(OpCode::IntAdd | OpCode::IntSub) if value.size == 4 => {
+                match (value.op, s.value(args[0]).op, s.value(args[1]).op) {
+                    (Op::P(OpCode::IntAdd), Op::Const(delta), _) => {
+                        offset = offset.wrapping_add(delta as u32);
+                        id = args[1];
+                    }
+                    (Op::P(OpCode::IntAdd), _, Op::Const(delta)) => {
+                        offset = offset.wrapping_add(delta as u32);
+                        id = args[0];
+                    }
+                    (Op::P(OpCode::IntSub), _, Op::Const(delta)) => {
+                        offset = offset.wrapping_sub(delta as u32);
+                        id = args[0];
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+pub(crate) fn refresh_loads(s: &mut Ssa) {
+    let positions: BTreeMap<_, _> = s
+        .blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(block, item)| {
+            item.phis.iter().map(move |&id| (id, (block, 0))).chain(
+                item.ops
+                    .iter()
+                    .enumerate()
+                    .map(move |(position, &id)| (id, (block, position + 1))),
+            )
+        })
+        .collect();
+    let available = |value: ValueId, block: usize, position: usize| {
+        let mut pending = vec![value];
+        let mut seen = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if seen.len() > 256 {
+                return false;
+            }
+            if let Some(&(owner, at)) = positions.get(&id) {
+                if owner == block && at >= position {
+                    return false;
+                }
+            } else {
+                pending.extend_from_slice(s.args(id));
+            }
+        }
+        true
+    };
+    let mut replacements = BTreeMap::new();
+    for (block, item) in s.blocks.iter().enumerate() {
+        let mut call = None;
+        for (position, &id) in item.ops.iter().enumerate() {
+            let op = s.value(id).op;
+            if let Op::Call { .. } = op {
+                call = s
+                    .stack_guards
+                    .contains_key(&id)
+                    .then_some((id, position + 1));
+                continue;
+            }
+            if op == Op::StackLoad {
+                let Some((call, at)) = call else { continue };
+                let args = s.args(id);
+                if let Some(offset) = returned_stack_offset(s, args[1], call) {
+                    if available(args[2], block, at) {
+                        replacements.insert(id, (call, args[2], offset));
+                    }
+                }
+            } else if matches!(
+                op,
+                Op::CallInd
+                    | Op::StackBoundary
+                    | Op::StackStore
+                    | Op::StackCommit
+                    | Op::StackFlush
+                    | Op::P(OpCode::Store)
+            ) || matches!(op, Op::X87(op) if op.memory() == Some(rk_ir::x87::MemoryEffect::Write))
+                || rk_ir::properties(op).opaque
+                || rk_ir::properties(op).terminator
+            {
+                call = None;
+            }
+        }
+    }
+    let mut after: BTreeMap<ValueId, Vec<ValueId>> = BTreeMap::new();
+    for (&id, &(call, saved, offset)) in &replacements {
+        let start = s.args.len() as u32;
+        s.args.extend([call, saved]);
+        s.values[id as usize].op = Op::StackRefresh { offset };
+        s.values[id as usize].args_start = start;
+        s.values[id as usize].args_len = 2;
+        after.entry(call).or_default().push(id);
+    }
+    for block in &mut s.blocks {
+        block.ops = block
+            .ops
+            .iter()
+            .filter(|id| !replacements.contains_key(id))
+            .flat_map(|&id| {
+                std::iter::once(id).chain(after.get(&id).into_iter().flatten().copied())
+            })
+            .collect();
+    }
+}
+
+pub(crate) fn split_x87(s: &mut Ssa, facts: &dyn crate::CallFacts) {
+    let accesses = local_accesses(s, None);
+    let private = PrivateFrame::new(s, &accesses, Some(facts));
+    if !private.eligible {
+        return;
+    }
+    let mut addresses = Addresses::local(s);
+    let mut candidates = BTreeMap::new();
+    for (&id, access) in &accesses {
+        let Op::X87(op) = s.value(id).op else {
+            continue;
+        };
+        if !matches!(
+            op,
+            X87Op::Push {
+                src: None,
+                bits: 32 | 64
+            } | X87Op::Store {
+                dst: None,
+                bits: 32 | 64,
+                ..
+            } | X87Op::Store {
+                dst: None,
+                bits: 16,
+                integer: true,
+                ..
+            }
+        ) {
+            continue;
+        }
+        let Some(range) = access.location else {
+            continue;
+        };
+        if !range.address.is_exact() || !private.unexposed(range) {
+            continue;
+        }
+        addresses.get(s.args(id)[1]);
+        let Address::Known {
+            base: Base::Frame,
+            offset,
+            span,
+        } = addresses.relations.bounds(range.address)
+        else {
+            continue;
+        };
+        let start = i64::from(offset as i32);
+        if start < 0 && start + i64::from(span) + i64::from(range.size) <= 0 {
+            candidates.insert(id, op);
+        }
+    }
+    let mut loads = BTreeMap::new();
+    for block in 0..s.blocks.len() {
+        let mut ops = Vec::new();
+        for id in s.blocks[block].ops.clone() {
+            let Some(&op) = candidates.get(&id) else {
+                ops.push(id);
+                continue;
+            };
+            let args = s.args(id).to_vec();
+            let addr = s.value_addr[id as usize];
+            match op {
+                X87Op::Store {
+                    bits, pop, integer, ..
+                } => {
+                    let value = s.new_value(
+                        Op::X87(X87Op::StoreValue { bits, pop, integer }),
+                        (bits / 8) as u8,
+                        &[],
+                        addr,
+                    );
+                    s.values[id as usize].op = Op::P(OpCode::Store);
+                    s.values[id as usize].args_start = s.args.len() as u32;
+                    s.values[id as usize].args_len = 3;
+                    s.args.extend([args[0], args[1], value]);
+                    ops.extend([value, id]);
+                }
+                X87Op::Push { bits, .. } => {
+                    let value = s.new_value(Op::P(OpCode::Load), (bits / 8) as u8, &args, addr);
+                    s.values[id as usize].op = Op::X87(X87Op::PushValue { bits });
+                    s.values[id as usize].args_start = s.args.len() as u32;
+                    s.values[id as usize].args_len = 1;
+                    s.args.push(value);
+                    loads.insert(id, value);
+                    ops.extend([value, id]);
+                }
+                _ => unreachable!(),
+            }
+        }
+        s.blocks[block].ops = ops;
+    }
+    for index in 0..s.values.len() {
+        if s.values[index].op != Op::Memory {
+            continue;
+        }
+        let start = s.values[index].args_start as usize;
+        if let Some(&load) = loads.get(&s.args[start]) {
+            s.args[start] = load;
+        }
+    }
+}
 
 fn successors(s: &Ssa) -> Vec<Vec<usize>> {
     let mut result = vec![Vec::new(); s.blocks.len()];
@@ -227,12 +463,12 @@ pub(crate) fn promote(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate:
 }
 
 fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallFacts) {
-    let accesses = accesses(s, None);
+    let accesses = local_accesses(s, None);
     let private = PrivateFrame::new(s, &accesses, Some(facts));
     if !private.eligible {
         return;
     }
-    let mut addresses = Addresses::new(s);
+    let mut addresses = Addresses::local(s);
     let mut slots: BTreeMap<Range, BTreeSet<ValueId>> = BTreeMap::new();
     for (&id, access) in &accesses {
         if s.value(id).op != Op::P(OpCode::Store) {
@@ -244,35 +480,64 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
         if !private.unexposed(range) {
             continue;
         }
+        addresses.get(s.args(id)[1]);
         let Address::Known {
-            base: Base::Frame,
+            base,
             offset,
             span: 0,
         } = range.address
         else {
             continue;
         };
-        let start = i64::from(offset as i32);
-        if !matches!(range.size, 1 | 2 | 4 | 8) || start >= 0 || start + i64::from(range.size) > 0 {
+        if !matches!(base, Base::Frame)
+            && !matches!(base, Base::Stack(root)
+            if s.value(root).size == 4 && matches!(s.value(root).op, Op::P(OpCode::IntAnd)))
+        {
             continue;
         }
         let Address::Known {
             base: Base::Frame,
+            offset: floor,
+            span,
+        } = addresses.relations.bounds(range.address)
+        else {
+            continue;
+        };
+        if i64::from(floor as i32) + i64::from(span) + i64::from(range.size) > 0 {
+            continue;
+        }
+        let start = i64::from(offset as i32);
+        if !matches!(range.size, 1 | 2 | 4 | 8) {
+            continue;
+        }
+        let Address::Known {
+            base: esp_base,
             offset: esp,
             span: 0,
         } = addresses.state(id, Field::Esp)
         else {
             continue;
         };
-        if i64::from(esp as i32) <= start {
+        if esp_base == base && i64::from(esp as i32) <= start {
             slots.entry(range).or_default().insert(id);
         }
     }
     let ranges: Vec<_> = slots.keys().copied().collect();
+    let ordinary: BTreeSet<_> = slots
+        .iter()
+        .filter_map(|(&range, writes)| {
+            writes
+                .iter()
+                .any(|&id| s.boundary(id).is_some())
+                .then_some(range)
+        })
+        .collect();
     slots.retain(|range, _| {
-        ranges
-            .iter()
-            .all(|other| range == other || range.disjoint(*other))
+        ranges.iter().all(|other| {
+            range == other
+                || ordinary.contains(range) && !ordinary.contains(other)
+                || addresses.relations.disjoint(*range, *other)
+        })
     });
     if slots.len() > 64 || slots.len().saturating_mul(s.blocks.len()) > 100_000 {
         return;
@@ -340,12 +605,16 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
         }
     }
     for (range, writes) in slots {
+        let Address::Known { base, .. } = range.address else {
+            unreachable!()
+        };
         let mut actions = BTreeMap::new();
         for &id in s.blocks.iter().flat_map(|block| &block.ops) {
             let op = s.value(id).op;
             let action = if settlements.contains(&id) {
                 Action::Keep
             } else if retire_reused_stack
+                && base == Base::Frame
                 && op == Op::Return
                 && matches!(return_stacks.get(&id).copied(), Some(Address::Known {
                     base: Base::Frame, offset, span: 0
@@ -359,8 +628,8 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
                 Action::Keep
             } else if op == Op::StackBoundary
                 && matches!(stack_moves.get(&id),
-                Some(Address::Known { base: Base::Frame, offset, span: 0 })
-                    if (*offset as i32) <= match range.address {
+                Some(Address::Known { base: moved_base, offset, span: 0 })
+                    if *moved_base == base && (*offset as i32) <= match range.address {
                         Address::Known { offset, .. } => offset as i32,
                         _ => unreachable!(),
                     })
@@ -404,6 +673,11 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
         let Address::Known { offset, .. } = range.address else {
             unreachable!()
         };
+        let slot_base = match base {
+            Base::Frame => frame,
+            Base::Stack(root) => root,
+            _ => unreachable!(),
+        };
         let offset = s.constant(&mut constants, 4, u64::from(offset));
         let mut phis = Vec::new();
         for block in 0..s.blocks.len() {
@@ -414,11 +688,13 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
         let mut values = Vec::new();
         for block in 0..s.blocks.len() {
             let mut value = phis[block];
+            let mut source = None;
             let mut state = incoming(s, block, &outputs);
             let mut ops = Vec::new();
             for id in s.blocks[block].ops.clone() {
                 if stores.contains(&id) {
                     value = s.args(id)[2];
+                    source = Some(id);
                     state = PENDING;
                     let prior = s.args(id)[0];
                     if calls {
@@ -436,7 +712,7 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
                     && state == PENDING
                 {
                     let addr = s.value_addr[id as usize];
-                    let address = s.new_value(Op::P(OpCode::IntAdd), 4, &[frame, offset], addr);
+                    let address = s.new_value(Op::P(OpCode::IntAdd), 4, &[slot_base, offset], addr);
                     let mut args = vec![s.memory().unwrap(), address, value];
                     let op = if actions.get(&id) == Some(&Action::Hook) {
                         args.push(s.stack_guards[&id]);
@@ -447,11 +723,17 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
                         Op::P(OpCode::Store)
                     };
                     let flush = s.new_value(op, 0, &args, addr);
+                    if op == Op::StackFlush {
+                        if let Some(source) = source {
+                            s.stack_flush_sources.insert(flush, source);
+                        }
+                    }
                     ops.extend([address, flush]);
                 }
                 state = transfer(&actions, &stores, id, state);
                 if state == CLEAN {
                     value = zero;
+                    source = None;
                 }
                 ops.push(id);
             }

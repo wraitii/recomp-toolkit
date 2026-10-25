@@ -717,6 +717,59 @@ impl Scalar {
                     self.set(0, value, &mut events, None, None, None, bits == 32);
                 }
             }
+            X87Op::PushValue { bits } => {
+                let ty = if bits == 32 { Type::F32 } else { Type::F64 };
+                let value = self.temp(literal(0, ty), &mut events);
+                events.push(Event::Bitcast {
+                    bits,
+                    target: value.clone(),
+                    value: address.expect("x87 stored bits"),
+                    floating: true,
+                });
+                self.move_top(-1);
+                self.set(
+                    0,
+                    cast(Type::F64, value),
+                    &mut events,
+                    None,
+                    None,
+                    None,
+                    bits == 32,
+                );
+            }
+            X87Op::StoreValue { bits, pop, integer } => {
+                let stores = self.apply(
+                    X87Op::Store {
+                        dst: None,
+                        bits,
+                        pop,
+                        integer,
+                    },
+                    Some(literal(0, Type::U32)),
+                    None,
+                );
+                for event in stores {
+                    if let Event::Store {
+                        value, floating, ..
+                    } = event
+                    {
+                        if let Some(result) = result {
+                            if floating {
+                                events.push(Event::Bitcast {
+                                    bits,
+                                    target: external(result),
+                                    value,
+                                    floating: false,
+                                });
+                            } else {
+                                events.push(Event::Assign(Assign::new(external(result), value)));
+                            }
+                        }
+                    } else {
+                        events.push(event);
+                    }
+                }
+            }
             X87Op::PushInteger { bits } | X87Op::PushIntegerValue { bits } => {
                 let input = address.expect("x87 integer input");
                 let value = if matches!(op, X87Op::PushIntegerValue { .. }) {

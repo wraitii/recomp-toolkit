@@ -10,6 +10,13 @@ use rk_ssa::StackEffect;
 
 type Checked<T> = std::result::Result<T, &'static str>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Memory,
+    Returns,
+    Cleanup,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReturnEffect {
     Exact,
@@ -50,6 +57,9 @@ pub struct Analysis {
     pub rejected: BTreeMap<String, usize>,
     pub rejected_sites: BTreeMap<String, usize>,
     pub unbalanced_returns: BTreeSet<Addr>,
+    pub rejected_functions: BTreeMap<Addr, String>,
+    pub cleanups: BTreeMap<Addr, i32>,
+    pub rejected_cleanups: BTreeMap<Addr, String>,
 }
 
 pub struct CallFacts<'a> {
@@ -59,6 +69,9 @@ pub struct CallFacts<'a> {
 }
 
 impl rk_ssa::CallFacts for CallFacts<'_> {
+    fn readonly_memory(&self, site: Addr, target: Option<Addr>) -> bool {
+        self.registers.readonly_memory(site, target)
+    }
     fn cleanup(&self, site: Addr, target: Option<Addr>) -> Option<i32> {
         self.summary(site, target)
             .map(|summary| summary.effect.cleanup)
@@ -296,6 +309,33 @@ fn target(insn: &Insn) -> Option<Addr> {
     })
 }
 
+fn rejection(reason: &str, fir: &FunctionIr, known: &BTreeMap<Addr, Summary>) -> String {
+    if !matches!(reason, "unresolved direct call" | "unresolved tail") {
+        return reason.into();
+    }
+    let missing: Vec<_> = fir
+        .insns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, insn)| {
+            if reason == "unresolved direct call" {
+                if !insn.ops.iter().any(|op| op.opcode == OpCode::Call) {
+                    return None;
+                }
+            } else if !fir
+                .exits
+                .get(&(index as u32))
+                .is_some_and(|targets| !targets.is_empty())
+            {
+                return None;
+            }
+            let callee = target(insn)?;
+            (!known.contains_key(&callee)).then(|| format!("{:08x}->{callee:08x}", insn.addr))
+        })
+        .collect();
+    format!("{reason}: {}", missing.join(","))
+}
+
 fn compose(
     state: &mut State,
     summary: &Summary,
@@ -330,7 +370,7 @@ fn summarize(
     fir: &FunctionIr,
     known: &BTreeMap<Addr, Summary>,
     excluded: &BTreeSet<Addr>,
-    returns_only: bool,
+    mode: Mode,
 ) -> Checked<Summary> {
     if !fir.entries.is_empty()
         || !fir.dynamic.is_empty()
@@ -360,7 +400,7 @@ fn summarize(
         }
         let insn = fir.insns.get(index as usize).ok_or("invalid CFG index")?;
         let successors = fir.succ.get(index as usize).ok_or("missing successors")?;
-        if insn.x87
+        if insn.x87 && mode != Mode::Cleanup
             || insn.ops.iter().any(|op| {
                 op.opcode == OpCode::CallOther
                     || (matches!(op.opcode, OpCode::Branch | OpCode::CBranch)
@@ -416,7 +456,7 @@ fn summarize(
                         return Err("unsupported store");
                     }
                     let Some(Value::Stack(offset)) = state.read(op.inputs[0], &locals) else {
-                        if !returns_only {
+                        if mode == Mode::Memory {
                             return Err("potentially aliased non-stack write");
                         }
                         state.slots.clear();
@@ -482,6 +522,10 @@ fn summarize(
                         if let Some(value) = value {
                             locals.insert(output, value);
                         }
+                    }
+                    Space::Ram if mode == Mode::Cleanup => {
+                        state.slots.clear();
+                        writes_other = true;
                     }
                     _ => return Err("unmodeled output space"),
                 }
@@ -603,7 +647,19 @@ pub fn analyze(
             analysis.ir[&addr]
                 .as_ref()
                 .map_err(|_| "unlifted function")
-                .and_then(|fir| summarize(program, fir, &output.functions, excluded, returns_only))
+                .and_then(|fir| {
+                    summarize(
+                        program,
+                        fir,
+                        &output.functions,
+                        excluded,
+                        if returns_only {
+                            Mode::Returns
+                        } else {
+                            Mode::Memory
+                        },
+                    )
+                })
         };
         match result {
             Ok(summary) => {
@@ -624,6 +680,19 @@ pub fn analyze(
     for reason in failures.values() {
         *output.rejected.entry((*reason).into()).or_default() += 1;
     }
+    output.rejected_functions = failures
+        .into_iter()
+        .map(|(addr, reason)| {
+            let detail = analysis.ir[&addr].as_ref().map_or_else(
+                |_| reason.into(),
+                |fir| rejection(reason, fir, &output.functions),
+            );
+            (addr, detail)
+        })
+        .collect();
+    if returns_only {
+        infer_cleanups(program, analysis, excluded, &mut output);
+    }
     for (&site, targets) in indirect {
         let result = join(program, excluded, targets, &output.functions);
         match result {
@@ -636,6 +705,87 @@ pub fn analyze(
         }
     }
     output
+}
+
+fn infer_cleanups(
+    program: &Program,
+    analysis: &rk_frontend::Analysis,
+    excluded: &BTreeSet<Addr>,
+    output: &mut Analysis,
+) {
+    let mut known = output.functions.clone();
+    let mut candidates = BTreeSet::new();
+    loop {
+        let previous = candidates.len();
+        for (&addr, result) in &analysis.ir {
+            if excluded.contains(&addr) || known.contains_key(&addr) {
+                continue;
+            }
+            let Ok(fir) = result else { continue };
+            let mut pops: BTreeSet<_> = fir
+                .insns
+                .iter()
+                .filter(|insn| insn.mnemonic.eq_ignore_ascii_case("RET"))
+                .map(|insn| return_pop(program, insn))
+                .collect();
+            pops.extend(
+                fir.exits
+                    .values()
+                    .flatten()
+                    .filter(|&&target| !program.is_noreturn(target))
+                    .map(|target| known.get(target).map(|summary| summary.effect.cleanup)),
+            );
+            let Some(Some(cleanup)) = pops.first().copied().filter(|_| pops.len() == 1) else {
+                continue;
+            };
+            known.insert(
+                addr,
+                Summary {
+                    effect: StackEffect {
+                        cleanup,
+                        writes: Vec::new(),
+                    },
+                    reads: BTreeSet::new(),
+                    reads_other: true,
+                    writes_other: true,
+                    preserves: Fields::NONE,
+                    mapped_noreturn: false,
+                    returns: ReturnEffect::Unknown,
+                },
+            );
+            candidates.insert(addr);
+        }
+        if candidates.len() == previous {
+            break;
+        }
+    }
+    loop {
+        let mut removed = Vec::new();
+        for &addr in &candidates {
+            let fir = analysis.ir[&addr].as_ref().unwrap();
+            let result = summarize(program, fir, &known, excluded, Mode::Cleanup);
+            let reason = match result {
+                Ok(summary) if summary.effect.cleanup == known[&addr].effect.cleanup => continue,
+                Ok(_) => "inconsistent cleanup candidate",
+                Err(reason) => reason,
+            };
+            output
+                .rejected_cleanups
+                .insert(addr, rejection(reason, fir, &known));
+            removed.push(addr);
+        }
+        if removed.is_empty() {
+            break;
+        }
+        for addr in removed {
+            candidates.remove(&addr);
+            known.remove(&addr);
+        }
+    }
+    output.cleanups = candidates
+        .into_iter()
+        .map(|addr| (addr, known[&addr].effect.cleanup))
+        .collect();
 }
 
 fn join(

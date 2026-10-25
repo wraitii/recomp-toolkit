@@ -144,6 +144,13 @@ fn shape(s: &Ssa, id: ValueId) -> bool {
         Op::StackBoundary => n == 2 && z == 0 && size(0) == 4 && size(1) == 4,
         Op::StackCallGuard { .. } => n == 0 && z == 1,
         Op::StackLoad => n == 3 && size(0) == 0 && size(1) == 4 && z == size(2),
+        Op::StackRefresh { .. } => {
+            n == 2
+                && matches!(s.value(args[0]).op, Op::Call { .. })
+                && z == size(1)
+                && matches!(z, 1 | 2 | 4 | 8)
+                && s.stack_guards.contains_key(&args[0])
+        }
         Op::StackStore | Op::StackCommit => n == 3 && size(0) == 0 && size(1) == 4 && z == 0,
         Op::StackFlush => n == 4 && size(0) == 0 && size(1) == 4 && size(3) == 1 && z == 0,
         Op::Input(key) => n == 0 && state_width(key, z),
@@ -184,6 +191,12 @@ fn shape(s: &Ssa, id: ValueId) -> bool {
         }
         Op::X87(rk_ir::x87::X87Op::PushIntegerValue { bits }) => {
             n == 1 && z == 0 && matches!(bits, 16 | 32 | 64) && u16::from(size(0)) * 8 == bits
+        }
+        Op::X87(rk_ir::x87::X87Op::PushValue { bits }) => {
+            n == 1 && z == 0 && matches!(bits, 32 | 64) && u16::from(size(0)) * 8 == bits
+        }
+        Op::X87(rk_ir::x87::X87Op::StoreValue { bits, integer, .. }) => {
+            n == 0 && u16::from(z) * 8 == bits && (matches!(bits, 32 | 64) || integer && bits == 16)
         }
         Op::X87(op) => {
             let memory = usize::from(op.touches_memory());

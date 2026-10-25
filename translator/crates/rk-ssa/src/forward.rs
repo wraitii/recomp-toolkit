@@ -55,6 +55,95 @@ fn crosses_call(
     false
 }
 
+pub(crate) fn dump_dependencies(
+    s: &Ssa,
+    facts: &dyn CallFacts,
+    out: &mut (impl std::io::Write + ?Sized),
+) -> std::io::Result<()> {
+    let locations = crate::memory::local_accesses(s, Some(facts));
+    let private = crate::memory::PrivateFrame::new(s, &locations, Some(facts));
+    let mut addresses = Addresses::local(s);
+    for &id in locations.keys() {
+        if locations[&id].location.is_some() {
+            addresses.get(s.args(id)[1]);
+        }
+    }
+    for (&load, access) in &locations {
+        if !matches!(
+            s.value(load).op,
+            Op::P(OpCode::Load) | Op::X87(X87Op::PushInteger { .. })
+        ) {
+            continue;
+        }
+        let Some(range) = access.location.filter(|range| {
+            range.address.is_exact()
+                && matches!(
+                    range.address,
+                    Address::Known {
+                        base: Base::Frame | Base::Stack(_),
+                        ..
+                    }
+                )
+        }) else {
+            continue;
+        };
+        let mut pending = vec![s.args(load)[0]];
+        let mut seen = LookupSet::default();
+        let mut blockers = std::collections::BTreeSet::new();
+        while let Some(token) = pending.pop() {
+            if !seen.insert(token) {
+                continue;
+            }
+            if seen.len() > 4096 {
+                blockers.insert(token);
+                break;
+            }
+            match s.value(token).op {
+                Op::Phi => pending.extend_from_slice(s.args(token)),
+                Op::Memory => {
+                    let args = s.args(token);
+                    let Some(&effect) = args.first() else {
+                        blockers.insert(token);
+                        continue;
+                    };
+                    if let Some(access) = locations.get(&effect) {
+                        if s.value(effect).op == Op::P(OpCode::Store)
+                            && access.location == Some(range)
+                        {
+                            continue;
+                        }
+                        if !addresses.relations.excludes(&access.writes, range)
+                            && !private.disjoint(effect, range)
+                        {
+                            blockers.insert(effect);
+                            continue;
+                        }
+                        pending.push(args.get(1).copied().unwrap_or(s.args(effect)[0]));
+                    } else {
+                        pending.extend_from_slice(args);
+                    }
+                }
+                _ => {
+                    blockers.insert(token);
+                }
+            }
+        }
+        writeln!(out, "load-dependencies {} v{load} range={range:?} crosses-call={} guard-address-supported={} blockers={blockers:?}",
+            rk_core::Hex(s.value_addr[load as usize]), crosses_call(s, load, &locations),
+            matches!(addresses.relations.bounds(range.address), Address::Known { base: Base::Frame, .. }))?;
+        for blocker in blockers {
+            writeln!(
+                out,
+                "load-blocker v{load} {} v{blocker} {:?} writes={:?}",
+                rk_core::Hex(s.value_addr[blocker as usize]),
+                s.value(blocker).op,
+                locations.get(&blocker).map(|access| &access.writes)
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
     let calls = s.assume_private_stack
         && s.blocks
@@ -62,7 +151,7 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
             .flat_map(|block| &block.ops)
             .any(|&id| matches!(s.value(id).op, Op::Call { .. } | Op::CallInd));
     let guards: LookupSet<_> = if calls {
-        let locations = crate::memory::accesses(s, call_facts);
+        let locations = crate::memory::local_accesses(s, call_facts);
         s.blocks
             .iter()
             .flat_map(|block| &block.ops)
@@ -79,13 +168,30 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
         LookupSet::default()
     };
     crate::memory::partition(s, call_facts);
-    let mut addresses = Addresses::new(s);
+    let mut addresses = Addresses::local(s);
     let locations: Lookup<ValueId, Address> = s
         .blocks
         .iter()
         .flat_map(|block| &block.ops)
         .filter(|&&id| matches!(s.value(id).op, Op::P(OpCode::Load | OpCode::Store)))
         .map(|&id| (id, addresses.get(s.args(id)[1])))
+        .collect();
+    let guardable: LookupSet<_> = s
+        .blocks
+        .iter()
+        .flat_map(|block| &block.ops)
+        .filter(|&&id| {
+            locations.get(&id).is_some_and(|&address| {
+                matches!(
+                    addresses.relations.bounds(address),
+                    Address::Known {
+                        base: Base::Frame,
+                        ..
+                    }
+                )
+            })
+        })
+        .copied()
         .collect();
     let mut candidates = Vec::new();
     let mut alias: Lookup<ValueId, ValueId> = Lookup::default();
@@ -166,15 +272,7 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
                     }
                 }
             }
-            if failed
-                && matches!(
-                    target,
-                    Address::Known {
-                        base: Base::Frame | Base::Absolute,
-                        ..
-                    }
-                )
-            {
+            if failed {
                 candidates.push((load, target, width));
             }
             if !failed {
@@ -209,9 +307,22 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
             memo: BTreeMap::new(),
             phis: Vec::new(),
             anchored: false,
+            parts: BTreeMap::new(),
         };
         let saved = projection.get(token, 0);
         if let Some(saved) = saved.filter(|&saved| saved != load && projection.anchored) {
+            if !projection.parts.is_empty() {
+                for block in &mut projection.s.blocks {
+                    block.ops = block
+                        .ops
+                        .iter()
+                        .flat_map(|&id| {
+                            std::iter::once(id)
+                                .chain(projection.parts.get(&id).into_iter().flatten().copied())
+                        })
+                        .collect();
+                }
+            }
             for (phi, block) in projection.phis {
                 projection.s.blocks[block].phis.push(phi);
             }
@@ -231,6 +342,11 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
         }
     }
     integers.retain(|&(load, _, _)| !guards.contains(&load));
+    for &load in s.blocks.iter().flat_map(|block| &block.ops) {
+        if guards.contains(&load) && !guardable.contains(&load) {
+            alias.remove(&load);
+        }
+    }
     if alias.is_empty() && integers.is_empty() {
         return false;
     }
@@ -244,18 +360,7 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
                 if !guards.contains(&load) {
                     return None;
                 }
-                locations
-                    .get(&load)
-                    .is_some_and(|address| {
-                        matches!(
-                            address,
-                            Address::Known {
-                                base: Base::Frame,
-                                ..
-                            }
-                        )
-                    })
-                    .then_some((load, saved))
+                guardable.contains(&load).then_some((load, saved))
             })
             .collect();
         for (load, saved) in guarded {
@@ -313,6 +418,7 @@ struct Values<'a> {
     proven: &'a Lookup<(Range, ValueId), ValueId>,
     memo: BTreeMap<ValueId, ValueId>,
     phis: Vec<(ValueId, usize)>,
+    parts: BTreeMap<ValueId, Vec<ValueId>>,
     anchored: bool,
 }
 
@@ -364,11 +470,48 @@ impl Values<'_> {
                         } else {
                             effect
                         };
-                        if self.s.value(candidate).size as u32 == self.target.size
-                            && self.locations.get(&effect) == Some(&self.target.address)
-                        {
+                        let part = self.locations.get(&effect).and_then(|&address| {
+                            let Address::Known {
+                                base,
+                                offset,
+                                span: 0,
+                            } = address
+                            else {
+                                return None;
+                            };
+                            let Address::Known {
+                                base: target_base,
+                                offset: target_offset,
+                                span: 0,
+                            } = self.target.address
+                            else {
+                                return None;
+                            };
+                            let offset = target_offset.wrapping_sub(offset);
+                            (base == target_base
+                                && offset.checked_add(self.target.size)?
+                                    <= u32::from(self.s.value(candidate).size))
+                            .then_some(offset)
+                        });
+                        if let Some(offset) = part {
                             self.anchored |= candidate != self.load;
-                            candidate
+                            if offset == 0
+                                && u32::from(self.s.value(candidate).size) == self.target.size
+                            {
+                                candidate
+                            } else {
+                                let addr = self.s.value_addr[self.load as usize];
+                                let offset =
+                                    self.s.new_value(Op::Const(u64::from(offset)), 4, &[], addr);
+                                let part = self.s.new_value(
+                                    Op::P(OpCode::SubPiece),
+                                    self.target.size as u8,
+                                    &[candidate, offset],
+                                    addr,
+                                );
+                                self.parts.entry(effect).or_default().push(part);
+                                part
+                            }
                         } else if !store {
                             self.get(
                                 args.get(1).copied().unwrap_or(self.s.args(effect)[0]),

@@ -72,10 +72,15 @@ buckets under a 4 MiB source budget), `chunk_entries_*.c` entry thunks,
 statistics, fact bounds and effects consumed, trap and fallback reasons, slow
 operations, discovery traps, diagnostics and phase timings. `--discovery-report`
 writes the discovered code map, instruction lengths and every rejected function
-or entry with its pass and reason. `--dump program|fir|ssa|prepared|global|bodies|all`
+or entry with its pass and reason. `--dump program|fir|ssa|prepared|stack|global|bodies|all`
 prints intermediate stages to stdout, and `--only` restricts the dump to a set
-of functions. The `ssa` and `prepared` dumps build SSA outside `rk-plan` and are
-diagnostic only.
+of functions; `--selection FILE` also accepts a JSON `functions` array with hex
+`addr` fields. `ssa` uses conservative facts without x87 recipes. `prepared` and
+`stack` use production call facts, x87 recipes and preparation settings for the
+ordinary body; stack retirement remains restricted to reuse variants. `stack`
+reports frame rejection reasons, aligned/local versus entry-frame addresses,
+exposure, retained accesses, call guards and possible writes blocking local loads.
+These dumps run outside `rk-plan`.
 
 There is no emission cache or `--regen-function`. `build.py` fingerprints each
 image from the input JSON, the translator binary, the code-map files and
@@ -160,7 +165,20 @@ storage is assumed inaccessible through pointers independent of entry ESP, inclu
 pre-existing pointers and wrapping arithmetic. Explicit ESP-derived accesses still
 alias normally. Load forwarding requires a single entry and no opaque non-call effects
 or escaping branches. Escaped ranges retain conservative aliasing independently of
-unexposed slots. `[translate] assume_stack_pointer_bases` defaults to false.
+unexposed slots. Cyclic address joins require agreeing outside inputs and zero net
+offset around every traversed cycle; unanchored cycles remain unknown.
+Guarded load forwarding includes aligned locals and proved read-only callees;
+unknown reads still require pending stores to settle before those calls.
+Computed return values retain proved access footprints while recording their input
+capture sources; passed frame pointers remain exposed conservatively when their
+returned offsets are unknown. Unknown ESP-derived returns remain unsupported.
+Straight-line reloads with available cached values refresh inside the generic-call
+branch; subsequent uses need no load-site guard. Other control flow retains guarded loads.
+Functions with only refreshed loads and matched straight-line delayed stores assign
+ESP in the call branches and omit sticky stack validity state. Those stores publish
+their original address and value inside the unlikely generic-call branch. Unmatched
+flushes, guarded loads and final commits retain validity state.
+`[translate] assume_stack_pointer_bases` defaults to false.
 `DIVERGENCE(original):` when enabled, an escaped frame pointer is assumed to identify
 the beginning of its accessible region. Unknown upward extents expose the remainder
 of the frame; proved callee ranges can narrow exposure and include negative accesses.
@@ -170,7 +188,9 @@ guest stores, and original-code analysis summaries do not use this assumption.
 
 `[translate] lazy_stack_writes` defaults to true when the private-stack assumption
 is enabled, fault state is relaxed, and store hooks are disabled. Exact negative
-frame slots carry pending values through ordinary SSA phis. A backward pass keeps
+frame slots carry pending values through ordinary SSA phis. Eligible x87 stores
+produce rounded bits and retain ESP provenance while preserving their pop and status effects;
+local loads forward those bits, including contained slices of wider values, through memory SSA. A backward pass keeps
 a store eager unless it can be overwritten across an access separated by the
 private-stack assumption. Proved direct calls retain disjoint pending slots on
 their ordinary path. Preparation consumes checkpoint credit only when accepted;
@@ -213,6 +233,12 @@ callees, recursive dependencies, native replacements, exception flow and unsuppo
 effects leave the function unknown. Direct calls and tail calls compose only
 already-established summaries; indirect bounds cannot bootstrap function proofs.
 Named rejection counts and frame-checked cleanup counts are reported separately.
+Cleanup-only inference separately checks ESP balance over pcode, including x87,
+with conservative memory and register effects for unresolved recursive candidates.
+Candidates come from return encodings and tail targets; failed proofs remove them
+and their dependents. These facts establish only cleanup, without memory,
+return-address or checkpoint guarantees. `--dump global` lists per-function
+rejections, unresolved call edges and cleanup-only proofs.
 
 At a bounded call, every returning candidate must have a summary with matching
 cleanup. Mapped noreturn candidates remain dispatch targets but contribute no

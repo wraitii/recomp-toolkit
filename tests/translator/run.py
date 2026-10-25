@@ -332,6 +332,7 @@ image_base = 0x00400000
 entry_point = 0x00401000
 guest_root = 'C:\\TranslatorTests'
 windows_version = "4.10"
+store_hooks = false
 
 [translate]
 engine = "rust"

@@ -110,7 +110,7 @@ fn clone_sensitive(op: X87Op) -> bool {
             integer: false,
             ..
         } => true,
-        X87Op::Store { integer: true, .. } => true,
+        X87Op::Store { integer: true, .. } | X87Op::StoreValue { .. } => true,
         _ => false,
     }
 }
@@ -388,12 +388,13 @@ fn lower_clone(
                     if strict && op.touches_memory() {
                         events.extend(scalar.flush());
                     }
-                    let address =
-                        if op.touches_memory() || matches!(op, X87Op::PushIntegerValue { .. }) {
-                            s.args(value).last().map(|arg| Expr::External(*arg))
-                        } else {
-                            None
-                        };
+                    let address = if op.touches_memory()
+                        || matches!(op, X87Op::PushIntegerValue { .. } | X87Op::PushValue { .. })
+                    {
+                        s.args(value).last().map(|arg| Expr::External(*arg))
+                    } else {
+                        None
+                    };
                     let result = (op.result_size() > 0).then_some(value);
                     events.extend(scalar.apply(op, address, result));
                 }

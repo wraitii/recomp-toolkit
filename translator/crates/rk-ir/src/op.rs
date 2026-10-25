@@ -93,6 +93,7 @@ pub enum Op {
     StackBoundary,
     StackCallGuard { target: Addr, checkpoints: u32 },
     StackLoad,
+    StackRefresh { offset: u32 },
     StackStore,
     StackCommit,
     StackFlush,
@@ -250,7 +251,11 @@ pub fn properties(op: Op) -> Properties {
             ordered: true,
             ..Properties::new()
         },
-        Op::StackLoad | Op::StackStore | Op::StackCommit | Op::StackFlush => Properties {
+        Op::StackLoad
+        | Op::StackRefresh { .. }
+        | Op::StackStore
+        | Op::StackCommit
+        | Op::StackFlush => Properties {
             ordered: true,
             observes: true,
             faults: true,

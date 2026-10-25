@@ -59,12 +59,23 @@ pub fn prepare_with_publications(
     cg: &rk_ir::CgFunction,
     opts: &PrepareOptions,
 ) -> rk_core::Result<(Ssa, Option<BTreeMap<ValueId, Vec<StateKey>>>)> {
-    prepare_using(cg, opts, true)
+    prepare_using(cg, opts, true, None)
+}
+
+pub fn prepare_with_stack_dump(
+    cg: &rk_ir::CgFunction,
+    opts: &PrepareOptions,
+    out: &mut impl std::io::Write,
+) -> rk_core::Result<Ssa> {
+    prepare_using(cg, opts, true, Some(out)).map(|(ssa, _)| ssa)
 }
 
 struct NoCleanup<'a>(&'a dyn CallFacts);
 
 impl CallFacts for NoCleanup<'_> {
+    fn readonly_memory(&self, site: rk_core::Addr, target: Option<rk_core::Addr>) -> bool {
+        self.0.readonly_memory(site, target)
+    }
     fn checkpoints(&self, site: rk_core::Addr, target: Option<rk_core::Addr>) -> Option<u32> {
         self.0.checkpoints(site, target)
     }
@@ -101,6 +112,7 @@ fn prepare_using(
     cg: &rk_ir::CgFunction,
     opts: &PrepareOptions,
     stack_cleanups: bool,
+    mut trace: Option<&mut dyn std::io::Write>,
 ) -> rk_core::Result<(Ssa, Option<BTreeMap<ValueId, Vec<StateKey>>>)> {
     let build_options = BuildOptions {
         policy: opts.policy,
@@ -119,6 +131,18 @@ fn prepare_using(
     ssa.assume_private_stack = opts.assume_private_stack && opts.policy == Policy::Optimizing;
     ssa.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
     canonicalize(&mut ssa, opts.signed_sub);
+    if let Some(out) = trace.as_mut() {
+        writeln!(
+            out,
+            "before memory passes cleanup-inference={stack_cleanups} retirement={}",
+            opts.retire_reused_stack
+        )
+        .and_then(|_| crate::memory::dump_stack(&ssa, opts.call_facts, *out))
+        .map_err(|error| rk_core::Error::io("stack dump", error))?;
+    }
+    if lazy_stack_writes {
+        crate::stack::split_x87(&mut ssa, opts.call_facts);
+    }
     forward(&mut ssa, Some(opts.call_facts));
     if opts.policy == Policy::Optimizing && opts.fault_state == FaultState::Relaxed {
         crate::memory::eliminate_dead_stores(&mut ssa, Some(opts.call_facts));
@@ -126,8 +150,17 @@ fn prepare_using(
     if lazy_stack_writes {
         crate::stack::promote(&mut ssa, opts.retire_reused_stack, opts.call_facts);
     }
+    if let Some(out) = trace.as_mut() {
+        writeln!(
+            out,
+            "after memory passes cleanup-inference={stack_cleanups} retirement={}",
+            opts.retire_reused_stack
+        )
+        .and_then(|_| crate::memory::dump_stack(&ssa, opts.call_facts, *out))
+        .map_err(|error| rk_core::Error::io("stack dump", error))?;
+    }
     if stack_cleanups
-        && ssa.assume_private_stack
+        && opts.policy != Policy::Conservative
         && ssa
             .blocks
             .iter()
@@ -147,11 +180,15 @@ fn prepare_using(
                 ..*opts
             },
             false,
+            trace,
         );
     }
     crate::flags::build_joins(&mut ssa);
     crate::coalesce::coalesce(&mut ssa, opts.coalesce_roots);
     canonicalize(&mut ssa, opts.signed_sub);
+    if opts.fault_state == FaultState::Relaxed {
+        crate::stack::refresh_loads(&mut ssa);
+    }
     let plans = opts.lazy_publications.then(|| {
         let base = publications(&ssa, opts.call_facts);
         let simplify = ssa

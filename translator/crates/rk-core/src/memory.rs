@@ -5,6 +5,7 @@ pub enum Base {
     Frame,
     Absolute,
     Value(u32),
+    Stack(u32),
     Parameter(u8),
     Argument(i32),
 }

@@ -304,6 +304,12 @@ pub enum Event {
         floating: bool,
         bcd: bool,
     },
+    Bitcast {
+        bits: u16,
+        target: Expr,
+        value: Expr,
+        floating: bool,
+    },
     PublishTags(Vec<(Expr, Expr)>),
     Activation(Activation),
     Reset,

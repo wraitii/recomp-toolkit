@@ -33,7 +33,9 @@ pub use dump::dump;
 pub use flags::{cc_kind, FlagDescriptor, FlagPlan, FlagPublication, FlagSource};
 pub use forward::forward;
 pub use liveness::{live_values, simplify};
-pub use prepare::{prepare, prepare_with_publications, publications, PrepareOptions};
+pub use prepare::{
+    prepare, prepare_with_publications, prepare_with_stack_dump, publications, PrepareOptions,
+};
 
 pub type ValueId = u32;
 pub type BlockId = u32;
@@ -143,6 +145,7 @@ pub struct Ssa {
     pub value_addr: Vec<Addr>,
     pub(crate) stack_states: BTreeMap<ValueId, [ValueId; 4]>,
     pub stack_guards: BTreeMap<ValueId, ValueId>,
+    pub stack_flush_sources: BTreeMap<ValueId, ValueId>,
     pub(crate) stack_calls: bool,
     pub(crate) memory_partitioned: bool,
     pub(crate) assume_private_stack: bool,

@@ -47,6 +47,49 @@ struct Prepared {
     calls: Vec<Call>,
 }
 
+fn capture_sources(
+    s: &rk_ssa::Ssa,
+    addresses: &mut rk_ssa::address::Addresses<'_>,
+    derived: &LookupSet<u32>,
+    value: u32,
+) -> Option<BTreeSet<Base>> {
+    let mut result = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![value];
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) || !derived.contains(&id) {
+            continue;
+        }
+        match s.value(id).op {
+            Op::Input(key) => {
+                let field = s.field(key)?;
+                result.insert(if field == Field::Esp {
+                    Base::Frame
+                } else {
+                    Base::Parameter(field as u8)
+                });
+            }
+            Op::P(OpCode::Load) => {
+                let Address::Known {
+                    base: Base::Frame,
+                    offset,
+                    span: 0,
+                } = addresses.get(s.args(id)[1])
+                else {
+                    return None;
+                };
+                if (offset as i32) < 4 {
+                    return None;
+                }
+                result.insert(Base::Argument(offset as i32));
+            }
+            op if rk_ir::properties(op).pure => pending.extend(s.args(id)),
+            _ => return None,
+        }
+    }
+    Some(result)
+}
+
 fn prepare(
     input: &GlobalInput<'_>,
     addr: Addr,
@@ -213,7 +256,17 @@ fn prepare(
                         })
                     }) =>
                     {
-                        return None
+                        for &(_, value) in s
+                            .boundary(id)?
+                            .iter()
+                            .filter(|&&(key, _)| s.field(key) == Some(field))
+                        {
+                            let sources = capture_sources(&s, &mut addresses, &derived, value)?;
+                            if sources.contains(&Base::Frame) {
+                                return None;
+                            }
+                            local.unknown_captures.extend(sources);
+                        }
                     }
                     _ => {}
                 }
@@ -269,6 +322,21 @@ fn compose(
     for call in &body.calls {
         for target in &call.targets {
             let callee = current.get(target).or_else(|| known.get(target))?;
+            for &base in &callee.unknown_captures {
+                match call.address(Address::exact(base, 0)) {
+                    Address::Known {
+                        base: base @ (Base::Parameter(_) | Base::Argument(_)),
+                        ..
+                    } => {
+                        result.unknown_captures.insert(base);
+                    }
+                    Address::Known {
+                        base: Base::Absolute,
+                        ..
+                    } => {}
+                    _ => return None,
+                }
+            }
             for (source, output) in [
                 (&callee.effects.reads, &mut result.effects.reads),
                 (&callee.effects.writes, &mut result.effects.writes),
@@ -457,6 +525,7 @@ pub fn analyze(
             for target in targets {
                 let summary = functions.get(target)?;
                 result.effects.join(&summary.effects);
+                result.unknown_captures.extend(&summary.unknown_captures);
                 result.checkpoints = result
                     .checkpoints
                     .zip(summary.checkpoints)

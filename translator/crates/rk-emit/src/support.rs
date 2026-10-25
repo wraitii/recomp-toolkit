@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rk_core::contract::{Field, Fields};
 use rk_core::ir::OpCode;
@@ -6,6 +6,60 @@ use rk_ir::{field_lane, Op, Registers, StateKey};
 use rk_ssa::ValueId;
 
 use crate::PrivateEmit;
+
+pub(crate) fn call_writes(
+    plan: &rk_plan::PlannedFunction,
+) -> Option<(BTreeSet<ValueId>, BTreeMap<ValueId, Vec<ValueId>>)> {
+    let s = &plan.ssa;
+    let mut skipped = BTreeSet::new();
+    let mut covered = BTreeSet::new();
+    let mut calls: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for block in &s.blocks {
+        let mut stores = BTreeSet::new();
+        for (position, &id) in block.ops.iter().enumerate() {
+            match s.value(id).op {
+                Op::StackLoad | Op::StackCommit => return None,
+                Op::StackStore => {
+                    stores.insert(id);
+                    skipped.insert(id);
+                }
+                Op::StackFlush => {
+                    let args = s.args(id);
+                    let &store = s.stack_flush_sources.get(&id)?;
+                    if !stores.contains(&store) || s.args(store)[2] != args[2] {
+                        return None;
+                    }
+                    let (&call, _) = s
+                        .stack_guards
+                        .iter()
+                        .find(|&(_, &guard)| guard == args[3])?;
+                    let after = &block.ops[position + 1..];
+                    let end = after.iter().position(|&next| next == call)?;
+                    if after[..end]
+                        .iter()
+                        .any(|&next| !rk_ir::properties(s.value(next).op).pure)
+                    {
+                        return None;
+                    }
+                    calls.entry(call).or_default().push(store);
+                    covered.insert(store);
+                    skipped.insert(id);
+                }
+                Op::Call { .. } | Op::CallInd => stores.clear(),
+                _ => {}
+            }
+        }
+    }
+    if skipped.iter().any(|&id| {
+        s.value(id).op == Op::StackStore && !covered.contains(&id)
+            || plan.publish.get(&id).is_some_and(|keys| !keys.is_empty())
+            || plan.guard.get(&id).is_some_and(|keys| !keys.is_empty())
+            || plan.flag_publish.contains_key(&id)
+    }) {
+        return None;
+    }
+    Some((skipped, calls))
+}
 
 pub(crate) fn const_expr(data: u64, size: u8) -> String {
     if size > 4 {

@@ -51,6 +51,21 @@ pub(crate) fn call_effect(contract: Contract) -> CallEffect {
 }
 
 impl CallFacts for ContractCallFacts<'_> {
+    fn readonly_memory(&self, site: Addr, target: Option<Addr>) -> bool {
+        let Some(returns) = self.returns else {
+            return false;
+        };
+        match target {
+            Some(target) => returns.functions.get(&target),
+            None => returns.sites.get(&site),
+        }
+        .is_some_and(|summary| {
+            !summary.writes_other
+                && summary.effect.writes.is_empty()
+                && !summary.mapped_noreturn
+                && summary.returns == stack::ReturnEffect::Exact
+        })
+    }
     fn checkpoints(&self, site: Addr, target: Option<Addr>) -> Option<u32> {
         let borrows = self.borrows?;
         match target {
@@ -65,6 +80,7 @@ impl CallFacts for ContractCallFacts<'_> {
             None => returns.sites.get(&site),
         }
         .map(|summary| summary.effect.cleanup)
+        .or_else(|| target.and_then(|target| returns.cleanups.get(&target).copied()))
     }
     fn borrowed_stack(&self, site: Addr, target: Option<Addr>) -> Option<&rk_ssa::BorrowedStack> {
         let borrows = self.borrows?;
@@ -301,6 +317,15 @@ impl GlobalFacts {
 
     pub fn dump(&self, out: &mut impl Write) -> std::io::Result<()> {
         writeln!(out, "global report {}", format_report(&self.report))?;
+        for (&addr, reason) in &self.returns.rejected_functions {
+            writeln!(out, "return-rejected {addr:08x} {reason}")?;
+        }
+        for (&addr, cleanup) in &self.returns.cleanups {
+            writeln!(out, "cleanup-only {addr:08x} pop={cleanup}")?;
+        }
+        for (&addr, reason) in &self.returns.rejected_cleanups {
+            writeln!(out, "cleanup-rejected {addr:08x} {reason}")?;
+        }
         writeln!(
             out,
             "jump-bounds consumed={} unsupported={}",
@@ -322,14 +347,8 @@ impl GlobalFacts {
             )?;
         }
         for (&addr, summary) in &self.borrows.functions {
-            writeln!(
-                out,
-                "borrowed-stack {addr:08x} checkpoints={:?} reads={:?} writes={:?} captures={:?}",
-                summary.checkpoints,
-                summary.effects.reads,
-                summary.effects.writes,
-                summary.captures
-            )?;
+            writeln!(out, "borrowed-stack {addr:08x} checkpoints={:?} reads={:?} writes={:?} captures={:?} unknown-captures={:?}",
+                summary.checkpoints, summary.effects.reads, summary.effects.writes, summary.captures, summary.unknown_captures)?;
         }
         for (&addr, cost) in &self.borrows.checkpoints {
             writeln!(out, "checkpoint-bound {addr:08x} calls={cost}")?;

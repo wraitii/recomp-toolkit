@@ -4,10 +4,10 @@ use rk_core::contract::Field;
 use rk_core::ir::OpCode;
 use rk_core::memory::{Address, Base, Effects, Footprint, Range};
 use rk_core::{Lookup, LookupSet};
-use rk_ir::x87::{MemoryEffect, X87Op};
+use rk_ir::x87::MemoryEffect;
 use rk_ir::Op;
 
-use crate::address::Addresses;
+use crate::address::{Addresses, Relations};
 use crate::{CallFacts, Ssa, ValueId};
 
 #[derive(Clone, Debug)]
@@ -17,14 +17,34 @@ pub struct Access {
     pub location: Option<Range>,
 }
 
-fn footprint(range: Range) -> Footprint {
+fn footprint(range: Range, local: bool) -> Footprint {
     let mut result = Footprint::default();
-    result.insert(range);
+    if local && range.address.is_exact() && range.size != 0 {
+        result.ranges.insert(range);
+    } else {
+        result.insert(range);
+    }
     result
 }
 
 pub fn accesses(s: &Ssa, facts: Option<&dyn CallFacts>) -> BTreeMap<ValueId, Access> {
-    let mut addresses = Addresses::new(s);
+    accesses_using(s, facts, false).0
+}
+
+pub(crate) fn local_accesses(s: &Ssa, facts: Option<&dyn CallFacts>) -> BTreeMap<ValueId, Access> {
+    accesses_using(s, facts, true).0
+}
+
+fn accesses_using(
+    s: &Ssa,
+    facts: Option<&dyn CallFacts>,
+    local: bool,
+) -> (BTreeMap<ValueId, Access>, Relations) {
+    let mut addresses = if local {
+        Addresses::local(s)
+    } else {
+        Addresses::new(s)
+    };
     let mut result = BTreeMap::new();
     for block in &s.blocks {
         for &id in &block.ops {
@@ -43,7 +63,7 @@ pub fn accesses(s: &Ssa, facts: Option<&dyn CallFacts>) -> BTreeMap<ValueId, Acc
                         s.value(args[2]).size
                     };
                     let range = Range::new(addresses.get(args[1]), size as u32);
-                    let effect = footprint(range);
+                    let effect = footprint(range, local);
                     if matches!(op, Op::P(OpCode::Load) | Op::StackLoad) {
                         Access {
                             reads: effect,
@@ -58,20 +78,9 @@ pub fn accesses(s: &Ssa, facts: Option<&dyn CallFacts>) -> BTreeMap<ValueId, Acc
                         }
                     }
                 }
-                Op::X87(
-                    op @ (X87Op::PushInteger { bits: 16 | 32 | 64 }
-                    | X87Op::Store {
-                        dst: None,
-                        bits: 16 | 32 | 64 | 80,
-                        ..
-                    }),
-                ) => {
-                    let bits = match op {
-                        X87Op::PushInteger { bits } | X87Op::Store { bits, .. } => bits,
-                        _ => unreachable!(),
-                    };
-                    let range = Range::new(addresses.get(args[1]), u32::from(bits / 8));
-                    let effect = footprint(range);
+                Op::X87(op) if op.memory_size().is_some() => {
+                    let range = Range::new(addresses.get(args[1]), op.memory_size().unwrap());
+                    let effect = footprint(range, local);
                     if op.memory() == Some(MemoryEffect::Read) {
                         Access {
                             reads: effect,
@@ -128,11 +137,11 @@ pub fn accesses(s: &Ssa, facts: Option<&dyn CallFacts>) -> BTreeMap<ValueId, Acc
             result.insert(id, access);
         }
     }
-    result
+    (result, addresses.relations)
 }
 
 pub(crate) fn eliminate_dead_stores(s: &mut Ssa, facts: Option<&dyn CallFacts>) {
-    let accesses = accesses(s, facts);
+    let (accesses, relations) = accesses_using(s, facts, true);
     let mut aliases = Lookup::default();
     for block in &s.blocks {
         let mut overwritten = BTreeSet::new();
@@ -156,7 +165,7 @@ pub(crate) fn eliminate_dead_stores(s: &mut Ssa, facts: Option<&dyn CallFacts>) 
                 aliases.insert(id, s.args(id)[0]);
                 continue;
             }
-            overwritten.retain(|range| access.reads.disjoint(*range));
+            overwritten.retain(|range| relations.excludes(&access.reads, *range));
             if let Some(range) = access.location.filter(|range| range.address.is_exact()) {
                 if !access.writes.ranges.is_empty() && !access.writes.opaque {
                     overwritten.insert(range);
@@ -186,7 +195,7 @@ fn identified(range: Range) -> bool {
     matches!(
         range.address,
         Address::Known {
-            base: Base::Frame | Base::Absolute,
+            base: Base::Frame | Base::Absolute | Base::Value(_) | Base::Stack(_),
             span: 0,
             ..
         }
@@ -196,6 +205,7 @@ fn identified(range: Range) -> bool {
 #[derive(Default)]
 pub(crate) struct PrivateFrame {
     pub(crate) eligible: bool,
+    relations: Relations,
     independent: Lookup<ValueId, i32>,
     exposed: Footprint,
     calls: Lookup<ValueId, Effects>,
@@ -203,20 +213,20 @@ pub(crate) struct PrivateFrame {
 }
 
 impl PrivateFrame {
-    pub(crate) fn new(
+    fn rejection(
         s: &Ssa,
         accesses: &BTreeMap<ValueId, Access>,
-        facts: Option<&dyn CallFacts>,
-    ) -> Self {
-        if !s.assume_private_stack
-            || s.entries.len() != 1
-            || s.entries[0].addr != s.addr
-            || accesses.iter().any(|(&id, access)| {
-                access.location.is_none()
-                    && !matches!(s.value(id).op, Op::Call { .. } | Op::CallInd)
-            })
-        {
-            return Self::default();
+    ) -> Option<(&'static str, Option<ValueId>)> {
+        if !s.assume_private_stack {
+            return Some(("private-stack-disabled", None));
+        }
+        if s.entries.len() != 1 || s.entries[0].addr != s.addr {
+            return Some(("multiple-or-interior-entries", None));
+        }
+        if let Some((&id, _)) = accesses.iter().find(|&(id, access)| {
+            access.location.is_none() && !matches!(s.value(*id).op, Op::Call { .. } | Op::CallInd)
+        }) {
+            return Some(("unmodelled-memory-effect", Some(id)));
         }
         for block in &s.blocks {
             for &id in &block.ops {
@@ -233,9 +243,20 @@ impl PrivateFrame {
                     || matches!(op, Op::Branch { .. } | Op::CBranch { .. })
                         && s.boundary(id).is_some()
                 {
-                    return Self::default();
+                    return Some(("opaque-or-external-control-flow", Some(id)));
                 }
             }
+        }
+        None
+    }
+
+    pub(crate) fn new(
+        s: &Ssa,
+        accesses: &BTreeMap<ValueId, Access>,
+        facts: Option<&dyn CallFacts>,
+    ) -> Self {
+        if Self::rejection(s, accesses).is_some() {
+            return Self::default();
         }
         let mut derived = vec![false; s.values.len()];
         let mut users = vec![Vec::new(); s.values.len()];
@@ -280,9 +301,14 @@ impl PrivateFrame {
             *exposed = Footprint::unknown();
         };
         let mut stored_frame = false;
+        let mut stored_frame_ranges = Vec::new();
         for &id in accesses.keys() {
+            if accesses[&id].location.is_some() {
+                addresses.get(s.args(id)[1]);
+            }
             if s.value(id).op == Op::P(OpCode::Store) && derived[s.args(id)[2] as usize] {
                 stored_frame = true;
+                stored_frame_ranges.push(accesses[&id].location);
                 expose(&mut exposed, addresses.get(s.args(id)[2]));
             }
         }
@@ -297,6 +323,29 @@ impl PrivateFrame {
                 };
                 let summary =
                     facts.and_then(|facts| facts.borrowed_stack(s.value_addr[id as usize], target));
+                if let Some(summary) =
+                    summary.filter(|summary| !summary.unknown_captures.is_empty())
+                {
+                    let frame = addresses.state(id, Field::Esp);
+                    if stored_frame_ranges.iter().any(|stored| {
+                        stored.is_none_or(|stored| {
+                            let stored =
+                                Range::new(addresses.relations.bounds(stored.address), stored.size);
+                            summary.unknown_captures.iter().any(|base| match *base {
+                                Base::Argument(offset) => {
+                                    let read = Range::new(frame.offset(offset as u32), 4);
+                                    !stored.disjoint(Range::new(
+                                        addresses.relations.bounds(read.address),
+                                        read.size,
+                                    ))
+                                }
+                                _ => false,
+                            })
+                        })
+                    }) {
+                        exposed = Footprint::unknown();
+                    }
+                }
                 if let Some(&offset) =
                     summary.and_then(|summary| summary.captures.get(&Base::Frame))
                 {
@@ -323,6 +372,11 @@ impl PrivateFrame {
                     }) {
                         let address = addresses.state(id, field);
                         let parameter = Base::Parameter(field as u8);
+                        if summary
+                            .is_some_and(|summary| summary.unknown_captures.contains(&parameter))
+                        {
+                            exposed = Footprint::unknown();
+                        }
                         if let Some(summary) = summary {
                             for range in summary
                                 .effects
@@ -340,7 +394,8 @@ impl PrivateFrame {
                                     }
                                 }
                             }
-                            if !summary.captures.contains_key(&parameter)
+                            if !summary.unknown_captures.contains(&parameter)
+                                && !summary.captures.contains_key(&parameter)
                                 && !summary.effects.reads.opaque
                                 && !summary.effects.writes.opaque
                             {
@@ -362,6 +417,26 @@ impl PrivateFrame {
         let mut checkpoints = Lookup::default();
         for (&id, access) in accesses {
             if let Op::Call { target } = s.value(id).op {
+                let site = s.value_addr[id as usize];
+                if s.stack_calls
+                    && facts.is_some_and(|facts| {
+                        facts.readonly_memory(site, Some(target))
+                            && facts.cleanup(site, Some(target)).is_some()
+                    })
+                {
+                    if let Some(cost) =
+                        facts.and_then(|facts| facts.checkpoints(site, Some(target)))
+                    {
+                        calls.insert(
+                            id,
+                            Effects {
+                                reads: Footprint::unknown(),
+                                writes: Footprint::default(),
+                            },
+                        );
+                        checkpoints.insert(id, cost);
+                    }
+                }
                 if let Some(summary) = s
                     .stack_calls
                     .then(|| {
@@ -418,16 +493,18 @@ impl PrivateFrame {
             if let Address::Known {
                 base: Base::Frame,
                 offset,
-                span: 0,
+                span,
             } = addresses.state(id, Field::Esp)
             {
-                if (offset as i32) < 0 {
-                    independent.insert(id, offset as i32);
+                let top = i64::from(offset as i32) + i64::from(span);
+                if (offset as i32) < 0 && top < 0 {
+                    independent.insert(id, top as i32);
                 }
             }
         }
         Self {
             eligible: true,
+            relations: addresses.relations,
             independent,
             exposed,
             calls,
@@ -436,10 +513,14 @@ impl PrivateFrame {
     }
 
     pub(crate) fn unexposed(&self, range: Range) -> bool {
-        self.eligible && self.exposed.disjoint(range)
+        self.eligible
+            && self
+                .exposed
+                .disjoint(Range::new(self.relations.bounds(range.address), range.size))
     }
 
     pub(crate) fn call_disjoint(&self, effect: ValueId, range: Range) -> bool {
+        let range = Range::new(self.relations.bounds(range.address), range.size);
         self.unexposed(range)
             && self.calls.get(&effect).is_some_and(|effects| {
                 effects.reads.disjoint(range) && effects.writes.disjoint(range)
@@ -451,10 +532,11 @@ impl PrivateFrame {
     }
 
     pub(crate) fn disjoint(&self, effect: ValueId, range: Range) -> bool {
+        let range = Range::new(self.relations.bounds(range.address), range.size);
         let Address::Known {
             base: Base::Frame,
             offset,
-            span: 0,
+            span,
         } = range.address
         else {
             return false;
@@ -463,7 +545,7 @@ impl PrivateFrame {
         self.unexposed(range)
             && range.size != 0
             && start < 0
-            && start + i64::from(range.size) <= 0
+            && start + i64::from(span) + i64::from(range.size) <= 0
             && (self
                 .calls
                 .get(&effect)
@@ -475,11 +557,149 @@ impl PrivateFrame {
     }
 }
 
+pub(crate) fn dump_stack(
+    s: &Ssa,
+    facts: &dyn CallFacts,
+    out: &mut (impl std::io::Write + ?Sized),
+) -> std::io::Result<()> {
+    let accesses = accesses(s, Some(facts));
+    let private = PrivateFrame::new(s, &accesses, Some(facts));
+    let mut addresses = Addresses::local(s);
+    writeln!(
+        out,
+        "== stack {} private={} pointer-bases={} guarded-calls={}",
+        rk_core::Hex(s.addr),
+        s.assume_private_stack,
+        s.assume_stack_pointer_bases,
+        s.stack_calls
+    )?;
+    match PrivateFrame::rejection(s, &accesses) {
+        Some((reason, Some(id))) => writeln!(
+            out,
+            "frame rejected: {reason} at {} v{id} {:?}",
+            rk_core::Hex(s.value_addr[id as usize]),
+            s.value(id).op
+        )?,
+        Some((reason, None)) => writeln!(out, "frame rejected: {reason}")?,
+        None => writeln!(out, "frame eligible; exposed={:?}", private.exposed)?,
+    }
+    let mut counts = BTreeMap::<&str, usize>::new();
+    let mut origins = BTreeSet::new();
+    for block in &s.blocks {
+        for &id in &block.ops {
+            let value = s.value(id);
+            let site = s.value_addr[id as usize];
+            if matches!(value.op, Op::Call { .. } | Op::CallInd) {
+                let target = match value.op {
+                    Op::Call { target } => Some(target),
+                    _ => None,
+                };
+                if let Address::Known {
+                    base: Base::Value(root),
+                    ..
+                } = addresses.state(id, Field::Esp)
+                {
+                    origins.insert(root);
+                }
+                writeln!(out, "call {} v{id} {:?} esp={:?} cleanup={:?} checkpoints={:?} borrowed={} readonly={} guard={}",
+                    rk_core::Hex(site), value.op, addresses.state(id, Field::Esp),
+                    facts.cleanup(site, target), facts.checkpoints(site, target),
+                    facts.borrowed_stack(site, target).is_some(), facts.readonly_memory(site, target), s.stack_guards.contains_key(&id))?;
+            }
+            if value.op == Op::P(OpCode::IntAnd) && value.size == 4 {
+                let local = addresses.get(id);
+                if matches!(
+                    local,
+                    Address::Known {
+                        base: Base::Stack(_),
+                        ..
+                    }
+                ) {
+                    writeln!(
+                        out,
+                        "aligned {} v{id} local={local:?} frame={:?}",
+                        rk_core::Hex(site),
+                        addresses.relations.bounds(local)
+                    )?;
+                }
+            }
+            let Some(access) = accesses.get(&id) else {
+                continue;
+            };
+            let Some(range) = access.location else {
+                *counts.entry("unlocated-effects").or_default() += 1;
+                continue;
+            };
+            let local = addresses.get(s.args(id)[1]);
+            let kind = match range.address {
+                Address::Known {
+                    base: Base::Frame,
+                    span: 0,
+                    ..
+                } => "exact-frame",
+                Address::Known {
+                    base: Base::Frame, ..
+                } => "bounded-frame",
+                _ if matches!(
+                    local,
+                    Address::Known {
+                        base: Base::Stack(_),
+                        ..
+                    }
+                ) =>
+                {
+                    "stack-base"
+                }
+                _ => "other-memory",
+            };
+            *counts.entry(kind).or_default() += 1;
+            if kind == "other-memory" {
+                continue;
+            }
+            writeln!(
+                out,
+                "access {} v{id} {:?} size={} local={local:?} frame={:?} esp={:?} unexposed={}",
+                rk_core::Hex(site),
+                value.op,
+                range.size,
+                range.address,
+                addresses.state(id, Field::Esp),
+                private.unexposed(range)
+            )?;
+        }
+    }
+    let mut seen = BTreeSet::new();
+    while let Some(id) = origins.pop_first() {
+        if seen.len() >= 256 || !seen.insert(id) {
+            continue;
+        }
+        let op = s.value(id).op;
+        writeln!(
+            out,
+            "stack-origin v{id} {} {op:?} args={:?}",
+            rk_core::Hex(s.value_addr[id as usize]),
+            s.args(id)
+        )?;
+        if matches!(
+            op,
+            Op::Phi
+                | Op::Pack
+                | Op::Byte(_)
+                | Op::StateKeep(_)
+                | Op::P(OpCode::Copy | OpCode::IntAdd | OpCode::IntSub)
+        ) {
+            origins.extend(s.args(id));
+        }
+    }
+    writeln!(out, "access-counts {counts:?}")?;
+    crate::forward::dump_dependencies(s, facts, out)
+}
+
 pub fn partition(s: &mut Ssa, facts: Option<&dyn CallFacts>) -> bool {
     if s.memory_partitioned {
         return true;
     }
-    let accesses = accesses(s, facts);
+    let (accesses, relations) = accesses_using(s, facts, true);
     let private_frame = PrivateFrame::new(s, &accesses, facts);
     let mut ranges: BTreeSet<Range> = accesses
         .values()
@@ -497,6 +717,7 @@ pub fn partition(s: &mut Ssa, facts: Option<&dyn CallFacts>) -> bool {
     let mut projection = Projection {
         s,
         accesses: &accesses,
+        relations: &relations,
         regions: &regions,
         private_frame: &private_frame,
         old_len,
@@ -528,7 +749,8 @@ pub fn partition(s: &mut Ssa, facts: Option<&dyn CallFacts>) -> bool {
                 let touched = match region {
                     Some(region) => {
                         !projection.private_frame.disjoint(effect, *region)
-                            && (!access.reads.disjoint(*region) || !access.writes.disjoint(*region))
+                            && (!projection.relations.excludes(&access.reads, *region)
+                                || !projection.relations.excludes(&access.writes, *region))
                     }
                     None => {
                         access.reads.opaque
@@ -602,6 +824,7 @@ pub fn partition(s: &mut Ssa, facts: Option<&dyn CallFacts>) -> bool {
 struct Projection<'a> {
     s: &'a mut Ssa,
     accesses: &'a BTreeMap<ValueId, Access>,
+    relations: &'a Relations,
     regions: &'a [Option<Range>],
     private_frame: &'a PrivateFrame,
     old_len: usize,
@@ -682,7 +905,8 @@ impl Projection<'_> {
         let prior = self.s.args(effect)[0];
         let touched = match self.regions[region] {
             Some(range) => {
-                !self.private_frame.disjoint(effect, range) && !access.writes.disjoint(range)
+                !self.private_frame.disjoint(effect, range)
+                    && !self.relations.excludes(&access.writes, range)
             }
             None => {
                 access.writes.opaque
