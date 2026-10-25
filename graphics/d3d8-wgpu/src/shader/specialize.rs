@@ -2,7 +2,7 @@ use crate::RenderError;
 use crate::shader::program::*;
 use std::collections::BTreeSet;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Variant {
     pub unbound: u16,
     pub cube: u16,

@@ -52,6 +52,7 @@ pub(super) fn observe(draw: &mut D3d9DrawState, interface: &Interface, key: &Pip
 pub(super) fn recipe(
     draw: &D3d9DrawState,
     key: &PipelineKey,
+    recipe: &PipelineRecipe,
 ) -> (u64, [Option<(u64, usize)>; 2], Option<u64>) {
     let sources = key.modules.each_ref().map(|module| {
         draw.shaders
@@ -64,15 +65,6 @@ pub(super) fn recipe(
         .iter()
         .find(|(_, cached)| *cached == &key.layout)
         .map(|(layout, _)| fingerprint(layout));
-    let recipe = fingerprint(&(
-        sources,
-        layout,
-        key.entry_points,
-        &key.buffers,
-        &key.target,
-        key.primitive,
-        &key.depth,
-        key.multisample,
-    ));
+    let recipe = fingerprint(&recipe.key());
     (recipe, sources, layout)
 }

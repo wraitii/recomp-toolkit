@@ -24,11 +24,18 @@ def analyze(path, start, count):
     events = []
     identities = []
     context = None
+    recovered_interleavings = 0
     with path.open(errors="replace") as source:
         for line in source:
             prefix, found, record = line.partition("[d3d9-compile] ")
             if not found:
                 continue
+            if record.startswith("draw-programs frame=[host] audio sink:"):
+                continuation = next(source, "")
+                if not re.fullmatch(r"\d+ draw=\d+ vs=(?:Some\([0-9a-f]+\)|None) ps=(?:Some\([0-9a-f]+\)|None)\n?", continuation):
+                    raise ValueError("interrupted draw-programs record has no valid continuation")
+                record = "draw-programs frame=" + continuation
+                recovered_interleavings += 1
             kind, _, body = record.rstrip().partition(" ")
             fields = dict(re.findall(r"(\w+)=(\S+)", body))
             if kind == "identity":
@@ -83,6 +90,7 @@ def analyze(path, start, count):
     return {
         "input": str(path.resolve()),
         "identity": identities,
+        "recovered_audio_interleavings": recovered_interleavings,
         "window": {"start": min(selected), "end_exclusive": max(selected) + 1,
                    "completed_frames": len(selected), "draws": total_draws,
                    "draws_with_family": sum(counts.values())},

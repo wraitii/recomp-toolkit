@@ -30,3 +30,9 @@ impl LayoutAttribute {
 
 pub(crate) type VertexAttributes = SmallVec<[LayoutAttribute; 8]>;
 pub(crate) type VertexLayouts = SmallVec<[(u64, VertexAttributes); 2]>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct InterfaceKey {
+    pub(crate) bindings: std::sync::Arc<[wgpu::BindGroupLayoutEntry]>,
+    pub(crate) vertex_buffers: VertexLayouts,
+}

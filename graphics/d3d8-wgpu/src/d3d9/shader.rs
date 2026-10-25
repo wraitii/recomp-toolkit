@@ -60,7 +60,7 @@ pub struct ShaderRecord {
     pub pixel: bool,
     pub code: Arc<[u32]>,
     pub(crate) key: ProgramKey,
-    pub program: shader_wgsl::Program,
+    pub program: Arc<shader_wgsl::Program>,
     pub wgsl: String,
 }
 
@@ -106,7 +106,7 @@ impl D3d9Objects {
                 pixel,
                 code,
                 key,
-                program,
+                program: Arc::new(program),
                 wgsl,
             },
         );
