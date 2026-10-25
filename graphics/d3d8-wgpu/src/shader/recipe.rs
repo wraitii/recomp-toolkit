@@ -29,6 +29,24 @@ pub(crate) enum ShaderRecipeKey {
 }
 
 impl ShaderRecipe {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Source(source) => source.len(),
+            Self::Program { key, program, .. } => {
+                std::mem::size_of::<Program>()
+                    + key.byte_len()
+                    + program.code.capacity() * std::mem::size_of::<super::program::Inst>()
+                    + (program.inputs.capacity() + program.outputs.capacity())
+                        * std::mem::size_of::<super::program::DclIn>()
+                    + (program.samplers.len()
+                        + program.defs.len()
+                        + program.idefs.len()
+                        + program.bdefs.len())
+                        * 128
+            }
+        }
+    }
+
     pub(crate) fn key(&self) -> ShaderRecipeKey {
         match self {
             Self::Program { key, settings, .. } => {

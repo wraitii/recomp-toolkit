@@ -166,15 +166,35 @@ interface/raster state use the prepared interpreter; other draws keep
 specialization. This is a scoped comparison, not whole-scene interpreter-only
 coverage. A selected draw with missing preparation or unsupported resources fails
 by name. `interpreter-only` rejects uncovered draws and never selects or schedules
-specialization. The default `specialized` creates no interpreter GPU resources;
-hybrid scheduling belongs to M3 and is not available yet. Unknown modes fail at
+specialization. The default `specialized` creates no interpreter GPU resources.
+`hybrid` is opt-in on Metal: covered misses render through the prepared interpreter
+while one worker generates and compiles the complete specialization. Ready results
+are adopted at draw boundaries. Covered hybrid draws retain canonical packed
+vertices after switching; uncovered draws retain synchronous specialization with
+residual reasons. Other backends reject hybrid pending backend acceptance.
+Unknown modes fail at
 initialization. See [SHADERS.md](SHADERS.md) for exact coverage and bindings.
+
+The worker admits 32 waiting recipes, charges at most 8 MiB of estimated retained
+recipe data, and retains up to 128 ready specializations with least-recently-used
+eviction. Saturation keeps covered draws interpreted; failed jobs retain their
+diagnostic until reset rather than retrying. OOM remains a renderer error and
+physical device loss uses the existing loss path. Reset retires the worker's
+private completion channel without joining compilation, so old results cannot
+enter a new epoch. `[d3d9-async]` logs queue/compile/publication/first-selection
+timings, fallback residence, saturation, failures, epochs and residual counts.
+Recipe accounting excludes opaque driver allocations and temporary compiler
+memory; these limits are not performance acceptance budgets.
 
 Add `RECOMP_D3D9_UBER_TINT=1` to mix 15% red into interpreted fragment results
 after raster output processing, preserving alpha. The tint is a diagnostic to
 locate interpreted content; disable it for rendering comparisons. It is a
 per-draw uniform flag and creates no additional pipeline variant. Startup records
 include `tint=true` when enabled.
+In hybrid mode the tint disappears when a ready specialization is selected.
+For a visible handoff, `RECOMP_D3D9_ASYNC_DELAY_MS=5000` holds each successful
+worker result for five seconds before publication. It defaults to zero, delays
+only the compiler worker, and logs `debug-delay`; unset it for performance captures.
 
 Opt-in modes prepare one module/pipeline during device initialization, including
 replacement devices. Program changes upload immutable data and reuse that

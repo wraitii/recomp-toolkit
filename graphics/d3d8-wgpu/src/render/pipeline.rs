@@ -1,4 +1,5 @@
 use super::interface::{InterfaceKey, VertexLayouts};
+use crate::RenderError;
 use crate::shader::recipe::{ShaderRecipe, ShaderRecipeKey};
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -98,6 +99,63 @@ impl PreparedPipeline {
 }
 
 impl PipelineRecipe {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .shaders
+                .iter()
+                .map(ShaderRecipe::retained_bytes)
+                .sum::<usize>()
+            + std::mem::size_of_val(self.interface.bindings.as_ref())
+            + self
+                .interface
+                .vertex_buffers
+                .iter()
+                .map(|(_, attributes)| std::mem::size_of_val(attributes.as_slice()))
+                .sum::<usize>()
+    }
+
+    pub(crate) fn compile(&self, device: &wgpu::Device) -> Result<CompiledPipeline, RenderError> {
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let result = (|| {
+            let sources = [self.shaders[0].render()?, self.shaders[1].render()?];
+            for source in &sources {
+                crate::shader::specialize::validate(source)?;
+            }
+            let modules = sources.each_ref().map(|source| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("specialization-worker"),
+                    source: wgpu::ShaderSource::Wgsl(source.as_ref().into()),
+                })
+            });
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("specialization-worker"),
+                entries: &self.interface.bindings,
+            });
+            let pipeline = self
+                .prepare(modules.clone(), layout.clone())
+                .create(device, "specialization-worker");
+            Ok(CompiledPipeline {
+                pipeline,
+                modules,
+                layout,
+            })
+        })();
+        let oom = pollster::block_on(oom.pop());
+        let validation = pollster::block_on(validation.pop());
+        if let Some(error) = oom {
+            return Err(RenderError::out_of_memory(
+                "SpecializationCompile",
+                error.to_string(),
+            ));
+        }
+        if let Some(error) = validation {
+            return Err(RenderError::new("SpecializationCompile", error.to_string()));
+        }
+        result
+    }
+
     pub(crate) fn key(&self) -> PipelineRecipeKey {
         PipelineRecipeKey {
             shaders: self.shaders.each_ref().map(ShaderRecipe::key),
@@ -122,4 +180,11 @@ impl PipelineRecipe {
             multisample: self.descriptor.multisample,
         }
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct CompiledPipeline {
+    pub(crate) pipeline: wgpu::RenderPipeline,
+    pub(crate) modules: [wgpu::ShaderModule; 2],
+    pub(crate) layout: wgpu::BindGroupLayout,
 }

@@ -35,6 +35,12 @@ fn fingerprint(value: &impl Hash) -> u64 {
     hasher.finish()
 }
 
+fn evict_one<K: Clone + Eq + Hash, V>(cache: &mut FastMap<K, V>) {
+    if let Some(key) = cache.keys().next().cloned() {
+        cache.remove(&key);
+    }
+}
+
 fn trace_selected(frame: u64, frame_draw: u32, total_draw: u64) -> bool {
     static WINDOW: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
     let window = WINDOW.get_or_init(|| {
@@ -2219,6 +2225,8 @@ pub(crate) struct D3d9DrawState {
     observed_families: FastMap<trace::Family, u64>,
     inventory_programs: std::collections::BTreeSet<Arc<[u32]>>,
     interpreter_programs: FastMap<crate::shader::uber::EncodedKey, wgpu::Buffer>,
+    compiler: Option<crate::render::compile::Compiler>,
+    residual_reasons: FastMap<String, u64>,
     interpreter_draws: u64,
     interpreter_frame: uber::FrameCounters,
     measured_draws: u64,
@@ -2266,6 +2274,17 @@ impl D3d9DrawState {
     }
 
     pub(crate) fn end_frame(&mut self) {
+        if uber::hybrid() {
+            if let Some(compiler) = &mut self.compiler {
+                compiler.end_frame(self.frame);
+            }
+            for (reason, draws) in self.residual_reasons.drain() {
+                eprintln!(
+                    "[d3d9-async] residual frame={} reason={reason:?} draws={draws}",
+                    self.frame
+                );
+            }
+        }
         if trace_compilation() {
             eprintln!(
                 "[d3d9-compile] frame frame={} draws={} draw_cpu_ms={:.3} geometry_cpu_ms={:.3} packed_bytes={} geometry_upload_bytes={} batch_upload_bytes={} module_ms={:.3} pipeline_ms={:.3}",
@@ -2315,6 +2334,8 @@ impl D3d9DrawState {
     }
 
     pub(crate) fn reset(&mut self) {
+        self.compiler = None;
+        self.residual_reasons.clear();
         self.clear("device-reset");
         self.discard_batch();
         self.interpreter_programs.clear();
@@ -2429,7 +2450,7 @@ impl D3d9DrawState {
             module: std::sync::OnceLock::new(),
         });
         if self.shader_variants.len() >= 512 {
-            self.clear("variant-limit-all-caches");
+            evict_one(&mut self.shader_variants);
         }
         self.shader_variants.insert(key, Arc::clone(&cached));
         Ok(cached)
@@ -2446,7 +2467,7 @@ impl D3d9DrawState {
         }
         let sampler = gpu.validate("Draw", || Ok(gpu.device.create_sampler(&descriptor)))?;
         if self.samplers.len() >= 128 {
-            self.samplers.clear();
+            evict_one(&mut self.samplers);
         }
         self.samplers.insert(key, sampler.clone());
         Ok(sampler)
@@ -2490,7 +2511,7 @@ impl D3d9DrawState {
             );
         }
         if self.shaders.len() >= 512 {
-            self.clear("module-limit-all-caches");
+            evict_one(&mut self.shaders);
         }
         self.shaders.insert(source.to_owned(), shader.clone());
         Ok(shader)
@@ -2514,9 +2535,7 @@ impl D3d9DrawState {
                 }))
         })?;
         if self.layouts.len() >= 128 {
-            self.log_cache_clear("layout-limit-pipelines-and-layouts");
-            self.pipelines.clear();
-            self.layouts.clear();
+            evict_one(&mut self.layouts);
         }
         self.layouts.insert(key, layout.clone());
         Ok(layout)
@@ -2588,8 +2607,7 @@ impl D3d9DrawState {
             .prepare(key.modules.clone(), key.layout.clone())
             .create(&gpu.device, "d3d9-cached");
         if self.pipelines.len() >= 512 {
-            self.log_cache_clear("pipeline-limit-pipelines");
-            self.pipelines.clear();
+            evict_one(&mut self.pipelines);
         }
         self.pipelines
             .insert(key, (pipeline.clone(), Arc::new(recipe)));
@@ -3014,6 +3032,12 @@ pub(crate) fn execute(
     snapshot: &DrawSnapshot,
 ) -> Result<(), RenderError> {
     let draw_started = trace_compilation().then(Instant::now);
+    if let Some(compiler) = &mut draw.compiler {
+        if compiler.publish()? {
+            draw.memos.clear();
+            draw.pipeline_memo = None;
+        }
+    }
     if trace_compilation() && !draw.trace_identity {
         eprintln!(
             "[d3d9-compile] identity schema=1 build={} limits={:?} features={:?}",
@@ -3126,7 +3150,14 @@ pub(crate) fn execute(
             ps.map(|s| fingerprint(&s.code))
         );
     }
-    let interpreted = uber::select(gpu, state, snapshot, vs, ps)?;
+    let eligible = uber::select(gpu, draw, state, snapshot, vs, ps)?;
+    let ready = if eligible && uber::hybrid() {
+        uber::specialize(gpu, draw, state, snapshot, vs.unwrap(), ps.unwrap())?
+    } else {
+        None
+    };
+    let interpreted = eligible && ready.is_none();
+    let canonical = eligible;
     let geometry_started = trace_compilation().then(Instant::now);
     let mut linked_inputs = std::mem::take(&mut draw.linked);
     let mut ff_uniforms = std::mem::take(&mut draw.ff_uniforms);
@@ -3138,7 +3169,7 @@ pub(crate) fn execute(
     let linked = match vs {
         Some(v) => {
             link_inputs(declaration, &v.program, &mut linked_inputs)?;
-            if interpreted {
+            if canonical {
                 linked_inputs.sort_by_key(|input| input.location);
             }
             Some(linked_inputs.as_slice())
@@ -3146,7 +3177,7 @@ pub(crate) fn execute(
         None => ff_key.is_some().then_some(linked_inputs.as_slice()),
     };
     let direct = linked
-        .filter(|_| !interpreted)
+        .filter(|_| !canonical)
         .map(|linked| native_geometry(gpu, draw, &snapshot.command, linked, vs.is_some()))
         .transpose()?
         .flatten();
@@ -3181,7 +3212,7 @@ pub(crate) fn execute(
                 &mut draw.index_slots,
             )?;
             let vertices = if let Some(linked) = linked {
-                pack_shader_vertices(&snapshot.command, linked, &order, interpreted)?
+                pack_shader_vertices(&snapshot.command, linked, &order, canonical)?
             } else {
                 PackedVertices {
                     bytes: ff_vertices(&snapshot.command, declaration, &order, state)?,
@@ -3413,7 +3444,7 @@ pub(crate) fn execute(
                     .zip(&vertices.attributes)
                     .map(|(input, attribute)| {
                         let element_type =
-                            if !interpreted && native_vertex_format(input.element_type).is_some() {
+                            if !canonical && native_vertex_format(input.element_type).is_some() {
                                 input.element_type
                             } else {
                                 D3DDECLTYPE_FLOAT4
@@ -3449,7 +3480,7 @@ pub(crate) fn execute(
                 && memo.textures == snapshot.textures
         })
         .map(|index| draw.memos.remove(index));
-    let mut memo = match memo {
+    let mut memo = match ready.or(memo) {
         Some(memo) => memo,
         None if interpreted => uber::resolve(
             gpu,
@@ -3458,6 +3489,7 @@ pub(crate) fn execute(
             snapshot,
             vs.ok_or_else(|| unsupported("InterpreterDraw", "missing vertex program"))?,
             ps.ok_or_else(|| unsupported("InterpreterDraw", "missing pixel program"))?,
+            true,
         )?,
         None => resolve_shading(
             gpu,
