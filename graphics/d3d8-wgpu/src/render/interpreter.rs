@@ -261,42 +261,48 @@ impl PreparedInterpreter {
             key.descriptor.depth.as_mut().unwrap().depth_compare =
                 Some(wgpu::CompareFunction::Always);
             keys.push(key);
-            for (format, cull_mode, blend, depth) in [
+            for (format, cull_mode, blend, depth, topology) in [
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     Some(wgpu::Face::Front),
                     None,
                     None,
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     Some(wgpu::Face::Front),
                     None,
                     Some((false, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     Some(wgpu::Face::Front),
                     None,
                     Some((true, wgpu::CompareFunction::LessEqual)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     None,
                     Some((wgpu::BlendFactor::One, wgpu::BlendFactor::One)),
                     Some((false, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     Some(wgpu::Face::Front),
                     Some((wgpu::BlendFactor::One, wgpu::BlendFactor::One)),
                     Some((false, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     None,
                     Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
                     Some((false, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
@@ -306,6 +312,7 @@ impl PreparedInterpreter {
                         wgpu::BlendFactor::OneMinusSrcAlpha,
                     )),
                     Some((false, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
@@ -315,6 +322,7 @@ impl PreparedInterpreter {
                         wgpu::BlendFactor::OneMinusSrcAlpha,
                     )),
                     Some((false, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
@@ -324,6 +332,7 @@ impl PreparedInterpreter {
                         wgpu::BlendFactor::OneMinusSrcAlpha,
                     )),
                     Some((false, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
@@ -333,32 +342,43 @@ impl PreparedInterpreter {
                         wgpu::BlendFactor::OneMinusSrcAlpha,
                     )),
                     Some((true, wgpu::CompareFunction::LessEqual)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Rgba8Unorm,
                     Some(wgpu::Face::Front),
                     None,
                     Some((false, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     Some(wgpu::Face::Front),
                     None,
                     Some((true, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     None,
                     None,
                     Some((true, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     Some(wgpu::Face::Back),
                     None,
                     Some((true, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
-                (wgpu::TextureFormat::Bgra8Unorm, None, None, None),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    None,
+                    None,
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     None,
@@ -367,12 +387,14 @@ impl PreparedInterpreter {
                         wgpu::BlendFactor::OneMinusSrcAlpha,
                     )),
                     None,
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
                     Some(wgpu::Face::Front),
                     Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
                     None,
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
                 (
                     wgpu::TextureFormat::Bgra8Unorm,
@@ -382,6 +404,136 @@ impl PreparedInterpreter {
                         wgpu::BlendFactor::OneMinusSrcAlpha,
                     )),
                     None,
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    None,
+                    wgpu::PrimitiveTopology::TriangleStrip,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    None,
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Back),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    None,
+                    None,
+                    wgpu::PrimitiveTopology::TriangleStrip,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Back),
+                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
+                    Some((false, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((true, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    Some(wgpu::Face::Front),
+                    None,
+                    Some((true, wgpu::CompareFunction::LessEqual)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((true, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    None,
+                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
+                    Some((false, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((true, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    Some(wgpu::Face::Front),
+                    None,
+                    Some((true, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    Some(wgpu::Face::Back),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
+                    Some((false, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    None,
+                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
+                    Some((false, wgpu::CompareFunction::Always)),
+                    wgpu::PrimitiveTopology::TriangleList,
                 ),
             ] {
                 let mut key = keys[0].clone();
@@ -399,6 +551,10 @@ impl PreparedInterpreter {
                     }
                 });
                 key.descriptor.primitive.cull_mode = cull_mode;
+                key.descriptor.primitive.topology = topology;
+                key.descriptor.primitive.strip_index_format = (topology
+                    == wgpu::PrimitiveTopology::TriangleStrip)
+                    .then_some(wgpu::IndexFormat::Uint16);
                 key.descriptor.depth = depth.map(|(write, compare)| {
                     let mut state = keys[0].descriptor.depth.clone().unwrap();
                     state.depth_write_enabled = Some(write);

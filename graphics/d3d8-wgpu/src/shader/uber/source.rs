@@ -36,8 +36,8 @@ pub fn source() -> String {
     source += "default: {} } if ((psp.texture_flags.x & (1u << slot)) != 0u) { value = vec4<f32>(value.rgb, 1.0); } return value; }\n";
     source += &format!(
         "fn register_source_count(opcode: u32) -> u32 {{ switch opcode {{\n\
-         case {OP_MOV}u, {OP_FRC}u, {OP_RCP}u, {OP_RSQ}u, {OP_NRM}u, {OP_EXP}u, {OP_ABS}u, {OP_MOVA}u, {OP_TEXKILL}u, {OP_TEX}u: {{ return 1u; }}\n\
-         case {OP_MAD}u, {OP_LRP}u, {OP_CMP}u: {{ return 3u; }}\n\
+         case {OP_MOV}u, {OP_FRC}u, {OP_RCP}u, {OP_RSQ}u, {OP_NRM}u, {OP_EXP}u, {OP_EXPP}u, {OP_LOG}u, {OP_SINCOS}u, {OP_ABS}u, {OP_MOVA}u, {OP_TEXKILL}u, {OP_TEX}u: {{ return 1u; }}\n\
+         case {OP_MAD}u, {OP_LRP}u, {OP_CMP}u, {OP_DP2ADD}u: {{ return 3u; }}\n\
          default: {{ return 2u; }} }} }}\n"
     );
     source += r#"
@@ -100,15 +100,15 @@ fn pixel_write(r: ptr<function, Registers>, d: vec4<u32>, value: vec4<f32>) {
         default: {}
     }
 }
-struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2) v2: vec4<f32>, @location(3) v3: vec4<f32>, @location(4) v4: vec4<f32> }
-@vertex fn vs_main(v: VIn) -> V2F {
-    var r: Registers;
-    r.input[0] = v.v0 * vsp.ascale[0];
-    r.input[1] = v.v1 * vsp.ascale[1];
-    r.input[2] = v.v2 * vsp.ascale[2];
-    r.input[3] = v.v3 * vsp.ascale[3];
-    r.input[4] = v.v4 * vsp.ascale[4];
 "#;
+    source += "struct VIn {";
+    for slot in 0..VERTEX_INPUTS {
+        source += &format!(" @location({slot}) v{slot}: vec4<f32>,");
+    }
+    source += " }\n@vertex fn vs_main(v: VIn) -> V2F {\n var r: Registers;\n";
+    for slot in 0..VERTEX_INPUTS {
+        source += &format!("r.input[{slot}] = v.v{slot} * vsp.ascale[{slot}];\n");
+    }
     source += &format!(
         "for (var index = 0u; index < min(vp.header.z, {MAX_INSTRUCTIONS}u); index++) {{\n\
              let i = vp.code[index];\n\
@@ -122,7 +122,9 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
              case {OP_MOV}u: {{}}\n\
              case {OP_FRC}u: {{ value = fract(a); }}\n\
              case {OP_SGE}u: {{ value = select(vec4<f32>(0.0), vec4<f32>(1.0), a >= b); }}\n\
-             case {OP_EXP}u: {{ value = vec4<f32>(exp2(a.x)); }}\n\
+             case {OP_EXP}u, {OP_EXPP}u: {{ value = vec4<f32>(exp2(a.x)); }}\n\
+             case {OP_LOG}u: {{ value = vec4<f32>(log2(abs(a.x))); }}\n\
+             case {OP_DP2ADD}u: {{ value = vec4<f32>(dot(a.xy, b.xy) + c.x); }}\n\
              case {OP_ABS}u: {{ value = abs(a); }}\n\
              case {OP_POW}u: {{ value = vec4<f32>(pow(abs(a.x), b.x)); }}\n\
              case {OP_ADD}u: {{ value = a + b; }}\n\
@@ -137,6 +139,7 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
              case {OP_NRM}u: {{ value = d9_nrm(a); }}\n\
              case {OP_MUL}u: {{ value = a * b; }}\n\
              case {OP_MAD}u: {{ value = a * b + c; }}\n\
+             case {OP_SINCOS}u: {{ value = vec4<f32>(cos(a.x), sin(a.x), 0.0, 0.0); }}\n\
              case {OP_MOVA}u: {{}}\n\
              case {OP_DP4}u: {{ value = vec4<f32>(dot(a, b)); }}\n\
              default: {{}}\n\
@@ -193,7 +196,9 @@ struct VIn { @location(0) v0: vec4<f32>, @location(1) v1: vec4<f32>, @location(2
              case {OP_MOV}u: {{}}\n\
              case {OP_FRC}u: {{ value = fract(a); }}\n\
              case {OP_SGE}u: {{ value = select(vec4<f32>(0.0), vec4<f32>(1.0), a >= b); }}\n\
-             case {OP_EXP}u: {{ value = vec4<f32>(exp2(a.x)); }}\n\
+             case {OP_EXP}u, {OP_EXPP}u: {{ value = vec4<f32>(exp2(a.x)); }}\n\
+             case {OP_LOG}u: {{ value = vec4<f32>(log2(abs(a.x))); }}\n\
+             case {OP_DP2ADD}u: {{ value = vec4<f32>(dot(a.xy, b.xy) + c.x); }}\n\
              case {OP_ABS}u: {{ value = abs(a); }}\n\
              case {OP_POW}u: {{ value = vec4<f32>(pow(abs(a.x), b.x)); }}\n\
              case {OP_ADD}u: {{ value = a + b; }}\n\

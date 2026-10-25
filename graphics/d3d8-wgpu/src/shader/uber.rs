@@ -84,11 +84,14 @@ impl std::fmt::Display for Exclusion {
 
 pub(crate) fn sampler_mapping(p: &Program) -> Vec<(u32, u32)> {
     let mut next_2d = 0;
+    let mut next_cube = TEXTURES_2D;
     p.samplers
         .iter()
         .map(|(&guest, &kind)| {
             let physical = if kind == S_CUBE {
-                TEXTURES_2D
+                let slot = next_cube;
+                next_cube += 1;
+                slot
             } else {
                 let slot = next_2d;
                 next_2d += 1;
@@ -104,7 +107,7 @@ pub(crate) fn interface_candidate(p: &Program) -> bool {
         (p.samplers.keys().all(|&slot| slot < 16)
             && p.samplers.values().all(|&kind| matches!(kind, 2 | S_CUBE))
             && p.samplers.values().filter(|&&kind| kind == 2).count() <= TEXTURES_2D as usize
-            && p.samplers.values().filter(|&&kind| kind == S_CUBE).count() <= 1)
+            && p.samplers.values().filter(|&&kind| kind == S_CUBE).count() <= 2)
             && p.inputs.iter().all(|d| match d.ty {
                 R_INPUT => d.index < 2,
                 R_ADDR => d.index < TEXTURE_COORDINATES,
@@ -121,7 +124,7 @@ pub(crate) fn interface_candidate(p: &Program) -> bool {
                     && d.index < VERTEX_INPUTS
                     && matches!(
                         (d.usage, d.usage_index),
-                        (0, 0) | (1, 0) | (2, 0) | (3, 0) | (5, 0) | (6, 0) | (10, 0) | (10, 1)
+                        (0, 0) | (1, 0) | (2, 0) | (3, 0) | (5, 0..=3) | (6, 0) | (10, 0) | (10, 1)
                     )
             })
     }
@@ -163,10 +166,11 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
     ]);
     for (instruction, inst) in p.code.iter().enumerate() {
         let expected = match inst.op {
-            OP_MOV | OP_FRC | OP_RCP | OP_RSQ | OP_NRM | OP_EXP | OP_ABS => 1,
+            OP_MOV | OP_FRC | OP_RCP | OP_RSQ | OP_NRM | OP_EXP | OP_EXPP | OP_LOG | OP_ABS => 1,
             OP_MOVA if !p.pixel => 1,
             OP_TEXKILL if p.pixel => 1,
-            OP_MAD | OP_LRP | OP_CMP => 3,
+            OP_MAD | OP_LRP | OP_CMP | OP_DP2ADD => 3,
+            OP_SINCOS if !p.pixel => 3,
             OP_MUL | OP_ADD | OP_DP3 | OP_DP4 | OP_MIN | OP_MAX | OP_SLT | OP_SGE | OP_POW => 2,
             OP_TEX if p.pixel => 2,
             opcode => {
@@ -228,6 +232,7 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
             || d.mask > 15
             || d.modifiers & !allowed_modifiers != 0
             || d.shift != 0
+            || (inst.op == OP_SINCOS && (d.ty != R_TEMP || !matches!(d.mask, 1 | 2 | 3)))
             || (inst.op == OP_TEX && d.mask != 15)
         {
             return Err(Exclusion::Destination { instruction });
@@ -291,7 +296,17 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                 }
                 _ => false,
             };
-            if !source
+            if (inst.op == OP_SINCOS
+                && if operand == 0 {
+                    !matches!(s.swz, 0 | 0x55 | 0xaa | 0xff)
+                } else {
+                    s.ty != R_CONST
+                        || s.rel
+                        || s.md != 0
+                        || s.swz != 0xe4
+                        || inst.src[1].index == inst.src[2].index
+                })
+                || !source
                 || s.md > 1
                 || (s.rel && (p.pixel || s.ty != R_CONST || s.rel_comp > 3))
                 || s.swz > 255

@@ -2,7 +2,7 @@
 
 The opt-in interpreter implements a bounded SM2 VS/PS family; Spore rendering,
 native Metal compilation and GPU performance still require user-run validation.
-`src/shader/uber/` defines ABI v5 / interpreter v11. A program is 9232 bytes:
+`src/shader/uber/` defines ABI v6 / interpreter v12. A program is 9232 bytes:
 a four-u32 header (ABI version, pixel flag, instruction count, definition count),
 128 zero-padded 16-u32 instruction records and 32 definition records (index/padding
 and float bits). Opcode bits 8–10 mark immediate sources bit 16 selects projected TEX and bit 17 saturates the result before masked writes; source records
@@ -11,11 +11,11 @@ and bits 9–10 select the address component. Original bytecode equality plus AB
 version identifies program data; capacity overflow is excluded.
 
 Admitted arithmetic is MOV/ADD/MUL/MAD/DP3/DP4/RCP/RSQ/MIN/MAX/SLT/LRP/CMP/
-NRM/FRC/SGE/EXP/ABS/POW, plus vertex MOVA and pixel TEX through five 2D textures
-and one cube map. Projected sampling is limited to 2D textures.
+NRM/FRC/SGE/EXP/EXPP/LOG/ABS/POW/DP2ADD, plus vertex MOVA/SINCOS and pixel TEX through five 2D textures
+and two cube maps. Projected sampling is limited to 2D textures.
 Capacities are eight temporaries, 128 instructions, 32 float DEFs, 256/32 float
-constants, vertex oPos/oD0–1/oT0–7/a0, pixel v0–1/t0–7 and oC0. Up to five
-consecutive vertex inputs admit position, normal, tangent, color0/1, UV0 and blend
+constants, vertex oPos/oD0–1/oT0–7/a0, pixel v0–1/t0–7 and oC0. Up to seven
+consecutive vertex inputs admit position, normal, tangent, color0/1, UV0–3 and blend
 indices/weights. Source swizzles, negation and destination
 masks and saturation are supported. MOVA rounds using the existing specializer's nearest-integer
 helper. Relative vertex constants use the selected a0 component and the same
@@ -29,13 +29,17 @@ addressing, flow control, coissue and other models/registers/samplers remain
 excluded. TEXKILL accepts full-mask temporary or t0–7 operands and records any negative
 component (all four for SM2, matching specialization and vkd3d). Its destination
 record marks no write; its operand is encoded as an identity-swizzled source.
+SINCOS accepts x/y masks and uses the existing specializer’s cosine/sine behavior;
+Its replicated angle and distinct constant operands follow the
+[D3D9 form](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sincos---vs);
+approximation constants do not need register reads.
 Specialization remains unchanged.
 
-All families use five Float32x4 attributes (80-byte stride), existing 42-component
+All families use seven Float32x4 attributes (112-byte stride), existing 42-component
 varyings, smooth interpolation, CW triangles and one sample. Shorter declarations
 pad unused attributes with zero; lowering rejects reads of undeclared inputs.
 `compare-family11` prepares the original family; hybrid and interpreter-only
-prepare 21 exact captured states, including all five previous families. They use
+prepare 36 exact captured states, including all five previous families. They use
 BGRA8/RGBA8, triangle list/strip, no culling/front/back culling, opaque/alpha/additive
 blending and absent/LESS/LEQUAL/ALWAYS depth, with writes only where captured.
 The finite manifest is in `src/render/interpreter.rs`; other combinations fall back.
@@ -44,7 +48,7 @@ All share one module, layout and program allocations. Existing input conversion,
 half-pixel correction, raster output processing and sampler state are reused;
 opaque texture alpha is a per-binding bit in the per-draw flags. Declared guest
 sampler slots s0–15 map deterministically to physical 2D slots 0–4 (ascending guest
-slot order) and cube slot 5. Bound resources must match those dimensions and be
+slot order) and cube slots 5–6. Bound resources must match those dimensions and be
 filterable; missing declared textures remain excluded. Unused bindings receive
 private 2D/cube views and samplers. Ready hybrid specializations retain guest
 sampler bindings and the same packed geometry. Integer/bool banks, vertex textures, biased sampling,
@@ -52,8 +56,8 @@ shader depth output and MRT have no coverage. Stencil writes remain disabled.
 
 One bind group contains four dynamic uniforms (bindings 0/1: 4096-byte VS bank /
 272-byte parameters; 2/3: 512-byte PS bank / 64-byte parameters), texture/sampler
-4–9/20–25, and immutable 9232-byte program uniforms 36/37. It needs three uniforms per
-stage, four dynamic uniforms, five vertex attributes, six textures/samplers and
+4–10/20–26, and immutable 9232-byte program uniforms 36/37. It needs three uniforms per
+stage, four dynamic uniforms, seven vertex attributes, seven textures/samplers and
 42 inter-stage components; initialization checks the requested device limits.
 Prepared module/pipeline ownership follows the device. Queued draws and bindings
 retain their program buffers; reset clears program uploads and replacement devices

@@ -20,3 +20,7 @@ pub(crate) const OP_SGE: u32 = 13;
 pub(crate) const OP_EXP: u32 = 14;
 pub(crate) const OP_POW: u32 = 32;
 pub(crate) const OP_ABS: u32 = 35;
+pub(crate) const OP_LOG: u32 = 15;
+pub(crate) const OP_SINCOS: u32 = 37;
+pub(crate) const OP_EXPP: u32 = 78;
+pub(crate) const OP_DP2ADD: u32 = 90;
