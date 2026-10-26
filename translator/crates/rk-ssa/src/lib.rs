@@ -146,6 +146,7 @@ pub struct Ssa {
     pub(crate) stack_states: BTreeMap<ValueId, [ValueId; 4]>,
     pub stack_guards: BTreeMap<ValueId, u32>,
     pub frame: Option<ValueId>,
+    pub aligned: Option<(u32, u32)>,
     pub frame_publish: BTreeMap<ValueId, Vec<StateKey>>,
     pub frame_guard: BTreeMap<ValueId, Vec<StateKey>>,
     pub(crate) origins: Lookup<ValueId, (u32, u16)>,

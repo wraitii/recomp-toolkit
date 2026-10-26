@@ -8,7 +8,14 @@ use crate::Ssa;
 fn key_name(key: StateKey) -> String {
     match key {
         StateKey::Memory => "MEM".into(),
-        StateKey::Frame(offset) => format!("FRAME[{offset}]"),
+        StateKey::Frame {
+            offset,
+            aligned: false,
+        } => format!("FRAME[{offset}]"),
+        StateKey::Frame {
+            offset,
+            aligned: true,
+        } => format!("ALIGNED[{offset}]"),
         StateKey::Register(offset) => Registers::get()
             .covering(offset as u64)
             .map(|(name, v)| {

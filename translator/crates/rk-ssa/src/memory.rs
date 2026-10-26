@@ -19,7 +19,17 @@ pub struct Access {
 
 fn footprint(range: Range, local: bool) -> Footprint {
     let mut result = Footprint::default();
-    if local && range.address.is_exact() && range.size != 0 {
+    if local
+        && range.size != 0
+        && (range.address.is_exact()
+            || matches!(
+                range.address,
+                Address::Known {
+                    base: Base::Frame | Base::Stack(_),
+                    ..
+                }
+            ))
+    {
         result.ranges.insert(range);
     } else {
         result.insert(range);
@@ -92,9 +102,18 @@ pub fn accesses(s: &Ssa, facts: Option<&dyn CallFacts>) -> BTreeMap<ValueId, Acc
 pub(crate) fn eliminate_dead_stores(s: &mut Ssa, facts: Option<&dyn CallFacts>) {
     let frame = Frame::new(s, facts);
     let next = s.successors();
+    let reloaded: LookupSet<ValueId> = (0..s.values.len() as ValueId)
+        .filter(|&id| {
+            matches!(
+                s.value(id).op,
+                Op::StateReload(rk_ir::StateKey::Frame { .. })
+            )
+        })
+        .map(|id| s.args(id)[0])
+        .collect();
     let transfer = |id: ValueId, overwritten: &mut BTreeSet<Range>| -> bool {
         let op = s.value(id).op;
-        if s.boundary(id).is_some() && op != Op::P(OpCode::Store) {
+        if s.boundary(id).is_some() && op != Op::P(OpCode::Store) || reloaded.contains(&id) {
             overwritten.clear();
             return false;
         }

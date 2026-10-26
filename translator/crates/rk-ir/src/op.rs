@@ -8,7 +8,7 @@ use crate::x87::{X87Lowering, X87Op};
 pub enum StateKey {
     Register(u32),
     Memory,
-    Frame(i32),
+    Frame { offset: i32, aligned: bool },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -178,7 +178,8 @@ returned offsets are unknown. Unknown ESP-derived returns remain unsupported.
 `DIVERGENCE(original):` when enabled, an escaped frame pointer is assumed to identify
 the beginning of its accessible region. Unknown upward extents expose the remainder
 of the frame; proved callee ranges can narrow exposure and include negative accesses.
-Each exempted write needs a proved current ESP below the entire negative-offset
+Likewise a frame address plus an unknown index addresses only the frame from that
+address up to entry ESP. Each exempted write needs a proved current ESP below the entire negative-offset
 slot; arguments and the return address remain conservative. Forwarding retains
 guest stores, and original-code analysis summaries do not use this assumption.
 With relaxed fault state, eligible x87 accesses split into rounded value and memory
@@ -194,10 +195,11 @@ provenance; the emitted ESP after such a call is reread from guest state.
 is enabled, fault state is relaxed, and store hooks are disabled. Up to 64 exact
 negative frame slots of 1, 2, 4 or 8 bytes become state keys: the SSA is rebuilt
 with their contained loads, stores and x87 values as key reads and writes, so they
-share register publication and residency. Calls, returns and accesses that may touch
-a slot demand its publication; those that may write it reload it afterwards. Slots
-live across such a reload, overlapping slots and stores below ESP stay in memory. A
-store publishes immediately when every path demands its value before overwriting it,
+share register publication and residency. Slots are relative to entry ESP or to the
+function's most used ESP alignment, `(entry ESP + c) & mask`. Calls, returns and
+accesses that may touch a slot demand its publication; those that may write it reload
+it afterwards, and dead-store elimination keeps their stores. Overlapping slots and
+stores below ESP stay in memory. A store publishes immediately when every path demands its value before overwriting it,
 otherwise at the first demand. Constant addresses never touch frame slots.
 Preparation consumes checkpoint credit only when accepted;
 otherwise pending slots publish before ordinary dispatch consumes its checkpoint.

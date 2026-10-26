@@ -31,6 +31,10 @@ impl Relations {
         Address::Unknown
     }
 
+    pub fn parent(&self, base: Base) -> Option<Address> {
+        self.parents.get(&base).copied()
+    }
+
     pub fn offset_of(&self, outer: Range, inner: Range) -> Option<u32> {
         outer.offset_of(inner).or_else(|| {
             Range::new(self.bounds(outer.address), outer.size)
@@ -486,7 +490,33 @@ impl<'a> Addresses<'a> {
             Op::P(OpCode::IntAdd) if value.size == 4 => {
                 let a = self.infer(args[0]);
                 let b = self.infer(args[1]);
-                a.add(b)
+                match (a, b) {
+                    (
+                        base @ Address::Known {
+                            base: Base::Frame | Base::Stack(_),
+                            span: 0,
+                            ..
+                        },
+                        Address::Unknown
+                        | Address::Known {
+                            base: Base::Value(_),
+                            ..
+                        },
+                    )
+                    | (
+                        Address::Unknown
+                        | Address::Known {
+                            base: Base::Value(_),
+                            ..
+                        },
+                        base @ Address::Known {
+                            base: Base::Frame | Base::Stack(_),
+                            span: 0,
+                            ..
+                        },
+                    ) if self.local && self.ssa.assume_stack_pointer_bases => self.indexed(base),
+                    _ => a.add(b),
+                }
             }
             Op::P(OpCode::IntSub) if value.size == 4 => {
                 let a = self.infer(args[0]);
@@ -558,6 +588,19 @@ impl<'a> Addresses<'a> {
                     }
                 }
                 Address::Unknown
+            }
+            _ => Address::Unknown,
+        }
+    }
+
+    fn indexed(&self, base: Address) -> Address {
+        match self.relations.bounds(base) {
+            Address::Known {
+                base: Base::Frame,
+                offset,
+                span,
+            } if (offset as i32) < 0 && (offset as i32) + (span as i32) < 0 => {
+                base.bounded(0, offset.wrapping_neg())
             }
             _ => Address::Unknown,
         }

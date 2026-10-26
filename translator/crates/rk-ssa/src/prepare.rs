@@ -211,7 +211,7 @@ pub fn publications(s: &Ssa, call_facts: &dyn CallFacts) -> BTreeMap<ValueId, Ve
         };
         let mut keys: Vec<StateKey> = keys
             .into_iter()
-            .filter(|key| !matches!(key, StateKey::Frame(_)))
+            .filter(|key| !matches!(key, StateKey::Frame { .. }))
             .collect();
         keys.extend(
             s.frame_publish

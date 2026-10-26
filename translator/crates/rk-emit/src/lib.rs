@@ -2521,8 +2521,7 @@ impl<'a> Emitter<'a> {
             }
             Location::Eip => self.publish_register("eip", "EIP", state, keys)?,
             Location::Fs => self.publish_register("fs_base", "FS_OFFSET", state, keys)?,
-            Location::Frame(offset) => {
-                let key = StateKey::Frame(offset);
+            Location::Frame(key) => {
                 let Some(value) = self.listed_value(state, keys, key)? else {
                     return Ok(());
                 };
@@ -2532,7 +2531,7 @@ impl<'a> Emitter<'a> {
                     self.out,
                     "recomp_wr{}_(arena_, {}, ({}){stored});",
                     size as u32 * 8,
-                    self.frame_address(offset)?,
+                    self.frame_address(key)?,
                     ctype(size)
                 );
             }
@@ -3246,25 +3245,35 @@ impl<'a> Emitter<'a> {
         Ok(result)
     }
 
-    fn frame_address(&self, offset: i32) -> Result<String> {
+    fn frame_address(&self, key: StateKey) -> Result<String> {
+        let StateKey::Frame { offset, aligned } = key else {
+            return Err(self.error(0, "frame address of a register key"));
+        };
         let frame = self
             .s
             .frame
             .ok_or_else(|| self.error(0, "frame slot without a frame base"))?;
+        let mut base = self.expr(frame)?;
+        if aligned {
+            let (start, mask) = self
+                .s
+                .aligned
+                .ok_or_else(|| self.error(0, "aligned slot without an aligned base"))?;
+            base = format!("(({base} + 0x{start:x}u) & 0x{mask:x}u)");
+        }
         let sign = if offset < 0 { '-' } else { '+' };
         Ok(format!(
-            "(uint32_t)({} {sign} 0x{:x}u)",
-            self.expr(frame)?,
+            "(uint32_t)({base} {sign} 0x{:x}u)",
             offset.unsigned_abs()
         ))
     }
 
     fn field_expr(&self, key: StateKey, size: u8) -> Result<String> {
-        if let StateKey::Frame(offset) = key {
+        if matches!(key, StateKey::Frame { .. }) {
             return Ok(format!(
                 "recomp_rd{}_(arena_, {})",
                 size as u32 * 8,
-                self.frame_address(offset)?
+                self.frame_address(key)?
             ));
         }
         if size <= 1 {

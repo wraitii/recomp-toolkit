@@ -3,16 +3,33 @@ use std::collections::BTreeMap;
 use rk_core::ir::OpCode;
 use rk_core::memory::{Address, Base, Range};
 use rk_core::{Lookup, LookupSet};
-use rk_ir::{x87::X87Op, Op};
+use rk_ir::{x87::X87Op, Op, StateKey};
 
 use crate::memory::{Clobber, Frame};
 use crate::{Ssa, ValueId};
 
 const SLOT_BUDGET: usize = 64;
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Slot {
+    pub(crate) aligned: bool,
+    pub(crate) offset: i32,
+    pub(crate) size: u8,
+}
+
+impl Slot {
+    pub(crate) fn key(self) -> StateKey {
+        StateKey::Frame {
+            offset: self.offset,
+            aligned: self.aligned,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct FramePlan {
-    pub(crate) slots: Vec<(i32, u8)>,
+    pub(crate) slots: Vec<Slot>,
+    pub(crate) aligned: Option<(u32, u32)>,
     pub(crate) accesses: BTreeMap<(u32, u16), (usize, u8)>,
     pub(crate) analyzed: LookupSet<(u32, u16)>,
     pub(crate) sites: BTreeMap<(u32, u16), Site>,
@@ -69,25 +86,97 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts, retire: bool) -> Optio
     }) {
         return None;
     }
-    let local = |range: Range| match frame.relations.bounds(range.address) {
-        Address::Known {
-            base: Base::Frame,
-            offset,
-            span: 0,
-        } if i64::from(offset as i32) + i64::from(range.size) <= 0 && frame.unexposed(range) => {
-            Some(offset as i32)
-        }
-        _ => None,
-    };
-    let top = |id: ValueId| match frame.esp.get(&id).map(|&esp| frame.relations.bounds(esp)) {
+    let parent = |root: ValueId| match frame.relations.parent(Base::Stack(root)) {
         Some(Address::Known {
             base: Base::Frame,
             offset,
-            span: 0,
-        }) => Some(offset as i32),
+            span,
+        }) if s.value(root).op == Op::P(OpCode::IntAnd)
+            && span.wrapping_add(1).is_power_of_two() =>
+        {
+            Some((offset as i32, span))
+        }
         _ => None,
     };
-    let mut candidates: BTreeMap<(i32, u8), usize> = BTreeMap::new();
+    let mut roots: BTreeMap<ValueId, usize> = BTreeMap::new();
+    for access in frame.accesses.values() {
+        if let Some(Range {
+            address:
+                Address::Known {
+                    base: Base::Stack(root),
+                    span: 0,
+                    ..
+                },
+            ..
+        }) = access.location
+        {
+            if parent(root).is_some() {
+                *roots.entry(root).or_default() += 1;
+            }
+        }
+    }
+    let root = roots
+        .iter()
+        .max_by_key(|&(_, &count)| count)
+        .map(|(&root, _)| root);
+    let (low, slack) = root
+        .and_then(parent)
+        .map_or((0, 0), |(low, span)| (i64::from(low), i64::from(span)));
+    let position = |address: Address| match address {
+        Address::Known {
+            base: Base::Stack(base),
+            offset,
+            span: 0,
+        } if Some(base) == root => Some((true, offset as i32)),
+        _ => match frame.relations.bounds(address) {
+            Address::Known {
+                base: Base::Frame,
+                offset,
+                span: 0,
+            } => Some((false, offset as i32)),
+            _ => None,
+        },
+    };
+    let interval = |(aligned, offset): (bool, i32)| {
+        if aligned {
+            (low + i64::from(offset), low + i64::from(offset) + slack)
+        } else {
+            (i64::from(offset), i64::from(offset))
+        }
+    };
+    let le = |a: (bool, i32), b: (bool, i32)| {
+        if a.0 == b.0 {
+            a.1 <= b.1
+        } else {
+            interval(a).1 <= interval(b).0
+        }
+    };
+    let lt = |a: (bool, i32), b: (bool, i32)| {
+        if a.0 == b.0 {
+            a.1 < b.1
+        } else {
+            interval(a).1 < interval(b).0
+        }
+    };
+    let local = |range: Range| {
+        position(range.address)
+            .filter(|&at| interval(at).1 + i64::from(range.size) <= 0 && frame.unexposed(range))
+    };
+    let top = |id: ValueId| frame.esp.get(&id).and_then(|&esp| position(esp));
+    let range = |slot: Slot| {
+        Range::new(
+            Address::exact(
+                if slot.aligned {
+                    Base::Stack(root.unwrap())
+                } else {
+                    Base::Frame
+                },
+                slot.offset as u32,
+            ),
+            u32::from(slot.size),
+        )
+    };
+    let mut candidates: BTreeMap<Slot, usize> = BTreeMap::new();
     for (&id, access) in &frame.accesses {
         let op = s.value(id).op;
         let Some(range) = access
@@ -97,24 +186,25 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts, retire: bool) -> Optio
             continue;
         };
         let Some(start) = local(range) else { continue };
-        if top(id).is_some_and(|top| top <= start) {
-            *candidates.entry((start, range.size as u8)).or_default() += 1;
+        if top(id).is_some_and(|top| le(top, start)) {
+            *candidates
+                .entry(Slot {
+                    aligned: start.0,
+                    offset: start.1,
+                    size: range.size as u8,
+                })
+                .or_default() += 1;
         }
     }
-    let overlaps =
-        |(a, n): (i32, u8), (b, m): (i32, u8)| a < b + i32::from(m) && b < a + i32::from(n);
-    let mut slots: Vec<(i32, u8)> = candidates
+    let mut slots: Vec<Slot> = candidates
         .keys()
         .copied()
         .filter(|&slot| {
             candidates
                 .keys()
-                .all(|&other| other == slot || !overlaps(slot, other))
+                .all(|&other| other == slot || frame.relations.disjoint(range(slot), range(other)))
         })
         .collect();
-    let range = |(start, size): (i32, u8)| {
-        Range::new(Address::exact(Base::Frame, start as u32), u32::from(size))
-    };
     let mut rejected = vec![false; slots.len()];
     let mut contained = BTreeMap::new();
     let mut overlaps = Vec::new();
@@ -133,11 +223,11 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts, retire: bool) -> Optio
             .filter(|_| promotable(op))
             .and_then(|location| Some((local(location)?, location.size as i32)));
         for (index, &slot) in slots.iter().enumerate() {
-            let (start, size) = (slot.0, i32::from(slot.1));
-            if let Some((offset, _)) = location
-                .filter(|&(offset, width)| offset >= start && offset + width <= start + size)
-            {
-                if writes(op) && top(id).is_none_or(|top| top > offset) {
+            let (start, size) = (slot.offset, i32::from(slot.size));
+            if let Some(((_, offset), _)) = location.filter(|&((aligned, offset), width)| {
+                aligned == slot.aligned && offset >= start && offset + width <= start + size
+            }) {
+                if writes(op) && top(id).is_none_or(|top| !le(top, (slot.aligned, offset))) {
                     rejected[index] = true;
                 }
                 contained.insert(origin, (index, (offset - start) as u8));
@@ -193,13 +283,14 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts, retire: bool) -> Optio
         let top = top(id);
         let mut site = Site::default();
         for (index, &slot) in slots.iter().enumerate() {
-            let below = top.is_none_or(|top| slot.0 < top);
+            let start = (slot.aligned, slot.offset);
             if op == Op::Return {
-                if !retire || !below {
+                if !retire || !top.is_some_and(|top| lt(start, top)) {
                     site.publish.push(index);
                 }
                 continue;
             }
+            let below = !top.is_some_and(|top| le(top, start));
             if below || frame.clobber(s, id, range(slot)) != Clobber::Transparent {
                 site.clobber.push(index);
             }
@@ -217,134 +308,79 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts, retire: bool) -> Optio
         }
         sites.insert(origin, site);
     }
+    let aligned = root
+        .filter(|_| slots.iter().any(|slot| slot.aligned))
+        .map(|_| ((low + slack) as u32, !(slack as u32)));
     let mut plan = FramePlan {
         slots,
+        aligned,
         accesses,
         analyzed,
         sites,
         eager: LookupSet::default(),
     };
-    let next = s.successors();
-    let table = events(s, &frame, &plan);
-    let mut crossing = 0;
-    solve(
-        s,
-        &next,
-        &table,
-        false,
-        |state, [uses, defs, demands, clobbers]| (state & !defs & !clobbers) | uses | demands,
-        |id, after| crossing |= table.get(&id).map_or(0, |events| events[3]) & after,
-    );
-    if crossing != 0 {
-        plan.retain(|index| crossing & 1 << index == 0);
-        if plan.slots.is_empty() {
-            return None;
-        }
-    }
     let table = events(s, &frame, &plan);
     let mut eager = LookupSet::default();
-    solve(
-        s,
-        &next,
-        &table,
-        true,
-        |state, [_, defs, demands, _]| (state & !defs) | demands,
-        |id, after| {
-            let Some(&origin) = s.origins.get(&id) else {
-                return;
-            };
-            if let Some(&(index, _)) = plan.accesses.get(&origin) {
-                if writes(s.value(id).op) && after & 1 << index != 0 {
-                    eager.insert(origin);
-                }
+    anticipate(s, &table, |id, after| {
+        let Some(&origin) = s.origins.get(&id) else {
+            return;
+        };
+        if let Some(&(index, _)) = plan.accesses.get(&origin) {
+            if writes(s.value(id).op) && after & 1 << index != 0 {
+                eager.insert(origin);
             }
-        },
-    );
+        }
+    });
     plan.eager = eager;
     Some(plan)
 }
 
-impl FramePlan {
-    fn retain(&mut self, keep: impl Fn(usize) -> bool) {
-        let renumber: BTreeMap<usize, usize> = (0..self.slots.len())
-            .filter(|&index| keep(index))
-            .enumerate()
-            .map(|(new, old)| (old, new))
-            .collect();
-        self.slots = renumber.keys().map(|&old| self.slots[old]).collect();
-        self.accesses
-            .retain(|_, (slot, _)| renumber.get(slot).map(|&new| *slot = new).is_some());
-        let remap = |list: &mut Vec<usize>| {
-            *list = list
-                .iter()
-                .filter_map(|slot| renumber.get(slot).copied())
-                .collect()
-        };
-        for site in self.sites.values_mut() {
-            remap(&mut site.publish);
-            remap(&mut site.guard);
-            remap(&mut site.clobber);
-            if site.guard.is_empty() {
-                site.checkpoints = None;
-            }
-        }
-    }
-}
-
-fn events(s: &Ssa, frame: &Frame, plan: &FramePlan) -> Lookup<ValueId, [u64; 4]> {
-    let mask = |list: &[usize]| list.iter().fold(0u64, |mask, &slot| mask | 1 << slot);
+fn events(s: &Ssa, frame: &Frame, plan: &FramePlan) -> Lookup<ValueId, (u64, u64)> {
     let mut table = Lookup::default();
     for &id in s.blocks.iter().flat_map(|block| &block.ops) {
         let Some(origin) = s.origins.get(&id) else {
             continue;
         };
-        let mut events = [0u64; 4];
+        let mut defs = 0;
         if let Some(&(slot, offset)) = plan.accesses.get(origin) {
             let width = frame
                 .accesses
                 .get(&id)
                 .and_then(|access| access.location)
                 .map_or(0, |location| location.size);
-            let full =
-                writes(s.value(id).op) && offset == 0 && width == u32::from(plan.slots[slot].1);
-            events[usize::from(full)] |= 1 << slot;
+            if writes(s.value(id).op) && offset == 0 && width == u32::from(plan.slots[slot].size) {
+                defs = 1 << slot;
+            }
         }
-        if let Some(site) = plan.sites.get(origin) {
-            events[2] = mask(&site.publish);
-            events[3] = mask(&site.clobber);
-        }
-        if events != [0; 4] {
-            table.insert(id, events);
+        let demands = plan.sites.get(origin).map_or(0, |site| {
+            site.publish
+                .iter()
+                .fold(0u64, |mask, &slot| mask | 1 << slot)
+        });
+        if defs | demands != 0 {
+            table.insert(id, (defs, demands));
         }
     }
     table
 }
 
-fn solve(
-    s: &Ssa,
-    next: &[Vec<usize>],
-    table: &Lookup<ValueId, [u64; 4]>,
-    must: bool,
-    transfer: impl Fn(u64, [u64; 4]) -> u64,
-    mut visit: impl FnMut(ValueId, u64),
-) {
+fn anticipate(s: &Ssa, table: &Lookup<ValueId, (u64, u64)>, mut visit: impl FnMut(ValueId, u64)) {
+    let next = s.successors();
     let exit = |entry: &[u64], block: usize| {
-        if must {
-            if next[block].is_empty() {
-                0
-            } else {
-                next[block]
-                    .iter()
-                    .fold(u64::MAX, |state, &next| state & entry[next])
-            }
+        if next[block].is_empty() {
+            0
         } else {
             next[block]
                 .iter()
-                .fold(0, |state, &next| state | entry[next])
+                .fold(u64::MAX, |state, &next| state & entry[next])
         }
     };
-    let step = |state, id| transfer(state, table.get(&id).copied().unwrap_or_default());
-    let mut entry = vec![if must { u64::MAX } else { 0 }; s.blocks.len()];
+    let step = |state: u64, id| {
+        table
+            .get(&id)
+            .map_or(state, |&(defs, demands)| (state & !defs) | demands)
+    };
+    let mut entry = vec![u64::MAX; s.blocks.len()];
     loop {
         let mut changed = false;
         for block in (0..s.blocks.len()).rev() {

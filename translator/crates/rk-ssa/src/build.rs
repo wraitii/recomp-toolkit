@@ -248,8 +248,8 @@ impl<'a> Builder<'a> {
         }
         keys.push(StateKey::Memory);
         fields.push(None);
-        for &(offset, _) in frame.map_or(&[][..], |frame| &frame.slots) {
-            keys.push(StateKey::Frame(offset));
+        for slot in frame.map_or(&[][..], |frame| &frame.slots) {
+            keys.push(slot.key());
             fields.push(None);
         }
         let sizes = keys
@@ -257,9 +257,9 @@ impl<'a> Builder<'a> {
             .map(|key| match key {
                 StateKey::Memory => 0,
                 StateKey::Register(_) => 1,
-                StateKey::Frame(offset) => frame
-                    .and_then(|frame| frame.slots.iter().find(|slot| slot.0 == *offset))
-                    .map_or(1, |slot| slot.1),
+                StateKey::Frame { .. } => frame
+                    .and_then(|frame| frame.slots.iter().find(|slot| slot.key() == *key))
+                    .map_or(1, |slot| slot.size),
             })
             .collect();
         let mut seen = Lookup::default();
@@ -632,6 +632,7 @@ impl<'a> Builder<'a> {
             stack_guards: self.stack_guards,
             frame,
             frame_publish: self.frame_publish,
+            aligned: self.frame.and_then(|frame| frame.aligned),
             frame_guard: self.frame_guard,
             origins: self.origins,
             stack_calls: self.lazy_stack_writes,
@@ -945,11 +946,11 @@ impl<'a> Builder<'a> {
             .frame
             .and_then(|frame| Some((frame, frame.sites.get(&self.origin)?)))
         {
-            indices.extend(site.publish.iter().filter_map(|&slot| {
-                self.key_index
-                    .get(&StateKey::Frame(frame.slots[slot].0))
-                    .copied()
-            }));
+            indices.extend(
+                site.publish
+                    .iter()
+                    .filter_map(|&slot| self.key_index.get(&frame.slots[slot].key()).copied()),
+            );
         }
         if indices.is_empty() {
             return Ok(());
@@ -1301,10 +1302,7 @@ impl<'a> Builder<'a> {
     fn promoted(&self) -> Option<(usize, u8)> {
         let frame = self.frame?;
         let &(slot, offset) = frame.accesses.get(&self.origin)?;
-        Some((
-            *self.key_index.get(&StateKey::Frame(frame.slots[slot].0))?,
-            offset,
-        ))
+        Some((*self.key_index.get(&frame.slots[slot].key())?, offset))
     }
 
     fn frame_site(&mut self, value: ValueId) {
@@ -1314,7 +1312,7 @@ impl<'a> Builder<'a> {
         let slots = &self.frame.unwrap().slots;
         let keys = |list: &[usize]| {
             list.iter()
-                .map(|&slot| StateKey::Frame(slots[slot].0))
+                .map(|&slot| slots[slot].key())
                 .collect::<Vec<_>>()
         };
         if !site.publish.is_empty() {
@@ -1361,7 +1359,7 @@ impl<'a> Builder<'a> {
             return Ok(());
         };
         for &slot in &entry.clobber {
-            let key = StateKey::Frame(frame.slots[slot].0);
+            let key = frame.slots[slot].key();
             let index = *self.key_index.get(&key).unwrap();
             let _ = self.state_slot(state, index, block)?;
             state[index] = Some(self.value(Op::StateReload(key), self.sizes[index], &[site]));
@@ -1458,7 +1456,7 @@ impl<'a> Builder<'a> {
         self.reload_frame(site, state, block)?;
         for index in 0..self.keys.len() {
             let key = self.keys[index];
-            if matches!(key, StateKey::Memory | StateKey::Frame(_)) {
+            if matches!(key, StateKey::Memory | StateKey::Frame { .. }) {
                 continue;
             }
             let field = self.field_of[index];
@@ -1501,7 +1499,7 @@ impl<'a> Builder<'a> {
     fn reload_all(&mut self, site: ValueId, state: &mut [Option<ValueId>]) {
         for (index, slot) in state.iter_mut().enumerate().take(self.keys.len()) {
             let key = self.keys[index];
-            if matches!(key, StateKey::Memory | StateKey::Frame(_)) {
+            if matches!(key, StateKey::Memory | StateKey::Frame { .. }) {
                 continue;
             }
             *slot = Some(self.value(Op::StateReload(key), 1, &[site]));

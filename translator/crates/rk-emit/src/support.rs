@@ -67,7 +67,7 @@ pub(crate) enum Location {
     Eip,
     Fs,
     Df,
-    Frame(i32),
+    Frame(StateKey),
 }
 
 pub(crate) fn x87_reads_flags(line: &str) -> bool {
@@ -112,7 +112,7 @@ pub(crate) fn location(key: StateKey) -> Option<Location> {
     }
     let offset = match key {
         StateKey::Register(offset) => offset,
-        StateKey::Frame(offset) => return Some(Location::Frame(offset)),
+        StateKey::Frame { .. } => return Some(Location::Frame(key)),
         StateKey::Memory => return None,
     };
     let (name, _) = Registers::get().covering(offset as u64)?;

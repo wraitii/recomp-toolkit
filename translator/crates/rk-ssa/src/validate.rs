@@ -203,7 +203,7 @@ fn state_width(key: StateKey, size: u8) -> bool {
     match key {
         StateKey::Memory => size == 0,
         StateKey::Register(_) => matches!(size, 1 | 2 | 4 | 8 | 10 | 16),
-        StateKey::Frame(_) => matches!(size, 1 | 2 | 4 | 8),
+        StateKey::Frame { .. } => matches!(size, 1 | 2 | 4 | 8),
     }
 }
 
