@@ -22,6 +22,7 @@ def analyze(path, start, count):
     programs = {}
     families = {}
     events = []
+    async_events = []
     identities = []
     context = None
     recovered_interleavings = 0
@@ -29,6 +30,12 @@ def analyze(path, start, count):
         for line in source:
             prefix, found, record = line.partition("[d3d9-compile] ")
             if not found:
+                _, found, record = line.partition("[d3d9-async] ")
+                if found:
+                    kind, _, body = record.rstrip().partition(" ")
+                    fields = dict(re.findall(r"(\w+)=(\S+)", body))
+                    if kind in ("queued", "compiling", "completed", "published", "frame"):
+                        async_events.append({"kind": kind, **fields})
                 continue
             if record.startswith("draw-programs frame=[host] audio sink:"):
                 continuation = next(source, "")
@@ -49,9 +56,15 @@ def analyze(path, start, count):
             elif kind == "draw-programs":
                 context = (int(fields["frame"]), int(fields["draw"]))
                 draws[context] = {"programs": [fields["vs"], fields["ps"]]}
+            elif kind == "draw-specialization":
+                key = (int(fields["frame"]), int(fields["draw"]))
+                draws.setdefault(key, {})["specialization"] = fields["recipe"]
             elif kind == "draw-family":
                 key = (int(fields["frame"]), int(fields["draw"]))
-                draws.setdefault(key, {}).update(family=int(fields["family"]), recipe=fields["recipe"])
+                draws.setdefault(key, {}).update(
+                    family=int(fields["family"]), recipe=fields["recipe"],
+                    mode=fields.get("mode", "unknown"),
+                    eligible=fields.get("eligible"), prepared_family=fields.get("prepared_family"))
             elif kind == "frame":
                 frame = int(fields.pop("frame"))
                 if frame in frames:
@@ -83,6 +96,17 @@ def analyze(path, start, count):
         failures += ok == "false"
         family = selected_draws.get(draw, {}).get("family")
         costs[family] += ms
+    selected_async = [event for event in async_events if "frame" in event and int(event["frame"]) in selected]
+    async_metrics = defaultdict(list)
+    async_failures = 0
+    for event in selected_async:
+        for metric in ("queue_ms", "compile_ms", "elapsed_ms", "fallback_frames", "fallback_draws"):
+            if metric in event:
+                async_metrics[metric].append(float(event[metric]))
+        if event["kind"] == "completed":
+            async_failures += event.get("ok") == "false"
+    modes = Counter(draw.get("mode", "unknown") for draw in selected_draws.values())
+    coverage_available = all(draw.get("eligible") in ("true", "false") for draw in selected_draws.values())
     total_draws = sum(frame["draws"] for frame in selected.values())
     if sum(counts.values()) != total_draws:
         raise ValueError("draw-family records do not match successful draws; incomplete capture or failed draw preparation")
@@ -98,6 +122,20 @@ def analyze(path, start, count):
                            for key in sorted({key for frame in selected.values() for key in frame})},
         "compile_events_ms": {key: distribution(values) for key, values in event_times.items()},
         "compile_failures": failures,
+        "execution_modes": dict(modes),
+        "interpreter_coverage": {
+            "eligible_draws": sum(draw.get("eligible") == "true" for draw in selected_draws.values()),
+            "prepared_draws": sum(draw.get("prepared_family") not in (None, "0000000000000000")
+                                  for draw in selected_draws.values()),
+        } if coverage_available else None,
+        "async_compilation": {
+            "events": dict(Counter(event["kind"] for event in selected_async)),
+            "metrics": {key: distribution(values) for key, values in async_metrics.items()},
+            "failures": async_failures,
+            "queue_full": sum(int(event.get("queue_full", 0)) for event in selected_async),
+            "memory_full": sum(int(event.get("memory_full", 0)) for event in selected_async),
+            "recipes": sorted({event["recipe"] for event in selected_async if "recipe" in event}),
+        },
         "unattributed_compile_ms": costs[None],
         "observed_families": [
             {"id": family, "draws": draws_count,
@@ -105,10 +143,13 @@ def analyze(path, start, count):
              "compile_ms": costs[family],
              "compile_fraction": costs[family] / total_compile_ms if total_compile_ms else None,
              "descriptor": families.get(family),
+             "specializations": sorted({draw["specialization"] for draw in selected_draws.values()
+                                        if draw.get("family") == family and "specialization" in draw}),
              "program_pairs": [{"programs": pair, "draws": n} for pair, n in pairs[family].most_common()]}
             for family, draws_count in counts.most_common()],
         "programs": programs,
-        "limits": ["Observed families do not establish interpreter eligibility or prepared coverage.",
+        "limits": ["Interpreter coverage requires the explicit eligibility/prepared fields in newer traces.",
+                   "Async timings use the request frame for queue/compile events and publication frame for fallback residence.",
                    "CPU draw and compilation timings overlap; neither measures frame duration or GPU execution.",
                    "Only completed frames are included; texture transfers and failed draw preparation are excluded.",
                    "Compile cost is attributed to the draw that caused each miss, including shared module creation."],

@@ -58,7 +58,8 @@ and [Wine’s D3D9 conformance evidence](https://www.winehq.org/pipermail/wine-d
 The third texture-flags word holds a per-draw physical-slot mask that skips sampling; the specialized handoff omits those
 resource bindings. Unused and unbound bindings receive
 private 2D/cube views and samplers. Ready hybrid specializations retain guest
-sampler bindings and the same packed geometry. Integer/bool banks, vertex textures, biased sampling,
+sampler bindings and use native vertex fetch where supported, otherwise the
+existing compact packer. Integer/bool banks, vertex textures, biased sampling,
 shader depth output and MRT have no coverage. Stencil writes remain disabled.
 
 One bind group contains four dynamic uniforms (bindings 0/1: 4096-byte VS bank /

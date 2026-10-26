@@ -158,7 +158,10 @@ indices describe decoded fields, including unused fields on control instructions
 they are not inferred register capacities. A schema/build identity includes a
 fingerprint of renderer sources, manifest, lockfile and build script, target and
 profile, plus enabled device features/limits. The normal adapter startup record
-supplies backend and adapter identifiers.
+supplies backend and adapter identifiers. Draw records include execution mode,
+interpreter eligibility and the prepared family; specialized-only mode leaves
+eligibility unknown. The analyzer reports these alongside worker queue,
+compilation, publication and saturation metrics, correlated by recipe identity.
 
 `RECOMP_D3D9_SHADER_MODE=compare-family11` enables the M2 scoped comparison:
 draws matching the supported SM2 program subset and baseline family-11 static
@@ -171,8 +174,9 @@ specialization. Metal defaults to `hybrid`; other backends default to
 creating interpreter GPU resources. Startup logs the effective mode and backend.
 In hybrid mode, covered misses render through the prepared interpreter
 while one worker generates and compiles the complete specialization. Ready results
-are adopted at draw boundaries. Covered hybrid draws retain canonical packed
-vertices after switching; uncovered draws retain synchronous specialization with
+are adopted at draw boundaries. Ready specializations use native vertex fetch
+where supported, otherwise the existing compact packer; interpreted draws use
+canonical packed vertices. Uncovered draws retain synchronous specialization with
 residual reasons. Other backends reject hybrid pending backend acceptance.
 Unknown modes fail at
 initialization. See [SHADERS.md](SHADERS.md) for exact coverage and bindings.
@@ -188,7 +192,9 @@ enter a new epoch. `[d3d9-async]` logs queue/compile/publication
 timings, fallback residence, saturation, failures, epochs and residual counts.
 Routine preparation, compilation, upload and frame logs require
 `RECOMP_D3D9_TRACE_PIPELINES=1`; startup mode selection and compilation failures
-remain visible by default. Recipe accounting excludes opaque driver allocations and temporary compiler
+remain visible by default, as do evictions from caches that can require
+recompilation. The worker reuses up to 512 shader modules and 128 binding layouts
+within its device epoch. Recipe accounting excludes opaque driver allocations and temporary compiler
 memory; these limits are not performance acceptance budgets.
 
 Add `RECOMP_D3D9_UBER_TINT=1` to mix 15% red into interpreted fragment results

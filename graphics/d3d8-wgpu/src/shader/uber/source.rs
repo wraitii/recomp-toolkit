@@ -40,8 +40,8 @@ pub fn source() -> String {
          case {OP_MAD}u, {OP_LRP}u, {OP_CMP}u, {OP_DP2ADD}u: {{ return 3u; }}\n\
          default: {{ return 2u; }} }} }}\n"
     );
+    source += include_str!("../arithmetic.wgsl");
     source += r#"
-fn d9_nrm(a: vec4<f32>) -> vec4<f32> { let l = length(a.xyz); if (l > 0.0) { return a / l; } return vec4<f32>(0.0); }
 fn swizzle(v: vec4<f32>, s: u32) -> vec4<f32> {
     return vec4<f32>(v[s & 3u], v[(s >> 2u) & 3u], v[(s >> 4u) & 3u], v[(s >> 6u) & 3u]);
 }
@@ -106,6 +106,7 @@ fn pixel_write(r: ptr<function, Registers>, d: vec4<u32>, value: vec4<f32>) {
         source += &format!(" @location({slot}) v{slot}: vec4<f32>,");
     }
     source += " }\n@vertex fn vs_main(v: VIn) -> V2F {\n var r: Registers;\n";
+    let arithmetic = arithmetic_cases();
     for slot in 0..VERTEX_INPUTS {
         source += &format!("r.input[{slot}] = v.v{slot} * vsp.ascale[{slot}];\n");
     }
@@ -119,29 +120,9 @@ fn pixel_write(r: ptr<function, Registers>, d: vec4<u32>, value: vec4<f32>) {
              if (count > 2u) {{ c = vertex_read(i.c, &r, (i.dst.x & {}u) != 0u); }}\n\
              var value = a;\n\
              switch (i.dst.x & {OPCODE_MASK}u) {{\n\
-             case {OP_MOV}u: {{}}\n\
-             case {OP_FRC}u: {{ value = fract(a); }}\n\
-             case {OP_SGE}u: {{ value = select(vec4<f32>(0.0), vec4<f32>(1.0), a >= b); }}\n\
-             case {OP_EXP}u, {OP_EXPP}u: {{ value = vec4<f32>(exp2(a.x)); }}\n\
-             case {OP_LOG}u: {{ value = vec4<f32>(log2(abs(a.x))); }}\n\
-             case {OP_DP2ADD}u: {{ value = vec4<f32>(dot(a.xy, b.xy) + c.x); }}\n\
-             case {OP_ABS}u: {{ value = abs(a); }}\n\
-             case {OP_POW}u: {{ value = vec4<f32>(pow(abs(a.x), b.x)); }}\n\
-             case {OP_ADD}u: {{ value = a + b; }}\n\
-             case {OP_RCP}u: {{ value = vec4<f32>(1.0 / a.x); }}\n\
-             case {OP_RSQ}u: {{ value = vec4<f32>(inverseSqrt(abs(a.x))); }}\n\
-             case {OP_DP3}u: {{ value = vec4<f32>(dot(a.xyz, b.xyz)); }}\n\
-             case {OP_MIN}u: {{ value = min(a, b); }}\n\
-             case {OP_MAX}u: {{ value = max(a, b); }}\n\
-             case {OP_SLT}u: {{ value = select(vec4<f32>(0.0), vec4<f32>(1.0), a < b); }}\n\
-             case {OP_LRP}u: {{ value = mix(c, b, a); }}\n\
-             case {OP_CMP}u: {{ value = select(c, b, a >= vec4<f32>(0.0)); }}\n\
-             case {OP_NRM}u: {{ value = d9_nrm(a); }}\n\
-             case {OP_MUL}u: {{ value = a * b; }}\n\
-             case {OP_MAD}u: {{ value = a * b + c; }}\n\
+             {arithmetic}\
              case {OP_SINCOS}u: {{ value = vec4<f32>(cos(a.x), sin(a.x), 0.0, 0.0); }}\n\
              case {OP_MOVA}u: {{}}\n\
-             case {OP_DP4}u: {{ value = vec4<f32>(dot(a, b)); }}\n\
              default: {{}}\n\
              }}\n\
              if ((i.dst.x & {SATURATE_FLAG}u) != 0u) {{ value = clamp(value, vec4<f32>(0.0), vec4<f32>(1.0)); }}\n\
@@ -192,8 +173,29 @@ fn pixel_write(r: ptr<function, Registers>, d: vec4<u32>, value: vec4<f32>) {
              if (count > 2u) {{ c = pixel_read(i.c, &r, (i.dst.x & {}u) != 0u); }}\n\
              var value = a;\n\
              switch (i.dst.x & {OPCODE_MASK}u) {{\n\
+             {arithmetic}\
              case {OP_TEXKILL}u: {{ killed = killed || any(a < vec4<f32>(0.0)); }}\n\
-             case {OP_MOV}u: {{}}\n\
+             case {OP_TEX}u: {{ let coord = select(a, a / a.w, (i.dst.x & 65536u) != 0u); value = sample_texture(i.b.y, coord); }}\n\
+             default: {{}}\n\
+             }}\n\
+             if ((i.dst.x & {SATURATE_FLAG}u) != 0u) {{ value = clamp(value, vec4<f32>(0.0), vec4<f32>(1.0)); }}\n\
+             pixel_write(&r, i.dst, value);\n\
+             }}\n",
+        1u32 << IMMEDIATE_SOURCE_SHIFT,
+        1u32 << (IMMEDIATE_SOURCE_SHIFT + 1),
+        1u32 << (IMMEDIATE_SOURCE_SHIFT + 2),
+    );
+    source += "if (killed) { discard; }\n\
+        let col = d9_output(r.color[0], v);\n\
+        if (psp.texture_flags.y != 0u) { return vec4<f32>(mix(col.rgb, vec3<f32>(1.0, 0.0, 0.0), 0.15), col.a); }\n\
+        return col;\n}\n";
+    source += include_str!("../raster.wgsl");
+    source
+}
+
+fn arithmetic_cases() -> String {
+    format!(
+        "case {OP_MOV}u: {{}}\n\
              case {OP_FRC}u: {{ value = fract(a); }}\n\
              case {OP_SGE}u: {{ value = select(vec4<f32>(0.0), vec4<f32>(1.0), a >= b); }}\n\
              case {OP_EXP}u, {OP_EXPP}u: {{ value = vec4<f32>(exp2(a.x)); }}\n\
@@ -214,20 +216,6 @@ fn pixel_write(r: ptr<function, Registers>, d: vec4<u32>, value: vec4<f32>) {
              case {OP_MUL}u: {{ value = a * b; }}\n\
              case {OP_MAD}u: {{ value = a * b + c; }}\n\
              case {OP_DP4}u: {{ value = vec4<f32>(dot(a, b)); }}\n\
-             case {OP_TEX}u: {{ let coord = select(a, a / a.w, (i.dst.x & 65536u) != 0u); value = sample_texture(i.b.y, coord); }}\n\
-             default: {{}}\n\
-             }}\n\
-             if ((i.dst.x & {SATURATE_FLAG}u) != 0u) {{ value = clamp(value, vec4<f32>(0.0), vec4<f32>(1.0)); }}\n\
-             pixel_write(&r, i.dst, value);\n\
-             }}\n",
-        1u32 << IMMEDIATE_SOURCE_SHIFT,
-        1u32 << (IMMEDIATE_SOURCE_SHIFT + 1),
-        1u32 << (IMMEDIATE_SOURCE_SHIFT + 2),
-    );
-    source += "if (killed) { discard; }\n\
-        let col = d9_output(r.color[0], v);\n\
-        if (psp.texture_flags.y != 0u) { return vec4<f32>(mix(col.rgb, vec3<f32>(1.0, 0.0, 0.0), 0.15), col.a); }\n\
-        return col;\n}\n";
-    source += include_str!("../raster.wgsl");
-    source
+"
+    )
 }

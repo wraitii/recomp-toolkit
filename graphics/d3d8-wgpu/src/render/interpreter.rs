@@ -268,357 +268,65 @@ impl PreparedInterpreter {
             key.descriptor.depth.as_mut().unwrap().depth_compare =
                 Some(wgpu::CompareFunction::Always);
             keys.push(key);
+            use wgpu::PrimitiveTopology::{TriangleList, TriangleStrip};
+            use wgpu::TextureFormat::{Bgra8Unorm, Rgba8Unorm};
+            let front = Some(wgpu::Face::Front);
+            let back = Some(wgpu::Face::Back);
+            let alpha = Some((
+                wgpu::BlendFactor::SrcAlpha,
+                wgpu::BlendFactor::OneMinusSrcAlpha,
+            ));
+            let add_alpha = Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One));
+            let add = Some((wgpu::BlendFactor::One, wgpu::BlendFactor::One));
+            let src_alpha = Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::Zero));
+            let read_always = Some((false, wgpu::CompareFunction::Always));
+            let read_less = Some((false, wgpu::CompareFunction::Less));
+            let read_lequal = Some((false, wgpu::CompareFunction::LessEqual));
+            let write_always = Some((true, wgpu::CompareFunction::Always));
+            let write_less = Some((true, wgpu::CompareFunction::Less));
+            let write_lequal = Some((true, wgpu::CompareFunction::LessEqual));
             for (format, cull_mode, blend, depth, topology) in [
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    None,
-                    None,
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    None,
-                    Some((false, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    None,
-                    Some((true, wgpu::CompareFunction::LessEqual)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    Some((wgpu::BlendFactor::One, wgpu::BlendFactor::One)),
-                    Some((false, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((wgpu::BlendFactor::One, wgpu::BlendFactor::One)),
-                    Some((false, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
-                    Some((false, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((true, wgpu::CompareFunction::LessEqual)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    Some(wgpu::Face::Front),
-                    None,
-                    Some((false, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    None,
-                    Some((true, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    None,
-                    Some((true, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Back),
-                    None,
-                    Some((true, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    None,
-                    None,
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    None,
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
-                    None,
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    None,
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    None,
-                    wgpu::PrimitiveTopology::TriangleStrip,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    None,
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Back),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    None,
-                    None,
-                    wgpu::PrimitiveTopology::TriangleStrip,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Back),
-                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
-                    Some((false, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((true, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    Some(wgpu::Face::Front),
-                    None,
-                    Some((true, wgpu::CompareFunction::LessEqual)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((true, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    None,
-                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
-                    Some((false, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((true, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    Some(wgpu::Face::Front),
-                    None,
-                    Some((true, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    Some(wgpu::Face::Back),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
-                    Some((false, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    None,
-                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One)),
-                    Some((false, wgpu::CompareFunction::Always)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    None,
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::LessEqual)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((true, wgpu::CompareFunction::LessEqual)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::LessEqual)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::LessEqual)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    None,
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::LessEqual)),
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    None,
-                    Some((
-                        wgpu::BlendFactor::SrcAlpha,
-                        wgpu::BlendFactor::OneMinusSrcAlpha,
-                    )),
-                    Some((false, wgpu::CompareFunction::Less)),
-                    wgpu::PrimitiveTopology::TriangleStrip,
-                ),
-                (
-                    wgpu::TextureFormat::Bgra8Unorm,
-                    Some(wgpu::Face::Front),
-                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::Zero)),
-                    None,
-                    wgpu::PrimitiveTopology::TriangleList,
-                ),
+                (Bgra8Unorm, front, None, None, TriangleList),
+                (Bgra8Unorm, front, None, read_always, TriangleList),
+                (Bgra8Unorm, front, None, write_lequal, TriangleList),
+                (Bgra8Unorm, None, add, read_always, TriangleList),
+                (Bgra8Unorm, front, add, read_always, TriangleList),
+                (Bgra8Unorm, None, add_alpha, read_less, TriangleList),
+                (Bgra8Unorm, None, alpha, read_always, TriangleList),
+                (Bgra8Unorm, None, alpha, read_less, TriangleList),
+                (Bgra8Unorm, front, alpha, read_always, TriangleList),
+                (Bgra8Unorm, front, alpha, write_lequal, TriangleList),
+                (Rgba8Unorm, front, None, read_always, TriangleList),
+                (Bgra8Unorm, front, None, write_less, TriangleList),
+                (Bgra8Unorm, None, None, write_less, TriangleList),
+                (Bgra8Unorm, back, None, write_less, TriangleList),
+                (Bgra8Unorm, None, None, None, TriangleList),
+                (Bgra8Unorm, None, alpha, None, TriangleList),
+                (Bgra8Unorm, front, add_alpha, None, TriangleList),
+                (Bgra8Unorm, front, alpha, None, TriangleList),
+                (Bgra8Unorm, None, alpha, None, TriangleStrip),
+                (Rgba8Unorm, None, alpha, read_always, TriangleList),
+                (Bgra8Unorm, back, alpha, read_less, TriangleList),
+                (Bgra8Unorm, None, None, None, TriangleStrip),
+                (Bgra8Unorm, back, add_alpha, read_less, TriangleList),
+                (Bgra8Unorm, None, alpha, write_less, TriangleList),
+                (Rgba8Unorm, front, alpha, read_always, TriangleList),
+                (Rgba8Unorm, front, None, write_lequal, TriangleList),
+                (Bgra8Unorm, front, alpha, write_less, TriangleList),
+                (Rgba8Unorm, None, add_alpha, read_less, TriangleList),
+                (Rgba8Unorm, front, alpha, write_always, TriangleList),
+                (Rgba8Unorm, front, None, write_less, TriangleList),
+                (Rgba8Unorm, back, alpha, read_less, TriangleList),
+                (Rgba8Unorm, front, add_alpha, read_always, TriangleList),
+                (Rgba8Unorm, None, add_alpha, read_always, TriangleList),
+                (Rgba8Unorm, None, alpha, read_less, TriangleList),
+                (Bgra8Unorm, front, alpha, read_lequal, TriangleList),
+                (Rgba8Unorm, front, alpha, write_lequal, TriangleList),
+                (Bgra8Unorm, None, alpha, read_lequal, TriangleList),
+                (Rgba8Unorm, front, alpha, read_lequal, TriangleList),
+                (Rgba8Unorm, None, alpha, read_lequal, TriangleList),
+                (Bgra8Unorm, None, alpha, read_less, TriangleStrip),
+                (Bgra8Unorm, front, src_alpha, None, TriangleList),
             ] {
                 let mut key = keys[0].clone();
                 let target = key.descriptor.target.as_mut().unwrap();

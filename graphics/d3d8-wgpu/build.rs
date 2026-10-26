@@ -1,5 +1,6 @@
 use std::path::Path;
 
+#[allow(dead_code)]
 #[path = "src/shader/opcodes.rs"]
 mod opcodes;
 #[path = "src/shader/uber/abi.rs"]

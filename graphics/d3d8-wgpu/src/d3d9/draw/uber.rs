@@ -111,6 +111,12 @@ pub(crate) fn prepare(gpu: &D3d9Gpu) -> Result<(), RenderError> {
         .map_err(|_| unsupported("InterpreterPrepare", "family already prepared"))
 }
 
+#[derive(Default)]
+pub(super) struct Selection {
+    pub(super) eligible: Option<bool>,
+    pub(super) family: Option<u64>,
+}
+
 pub(super) fn select(
     gpu: &D3d9Gpu,
     draw: &mut D3d9DrawState,
@@ -118,9 +124,29 @@ pub(super) fn select(
     snapshot: &DrawSnapshot,
     vs: Option<&super::super::shader::ShaderRecord>,
     ps: Option<&super::super::shader::ShaderRecord>,
-) -> Result<bool, RenderError> {
-    let result = coverage(gpu, state, snapshot, vs, ps);
-    if hybrid(gpu) {
+) -> Result<Selection, RenderError> {
+    let mode = mode(gpu)?;
+    if mode == Mode::Specialized {
+        return Ok(Selection::default());
+    }
+    let coverage = coverage(gpu, state, snapshot, vs, ps);
+    let eligible = coverage.as_ref().is_ok_and(|eligible| *eligible);
+    let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
+    let family = gpu
+        .interpreter
+        .get()
+        .ok_or_else(|| unsupported("InterpreterDraw", "interpreter not prepared"))?
+        .find(&descriptor)
+        .filter(|_| eligible)
+        .map(|family| fingerprint(&family.key));
+    let result = coverage.and_then(|eligible| {
+        if eligible && family.is_none() && mode != Mode::CompareFamily11 {
+            Err(unsupported("InterpreterDraw", "unprepared-pipeline-state"))
+        } else {
+            Ok(eligible)
+        }
+    });
+    if mode == Mode::Hybrid {
         let reason = match &result {
             Ok(true) => None,
             Ok(false) => Some("unsupported-instruction-or-interface".to_string()),
@@ -130,13 +156,17 @@ pub(super) fn select(
             if trace_compilation() {
                 *draw.residual_reasons.entry(reason).or_default() += 1;
             }
-            return Ok(false);
         }
+    } else {
+        result?;
     }
-    result
+    Ok(Selection {
+        eligible: Some(eligible),
+        family,
+    })
 }
 
-fn topology(snapshot: &DrawSnapshot) -> wgpu::PrimitiveTopology {
+pub(super) fn topology(snapshot: &DrawSnapshot) -> wgpu::PrimitiveTopology {
     if snapshot.command.primitive == D3DPT_TRIANGLESTRIP {
         wgpu::PrimitiveTopology::TriangleStrip
     } else {
@@ -155,11 +185,6 @@ fn coverage(
     if mode == Mode::Specialized {
         return Ok(false);
     }
-    let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
-    let prepared = gpu
-        .interpreter
-        .get()
-        .ok_or_else(|| unsupported("InterpreterDraw", "interpreter not prepared"))?;
     let exclusion = if !matches!(
         snapshot.command.primitive,
         D3DPT_TRIANGLELIST | D3DPT_TRIANGLESTRIP
@@ -167,8 +192,6 @@ fn coverage(
         Some("unsupported-primitive")
     } else if rs(state, 9) != 2 {
         Some("unsupported-shading-mode")
-    } else if prepared.find(&descriptor).is_none() {
-        Some("unprepared-pipeline-state")
     } else if !vs.is_some_and(|s| program::interface_candidate(&s.program)) {
         Some("unsupported-vertex-interface")
     } else if !ps.is_some_and(|s| program::interface_candidate(&s.program)) {
@@ -254,22 +277,19 @@ pub(super) fn specialize(
     snapshot: &DrawSnapshot,
     vs: &super::super::shader::ShaderRecord,
     ps: &super::super::shader::ShaderRecord,
-) -> Result<Option<Box<DrawMemo>>, RenderError> {
-    let prepared = gpu
-        .interpreter
-        .get()
-        .ok_or_else(|| unsupported("HybridDraw", "interpreter not prepared"))?;
-    let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
-    let family = prepared
-        .find(&descriptor)
-        .ok_or_else(|| unsupported("HybridDraw", "unprepared-family"))?;
+    vertex_buffers: VertexLayouts,
+    topology: wgpu::PrimitiveTopology,
+    strip_format: Option<wgpu::IndexFormat>,
+    raw_inputs: u16,
+) -> Result<Option<(CompiledPipeline, PipelineRecipe)>, RenderError> {
+    let descriptor = pipeline_descriptor(gpu, state, snapshot, topology, strip_format)?;
     let shaders = [vs, ps].map(|shader| {
         let (_, settings) = translated_snapshot(
             ShaderOrigin::Guest(shader.key.clone()),
             &shader.program,
             state,
             &snapshot.textures,
-            0,
+            raw_inputs,
         )?;
         Ok(ShaderRecipe::Program {
             key: shader.key.clone(),
@@ -300,21 +320,21 @@ pub(super) fn specialize(
         shaders: [vertex?, pixel?],
         interface: InterfaceKey {
             bindings: layout_key.entries().into(),
-            vertex_buffers: family.key.interface.vertex_buffers.clone(),
+            vertex_buffers,
         },
-        descriptor: family.key.descriptor.clone(),
+        descriptor,
     };
-    if let Some((compiled, _)) = draw.pipelines.get(&recipe.key()) {
-        return resolve(
-            gpu,
-            draw,
-            state,
-            snapshot,
-            vs,
-            ps,
-            Some((compiled.clone(), recipe)),
-        )
-        .map(Some);
+    let key = recipe.key();
+    if trace_compilation() {
+        eprintln!(
+            "[d3d9-compile] draw-specialization frame={} draw={} recipe={:016x}",
+            draw.frame,
+            draw.measured_draws,
+            key.fingerprint()
+        );
+    }
+    if let Some((compiled, _)) = draw.pipelines.get(&key) {
+        return Ok(Some((compiled.clone(), recipe)));
     }
     if draw.compiler.is_none() {
         draw.compiler = Some(crate::render::compile::Compiler::new(
@@ -377,7 +397,8 @@ pub(super) fn resolve(
     snapshot: &DrawSnapshot,
     vs: &super::super::shader::ShaderRecord,
     ps: &super::super::shader::ShaderRecord,
-    specialized: Option<(crate::render::pipeline::CompiledPipeline, PipelineRecipe)>,
+    specialized: Option<(CompiledPipeline, PipelineRecipe)>,
+    raw_inputs: u16,
 ) -> Result<Box<DrawMemo>, RenderError> {
     let interpreted = specialized.is_none();
     let prepared = gpu
@@ -439,6 +460,26 @@ pub(super) fn resolve(
         }
     }
     let bindings = bindings.into();
+    let selected_descriptor = specialized
+        .as_ref()
+        .map(|(_, recipe)| recipe.descriptor.clone())
+        .unwrap_or_else(|| family.key.descriptor.clone());
+    let shape = specialized
+        .as_ref()
+        .map(|(_, recipe)| {
+            (
+                recipe.interface.vertex_buffers.clone(),
+                recipe.descriptor.primitive.topology,
+                recipe.descriptor.primitive.strip_index_format,
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                family.key.interface.vertex_buffers.clone(),
+                family.key.descriptor.primitive.topology,
+                None,
+            )
+        });
     let (modules, layout, binding_entries, recipes, vs_count, ps_count, pipeline) =
         if let Some((compiled, recipe)) = specialized {
             (
@@ -464,10 +505,48 @@ pub(super) fn resolve(
                 family.pipeline.clone(),
             )
         };
+    let trace_pipeline = if trace_compilation() {
+        let mut stages = Vec::with_capacity(2);
+        for shader in [vs, ps] {
+            let (key, _) = translated_snapshot(
+                ShaderOrigin::Guest(shader.key.clone()),
+                &shader.program,
+                state,
+                &snapshot.textures,
+                raw_inputs,
+            )?;
+            stages.push(trace::stage(&key));
+        }
+        let interface = trace::Interface {
+            stages: stages.try_into().unwrap(),
+            layout: Arc::clone(&binding_entries),
+            inputs: vs
+                .program
+                .inputs
+                .iter()
+                .map(|i| (i.usage, i.usage_index, i.ty, i.index))
+                .collect(),
+        };
+        let recipe = PipelineRecipe {
+            shaders: recipes.clone(),
+            interface: InterfaceKey {
+                bindings: Arc::clone(&binding_entries),
+                vertex_buffers: shape.0.clone(),
+            },
+            descriptor: selected_descriptor,
+        };
+        let key = recipe.prepare(modules.clone(), layout.clone());
+        Some((
+            trace::observe(draw, &interface, &key),
+            fingerprint(&recipe.key()),
+        ))
+    } else {
+        None
+    };
     Ok(Box::new(DrawMemo {
         fingerprint: state.pipeline_fingerprint(),
         ff_key: None,
-        raw_inputs: 0,
+        raw_inputs,
         target: (snapshot.target.texture.format(), snapshot.target.format),
         depth: snapshot
             .depth
@@ -483,14 +562,7 @@ pub(super) fn resolve(
         layout,
         programs,
         trace_interface: None,
-        trace_pipeline: None,
-        pipeline: Some((
-            (
-                family.key.interface.vertex_buffers.clone(),
-                family.key.descriptor.primitive.topology,
-                None,
-            ),
-            pipeline,
-        )),
+        trace_pipeline,
+        pipeline: Some((shape, pipeline)),
     }))
 }

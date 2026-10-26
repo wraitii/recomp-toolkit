@@ -16,45 +16,6 @@ pub(crate) const R_DEPTHOUT: u32 = 9;
 pub(crate) const R_SAMPLER: u32 = 10;
 pub(crate) const R_CONSTBOOL: u32 = 14;
 
-pub(crate) const OP_NOP: u32 = 0;
-pub(crate) const OP_SUB: u32 = 3;
-pub(crate) const OP_LOG: u32 = 15;
-pub(crate) const OP_LIT: u32 = 16;
-pub(crate) const OP_DST: u32 = 17;
-pub(crate) const OP_M4X4: u32 = 20;
-pub(crate) const OP_M4X3: u32 = 21;
-pub(crate) const OP_M3X4: u32 = 22;
-pub(crate) const OP_M3X3: u32 = 23;
-pub(crate) const OP_M3X2: u32 = 24;
-pub(crate) const OP_REP: u32 = 38;
-pub(crate) const OP_ENDREP: u32 = 39;
-pub(crate) const OP_IF: u32 = 40;
-pub(crate) const OP_IFC: u32 = 41;
-pub(crate) const OP_ELSE: u32 = 42;
-pub(crate) const OP_ENDIF: u32 = 43;
-pub(crate) const OP_BREAK: u32 = 44;
-pub(crate) const OP_BREAKC: u32 = 45;
-pub(crate) const OP_DCL: u32 = 31;
-pub(crate) const OP_CRS: u32 = 33;
-pub(crate) const OP_SGN: u32 = 34;
-pub(crate) const OP_SINCOS: u32 = 37;
-pub(crate) const OP_DEFB: u32 = 47;
-pub(crate) const OP_DEFI: u32 = 48;
-pub(crate) const OP_TEXCOORD: u32 = 64;
-pub(crate) const OP_TEXREG2AR: u32 = 69;
-pub(crate) const OP_TEXREG2GB: u32 = 70;
-pub(crate) const OP_EXPP: u32 = 78;
-pub(crate) const OP_LOGP: u32 = 79;
-pub(crate) const OP_CND: u32 = 80;
-pub(crate) const OP_DEF: u32 = 81;
-pub(crate) const OP_TEXDP3: u32 = 85;
-pub(crate) const OP_DP2ADD: u32 = 90;
-pub(crate) const OP_DSX: u32 = 91;
-pub(crate) const OP_DSY: u32 = 92;
-pub(crate) const OP_PHASE: u32 = 0xfffd;
-pub(crate) const OP_COMMENT: u32 = 0xfffe;
-pub(crate) const OP_END: u32 = 0xffff;
-
 pub(crate) const S_CUBE: u32 = 3;
 pub(crate) const S_VOLUME: u32 = 4;
 
@@ -109,6 +70,7 @@ pub struct Program {
     pub inputs: Vec<DclIn>,
     pub outputs: Vec<DclIn>,
     pub samplers: BTreeMap<u32, u32>,
+    sampled_slots: u16,
     pub defs: BTreeMap<u32, [f32; 4]>,
     pub idefs: BTreeMap<u32, [i32; 4]>,
     pub bdefs: BTreeMap<u32, bool>,
@@ -125,6 +87,10 @@ impl Program {
             self.major,
             self.minor
         )
+    }
+
+    pub(crate) fn sampled_slots(&self) -> u16 {
+        self.sampled_slots
     }
 
     pub fn const_limit(&self) -> u32 {
@@ -657,6 +623,14 @@ impl Program {
         if p.relative {
             p.max_const = if pixel { 32 } else { 256 };
         }
+        p.sampled_slots = p.code.iter().fold(0, |slots, inst| {
+            let stage = match inst.op {
+                OP_TEX if p.major >= 2 => Some(inst.src[1].index),
+                OP_TEX | OP_TEXREG2AR | OP_TEXREG2GB => Some(inst.dst.index),
+                _ => None,
+            };
+            slots | stage.and_then(|stage| 1u16.checked_shl(stage)).unwrap_or(0)
+        });
         Ok(p)
     }
 }

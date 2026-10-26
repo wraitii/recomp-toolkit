@@ -159,7 +159,7 @@ pub(super) fn capture_mvp(
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Interface {
     pub stages: [(u8, KeyWords); 2],
-    pub layout: LayoutKey,
+    pub layout: Arc<[wgpu::BindGroupLayoutEntry]>,
     pub inputs: Vec<(u32, u32, u32, u32)>,
 }
 

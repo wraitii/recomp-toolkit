@@ -1,6 +1,9 @@
 use super::interface::{InterfaceKey, VertexLayouts};
 use crate::RenderError;
+use crate::fast_map::FastMap;
 use crate::shader::recipe::{ShaderRecipe, ShaderRecipeKey};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PreparedPipeline {
@@ -86,6 +89,14 @@ pub(crate) struct PipelineRecipeKey {
     descriptor: PipelineDescriptor,
 }
 
+impl PipelineRecipeKey {
+    pub(crate) fn fingerprint(&self) -> u64 {
+        let mut hasher = crate::fast_map::FastHasher::default();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 impl PreparedPipeline {
     pub(crate) fn descriptor(&self) -> PipelineDescriptor {
         PipelineDescriptor {
@@ -94,6 +105,43 @@ impl PreparedPipeline {
             primitive: self.primitive,
             depth: self.depth.clone(),
             multisample: self.multisample,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CompilationCache {
+    modules: FastMap<ShaderRecipeKey, wgpu::ShaderModule>,
+    layouts: FastMap<Arc<[wgpu::BindGroupLayoutEntry]>, wgpu::BindGroupLayout>,
+}
+
+impl CompilationCache {
+    fn retain(&mut self, recipe: &PipelineRecipe, compiled: &CompiledPipeline) {
+        for (shader, module) in recipe.shaders.iter().zip(&compiled.modules) {
+            let key = shader.key();
+            if self.modules.contains_key(&key) {
+                continue;
+            }
+            if self.modules.len() >= 512 {
+                if let Some(key) = self.modules.keys().next().cloned() {
+                    self.modules.remove(&key);
+                    eprintln!(
+                        "[d3d9-cache] WARNING eviction cache=worker-shader-modules evicted=1 limit_entries=512; may require recompilation"
+                    );
+                }
+            }
+            self.modules.insert(key, module.clone());
+        }
+        if !self.layouts.contains_key(&recipe.interface.bindings) {
+            if self.layouts.len() >= 128 {
+                if let Some(key) = self.layouts.keys().next().cloned() {
+                    self.layouts.remove(&key);
+                }
+            }
+            self.layouts.insert(
+                Arc::clone(&recipe.interface.bindings),
+                compiled.layout.clone(),
+            );
         }
     }
 }
@@ -115,24 +163,47 @@ impl PipelineRecipe {
                 .sum::<usize>()
     }
 
-    pub(crate) fn compile(&self, device: &wgpu::Device) -> Result<CompiledPipeline, RenderError> {
+    pub(crate) fn compile(
+        &self,
+        device: &wgpu::Device,
+        cache: &mut CompilationCache,
+    ) -> Result<CompiledPipeline, RenderError> {
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let result = (|| {
-            let sources = [self.shaders[0].render()?, self.shaders[1].render()?];
-            for source in &sources {
-                crate::shader::specialize::validate(source)?;
+            let mut modules: Vec<wgpu::ShaderModule> = Vec::with_capacity(2);
+            for shader in &self.shaders {
+                let key = shader.key();
+                let module = if let Some(module) = cache.modules.get(&key) {
+                    module.clone()
+                } else if let Some((_, module)) = self
+                    .shaders
+                    .iter()
+                    .zip(&modules)
+                    .find(|(previous, _)| previous.key() == key)
+                {
+                    module.clone()
+                } else {
+                    let source = shader.render()?;
+                    crate::shader::specialize::validate(&source)?;
+                    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("specialization-worker"),
+                        source: wgpu::ShaderSource::Wgsl(source.as_ref().into()),
+                    })
+                };
+                modules.push(module);
             }
-            let modules = sources.each_ref().map(|source| {
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("specialization-worker"),
-                    source: wgpu::ShaderSource::Wgsl(source.as_ref().into()),
-                })
-            });
-            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("specialization-worker"),
-                entries: &self.interface.bindings,
-            });
+            let modules: [wgpu::ShaderModule; 2] = modules.try_into().unwrap();
+            let layout = cache
+                .layouts
+                .get(&self.interface.bindings)
+                .cloned()
+                .unwrap_or_else(|| {
+                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("specialization-worker"),
+                        entries: &self.interface.bindings,
+                    })
+                });
             let pipeline = self
                 .prepare(modules.clone(), layout.clone())
                 .create(device, "specialization-worker");
@@ -152,6 +223,9 @@ impl PipelineRecipe {
         }
         if let Some(error) = validation {
             return Err(RenderError::new("SpecializationCompile", error.to_string()));
+        }
+        if let Ok(compiled) = &result {
+            cache.retain(self, compiled);
         }
         result
     }

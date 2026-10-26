@@ -36,6 +36,12 @@ fn fingerprint(value: &impl Hash) -> u64 {
     hasher.finish()
 }
 
+fn warn_cache_eviction(name: &str, limit: usize) {
+    eprintln!(
+        "[d3d9-cache] WARNING eviction cache={name} evicted=1 limit_entries={limit}; may require recompilation"
+    );
+}
+
 fn evict_one<K: Clone + Eq + Hash, V>(cache: &mut FastMap<K, V>) {
     if let Some(key) = cache.keys().next().cloned() {
         cache.remove(&key);
@@ -679,6 +685,20 @@ struct NativeStream {
     size: u64,
 }
 
+struct NativeGeometryPlan {
+    streams: SmallVec<[(u32, VertexAttributes); 2]>,
+    layouts: VertexLayouts,
+    topology: wgpu::PrimitiveTopology,
+    strip_format: Option<wgpu::IndexFormat>,
+    first: u64,
+    span: u64,
+    index_offset: u64,
+    index_size: u64,
+    index_format: wgpu::IndexFormat,
+    base_vertex: i32,
+    count: u32,
+}
+
 struct NativeGeometry {
     vertices: SmallVec<[NativeStream; 2]>,
     layouts: VertexLayouts,
@@ -704,6 +724,43 @@ struct PackedVertices {
     stride: u64,
 }
 
+fn packed_shader_layout(
+    linked: &[LinkedInput],
+    canonical: bool,
+) -> Result<(Vec<wgpu::VertexAttribute>, u64), RenderError> {
+    let mut stride = 0;
+    let mut attributes = Vec::with_capacity(linked.len());
+    for input in linked {
+        let format = if canonical {
+            None
+        } else {
+            native_vertex_format(input.element_type)
+        }
+        .unwrap_or(wgpu::VertexFormat::Float32x4);
+        attributes.push(wgpu::VertexAttribute {
+            format,
+            offset: stride,
+            shader_location: input.location,
+        });
+        stride += format.size();
+    }
+    if canonical {
+        let target = crate::shader::uber::VERTEX_STRIDE;
+        if stride > target {
+            return Err(invalid("Draw", "canonical vertex input capacity exceeded"));
+        }
+        while attributes.len() < crate::shader::uber::VERTEX_INPUTS as usize {
+            attributes.push(wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: attributes.len() as u64 * 16,
+                shader_location: attributes.len() as u32,
+            });
+        }
+        stride = target;
+    }
+    Ok((attributes, stride))
+}
+
 fn pack_shader_vertices(
     command: &DrawCommand,
     linked: &[LinkedInput],
@@ -717,20 +774,14 @@ fn pack_shader_vertices(
         offset: usize,
     }
     let mut copies: Vec<Copy<'_>> = Vec::with_capacity(linked.len());
-    let mut attributes = Vec::with_capacity(linked.len());
-    let mut stride = 0u64;
+    let (attributes, stride) = packed_shader_layout(linked, canonical)?;
+    let mut copied_stride = 0u64;
     let max_index = order.iter().copied().max();
     for input in linked {
         let native = (!canonical)
             .then(|| native_vertex_format(input.element_type))
             .flatten();
-        let format = native.unwrap_or(wgpu::VertexFormat::Float32x4);
-        attributes.push(wgpu::VertexAttribute {
-            format,
-            offset: stride,
-            shader_location: input.location,
-        });
-        stride += format.size();
+        copied_stride += native.unwrap_or(wgpu::VertexFormat::Float32x4).size();
         if let Some(max_index) = max_index {
             let fetch = VertexFetch::prepare(
                 command,
@@ -757,23 +808,7 @@ fn pack_shader_vertices(
             });
         }
     }
-    let padding = if canonical {
-        let target = crate::shader::uber::VERTEX_STRIDE;
-        let padding = target
-            .checked_sub(stride)
-            .ok_or_else(|| invalid("Draw", "canonical vertex input capacity exceeded"))?;
-        while attributes.len() < crate::shader::uber::VERTEX_INPUTS as usize {
-            attributes.push(wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: attributes.len() as u64 * 16,
-                shader_location: attributes.len() as u32,
-            });
-        }
-        stride = target;
-        padding as usize
-    } else {
-        0
-    };
+    let padding = (stride - copied_stride) as usize;
     let total = order
         .len()
         .checked_mul(stride as usize)
@@ -817,13 +852,13 @@ fn pack_shader_vertices(
     })
 }
 
-fn native_geometry(
+fn plan_native_geometry(
     gpu: &D3d9Gpu,
     draw: &mut D3d9DrawState,
     command: &DrawCommand,
     linked: &[LinkedInput],
     allow_raw_inputs: bool,
-) -> Result<Option<Box<NativeGeometry>>, RenderError> {
+) -> Result<Option<NativeGeometryPlan>, RenderError> {
     let topology = match command.primitive {
         D3DPT_POINTLIST => wgpu::PrimitiveTopology::PointList,
         D3DPT_LINELIST => wgpu::PrimitiveTopology::LineList,
@@ -891,13 +926,10 @@ fn native_geometry(
     if end > index_count(command.index_format, &command.index_bytes) {
         return Err(invalid("Draw", "index range exceeds the index stream"));
     }
-    let index_data = draw.geometry_source(gpu, &command.index_bytes)?;
-    let mut cached = draw
-        .geometry
-        .get_mut(&(Arc::as_ptr(&command.index_bytes) as usize));
     let range = (command.start_vertex, count, command.index_format);
-    let (min_raw, max_raw) = if let Some(&bounds) = cached
-        .as_ref()
+    let (min_raw, max_raw) = if let Some(&bounds) = draw
+        .geometry
+        .get(&(Arc::as_ptr(&command.index_bytes) as usize))
         .and_then(|cached| cached.index_bounds.get(&range))
     {
         bounds
@@ -908,12 +940,6 @@ fn native_geometry(
             let raw = indexed_vertex_index(&command.index_bytes, command.index_format, index);
             min = min.min(raw);
             max = max.max(raw);
-        }
-        if let Some(cached) = cached.as_mut() {
-            if cached.index_bounds.len() >= 256 {
-                cached.index_bounds.clear();
-            }
-            cached.index_bounds.insert(range, (min, max));
         }
         (min, max)
     };
@@ -948,34 +974,78 @@ fn native_geometry(
     }
     let first = (i64::from(command.base_vertex) + i64::from(min_raw)) as u64;
     let span = u64::from(max_raw - min_raw + 1);
-    let mut vertices = SmallVec::new();
-    let mut layouts = SmallVec::new();
-    for (stream_id, attributes) in streams.drain(..) {
-        let stream = stream_for(command, stream_id)?;
-        let stride = u64::from(stream.stride);
-        let offset = u64::from(stream.offset) + first * stride;
-        let data = draw.geometry_source(gpu, &stream.bytes)?;
-        let size = if matches!(data, GeometryData::Stream(_)) {
-            span * stride
-        } else {
-            stream.bytes.len() as u64 - offset
-        };
-        vertices.push(NativeStream { data, offset, size });
-        layouts.push((stride, attributes));
-    }
-    draw.native_streams = streams;
-    Ok(Some(Box::new(NativeGeometry {
-        vertices,
+    let layouts = streams
+        .iter()
+        .map(|(stream_id, attributes)| {
+            Ok((
+                u64::from(stream_for(command, *stream_id)?.stride),
+                attributes.clone(),
+            ))
+        })
+        .collect::<Result<_, RenderError>>()?;
+    Ok(Some(NativeGeometryPlan {
+        streams,
         layouts,
         topology,
         strip_format: strip.then_some(index_format),
-        index: index_data,
+        first,
+        span,
         index_offset: start as u64 * index_stride,
         index_size: u64::from(count) * index_stride,
         index_format,
         base_vertex: -(min_raw as i32),
         count,
-    })))
+    }))
+}
+
+fn upload_native_geometry(
+    gpu: &D3d9Gpu,
+    draw: &mut D3d9DrawState,
+    command: &DrawCommand,
+    mut plan: NativeGeometryPlan,
+) -> Result<Box<NativeGeometry>, RenderError> {
+    let index = draw.geometry_source(gpu, &command.index_bytes)?;
+    if let Some(cached) = draw
+        .geometry
+        .get_mut(&(Arc::as_ptr(&command.index_bytes) as usize))
+    {
+        let range = (command.start_vertex, plan.count, command.index_format);
+        if !cached.index_bounds.contains_key(&range) {
+            if cached.index_bounds.len() >= 256 {
+                cached.index_bounds.clear();
+            }
+            let min = (-plan.base_vertex) as u32;
+            cached
+                .index_bounds
+                .insert(range, (min, min + plan.span as u32 - 1));
+        }
+    }
+    let mut vertices = SmallVec::new();
+    for (stream_id, _) in plan.streams.drain(..) {
+        let stream = stream_for(command, stream_id)?;
+        let stride = u64::from(stream.stride);
+        let offset = u64::from(stream.offset) + plan.first * stride;
+        let data = draw.geometry_source(gpu, &stream.bytes)?;
+        let size = if matches!(data, GeometryData::Stream(_)) {
+            plan.span * stride
+        } else {
+            stream.bytes.len() as u64 - offset
+        };
+        vertices.push(NativeStream { data, offset, size });
+    }
+    draw.native_streams = plan.streams;
+    Ok(Box::new(NativeGeometry {
+        vertices,
+        layouts: plan.layouts,
+        topology: plan.topology,
+        strip_format: plan.strip_format,
+        index,
+        index_offset: plan.index_offset,
+        index_size: plan.index_size,
+        index_format: plan.index_format,
+        base_vertex: plan.base_vertex,
+        count: plan.count,
+    }))
 }
 
 fn flat_to_u8(values: &[f32]) -> Vec<u8> {
@@ -2469,6 +2539,7 @@ impl D3d9DrawState {
         });
         if self.shader_variants.len() >= 512 {
             evict_one(&mut self.shader_variants);
+            warn_cache_eviction("shader-variants", 512);
         }
         self.shader_variants.insert(key, Arc::clone(&cached));
         Ok(cached)
@@ -2530,6 +2601,7 @@ impl D3d9DrawState {
         }
         if self.shaders.len() >= 512 {
             evict_one(&mut self.shaders);
+            warn_cache_eviction("shader-modules", 512);
         }
         self.shaders.insert(source.to_owned(), shader.clone());
         Ok(shader)
@@ -2637,6 +2709,7 @@ impl D3d9DrawState {
     fn cache_pipeline(&mut self, recipe: PipelineRecipe, compiled: CompiledPipeline) {
         if self.pipelines.len() >= 512 {
             evict_one(&mut self.pipelines);
+            warn_cache_eviction("pipelines", 512);
         }
         self.pipelines
             .insert(recipe.key(), (compiled, Arc::new(recipe)));
@@ -2702,6 +2775,31 @@ fn translated_snapshot(
             }
         }
     }
+    let sampled = program.sampled_slots();
+    let bound = sampled & !variant.unbound;
+    variant.unbound &= sampled;
+    variant.cube &= bound;
+    variant.volume &= bound;
+    variant.depth &= bound;
+    variant.projected &= bound;
+    opaque &= u32::from(bound);
+    if program.major >= 2 {
+        variant.cube = 0;
+        variant.volume = 0;
+        variant.projected = 0;
+    }
+    variant.raw_inputs &= if program.pixel {
+        0
+    } else {
+        program
+            .inputs
+            .iter()
+            .filter(|input| input.ty == crate::shader::program::R_INPUT)
+            .fold(0, |mask, input| {
+                mask | 1u16.checked_shl(input.index).unwrap_or(0)
+            })
+    };
+    let flat_shading = rs(state, 9) == 1;
     let key = ShaderVariantKey {
         pixel: program.pixel,
         shader,
@@ -2712,14 +2810,14 @@ fn translated_snapshot(
             u32::from(variant.depth),
             u32::from(variant.projected),
             opaque,
-            rs(state, 9),
-            u32::from(raw_inputs),
+            u32::from(flat_shading),
+            u32::from(variant.raw_inputs),
         ]),
     };
     let settings = ProgramSettings {
         variant,
         opaque_slots: opaque as u16,
-        flat_shading: rs(state, 9) == 1,
+        flat_shading,
         pixel_output: program.pixel.then_some(OUTPUT),
     };
     Ok((key, settings))
@@ -2959,7 +3057,7 @@ fn resolve_shading(
         .zip(trace_pixel)
         .map(|(vertex, pixel)| trace::Interface {
             stages: [vertex, pixel],
-            layout: layout_key,
+            layout: layout_key.entries().into(),
             inputs: vs
                 .map(|v| {
                     v.program
@@ -3063,7 +3161,6 @@ pub(crate) fn execute(
     if let Some(compiler) = &mut draw.compiler {
         let ready = compiler.publish(draw.frame)?;
         if !ready.is_empty() {
-            draw.memos.clear();
             draw.pipeline_memo = None;
         }
         for (recipe, compiled) in ready {
@@ -3072,7 +3169,7 @@ pub(crate) fn execute(
     }
     if trace_compilation() && !draw.trace_identity {
         eprintln!(
-            "[d3d9-compile] identity schema=1 build={} limits={:?} features={:?}",
+            "[d3d9-compile] identity schema=2 build={} limits={:?} features={:?}",
             env!("RECOMP_RENDERER_BUILD"),
             gpu.limits(),
             gpu.features()
@@ -3182,14 +3279,8 @@ pub(crate) fn execute(
             ps.map(|s| fingerprint(&s.code))
         );
     }
-    let eligible = uber::select(gpu, draw, state, snapshot, vs, ps)?;
-    let ready = if eligible && uber::hybrid(gpu) {
-        uber::specialize(gpu, draw, state, snapshot, vs.unwrap(), ps.unwrap())?
-    } else {
-        None
-    };
-    let interpreted = eligible && ready.is_none();
-    let canonical = eligible;
+    let selection = uber::select(gpu, draw, state, snapshot, vs, ps)?;
+    let covered = selection.family.is_some();
     let geometry_started = trace_compilation().then(Instant::now);
     let mut linked_inputs = std::mem::take(&mut draw.linked);
     let mut ff_uniforms = std::mem::take(&mut draw.ff_uniforms);
@@ -3201,20 +3292,21 @@ pub(crate) fn execute(
     let linked = match vs {
         Some(v) => {
             link_inputs(declaration, &v.program, &mut linked_inputs)?;
-            if canonical {
+            if covered {
                 linked_inputs.sort_by_key(|input| input.location);
             }
             Some(linked_inputs.as_slice())
         }
         None => ff_key.is_some().then_some(linked_inputs.as_slice()),
     };
-    let direct = linked
-        .filter(|_| !canonical)
-        .map(|linked| native_geometry(gpu, draw, &snapshot.command, linked, vs.is_some()))
+    let hybrid = covered && uber::hybrid(gpu);
+    let native_plan = linked
+        .filter(|_| !covered || hybrid)
+        .map(|linked| plan_native_geometry(gpu, draw, &snapshot.command, linked, vs.is_some()))
         .transpose()?
         .flatten();
     let mut raw_inputs = 0u16;
-    if direct.is_some() {
+    if native_plan.is_some() {
         for input in linked.into_iter().flatten() {
             if input.element_type == D3DDECLTYPE_UBYTE4 {
                 raw_inputs |= 1u16
@@ -3222,6 +3314,54 @@ pub(crate) fn execute(
                     .ok_or_else(|| invalid("Draw", "raw byte vertex input location exceeds 15"))?;
             }
         }
+    }
+    let specialization_started = trace_compilation().then(Instant::now);
+    let ready = if hybrid {
+        let (buffers, topology, strip_format) = if let Some(plan) = &native_plan {
+            (plan.layouts.clone(), plan.topology, plan.strip_format)
+        } else {
+            let (attributes, stride) = packed_shader_layout(linked.unwrap(), false)?;
+            let buffers = smallvec![(
+                stride,
+                attributes
+                    .iter()
+                    .map(LayoutAttribute::new)
+                    .collect::<Result<_, _>>()?
+            )];
+            (buffers, uber::topology(snapshot), None)
+        };
+        uber::specialize(
+            gpu,
+            draw,
+            state,
+            snapshot,
+            vs.unwrap(),
+            ps.unwrap(),
+            buffers,
+            topology,
+            strip_format,
+            raw_inputs,
+        )?
+    } else {
+        None
+    };
+    let specialization_ms =
+        specialization_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    let interpreted = covered && ready.is_none();
+    let canonical = interpreted;
+    let direct = match native_plan {
+        Some(plan) if !interpreted => {
+            Some(upload_native_geometry(gpu, draw, &snapshot.command, plan)?)
+        }
+        Some(mut plan) => {
+            plan.streams.clear();
+            draw.native_streams = plan.streams;
+            None
+        }
+        None => None,
+    };
+    if interpreted {
+        raw_inputs = 0;
     }
     let (mut native_geometry, vertices, order, draw_indices, topology) =
         if let Some(geometry) = direct {
@@ -3261,7 +3401,7 @@ pub(crate) fn execute(
             (None, vertices, order, draw_indices, topology)
         };
     if let Some(started) = geometry_started {
-        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let ms = (started.elapsed().as_secs_f64() * 1000.0 - specialization_ms).max(0.0);
         draw.geometry_cpu_ms += ms;
         if interpreted {
             draw.interpreter_frame.packing_ms += ms;
@@ -3505,6 +3645,11 @@ pub(crate) fn execute(
         .rposition(|memo| {
             memo.fingerprint == fingerprint
                 && memo.programs.is_some() == interpreted
+                && ready.as_ref().is_none_or(|(compiled, _)| {
+                    memo.pipeline
+                        .as_ref()
+                        .is_some_and(|(_, pipeline)| *pipeline == compiled.pipeline)
+                })
                 && memo.ff_key == ff_key
                 && memo.raw_inputs == raw_inputs
                 && memo.target == target_key
@@ -3512,16 +3657,17 @@ pub(crate) fn execute(
                 && memo.textures == snapshot.textures
         })
         .map(|index| draw.memos.remove(index));
-    let mut memo = match ready.or(memo) {
+    let mut memo = match memo {
         Some(memo) => memo,
-        None if interpreted => uber::resolve(
+        None if covered => uber::resolve(
             gpu,
             draw,
             state,
             snapshot,
             vs.ok_or_else(|| unsupported("InterpreterDraw", "missing vertex program"))?,
             ps.ok_or_else(|| unsupported("InterpreterDraw", "missing pixel program"))?,
-            None,
+            ready,
+            raw_inputs,
         )?,
         None => resolve_shading(
             gpu,
@@ -3630,10 +3776,14 @@ pub(crate) fn execute(
             pipeline.clone()
         }
         _ => {
-            if interpreted {
+            if covered {
                 return Err(unsupported(
-                    "InterpreterDraw",
-                    "unprepared-interface family11",
+                    if interpreted {
+                        "InterpreterDraw"
+                    } else {
+                        "HybridDraw"
+                    },
+                    "selected pipeline does not match vertex interface",
                 ));
             }
             let descriptor =
@@ -3666,8 +3816,17 @@ pub(crate) fn execute(
         }
     };
     if let Some((family, recipe)) = memo.trace_pipeline {
+        let mode = if interpreted {
+            "interpreted"
+        } else {
+            "specialized"
+        };
+        let eligible = selection
+            .eligible
+            .map_or("unknown", |value| if value { "true" } else { "false" });
+        let prepared_family = selection.family.unwrap_or(0);
         eprintln!(
-            "[d3d9-compile] draw-family frame={} draw={} family={family} recipe={recipe:016x}",
+            "[d3d9-compile] draw-family frame={} draw={} family={family} recipe={recipe:016x} mode={mode} eligible={eligible} prepared_family={prepared_family:016x}",
             draw.frame, draw.measured_draws
         );
     }

@@ -1,4 +1,4 @@
-use super::pipeline::{CompiledPipeline, PipelineRecipe, PipelineRecipeKey};
+use super::pipeline::{CompilationCache, CompiledPipeline, PipelineRecipe, PipelineRecipeKey};
 use crate::RenderError;
 use crate::fast_map::FastMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -14,6 +14,7 @@ struct Job {
     key: PipelineRecipeKey,
     recipe: PipelineRecipe,
     queued: Instant,
+    frame: u64,
 }
 
 enum Completion {
@@ -78,6 +79,7 @@ impl Compiler {
         std::thread::Builder::new()
             .name("shader-compiler".into())
             .spawn(move || {
+                let mut cache = CompilationCache::default();
                 for job in received {
                     if worker_stopped.load(Ordering::Acquire) {
                         break;
@@ -91,16 +93,16 @@ impl Compiler {
                     let started = Instant::now();
                     if trace {
                         eprintln!(
-                            "[d3d9-async] compiling epoch={epoch} key={:?} queue_ms={:.3}",
-                            job.key,
+                            "[d3d9-async] compiling epoch={epoch} recipe={:016x} frame={} queue_ms={:.3}",
+                            job.key.fingerprint(), job.frame,
                             started.duration_since(job.queued).as_secs_f64() * 1000.0
                         );
                     }
-                    let result = job.recipe.compile(&device);
+                    let result = job.recipe.compile(&device, &mut cache);
                     if trace || result.is_err() {
                         eprintln!(
-                            "[d3d9-async] completed epoch={epoch} key={:?} compile_ms={:.3} error={:?}",
-                            job.key,
+                            "[d3d9-async] completed epoch={epoch} recipe={:016x} frame={} ok={} compile_ms={:.3} error={:?}",
+                            job.key.fingerprint(), job.frame, result.is_ok(),
                             started.elapsed().as_secs_f64() * 1000.0,
                             result.as_ref().err()
                         );
@@ -216,7 +218,10 @@ impl Compiler {
                         self.bytes -= tracked.bytes;
                         if self.trace {
                             eprintln!(
-                                "[d3d9-async] published epoch={epoch} key={key:?} elapsed_ms={:.3} fallback_frames={} fallback_draws={}",
+                                "[d3d9-async] published epoch={epoch} recipe={:016x} frame={frame} requested_frame={} ok={} elapsed_ms={:.3} fallback_frames={} fallback_draws={}",
+                                key.fingerprint(),
+                                tracked.first_frame,
+                                result.is_ok(),
                                 tracked.queued.elapsed().as_secs_f64() * 1000.0,
                                 frame.saturating_sub(tracked.first_frame),
                                 tracked.fallback_draws
@@ -273,12 +278,14 @@ impl Compiler {
             key: key.clone(),
             recipe,
             queued,
+            frame,
         }) {
             Ok(()) => {
                 self.bytes += bytes;
                 if self.trace {
                     eprintln!(
-                        "[d3d9-async] queued epoch={epoch} key={key:?} entries={} recipe_bytes_estimate={}",
+                        "[d3d9-async] queued epoch={epoch} recipe={:016x} frame={frame} entries={} recipe_bytes_estimate={}",
+                        key.fingerprint(),
                         self.entries.len() + 1,
                         self.bytes
                     );

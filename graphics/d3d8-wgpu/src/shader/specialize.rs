@@ -17,7 +17,6 @@ const PRELUDE: &str = r#"diagnostic(off, derivative_uniformity);
 fn d9_dz(v: vec4<f32>) -> vec4<f32> { return vec4<f32>(v.x / v.z, v.y / v.z, v.z, v.w); }
 fn d9_dw(v: vec4<f32>) -> vec4<f32> { return vec4<f32>(v.x / v.w, v.y / v.w, v.z, v.w); }
 fn d9_lit(a: vec4<f32>) -> vec4<f32> { var o = vec4<f32>(1.0, max(a.x, 0.0), 0.0, 1.0); if (a.x > 0.0 && a.y > 0.0) { o.z = pow(a.y, clamp(a.w, -127.9961, 127.9961)); } return o; }
-fn d9_nrm(a: vec4<f32>) -> vec4<f32> { let l = length(a.xyz); if (l > 0.0) { return a / l; } return vec4<f32>(0.0); }
 fn d9_round(v: vec4<f32>) -> vec4<f32> { return sign(v) * floor(abs(v) + 0.5); }
 fn d9_alpha(v: vec4<f32>) -> vec4<f32> { return vec4<f32>(0.0, 0.0, 0.0, v.r); }
 fn d9_shadow(t: texture_depth_2d, sm: sampler_comparison, c: vec4<f32>) -> vec4<f32> { let r = textureSampleCompareLevel(t, sm, c.xy, clamp(c.z, 0.0, 1.0)); return vec4<f32>(r, r, r, 1.0); }
@@ -854,6 +853,7 @@ impl<'a> Gen<'a> {
 
     fn compose(&mut self) -> String {
         let mut s = String::from(PRELUDE);
+        s += include_str!("arithmetic.wgsl");
         if self.p.pixel {
             s += &self.compose_pixel();
         } else {
