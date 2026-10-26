@@ -715,7 +715,11 @@ struct NativeGeometry {
 struct CachedGeometry {
     bytes: Weak<Vec<u8>>,
     buffer: wgpu::Buffer,
-    index_bounds: FastMap<(u32, u32, u32), (u32, u32)>,
+}
+
+struct CachedIndexBounds {
+    bytes: Weak<Vec<u8>>,
+    ranges: FastMap<(u32, u32, u32), (u32, u32)>,
 }
 
 struct PackedVertices {
@@ -926,23 +930,7 @@ fn plan_native_geometry(
     if end > index_count(command.index_format, &command.index_bytes) {
         return Err(invalid("Draw", "index range exceeds the index stream"));
     }
-    let range = (command.start_vertex, count, command.index_format);
-    let (min_raw, max_raw) = if let Some(&bounds) = draw
-        .geometry
-        .get(&(Arc::as_ptr(&command.index_bytes) as usize))
-        .and_then(|cached| cached.index_bounds.get(&range))
-    {
-        bounds
-    } else {
-        let mut min = u32::MAX;
-        let mut max = 0;
-        for index in start..end {
-            let raw = indexed_vertex_index(&command.index_bytes, command.index_format, index);
-            min = min.min(raw);
-            max = max.max(raw);
-        }
-        (min, max)
-    };
+    let (min_raw, max_raw) = draw.index_bounds(command, count);
     let max_index = i64::from(max_raw) + i64::from(command.base_vertex);
     if i64::from(min_raw) + i64::from(command.base_vertex) < 0 || max_index > i64::from(u32::MAX) {
         return Err(invalid(
@@ -1005,21 +993,6 @@ fn upload_native_geometry(
     mut plan: NativeGeometryPlan,
 ) -> Result<Box<NativeGeometry>, RenderError> {
     let index = draw.geometry_source(gpu, &command.index_bytes)?;
-    if let Some(cached) = draw
-        .geometry
-        .get_mut(&(Arc::as_ptr(&command.index_bytes) as usize))
-    {
-        let range = (command.start_vertex, plan.count, command.index_format);
-        if !cached.index_bounds.contains_key(&range) {
-            if cached.index_bounds.len() >= 256 {
-                cached.index_bounds.clear();
-            }
-            let min = (-plan.base_vertex) as u32;
-            cached
-                .index_bounds
-                .insert(range, (min, min + plan.span as u32 - 1));
-        }
-    }
     let mut vertices = SmallVec::new();
     for (stream_id, _) in plan.streams.drain(..) {
         let stream = stream_for(command, stream_id)?;
@@ -2305,6 +2278,7 @@ pub(crate) struct D3d9DrawState {
     index_remap: Vec<u32>,
     geometry: FastMap<usize, CachedGeometry>,
     geometry_seen: FastMap<usize, (Weak<Vec<u8>>, u64)>,
+    index_bounds: FastMap<usize, CachedIndexBounds>,
     frame: u64,
     trace_frame_draw: u32,
     trace_total_draw: u64,
@@ -2360,6 +2334,7 @@ impl D3d9DrawState {
         self.bind_groups.clear();
         self.geometry.clear();
         self.geometry_seen.clear();
+        self.index_bounds.clear();
     }
 
     pub(crate) fn end_frame(&mut self, gpu: &D3d9Gpu) {
@@ -2432,6 +2407,45 @@ impl D3d9DrawState {
     }
     pub fn drop_resource(&mut self, _id: u32) {}
 
+    fn index_bounds(&mut self, command: &DrawCommand, count: u32) -> (u32, u32) {
+        let key = Arc::as_ptr(&command.index_bytes) as usize;
+        let range = (command.start_vertex, count, command.index_format);
+        if let Some(&bounds) = self
+            .index_bounds
+            .get(&key)
+            .and_then(|cached| cached.ranges.get(&range))
+        {
+            return bounds;
+        }
+        let mut min = u32::MAX;
+        let mut max = 0;
+        let start = command.start_vertex as usize;
+        for index in start..start + count as usize {
+            let raw = indexed_vertex_index(&command.index_bytes, command.index_format, index);
+            min = min.min(raw);
+            max = max.max(raw);
+        }
+        if !self.index_bounds.contains_key(&key) && self.index_bounds.len() >= 256 {
+            self.index_bounds
+                .retain(|_, cached| cached.bytes.strong_count() != 0);
+            if self.index_bounds.len() >= 256 {
+                evict_one(&mut self.index_bounds);
+            }
+        }
+        let cached = self
+            .index_bounds
+            .entry(key)
+            .or_insert_with(|| CachedIndexBounds {
+                bytes: Arc::downgrade(&command.index_bytes),
+                ranges: FastMap::default(),
+            });
+        if cached.ranges.len() >= 256 {
+            evict_one(&mut cached.ranges);
+        }
+        cached.ranges.insert(range, (min, max));
+        (min, max)
+    }
+
     fn geometry_source(
         &mut self,
         gpu: &D3d9Gpu,
@@ -2501,7 +2515,6 @@ impl D3d9DrawState {
             CachedGeometry {
                 bytes: Arc::downgrade(bytes),
                 buffer: buffer.clone(),
-                index_bounds: FastMap::default(),
             },
         );
         Ok(buffer)
@@ -3645,6 +3658,11 @@ pub(crate) fn execute(
         .rposition(|memo| {
             memo.fingerprint == fingerprint
                 && memo.programs.is_some() == interpreted
+                && (!interpreted
+                    || memo
+                        .pipeline
+                        .as_ref()
+                        .is_some_and(|(shape, _)| shape.1 == topology))
                 && ready.as_ref().is_none_or(|(compiled, _)| {
                     memo.pipeline
                         .as_ref()
@@ -3733,24 +3751,28 @@ pub(crate) fn execute(
         psp_words,
     );
     let parameters = if interpreted {
-        let (opaque, unbound) = ps.map_or((0, 0), |shader| {
-            crate::shader::uber::sampler_mapping(&shader.program)
-                .into_iter()
-                .fold(
-                    (0, 0),
-                    |(opaque, unbound), (guest, physical)| match snapshot
-                        .textures
-                        .iter()
-                        .find(|t| t.stage == guest)
-                    {
-                        Some(texture) => (
-                            opaque | (u32::from(opaque_format(texture.format)) << physical),
-                            unbound,
-                        ),
-                        None => (opaque, unbound | (1 << physical)),
-                    },
-                )
-        });
+        let (opaque, unbound) = ps
+            .unwrap()
+            .interpreter
+            .as_ref()
+            .map_err(|why| unsupported("InterpreterDraw", why.to_string()))?
+            .sampler_mapping
+            .iter()
+            .copied()
+            .fold(
+                (0, 0),
+                |(opaque, unbound), (guest, physical)| match snapshot
+                    .textures
+                    .iter()
+                    .find(|t| t.stage == guest)
+                {
+                    Some(texture) => (
+                        opaque | (u32::from(opaque_format(texture.format)) << physical),
+                        unbound,
+                    ),
+                    None => (opaque, unbound | (1 << physical)),
+                },
+            );
         parameters.interpreter_flags(opaque, unbound, uber::tint_enabled())
     } else {
         parameters

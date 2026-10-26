@@ -31,6 +31,7 @@ pub(crate) struct EncodedProgram {
     pub(crate) key: EncodedKey,
     pub(crate) words: Arc<[u32]>,
     pub(crate) requirements: Requirements,
+    pub(crate) sampler_mapping: Vec<(u32, u32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -82,7 +83,7 @@ impl std::fmt::Display for Exclusion {
     }
 }
 
-pub(crate) fn sampler_mapping(p: &Program) -> Vec<(u32, u32)> {
+fn sampler_mapping(p: &Program) -> Vec<(u32, u32)> {
     let mut next_2d = 0;
     let mut next_cube = TEXTURES_2D;
     p.samplers
@@ -156,6 +157,7 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
     if !interface_candidate(p) || p.declaration_modifiers & !precision_modifier != 0 {
         return Err(Exclusion::Declarations);
     }
+    let sampler_mapping = sampler_mapping(p);
     let mut requirements = Requirements::default();
     let mut words = Vec::with_capacity(4 + p.code.len() * INSTRUCTION_WORDS);
     words.extend([
@@ -333,9 +335,9 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
             } else {
                 let flags = s.md | (u32::from(s.rel) << 8) | (s.rel_comp << 9);
                 let index = if s.ty == R_SAMPLER {
-                    sampler_mapping(p)
-                        .into_iter()
-                        .find(|&(guest, _)| guest == s.index)
+                    sampler_mapping
+                        .iter()
+                        .find(|&&(guest, _)| guest == s.index)
                         .unwrap()
                         .1
                 } else {
@@ -358,5 +360,6 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
         },
         words: words.into(),
         requirements,
+        sampler_mapping,
     })
 }

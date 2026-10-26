@@ -418,7 +418,11 @@ pub(super) fn resolve(
         buffers.push(upload(gpu, &mut draw.interpreter_programs, program)?);
     }
     let programs = interpreted.then(|| [buffers[0].clone(), buffers[1].clone()]);
-    let mapping = program::sampler_mapping(&ps.program);
+    let mapping = &ps
+        .interpreter
+        .as_ref()
+        .map_err(|why| unsupported("InterpreterDraw", why.to_string()))?
+        .sampler_mapping;
     let mut bindings = Vec::new();
     if interpreted {
         for physical in 0..program::TEXTURE_SLOTS {
@@ -447,7 +451,7 @@ pub(super) fn resolve(
             bindings.push(binding);
         }
     } else {
-        for (guest, _) in mapping {
+        for &(guest, _) in mapping {
             let Some(texture) = snapshot.textures.iter().find(|t| t.stage == guest) else {
                 continue;
             };
