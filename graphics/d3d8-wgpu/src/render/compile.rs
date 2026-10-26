@@ -247,12 +247,12 @@ impl Compiler {
 
     pub(crate) fn request(
         &mut self,
-        recipe: PipelineRecipe,
+        key: &PipelineRecipeKey,
+        recipe: &PipelineRecipe,
         frame: u64,
     ) -> Result<(), RenderError> {
         let epoch = self.epoch;
-        let key = recipe.key();
-        if let Some(tracked) = self.entries.get_mut(&key) {
+        if let Some(tracked) = self.entries.get_mut(key) {
             return match &tracked.entry {
                 Entry::Failed(error) if error.kind == crate::RenderErrorKind::OutOfMemory => {
                     Err(error.clone())
@@ -276,7 +276,7 @@ impl Compiler {
         let queued = Instant::now();
         match jobs.try_send(Job {
             key: key.clone(),
-            recipe,
+            recipe: recipe.clone(),
             queued,
             frame,
         }) {
@@ -291,7 +291,7 @@ impl Compiler {
                     );
                 }
                 self.entries.insert(
-                    key,
+                    key.clone(),
                     Tracked {
                         entry: Entry::Queued,
                         bytes,

@@ -107,7 +107,7 @@ pub(super) fn capture_mvp(
         .find(|(p, _)| p.pipeline == *pipeline)
         .map(|(_, recipe)| {
             (
-                fingerprint(&recipe.key()),
+                recipe.key().fingerprint(),
                 &recipe.interface,
                 &recipe.descriptor,
             )
@@ -221,6 +221,6 @@ pub(super) fn recipe(
         .iter()
         .find(|(_, cached)| *cached == &key.layout)
         .map(|(layout, _)| fingerprint(layout));
-    let recipe = fingerprint(&recipe.key());
+    let recipe = recipe.key().fingerprint();
     (recipe, sources, layout)
 }

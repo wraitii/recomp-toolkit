@@ -2289,12 +2289,14 @@ pub(crate) struct D3d9DrawState {
     inventory_programs: std::collections::BTreeSet<Arc<[u32]>>,
     interpreter_programs: FastMap<crate::shader::uber::EncodedKey, wgpu::Buffer>,
     compiler: Option<crate::render::compile::Compiler>,
+    specialization: uber::RecipeCache,
     residual_reasons: FastMap<String, u64>,
     interpreter_draws: u64,
     interpreter_frame: uber::FrameCounters,
     measured_draws: u64,
     draw_cpu_ms: f64,
     geometry_cpu_ms: f64,
+    specialization_cpu_ms: f64,
     packed_bytes: u64,
     geometry_upload_bytes: u64,
     batch_upload_bytes: u64,
@@ -2325,6 +2327,7 @@ impl D3d9DrawState {
     fn clear(&mut self, reason: &str) {
         self.log_cache_clear(reason);
         self.memos.clear();
+        self.specialization = uber::RecipeCache::default();
         self.pipeline_memo = None;
         self.pipelines.clear();
         self.layouts.clear();
@@ -2351,7 +2354,7 @@ impl D3d9DrawState {
         }
         if trace_compilation() {
             eprintln!(
-                "[d3d9-compile] frame frame={} draws={} draw_cpu_ms={:.3} geometry_cpu_ms={:.3} packed_bytes={} geometry_upload_bytes={} batch_upload_bytes={} module_ms={:.3} pipeline_ms={:.3}",
+                "[d3d9-compile] frame frame={} draws={} draw_cpu_ms={:.3} geometry_cpu_ms={:.3} packed_bytes={} geometry_upload_bytes={} batch_upload_bytes={} module_ms={:.3} pipeline_ms={:.3} specialization_cpu_ms={:.3} recipe_cache_hits={} recipe_cache_misses={}",
                 self.frame,
                 self.measured_draws,
                 self.draw_cpu_ms,
@@ -2360,7 +2363,10 @@ impl D3d9DrawState {
                 self.geometry_upload_bytes,
                 self.batch_upload_bytes,
                 self.module_ms,
-                self.pipeline_ms
+                self.pipeline_ms,
+                self.specialization_cpu_ms,
+                self.specialization.hits,
+                self.specialization.misses
             );
         }
         if trace_compilation() && uber::enabled(gpu) {
@@ -2382,6 +2388,9 @@ impl D3d9DrawState {
         self.measured_draws = 0;
         self.draw_cpu_ms = 0.0;
         self.geometry_cpu_ms = 0.0;
+        self.specialization_cpu_ms = 0.0;
+        self.specialization.hits = 0;
+        self.specialization.misses = 0;
         self.packed_bytes = 0;
         self.geometry_upload_bytes = 0;
         self.batch_upload_bytes = 0;
@@ -2740,13 +2749,12 @@ fn texture_dimension(t: &BoundTexture) -> wgpu::TextureViewDimension {
 fn opaque_format(format: u32) -> bool {
     matches!(format, 20 | 22 | 23 | 24 | 27 | 30 | 33 | 50)
 }
-fn translated_snapshot(
-    shader: ShaderOrigin,
+fn translated_settings(
     program: &wgsl::Program,
     state: &D3d9State,
     textures: &[BoundTexture],
     raw_inputs: u16,
-) -> Result<(ShaderVariantKey, ProgramSettings), RenderError> {
+) -> Result<ProgramSettings, RenderError> {
     let mut variant = wgsl::Variant::default();
     variant.raw_inputs = raw_inputs;
     for stage in 0..16 {
@@ -2813,6 +2821,23 @@ fn translated_snapshot(
             })
     };
     let flat_shading = rs(state, 9) == 1;
+    Ok(ProgramSettings {
+        variant,
+        opaque_slots: opaque as u16,
+        flat_shading,
+        pixel_output: program.pixel.then_some(OUTPUT),
+    })
+}
+
+fn translated_snapshot(
+    shader: ShaderOrigin,
+    program: &wgsl::Program,
+    state: &D3d9State,
+    textures: &[BoundTexture],
+    raw_inputs: u16,
+) -> Result<(ShaderVariantKey, ProgramSettings), RenderError> {
+    let settings = translated_settings(program, state, textures, raw_inputs)?;
+    let variant = &settings.variant;
     let key = ShaderVariantKey {
         pixel: program.pixel,
         shader,
@@ -2822,16 +2847,10 @@ fn translated_snapshot(
             u32::from(variant.volume),
             u32::from(variant.depth),
             u32::from(variant.projected),
-            opaque,
-            u32::from(flat_shading),
+            u32::from(settings.opaque_slots),
+            u32::from(settings.flat_shading),
             u32::from(variant.raw_inputs),
         ]),
-    };
-    let settings = ProgramSettings {
-        variant,
-        opaque_slots: opaque as u16,
-        flat_shading,
-        pixel_output: program.pixel.then_some(OUTPUT),
     };
     Ok((key, settings))
 }
@@ -3360,6 +3379,7 @@ pub(crate) fn execute(
     };
     let specialization_ms =
         specialization_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    draw.specialization_cpu_ms += specialization_ms;
     let interpreted = covered && ready.is_none();
     let canonical = interpreted;
     let direct = match native_plan {

@@ -82,8 +82,9 @@ pub(crate) struct PipelineRecipe {
     pub(crate) descriptor: PipelineDescriptor,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PipelineRecipeKey {
+    fingerprint: u64,
     shaders: [ShaderRecipeKey; 2],
     interface: InterfaceKey,
     descriptor: PipelineDescriptor,
@@ -91,9 +92,13 @@ pub(crate) struct PipelineRecipeKey {
 
 impl PipelineRecipeKey {
     pub(crate) fn fingerprint(&self) -> u64 {
-        let mut hasher = crate::fast_map::FastHasher::default();
-        self.hash(&mut hasher);
-        hasher.finish()
+        self.fingerprint
+    }
+}
+
+impl Hash for PipelineRecipeKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.fingerprint);
     }
 }
 
@@ -231,8 +236,14 @@ impl PipelineRecipe {
     }
 
     pub(crate) fn key(&self) -> PipelineRecipeKey {
+        let shaders = self.shaders.each_ref().map(ShaderRecipe::key);
+        let mut hasher = crate::fast_map::FastHasher::default();
+        shaders.hash(&mut hasher);
+        self.interface.hash(&mut hasher);
+        self.descriptor.hash(&mut hasher);
         PipelineRecipeKey {
-            shaders: self.shaders.each_ref().map(ShaderRecipe::key),
+            fingerprint: hasher.finish(),
+            shaders,
             interface: self.interface.clone(),
             descriptor: self.descriptor.clone(),
         }

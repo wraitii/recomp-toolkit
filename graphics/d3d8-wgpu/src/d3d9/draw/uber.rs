@@ -270,6 +270,21 @@ pub(super) fn hybrid(gpu: &D3d9Gpu) -> bool {
     mode(gpu).is_ok_and(|mode| mode == Mode::Hybrid)
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RecipeInputs {
+    shaders: [(ProgramKey, ProgramSettings); 2],
+    layout: LayoutKey,
+    vertex_buffers: VertexLayouts,
+    descriptor: PipelineDescriptor,
+}
+
+#[derive(Default)]
+pub(super) struct RecipeCache {
+    entries: FastMap<RecipeInputs, (PipelineRecipeKey, Arc<PipelineRecipe>)>,
+    pub(super) hits: u64,
+    pub(super) misses: u64,
+}
+
 pub(super) fn specialize(
     gpu: &D3d9Gpu,
     draw: &mut D3d9DrawState,
@@ -281,23 +296,10 @@ pub(super) fn specialize(
     topology: wgpu::PrimitiveTopology,
     strip_format: Option<wgpu::IndexFormat>,
     raw_inputs: u16,
-) -> Result<Option<(CompiledPipeline, PipelineRecipe)>, RenderError> {
+) -> Result<Option<(CompiledPipeline, Arc<PipelineRecipe>)>, RenderError> {
     let descriptor = pipeline_descriptor(gpu, state, snapshot, topology, strip_format)?;
-    let shaders = [vs, ps].map(|shader| {
-        let (_, settings) = translated_snapshot(
-            ShaderOrigin::Guest(shader.key.clone()),
-            &shader.program,
-            state,
-            &snapshot.textures,
-            raw_inputs,
-        )?;
-        Ok(ShaderRecipe::Program {
-            key: shader.key.clone(),
-            program: Arc::clone(&shader.program),
-            settings,
-        })
-    });
-    let [vertex, pixel] = shaders;
+    let vertex = translated_settings(&vs.program, state, &snapshot.textures, raw_inputs)?;
+    let pixel = translated_settings(&ps.program, state, &snapshot.textures, raw_inputs)?;
     let mut textures = [None; MAX_SAMPLERS];
     for texture in snapshot
         .textures
@@ -316,25 +318,55 @@ pub(super) fn specialize(
         ps: ps.program.const_limit(),
         textures,
     };
-    let recipe = PipelineRecipe {
-        shaders: [vertex?, pixel?],
-        interface: InterfaceKey {
-            bindings: layout_key.entries().into(),
-            vertex_buffers,
-        },
+    let inputs = RecipeInputs {
+        shaders: [(vs.key.clone(), vertex), (ps.key.clone(), pixel)],
+        layout: layout_key,
+        vertex_buffers,
         descriptor,
     };
-    let key = recipe.key();
+    if draw.specialization.entries.len() >= 512
+        && !draw.specialization.entries.contains_key(&inputs)
+    {
+        evict_one(&mut draw.specialization.entries);
+    }
+    let (cached, (key, recipe)) = match draw.specialization.entries.entry(inputs) {
+        std::collections::hash_map::Entry::Occupied(entry) => (true, entry.into_mut()),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            let inputs = entry.key();
+            let recipe = Arc::new(PipelineRecipe {
+                shaders: [0, 1].map(|index| {
+                    let shader = [vs, ps][index];
+                    ShaderRecipe::Program {
+                        key: shader.key.clone(),
+                        program: Arc::clone(&shader.program),
+                        settings: inputs.shaders[index].1.clone(),
+                    }
+                }),
+                interface: InterfaceKey {
+                    bindings: inputs.layout.entries().into(),
+                    vertex_buffers: inputs.vertex_buffers.clone(),
+                },
+                descriptor: inputs.descriptor.clone(),
+            });
+            (false, entry.insert((recipe.key(), recipe)))
+        }
+    };
+    if cached {
+        draw.specialization.hits += 1;
+    } else {
+        draw.specialization.misses += 1;
+    }
+    let key = &*key;
     if trace_compilation() {
         eprintln!(
-            "[d3d9-compile] draw-specialization frame={} draw={} recipe={:016x}",
+            "[d3d9-compile] draw-specialization frame={} draw={} recipe={:016x} cached={cached}",
             draw.frame,
             draw.measured_draws,
             key.fingerprint()
         );
     }
-    if let Some((compiled, _)) = draw.pipelines.get(&key) {
-        return Ok(Some((compiled.clone(), recipe)));
+    if let Some((compiled, _)) = draw.pipelines.get(key) {
+        return Ok(Some((compiled.clone(), Arc::clone(recipe))));
     }
     if draw.compiler.is_none() {
         draw.compiler = Some(crate::render::compile::Compiler::new(
@@ -347,7 +379,7 @@ pub(super) fn specialize(
         )?);
     }
     let compiler = draw.compiler.as_mut().unwrap();
-    compiler.request(recipe, draw.frame)?;
+    compiler.request(key, recipe, draw.frame)?;
     Ok(None)
 }
 
@@ -397,7 +429,7 @@ pub(super) fn resolve(
     snapshot: &DrawSnapshot,
     vs: &super::super::shader::ShaderRecord,
     ps: &super::super::shader::ShaderRecord,
-    specialized: Option<(CompiledPipeline, PipelineRecipe)>,
+    specialized: Option<(CompiledPipeline, Arc<PipelineRecipe>)>,
     raw_inputs: u16,
 ) -> Result<Box<DrawMemo>, RenderError> {
     let interpreted = specialized.is_none();
@@ -489,8 +521,8 @@ pub(super) fn resolve(
             (
                 compiled.modules,
                 compiled.layout,
-                recipe.interface.bindings,
-                recipe.shaders,
+                Arc::clone(&recipe.interface.bindings),
+                recipe.shaders.clone(),
                 vs.program.const_limit(),
                 ps.program.const_limit(),
                 compiled.pipeline,
@@ -542,7 +574,7 @@ pub(super) fn resolve(
         let key = recipe.prepare(modules.clone(), layout.clone());
         Some((
             trace::observe(draw, &interface, &key),
-            fingerprint(&recipe.key()),
+            recipe.key().fingerprint(),
         ))
     } else {
         None
