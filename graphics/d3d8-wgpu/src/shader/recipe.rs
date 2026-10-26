@@ -9,7 +9,7 @@ pub(crate) struct ProgramSettings {
     pub variant: Variant,
     pub opaque_slots: u16,
     pub flat_shading: bool,
-    pub pixel_output: Option<&'static str>,
+    pub pixel_output: bool,
 }
 
 #[derive(Clone)]
@@ -65,9 +65,9 @@ impl ShaderRecipe {
                 let mut source = translate(program, &settings.variant)?;
                 if program.pixel {
                     source = opaque_samples(source, settings.opaque_slots);
-                    if let Some(output) = settings.pixel_output {
+                    if settings.pixel_output {
                         source = source.replace("return col;", "return d9_output(col,vin);");
-                        source += output;
+                        source += include_str!("raster.wgsl");
                     }
                 }
                 Ok(shading_source(source, settings.flat_shading).into())

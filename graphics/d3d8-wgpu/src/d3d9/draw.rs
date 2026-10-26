@@ -2829,7 +2829,7 @@ fn translated_settings(
         variant,
         opaque_slots: opaque as u16,
         flat_shading,
-        pixel_output: program.pixel.then_some(OUTPUT),
+        pixel_output: program.pixel,
     })
 }
 
