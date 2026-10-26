@@ -107,6 +107,7 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     for boundary in &ssa.boundaries {
         live_publish.entry(boundary.at).or_default();
     }
+    descriptor_roots.extend(ssa.frame);
     let live = live_values(&ssa, Some(&live_publish), &descriptor_roots, &[]);
     let entry_settle = (0..ssa.values.len()).any(|index| {
         let id = index as ValueId;
@@ -226,7 +227,6 @@ fn reduce_publications(
     if block_count == 0 || s.keys.is_empty() {
         return (BTreeMap::new(), BTreeMap::new());
     }
-    let n = s.keys.len();
     let key_index: rk_core::Lookup<StateKey, usize> = s
         .keys
         .iter()
@@ -272,11 +272,20 @@ fn reduce_publications(
     }
     let phi_lanes = s.phi_lanes();
     let successors = successors(s);
-    let mut out = vec![vec![None; n]; block_count];
+    let mut out: Vec<Option<Vec<Option<ValueId>>>> = vec![None; block_count];
     let mut pending: std::collections::VecDeque<usize> = (0..block_count).collect();
     let mut queued = vec![true; block_count];
+    let mut visits = vec![0u32; block_count];
     while let Some(block) = pending.pop_front() {
         queued[block] = false;
+        if s.blocks[block]
+            .preds
+            .iter()
+            .all(|&pred| pred != rk_ssa::DISPATCH_BLOCK && out[pred as usize].is_none())
+        {
+            continue;
+        }
+        visits[block] += 1;
         let mut resident = resident_in(s, block, &out, &dispatch, &phi_lanes[block]);
         walk_block(
             s,
@@ -290,8 +299,15 @@ fn reduce_publications(
             None,
             None,
         );
-        if resident != out[block] {
-            out[block] = resident;
+        if let Some(previous) = out[block].as_ref().filter(|_| visits[block] > 4) {
+            for (current, previous) in resident.iter_mut().zip(previous) {
+                if current != previous {
+                    *current = None;
+                }
+            }
+        }
+        if out[block].as_ref() != Some(&resident) {
+            out[block] = Some(resident);
             for &next in &successors[block] {
                 if !queued[next] {
                     queued[next] = true;
@@ -335,18 +351,20 @@ fn successors(s: &Ssa) -> Vec<Vec<usize>> {
 fn resident_in(
     s: &Ssa,
     block: usize,
-    out: &[Vec<Option<ValueId>>],
+    out: &[Option<Vec<Option<ValueId>>>],
     dispatch: &[Option<ValueId>],
     lanes: &[(usize, ValueId, Vec<ValueId>)],
 ) -> Vec<Option<ValueId>> {
     let preds = &s.blocks[block].preds;
-    let mut resident: Option<Vec<Option<ValueId>>> = None;
-    for pred in preds {
-        let source: &[Option<ValueId>] = if *pred == rk_ssa::DISPATCH_BLOCK {
-            dispatch
+    let source = |pred: rk_ssa::BlockId| {
+        if pred == rk_ssa::DISPATCH_BLOCK {
+            Some(dispatch)
         } else {
-            &out[*pred as usize]
-        };
+            out[pred as usize].as_deref()
+        }
+    };
+    let mut resident: Option<Vec<Option<ValueId>>> = None;
+    for source in preds.iter().filter_map(|&pred| source(pred)) {
         match &mut resident {
             None => resident = Some(source.to_vec()),
             Some(current) => {
@@ -360,13 +378,8 @@ fn resident_in(
     }
     let mut resident = resident.unwrap_or_else(|| vec![None; dispatch.len()]);
     for (index, value, args) in lanes {
-        let carries = preds.iter().enumerate().all(|(position, pred)| {
-            let source: &[Option<ValueId>] = if *pred == rk_ssa::DISPATCH_BLOCK {
-                dispatch
-            } else {
-                &out[*pred as usize]
-            };
-            source[*index] == Some(args[position])
+        let carries = preds.iter().enumerate().all(|(position, &pred)| {
+            source(pred).is_none_or(|source| source[*index] == Some(args[position]))
         });
         if carries {
             resident[*index] = Some(*value);
@@ -464,6 +477,18 @@ fn walk_block(
                 if let Some(out) = guard.as_deref_mut() {
                     out.entry(value).or_default().push(*key);
                 }
+            }
+        }
+        for key in s.frame_guard.get(&value).into_iter().flatten() {
+            let (Some(&index), Some(&state_value)) = (key_index.get(key), current.get(key)) else {
+                continue;
+            };
+            if resident[index] == Some(state_value) {
+                continue;
+            }
+            resident[index] = None;
+            if let Some(out) = guard.as_deref_mut() {
+                out.entry(value).or_default().push(*key);
             }
         }
         let homes: Vec<bool> = reloads

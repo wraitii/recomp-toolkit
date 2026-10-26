@@ -168,8 +168,7 @@ or escaping branches. Escaped ranges retain conservative aliasing independently 
 unexposed slots. Cyclic address joins require agreeing outside inputs and zero net
 offset around every traversed cycle; unanchored cycles remain unknown.
 Frame loads forward across proved-disjoint calls, including aligned locals and
-read-only callees; other loads do not forward across calls. Unknown reads still
-require pending stores to settle before those calls. `DIVERGENCE(original):` the
+read-only callees; other loads do not forward across calls. `DIVERGENCE(original):` the
 assumption extends to hooks, replacements and observers, which may read but not
 write unescaped caller frame bytes.
 Computed return values retain proved access footprints while recording their input
@@ -192,26 +191,26 @@ before any read are removed. Proved call cleanup is always used for ESP
 provenance; the emitted ESP after such a call is reread from guest state.
 
 `[translate] lazy_stack_writes` defaults to true when the private-stack assumption
-is enabled, fault state is relaxed, and store hooks are disabled. Exact negative
-frame slots carry pending values through ordinary SSA phis. A backward pass keeps
-a store eager unless it can be overwritten across an access separated by the
-private-stack assumption. Proved direct calls retain disjoint pending slots on
-their ordinary path. Preparation consumes checkpoint credit only when accepted;
-otherwise pending writes flush before ordinary dispatch consumes its checkpoint.
+is enabled, fault state is relaxed, and store hooks are disabled. Up to 64 exact
+negative frame slots of 1, 2, 4 or 8 bytes become state keys: the SSA is rebuilt
+with their contained loads, stores and x87 values as key reads and writes, so they
+share register publication and residency. Calls, returns and accesses that may touch
+a slot demand its publication; those that may write it reload it afterwards. Slots
+live across such a reload, overlapping slots and stores below ESP stay in memory. A
+store publishes immediately when every path demands its value before overwriting it,
+otherwise at the first demand. Constant addresses never touch frame slots.
+Preparation consumes checkpoint credit only when accepted;
+otherwise pending slots publish before ordinary dispatch consumes its checkpoint.
 Non-leaf callees require credit for the longest nested call path as well as entry;
 recursion, call-containing loops and unresolved dispatch retain eager publication.
 `DIVERGENCE(original):` scheduler work is assumed to preserve this thread's unescaped
 live frame. A guarded call has one route condition, `recomp_slow_routes`, raised by
 hooks, profiling and frame watch; its unlikely generic arm publishes the register
-fields hooks observe and flushes the pending slots before dispatch, and nothing is
+fields hooks observe and the slots the call does not otherwise demand, and nothing is
 reloaded afterwards. `[game] call_hooks = false` removes hook publications and
-kept-field rereads everywhere. Unproved calls flush and clear pending writes. ESP
-changes retain allocated slots and flush released slots before subsequent effects.
-Publication requires a pending write on every
-incoming path. At mixed joins, definite-pending predecessors flush before merging;
-unresolved placement retains eager stores instead of runtime dirty guards.
-Overlapping candidate slots, unknown effects, alternate entries and exposed ranges
-retain eager writes. `DIVERGENCE(original):` eligible private-frame writes are delayed;
+kept-field rereads everywhere. Slots below a call's ESP are published before it and
+reloaded after it. Unknown effects, alternate entries and exposed ranges keep frame
+stores in memory. `DIVERGENCE(original):` eligible private-frame writes are delayed;
 ordinary entry paths preserve final bytes. `[translate] retire_reused_stack` defaults
 to false. `DIVERGENCE(original):` normal reuse of released stack storage invalidates
 old contents at and below the new write, including bytes not overwritten. A bounded

@@ -101,7 +101,6 @@ struct Emitter<'a> {
     private: Option<&'a PrivateEmit>,
     materialized: Vec<bool>,
     uses_arena: bool,
-    flushes: BTreeMap<ValueId, Vec<ValueId>>,
     value_block: Vec<u32>,
     successors: Vec<Vec<usize>>,
     transfers: Transfers,
@@ -232,19 +231,10 @@ impl<'a> Emitter<'a> {
         let mut materialized = vec![false; s.values.len()];
         let mut value_block = vec![0u32; s.values.len()];
         let mut successors = vec![Vec::new(); s.blocks.len()];
-        let mut flushes: BTreeMap<ValueId, Vec<ValueId>> = BTreeMap::new();
         for (index, block) in s.blocks.iter().enumerate() {
             for value in block.phis.iter().chain(block.ops.iter()) {
                 materialized[*value as usize] = true;
                 value_block[*value as usize] = index as u32;
-            }
-            for (position, &value) in block.ops.iter().enumerate() {
-                if let Some(call) = (s.value(value).op == Op::StackFlush)
-                    .then(|| s.flushed_call(index as u32, position))
-                    .flatten()
-                {
-                    flushes.entry(call).or_default().push(value);
-                }
             }
             for pred in &block.preds {
                 if *pred != DISPATCH_BLOCK {
@@ -298,12 +288,13 @@ impl<'a> Emitter<'a> {
                     && !has_dynamic
             })
             .collect();
-        let uses_arena = s.values.iter().any(|value| {
-            matches!(
-                value.op,
-                Op::P(OpCode::Load) | Op::P(OpCode::Store) | Op::StackFlush | Op::ImportTail { .. }
-            ) || matches!(value.op, Op::X87(op) if op.touches_memory())
-        });
+        let uses_arena = s.frame.is_some()
+            || s.values.iter().any(|value| {
+                matches!(
+                    value.op,
+                    Op::P(OpCode::Load) | Op::P(OpCode::Store) | Op::ImportTail { .. }
+                ) || matches!(value.op, Op::X87(op) if op.touches_memory())
+            });
         let mut in_block = vec![false; s.values.len()];
         for block in &s.blocks {
             for value in &block.ops {
@@ -389,7 +380,6 @@ impl<'a> Emitter<'a> {
             private: ctx.private,
             materialized,
             uses_arena,
-            flushes,
             value_block,
             transfers: Transfers::new(plan, &successors, has_dynamic),
             successors,
@@ -999,7 +989,8 @@ impl<'a> Emitter<'a> {
             self.write_x87(lines);
         }
         match item.op {
-            Op::Memory | Op::StackBoundary => Ok(true),
+            Op::Memory => Ok(true),
+            Op::Publish => self.publish(value).map(|_| true),
             Op::X87(op) => {
                 if op.touches_memory() || matches!(op, rk_ir::x87::X87Op::Conditional(..)) {
                     self.publish(value)?;
@@ -1120,7 +1111,6 @@ impl<'a> Emitter<'a> {
                 Ok(true)
             }
             Op::P(OpCode::Load) => self.load(value).map(|_| true),
-            Op::StackFlush => Ok(true),
             Op::P(OpCode::Store) => self.store(value).map(|_| true),
             _ => {
                 let expr = self.operation(value)?;
@@ -1843,9 +1833,6 @@ impl<'a> Emitter<'a> {
             if let Some(keys) = self.plan.guard.get(&value).cloned() {
                 self.publish_keys(value, &keys, false)?;
             }
-            for flush in self.flushes.get(&value).cloned().unwrap_or_default() {
-                self.store(flush)?;
-            }
             let _ = writeln!(self.out, "{fallback}");
             if let Some(&expected) = self.plan.return_addr.get(&value) {
                 self.resume_check(value, target, expected);
@@ -2534,6 +2521,21 @@ impl<'a> Emitter<'a> {
             }
             Location::Eip => self.publish_register("eip", "EIP", state, keys)?,
             Location::Fs => self.publish_register("fs_base", "FS_OFFSET", state, keys)?,
+            Location::Frame(offset) => {
+                let key = StateKey::Frame(offset);
+                let Some(value) = self.listed_value(state, keys, key)? else {
+                    return Ok(());
+                };
+                let size = self.s.value(value).size;
+                let stored = self.expr(value)?;
+                let _ = writeln!(
+                    self.out,
+                    "recomp_wr{}_(arena_, {}, ({}){stored});",
+                    size as u32 * 8,
+                    self.frame_address(offset)?,
+                    ctype(size)
+                );
+            }
             Location::Df => {
                 let key = StateKey::Register(Registers::get().require("DF").offset as u32);
                 let value = self.listed_value(state, keys, key)?;
@@ -3244,7 +3246,27 @@ impl<'a> Emitter<'a> {
         Ok(result)
     }
 
+    fn frame_address(&self, offset: i32) -> Result<String> {
+        let frame = self
+            .s
+            .frame
+            .ok_or_else(|| self.error(0, "frame slot without a frame base"))?;
+        let sign = if offset < 0 { '-' } else { '+' };
+        Ok(format!(
+            "(uint32_t)({} {sign} 0x{:x}u)",
+            self.expr(frame)?,
+            offset.unsigned_abs()
+        ))
+    }
+
     fn field_expr(&self, key: StateKey, size: u8) -> Result<String> {
+        if let StateKey::Frame(offset) = key {
+            return Ok(format!(
+                "recomp_rd{}_(arena_, {})",
+                size as u32 * 8,
+                self.frame_address(offset)?
+            ));
+        }
         if size <= 1 {
             return self.lane_expr(key);
         }

@@ -9,6 +9,7 @@ use rk_core::{Addr, Diagnostic, Lookup, Reason};
 use rk_ir::{CgFunction, CgOp, FlagShape, Op, Registers, SlowInsn, StateKey};
 
 use crate::canonical::{resolve_alias, rewrite_aliases};
+use crate::stack::FramePlan;
 use crate::{
     BlockId, Boundary, Dispatch, Entry, FlagRecord, InsnLoc, Ssa, Value, ValueId, DISPATCH_BLOCK,
 };
@@ -91,7 +92,7 @@ impl Default for BuildOptions<'static> {
 }
 
 pub fn build(cg: &CgFunction, opts: &BuildOptions) -> Result<Ssa, Diagnostic> {
-    build_with_faults(cg, opts, FaultState::Exact, false)
+    build_with_faults(cg, opts, FaultState::Exact, false, None)
 }
 
 pub(crate) fn build_with_faults(
@@ -99,8 +100,9 @@ pub(crate) fn build_with_faults(
     opts: &BuildOptions,
     fault_state: FaultState,
     lazy_stack_writes: bool,
+    frame: Option<&FramePlan>,
 ) -> Result<Ssa, Diagnostic> {
-    let mut builder = Builder::new(cg, opts, fault_state)?;
+    let mut builder = Builder::new(cg, opts, fault_state, frame)?;
     builder.lazy_stack_writes = lazy_stack_writes;
     builder.run(cg)
 }
@@ -108,6 +110,13 @@ pub(crate) fn build_with_faults(
 struct Builder<'a> {
     opts: &'a BuildOptions<'a>,
     lazy_stack_writes: bool,
+    frame: Option<&'a FramePlan>,
+    sizes: Vec<u8>,
+    origin: (u32, u16),
+    origins: Lookup<ValueId, (u32, u16)>,
+    frame_publish: BTreeMap<ValueId, Vec<StateKey>>,
+    frame_guard: BTreeMap<ValueId, Vec<StateKey>>,
+    stack_guards: BTreeMap<ValueId, u32>,
     stack_states: BTreeMap<ValueId, [ValueId; 4]>,
     keys: Vec<StateKey>,
     key_index: Lookup<StateKey, usize>,
@@ -209,6 +218,7 @@ impl<'a> Builder<'a> {
         cg: &CgFunction,
         opts: &'a BuildOptions<'a>,
         fault_state: FaultState,
+        frame: Option<&'a FramePlan>,
     ) -> Result<Self, Diagnostic> {
         let regs = Registers::get();
         let (base_keys, base_fields) = base_layout();
@@ -238,6 +248,20 @@ impl<'a> Builder<'a> {
         }
         keys.push(StateKey::Memory);
         fields.push(None);
+        for &(offset, _) in frame.map_or(&[][..], |frame| &frame.slots) {
+            keys.push(StateKey::Frame(offset));
+            fields.push(None);
+        }
+        let sizes = keys
+            .iter()
+            .map(|key| match key {
+                StateKey::Memory => 0,
+                StateKey::Register(_) => 1,
+                StateKey::Frame(offset) => frame
+                    .and_then(|frame| frame.slots.iter().find(|slot| slot.0 == *offset))
+                    .map_or(1, |slot| slot.1),
+            })
+            .collect();
         let mut seen = Lookup::default();
         for key in &keys {
             if seen.insert(*key, ()).is_some() {
@@ -270,6 +294,13 @@ impl<'a> Builder<'a> {
         Ok(Self {
             opts,
             lazy_stack_writes: false,
+            frame,
+            sizes,
+            origin: (0, 0),
+            origins: Lookup::default(),
+            frame_publish: BTreeMap::new(),
+            frame_guard: BTreeMap::new(),
+            stack_guards: BTreeMap::new(),
             stack_states: BTreeMap::new(),
             keys,
             key_index,
@@ -451,7 +482,8 @@ impl<'a> Builder<'a> {
         let keys = self.keys.clone();
         self.dispatch_loads = keys
             .iter()
-            .map(|&key| self.value(Op::Input(key), key_size(key), &[]))
+            .enumerate()
+            .map(|(index, &key)| self.value(Op::Input(key), self.sizes[index], &[]))
             .collect();
         let memory_index = self.memory_index();
         self.preds = blocks.iter().map(|block| block.preds.clone()).collect();
@@ -492,7 +524,7 @@ impl<'a> Builder<'a> {
                         self.pending.carry = Some(self.state_slot(&mut state, cf_index, block_id)?);
                     }
                 }
-                for cg_op in &insn.ops {
+                for (position, cg_op) in insn.ops.iter().enumerate() {
                     if self.values.len() >= self.opts.value_budget {
                         return Err(Diagnostic::new(
                             insn.addr,
@@ -502,17 +534,23 @@ impl<'a> Builder<'a> {
                         ));
                     }
                     self.current_addr = insn.addr;
-                    let esp = Registers::get().require("ESP");
-                    let stack_before = if self.lazy_stack_writes
-                        && cg_op.output.is_some_and(|output| {
-                            output.space == esp.space
-                                && output.offset < esp.offset + esp.size as u64
-                                && esp.offset < output.offset + output.size as u64
-                        }) {
-                        Some(self.read(&esp, &mut state, &mut temps, block_id)?)
-                    } else {
-                        None
-                    };
+                    self.origin = (index, position as u16);
+                    let emitted = ops.len();
+                    if self
+                        .frame
+                        .is_some_and(|frame| !frame.analyzed.contains(&self.origin))
+                        && match cg_op.op {
+                            Op::X87(x87) => x87.touches_memory(),
+                            op => rk_ir::properties(op).memory,
+                        }
+                    {
+                        return Err(Diagnostic::new(
+                            insn.addr,
+                            Reason::Unsupported {
+                                detail: "memory effect outside the frame plan".into(),
+                            },
+                        ));
+                    }
                     if let Err(mut diagnostic) = self.apply_op(
                         cg_op,
                         insn.addr,
@@ -527,9 +565,8 @@ impl<'a> Builder<'a> {
                         }
                         return Err(diagnostic);
                     }
-                    if let Some(before) = stack_before {
-                        let after = self.read(&esp, &mut state, &mut temps, block_id)?;
-                        ops.push(self.value(Op::StackBoundary, 0, &[before, after]));
+                    if ops.len() > emitted {
+                        self.origins.insert(*ops.last().unwrap(), self.origin);
                     }
                 }
                 if let Some((a, b)) = insn.flag_operands {
@@ -554,6 +591,13 @@ impl<'a> Builder<'a> {
         }
 
         let alias = self.trivial_phi_aliases();
+        let frame = self.frame.map(|_| {
+            let esp: Vec<ValueId> = rk_ir::lanes(Field::Esp)
+                .iter()
+                .map(|key| self.dispatch_loads[*self.key_index.get(key).unwrap()])
+                .collect();
+            self.value(Op::Pack, 4, &esp)
+        });
 
         let dispatch = Dispatch {
             loads: keys
@@ -585,7 +629,11 @@ impl<'a> Builder<'a> {
             loc: self.loc,
             value_addr: self.value_addr,
             stack_states: self.stack_states,
-            stack_guards: BTreeMap::new(),
+            stack_guards: self.stack_guards,
+            frame,
+            frame_publish: self.frame_publish,
+            frame_guard: self.frame_guard,
+            origins: self.origins,
             stack_calls: self.lazy_stack_writes,
             memory_partitioned: false,
             assume_private_stack: false,
@@ -648,7 +696,7 @@ impl<'a> Builder<'a> {
         if preds.len() == 1 && self.sealed(block) {
             return self.defined(index, preds[0]);
         }
-        let phi = self.phi(key_size(self.keys[index]), preds.len());
+        let phi = self.phi(self.sizes[index], preds.len());
         self.value_addr[phi as usize] = self.block_addrs[block as usize];
         self.block_phis[block as usize].push(phi);
         self.phi_key.insert(phi, index);
@@ -873,18 +921,51 @@ impl<'a> Builder<'a> {
         block: BlockId,
         access: bool,
     ) -> Result<(), Diagnostic> {
-        let count = if access {
-            self.access_indices.len()
+        let indices: Vec<usize> = if access {
+            self.access_indices.clone()
         } else {
-            self.keys.len()
+            (0..self.keys.len()).collect()
         };
-        let mut resolved = Vec::with_capacity(count);
-        for position in 0..count {
-            let index = if access {
-                self.access_indices[position]
-            } else {
-                position
-            };
+        self.record(at, state, block, &indices)
+    }
+
+    fn access_boundary(
+        &mut self,
+        at: ValueId,
+        state: &mut [Option<ValueId>],
+        block: BlockId,
+        registers: bool,
+    ) -> Result<(), Diagnostic> {
+        let mut indices = if registers {
+            self.access_indices.clone()
+        } else {
+            Vec::new()
+        };
+        if let Some((frame, site)) = self
+            .frame
+            .and_then(|frame| Some((frame, frame.sites.get(&self.origin)?)))
+        {
+            indices.extend(site.publish.iter().filter_map(|&slot| {
+                self.key_index
+                    .get(&StateKey::Frame(frame.slots[slot].0))
+                    .copied()
+            }));
+        }
+        if indices.is_empty() {
+            return Ok(());
+        }
+        self.record(at, state, block, &indices)
+    }
+
+    fn record(
+        &mut self,
+        at: ValueId,
+        state: &mut [Option<ValueId>],
+        block: BlockId,
+        indices: &[usize],
+    ) -> Result<(), Diagnostic> {
+        let mut resolved = Vec::with_capacity(indices.len());
+        for &index in indices {
             let key = self.keys[index];
             resolved.push((key, self.state_slot(state, index, block)?));
         }
@@ -935,6 +1016,34 @@ impl<'a> Builder<'a> {
                 self.reload_all(value, state);
                 ops.push(value);
             }
+            Op::X87(x87) if self.promoted().is_some() => {
+                let slot = self.promoted().unwrap();
+                match x87 {
+                    rk_ir::x87::X87Op::Store {
+                        bits, pop, integer, ..
+                    } => {
+                        let value = self.value(
+                            Op::X87(rk_ir::x87::X87Op::StoreValue { bits, pop, integer }),
+                            (bits / 8) as u8,
+                            &[],
+                        );
+                        ops.push(value);
+                        self.write_slot(state, block, slot, value)?;
+                        self.publish_eager(state, block, ops, slot.0)?;
+                    }
+                    rk_ir::x87::X87Op::Push { bits, .. }
+                    | rk_ir::x87::X87Op::PushInteger { bits } => {
+                        let loaded = self.read_slot(state, block, ops, slot, (bits / 8) as u8)?;
+                        let op = if matches!(x87, rk_ir::x87::X87Op::Push { .. }) {
+                            rk_ir::x87::X87Op::PushValue { bits }
+                        } else {
+                            rk_ir::x87::X87Op::PushIntegerValue { bits }
+                        };
+                        ops.push(self.value(Op::X87(op), 0, &[loaded]));
+                    }
+                    _ => unreachable!(),
+                }
+            }
             Op::X87(x87) => {
                 let touches_memory = x87.touches_memory();
                 let mut args = Vec::new();
@@ -956,6 +1065,10 @@ impl<'a> Builder<'a> {
                 }
                 if matches!(x87, rk_ir::x87::X87Op::Conditional(..)) {
                     self.boundary(value, state, block, false)?;
+                } else if touches_memory {
+                    self.access_boundary(value, state, block, false)?;
+                    self.reload_frame(value, state, block)?;
+                    self.frame_site(value);
                 }
                 if let Some(output) = cg_op.output {
                     self.write(&output, value, state, temps)?;
@@ -970,6 +1083,7 @@ impl<'a> Builder<'a> {
                 let memory = self.state_slot(state, memory_index, block)?;
                 let value = self.value(Op::Call { target }, 0, &[memory]);
                 self.boundary(value, state, block, false)?;
+                self.frame_site(value);
                 let token = self.value(Op::Memory, 0, &[value]);
                 state[memory_index] = Some(token);
                 let effect = self.call_effect(addr, Some(target));
@@ -989,6 +1103,7 @@ impl<'a> Builder<'a> {
                 let memory = self.state_slot(state, memory_index, block)?;
                 let value = self.value(Op::CallInd, 0, &[memory, target]);
                 self.boundary(value, state, block, false)?;
+                self.frame_site(value);
                 let token = self.value(Op::Memory, 0, &[value]);
                 state[memory_index] = Some(token);
                 let effect = self.call_effect(addr, None);
@@ -1030,6 +1145,25 @@ impl<'a> Builder<'a> {
                 state[memory_index] = Some(token);
                 ops.push(value);
             }
+            Op::P(OpCode::Load) | Op::P(OpCode::Store) if self.promoted().is_some() => {
+                let slot = self.promoted().unwrap();
+                if let Some(output) = cg_op.output {
+                    let value = self.read_slot(state, block, ops, slot, output.size as u8)?;
+                    self.write(&output, value, state, temps)?;
+                } else {
+                    let stored = cg_op.inputs.get(1).ok_or_else(|| {
+                        Diagnostic::new(
+                            addr,
+                            Reason::Unsupported {
+                                detail: "store without a value".into(),
+                            },
+                        )
+                    })?;
+                    let value = self.read(stored, state, temps, block)?;
+                    self.write_slot(state, block, slot, value)?;
+                    self.publish_eager(state, block, ops, slot.0)?;
+                }
+            }
             Op::P(OpCode::Load) | Op::P(OpCode::Store) => {
                 let memory = self.state_slot(state, memory_index, block)?;
                 let mut args = vec![memory];
@@ -1047,9 +1181,7 @@ impl<'a> Builder<'a> {
                     self.stack_states.insert(value, lanes);
                 }
                 if self.relaxed_memory() {
-                    if cg_op.op == Op::P(OpCode::Store) {
-                        self.boundary(value, state, block, true)?;
-                    }
+                    self.access_boundary(value, state, block, cg_op.op == Op::P(OpCode::Store))?;
                 } else {
                     self.boundary(value, state, block, false)?;
                 }
@@ -1058,6 +1190,8 @@ impl<'a> Builder<'a> {
                 if let Some(output) = cg_op.output {
                     self.write(&output, value, state, temps)?;
                 }
+                self.reload_frame(value, state, block)?;
+                self.frame_site(value);
                 ops.push(value);
             }
             Op::Return
@@ -1071,6 +1205,7 @@ impl<'a> Builder<'a> {
                 }
                 let value = self.value(cg_op.op, 0, &args);
                 self.boundary(value, state, block, false)?;
+                self.frame_site(value);
                 ops.push(value);
             }
             Op::Branch { .. } | Op::CBranch { .. } | Op::Trap(_) => {
@@ -1148,8 +1283,7 @@ impl<'a> Builder<'a> {
             | Op::Byte(_)
             | Op::Pack
             | Op::Memory
-            | Op::StackBoundary
-            | Op::StackFlush
+            | Op::Publish
             | Op::StateReload(_)
             | Op::StateKeep(_)
             | Op::CcKind(_) => {
@@ -1161,6 +1295,121 @@ impl<'a> Builder<'a> {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn promoted(&self) -> Option<(usize, u8)> {
+        let frame = self.frame?;
+        let &(slot, offset) = frame.accesses.get(&self.origin)?;
+        Some((
+            *self.key_index.get(&StateKey::Frame(frame.slots[slot].0))?,
+            offset,
+        ))
+    }
+
+    fn frame_site(&mut self, value: ValueId) {
+        let Some(site) = self.frame.and_then(|frame| frame.sites.get(&self.origin)) else {
+            return;
+        };
+        let slots = &self.frame.unwrap().slots;
+        let keys = |list: &[usize]| {
+            list.iter()
+                .map(|&slot| StateKey::Frame(slots[slot].0))
+                .collect::<Vec<_>>()
+        };
+        if !site.publish.is_empty() {
+            self.frame_publish.insert(value, keys(&site.publish));
+        }
+        if !site.guard.is_empty() {
+            self.frame_guard.insert(value, keys(&site.guard));
+        }
+        if let Some(checkpoints) = site.checkpoints {
+            self.stack_guards.insert(value, checkpoints);
+        }
+    }
+
+    fn publish_eager(
+        &mut self,
+        state: &mut [Option<ValueId>],
+        block: BlockId,
+        ops: &mut Vec<ValueId>,
+        index: usize,
+    ) -> Result<(), Diagnostic> {
+        if !self
+            .frame
+            .is_some_and(|frame| frame.eager.contains(&self.origin))
+        {
+            return Ok(());
+        }
+        let marker = self.value(Op::Publish, 0, &[]);
+        self.record(marker, state, block, &[index])?;
+        self.frame_publish.insert(marker, vec![self.keys[index]]);
+        ops.push(marker);
+        Ok(())
+    }
+
+    fn reload_frame(
+        &mut self,
+        site: ValueId,
+        state: &mut [Option<ValueId>],
+        block: BlockId,
+    ) -> Result<(), Diagnostic> {
+        let Some((frame, entry)) = self
+            .frame
+            .and_then(|frame| Some((frame, frame.sites.get(&self.origin)?)))
+        else {
+            return Ok(());
+        };
+        for &slot in &entry.clobber {
+            let key = StateKey::Frame(frame.slots[slot].0);
+            let index = *self.key_index.get(&key).unwrap();
+            let _ = self.state_slot(state, index, block)?;
+            state[index] = Some(self.value(Op::StateReload(key), self.sizes[index], &[site]));
+        }
+        Ok(())
+    }
+
+    fn read_slot(
+        &mut self,
+        state: &mut [Option<ValueId>],
+        block: BlockId,
+        ops: &mut Vec<ValueId>,
+        (index, offset): (usize, u8),
+        width: u8,
+    ) -> Result<ValueId, Diagnostic> {
+        let whole = self.state_slot(state, index, block)?;
+        if offset == 0 && width == self.sizes[index] {
+            return Ok(whole);
+        }
+        let at = self.value(Op::Const(u64::from(offset)), 4, &[]);
+        let part = self.value(Op::P(OpCode::SubPiece), width, &[whole, at]);
+        ops.push(part);
+        Ok(part)
+    }
+
+    fn write_slot(
+        &mut self,
+        state: &mut [Option<ValueId>],
+        block: BlockId,
+        (index, offset): (usize, u8),
+        value: ValueId,
+    ) -> Result<(), Diagnostic> {
+        let (width, size) = (self.values[value as usize].size, self.sizes[index]);
+        if offset == 0 && width == size {
+            state[index] = Some(value);
+            return Ok(());
+        }
+        let old = self.state_slot(state, index, block)?;
+        let lanes: Vec<ValueId> = (0..size)
+            .map(
+                |lane| match lane.checked_sub(offset).filter(|&lane| lane < width) {
+                    Some(_) if width == 1 => value,
+                    Some(lane) => self.value(Op::Byte(lane), 1, &[value]),
+                    None => self.value(Op::Byte(lane), 1, &[old]),
+                },
+            )
+            .collect();
+        state[index] = Some(self.value(Op::Pack, size, &lanes));
         Ok(())
     }
 
@@ -1206,9 +1455,10 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
+        self.reload_frame(site, state, block)?;
         for index in 0..self.keys.len() {
             let key = self.keys[index];
-            if key == StateKey::Memory {
+            if matches!(key, StateKey::Memory | StateKey::Frame(_)) {
                 continue;
             }
             let field = self.field_of[index];
@@ -1217,9 +1467,9 @@ impl<'a> Builder<'a> {
             });
             let old = self.state_slot(state, index, block)?;
             state[index] = Some(if kept {
-                self.value(Op::StateKeep(key), key_size(key), &[site, old])
+                self.value(Op::StateKeep(key), 1, &[site, old])
             } else {
-                self.value(Op::StateReload(key), key_size(key), &[site])
+                self.value(Op::StateReload(key), 1, &[site])
             });
         }
         if let Some(value) = next_esp {
@@ -1242,7 +1492,7 @@ impl<'a> Builder<'a> {
             }
             if self.field_of[index].is_some_and(|field| fields.contains(field)) {
                 let _ = self.state_slot(state, index, block)?;
-                state[index] = Some(self.value(Op::StateReload(key), key_size(key), &[site]));
+                state[index] = Some(self.value(Op::StateReload(key), 1, &[site]));
             }
         }
         Ok(())
@@ -1251,10 +1501,10 @@ impl<'a> Builder<'a> {
     fn reload_all(&mut self, site: ValueId, state: &mut [Option<ValueId>]) {
         for (index, slot) in state.iter_mut().enumerate().take(self.keys.len()) {
             let key = self.keys[index];
-            if key == StateKey::Memory {
+            if matches!(key, StateKey::Memory | StateKey::Frame(_)) {
                 continue;
             }
-            *slot = Some(self.value(Op::StateReload(key), key_size(key), &[site]));
+            *slot = Some(self.value(Op::StateReload(key), 1, &[site]));
         }
     }
 
@@ -1375,14 +1625,6 @@ impl<'a> Builder<'a> {
                 },
             )),
         }
-    }
-}
-
-fn key_size(key: StateKey) -> u8 {
-    if key == StateKey::Memory {
-        0
-    } else {
-        1
     }
 }
 

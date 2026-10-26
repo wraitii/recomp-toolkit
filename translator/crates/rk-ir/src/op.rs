@@ -8,6 +8,7 @@ use crate::x87::{X87Lowering, X87Op};
 pub enum StateKey {
     Register(u32),
     Memory,
+    Frame(i32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,8 +91,7 @@ pub enum Op {
     Byte(u8),
     Pack,
     Memory,
-    StackBoundary,
-    StackFlush,
+    Publish,
     StateReload(StateKey),
     StateKeep(StateKey),
     CcKind(CcKind),
@@ -238,15 +238,9 @@ pub fn properties(op: Op) -> Properties {
                 ..Properties::new()
             },
         },
-        Op::StackBoundary => Properties {
-            synthetic: true,
-            ..Properties::new()
-        },
-        Op::StackFlush => Properties {
+        Op::Publish => Properties {
             ordered: true,
-            observes: true,
-            faults: true,
-            memory: true,
+            synthetic: true,
             ..Properties::new()
         },
         Op::Call { .. } | Op::CallInd => Properties::effect(),

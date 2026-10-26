@@ -51,7 +51,7 @@ fn access(
     };
     Some(match s.value(id).op {
         Op::P(OpCode::Load) => located(u32::from(s.value(id).size), false),
-        Op::P(OpCode::Store) | Op::StackFlush => located(u32::from(s.value(args[2]).size), true),
+        Op::P(OpCode::Store) => located(u32::from(s.value(args[2]).size), true),
         Op::X87(op) if op.memory_size().is_some() => located(
             op.memory_size().unwrap(),
             op.memory() != Some(MemoryEffect::Read),
@@ -263,8 +263,6 @@ impl Frame {
                 esp.insert(id, addresses.state(id, Field::Esp));
             } else if op == Op::Return {
                 esp.insert(id, addresses.state(id, Field::Esp));
-            } else if op == Op::StackBoundary {
-                esp.insert(id, addresses.get(s.args(id)[1]));
             }
         }
         let rejection = Self::rejection(s, &accesses);
@@ -563,7 +561,20 @@ impl Frame {
                 || self
                     .independent
                     .get(&effect)
-                    .is_some_and(|&esp| i64::from(esp) <= start))
+                    .is_some_and(|&esp| i64::from(esp) <= start)
+                || self
+                    .accesses
+                    .get(&effect)
+                    .and_then(|access| access.location)
+                    .is_some_and(|location| {
+                        matches!(
+                            self.relations.bounds(location.address),
+                            Address::Known {
+                                base: Base::Absolute,
+                                ..
+                            }
+                        )
+                    }))
     }
 
     pub(crate) fn clobber(&self, s: &Ssa, effect: ValueId, range: Range) -> Clobber {

@@ -70,6 +70,9 @@ pub(crate) fn rewrite_aliases(s: &mut Ssa, alias: &impl Aliases) {
     for (_, value) in &mut s.state {
         *value = resolve_alias(alias, *value);
     }
+    if let Some(frame) = &mut s.frame {
+        *frame = resolve_alias(alias, *frame);
+    }
     for (_, value) in &mut s.dispatch.loads {
         *value = resolve_alias(alias, *value);
     }

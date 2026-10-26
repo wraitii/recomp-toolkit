@@ -43,14 +43,6 @@ pub fn validate(s: &Ssa) -> Result<()> {
         {
             return Err(invalid(format!("block {index} has an invalid reference")));
         }
-        if let Some(position) = block.ops.iter().enumerate().position(|(position, &value)| {
-            s.value(value).op == Op::StackFlush && s.flushed_call(index as u32, position).is_none()
-        }) {
-            return Err(invalid(format!(
-                "block {index} flushes {} without a guarded call",
-                block.ops[position]
-            )));
-        }
         for &phi in &block.phis {
             if s.value(phi).op != Op::Phi
                 || s.args(phi).len() != block.preds.len()
@@ -149,13 +141,12 @@ fn shape(s: &Ssa, id: ValueId) -> bool {
             BranchInd | Return => n == 1 && z == 0 && size(0) == 4,
             CallInd | CallOther | Unknown => n == 1 && size(0) == 0 && z == 0,
         },
-        Op::StackBoundary => n == 2 && z == 0 && size(0) == 4 && size(1) == 4,
-        Op::StackFlush => n == 3 && size(0) == 0 && size(1) == 4 && z == 0,
         Op::Input(key) => n == 0 && state_width(key, z),
         Op::Const(_) => n == 0 && z > 0,
         Op::Target(_) => n == 0 && z == 4,
         Op::Phi => args.iter().all(|&arg| s.value(arg).size == z),
         Op::Byte(lane) => n == 1 && z == 1 && lane < size(0),
+        Op::Publish => n == 0 && z == 0,
         Op::Pack => n == z as usize && z > 0 && args.iter().all(|&arg| s.value(arg).size == 1),
         Op::Memory => {
             n >= 1
@@ -212,6 +203,7 @@ fn state_width(key: StateKey, size: u8) -> bool {
     match key {
         StateKey::Memory => size == 0,
         StateKey::Register(_) => matches!(size, 1 | 2 | 4 | 8 | 10 | 16),
+        StateKey::Frame(_) => matches!(size, 1 | 2 | 4 | 8),
     }
 }
 

@@ -85,13 +85,29 @@ fn prepare_using(
         && opts.assume_private_stack
         && opts.policy == Policy::Optimizing
         && opts.fault_state == FaultState::Relaxed;
-    let mut ssa =
-        crate::build::build_with_faults(cg, &build_options, opts.fault_state, lazy_stack_writes)
-            .map_err(rk_core::Error::Diagnostic)?;
-    crate::validate(&ssa)?;
-    ssa.assume_private_stack = opts.assume_private_stack && opts.policy == Policy::Optimizing;
-    ssa.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
-    canonicalize(&mut ssa, opts.signed_sub);
+    let build = |frame| -> rk_core::Result<Ssa> {
+        let mut ssa = crate::build::build_with_faults(
+            cg,
+            &build_options,
+            opts.fault_state,
+            lazy_stack_writes,
+            frame,
+        )
+        .map_err(rk_core::Error::Diagnostic)?;
+        crate::validate(&ssa)?;
+        ssa.assume_private_stack = opts.assume_private_stack && opts.policy == Policy::Optimizing;
+        ssa.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
+        canonicalize(&mut ssa, opts.signed_sub);
+        Ok(ssa)
+    };
+    let mut ssa = build(None)?;
+    if lazy_stack_writes {
+        if let Some(frame) = crate::stack::plan(&ssa, opts.call_facts, opts.retire_reused_stack) {
+            if let Ok(promoted) = build(Some(&frame)) {
+                ssa = promoted;
+            }
+        }
+    }
     if let Some(out) = trace.as_mut() {
         writeln!(
             out,
@@ -107,9 +123,6 @@ fn prepare_using(
     forward(&mut ssa, Some(opts.call_facts));
     if opts.policy == Policy::Optimizing && opts.fault_state == FaultState::Relaxed {
         crate::memory::eliminate_dead_stores(&mut ssa, Some(opts.call_facts));
-    }
-    if lazy_stack_writes {
-        crate::stack::promote(&mut ssa, opts.retire_reused_stack, opts.call_facts);
     }
     if let Some(out) = trace.as_mut() {
         writeln!(
@@ -196,6 +209,17 @@ pub fn publications(s: &Ssa, call_facts: &dyn CallFacts) -> BTreeMap<ValueId, Ve
             }
             None => all.clone(),
         };
+        let mut keys: Vec<StateKey> = keys
+            .into_iter()
+            .filter(|key| !matches!(key, StateKey::Frame(_)))
+            .collect();
+        keys.extend(
+            s.frame_publish
+                .get(&boundary.at)
+                .into_iter()
+                .flatten()
+                .copied(),
+        );
         plan.insert(boundary.at, keys);
     }
     plan
