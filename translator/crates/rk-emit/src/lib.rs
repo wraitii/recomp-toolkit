@@ -639,11 +639,15 @@ impl<'a> Emitter<'a> {
     }
 
     fn write_inputs(&mut self) -> Result<()> {
-        for index in 0..self.s.values.len() {
-            let id = index as ValueId;
-            let Op::Input(key) = self.s.value(id).op else {
-                continue;
-            };
+        let mut inputs: Vec<(ValueId, StateKey)> = (0..self.s.values.len() as ValueId)
+            .filter_map(|id| match self.s.value(id).op {
+                Op::Input(key) => Some((id, key)),
+                _ => None,
+            })
+            .collect();
+        inputs.sort_by_key(|&(_, key)| matches!(key, StateKey::Frame { .. }));
+        for (id, key) in inputs {
+            let index = id as usize;
             if !self.plan.live.contains(&id) || !self.materialized[index] {
                 continue;
             }
