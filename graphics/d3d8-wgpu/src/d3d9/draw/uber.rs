@@ -101,8 +101,7 @@ pub(crate) fn prepare(gpu: &D3d9Gpu) -> Result<(), RenderError> {
         for family in &prepared.families {
             eprintln!(
                 "[d3d9-uber] prepare-family family={:016x} manifest={:?}",
-                fingerprint(&family.key),
-                family.key
+                family.fingerprint, family.key
             );
         }
     }
@@ -138,7 +137,7 @@ pub(super) fn select(
         .ok_or_else(|| unsupported("InterpreterDraw", "interpreter not prepared"))?
         .find(&descriptor)
         .filter(|_| eligible)
-        .map(|family| fingerprint(&family.key));
+        .map(|family| family.fingerprint);
     let result = coverage.and_then(|eligible| {
         if eligible && family.is_none() && mode != Mode::CompareFamily11 {
             Err(unsupported("InterpreterDraw", "unprepared-pipeline-state"))

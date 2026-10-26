@@ -2,6 +2,7 @@ use super::interface::{InterfaceKey, LayoutAttribute};
 use super::pipeline::{PipelineDescriptor, PreparedPipeline};
 use crate::RenderError;
 use crate::shader::uber::*;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub(crate) const SOURCE: &str = include_str!(concat!(env!("OUT_DIR"), "/d3d9-interpreter.wgsl"));
@@ -29,6 +30,7 @@ pub(crate) struct PreparedInterpreter {
 
 pub(crate) struct PreparedFamily {
     pub(crate) key: FamilyKey,
+    pub(crate) fingerprint: u64,
     pub(crate) pipeline: wgpu::RenderPipeline,
 }
 
@@ -379,7 +381,13 @@ impl PreparedInterpreter {
                         started.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                PreparedFamily { key, pipeline }
+                let mut hasher = crate::fast_map::FastHasher::default();
+                key.hash(&mut hasher);
+                PreparedFamily {
+                    key,
+                    fingerprint: hasher.finish(),
+                    pipeline,
+                }
             })
             .collect();
         let unused_texture = device

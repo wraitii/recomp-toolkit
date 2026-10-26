@@ -118,7 +118,7 @@ pub(super) fn capture_mvp(
                 .and_then(|p| p.for_pipeline(pipeline))
                 .map(|family| {
                     (
-                        fingerprint(&family.key),
+                        family.fingerprint,
                         &family.key.interface,
                         &family.key.descriptor,
                     )

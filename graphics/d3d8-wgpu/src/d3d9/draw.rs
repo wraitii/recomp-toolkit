@@ -3885,7 +3885,7 @@ pub(crate) fn execute(
                 gpu.interpreter
                     .get()
                     .and_then(|p| p.for_pipeline(&pipeline))
-                    .map_or(0, |family| self::fingerprint(&family.key)),
+                    .map_or(0, |family| family.fingerprint),
                 vs.map(|s| &s.key),
                 ps.map(|s| &s.key),
                 snapshot.target.view,
