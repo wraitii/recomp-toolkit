@@ -47,8 +47,8 @@ fn native_texture(texture: &wgpu::Texture) -> Result<*mut u8, RenderError> {
     let hal = unsafe { texture.as_hal::<wgpu::hal::api::Metal>() }.ok_or_else(|| {
         RenderError::new("D3D9::PresentHandoff", "the texture is not a Metal texture")
     })?;
-    let raw: &metal::TextureRef = unsafe { hal.raw_handle() };
-    Ok((raw as *const metal::TextureRef).cast_mut().cast())
+    let raw = hal.raw_handle();
+    Ok(std::ptr::from_ref(raw).cast_mut().cast())
 }
 
 #[cfg(not(target_os = "macos"))]

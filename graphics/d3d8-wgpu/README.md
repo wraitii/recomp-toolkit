@@ -11,6 +11,14 @@ or COM types and no game addresses. C++ owns guest dispatch, interface identity,
 reference counts and guest staging allocations; Rust owns CPU resource bytes,
 mip layout calculations, indexed-draw preparation, render state and GPU work.
 The native resource tests link the same Rust storage without creating a GPU.
+D3D9 decoding/admission and specialized WGSL emission live in `src/shader/`;
+`src/render/` owns immutable vertex layouts and prepared pipeline descriptors.
+D3D9 retains state interpretation, caches, submission and validation ownership.
+Owned stage recipes retain decoded programs and explicit variant/output settings,
+or captured fixed-function source. Complete pipeline recipes add resource/vertex
+interfaces, entry points and raster/output descriptors; prepared GPU handles stay
+separate. Draw parameters take explicit values and constant-bank slices, copied
+into existing batch storage before later state changes.
 
 - Lives in recomp-kit and is built by `dx/CMakeLists.txt` when `RECOMP_D3D8_WGPU` is on
   (or a game ships its own `graphics/d3d8-wgpu`). Game-specific usage inventories and
@@ -132,9 +140,149 @@ shader/layout/pipeline cache clears, to stderr with the `[d3d9-compile]` prefix.
 `RECOMP_D3D9_TRACE_PIPELINES=1` also logs every pipeline miss before and after
 compilation, every module creation, and shader variants. Records include frame
 numbers, source hashes and byte counts (vertex then pixel), pipeline recipe
-hashes derived from sources/layout/state, timings and cache sizes. Matching
+hashes derived from complete CPU recipes, timings and cache sizes. Matching
 recipe hashes expose recompilation across cache clears; missing source/layout
-metadata is reported as `None`.
+metadata is reported as `None`. Guest shader variant origins use content keys
+(fingerprint plus full bytecode equality), so identical programs can share
+variants across handles. Recipe identity now uses owned stage inputs/settings,
+binding and vertex interfaces, entry points and raster/output descriptors, with
+full equality available through its key. Recipe hashes from earlier revisions
+differ even for unchanged rendering; generated WGSL source hashes remain
+comparable. Source/layout handle lookups affect diagnostic metadata only,
+not recipe identity.
+The same flag records each drawn program's model,
+numeric opcode histogram, encoded register indices, modifiers, declarations and
+constant/texture metadata once per bytecode content, plus VS/PS content hashes
+for every draw. These inventory records contain no bytecode or WGSL. Destination
+indices describe decoded fields, including unused fields on control instructions;
+they are not inferred register capacities. A schema/build identity includes a
+fingerprint of renderer sources, manifest, lockfile and build script, target and
+profile, plus enabled device features/limits. The normal adapter startup record
+supplies backend and adapter identifiers. Draw records include execution mode,
+interpreter eligibility and the prepared family; specialized-only mode leaves
+eligibility unknown. The analyzer reports these alongside worker queue,
+compilation, publication and saturation metrics, correlated by recipe identity.
+
+`RECOMP_D3D9_SHADER_MODE=compare-family11` enables the M2 scoped comparison:
+draws matching the supported SM2 program subset and baseline family-11 static
+interface/raster state use the prepared interpreter; other draws keep
+specialization. This is a scoped comparison, not whole-scene interpreter-only
+coverage. A selected draw with missing preparation or unsupported resources fails
+by name. `interpreter-only` rejects uncovered draws and never selects or schedules
+specialization. Metal defaults to `hybrid`; other backends default to
+`specialized`. Set `RECOMP_D3D9_SHADER_MODE=specialized` to roll back without
+creating interpreter GPU resources. Startup logs the effective mode and backend.
+In hybrid mode, covered misses render through the prepared interpreter
+while one worker generates and compiles the complete specialization. Ready results
+are adopted at draw boundaries. Ready specializations use native vertex fetch
+where supported, otherwise the existing compact packer; interpreted draws use
+canonical packed vertices. Uncovered draws retain synchronous specialization with
+residual reasons. Other backends reject hybrid pending backend acceptance.
+Unknown modes fail at
+initialization. See [SHADERS.md](SHADERS.md) for exact coverage and bindings.
+
+The worker admits 32 waiting recipes with an 8 MiB budget for estimated retained
+recipe data and failure records. Successful completion releases that charge;
+failed jobs keep their charge and a bounded diagnostic until reset, without retry.
+Saturation keeps covered draws interpreted. OOM remains a renderer error and
+physical device loss uses the existing loss path. Reset retires the worker's
+private completion channel without joining compilation, so old results cannot
+enter a new epoch. `[d3d9-async]` logs queue/compile/publication timings, fallback
+residence, saturation, failures, epochs and residual counts.
+
+Completed pipelines share a 512-entry, 32 MiB estimated recipe cache with
+synchronous specialization. Shader variants and module caches each have the same
+limits; worker binding layouts retain up to 128 entries. Recipe preparation and
+interpreter program uploads each have a separate 512-entry, 8 MiB cache. These
+caches evict the least recently accessed entry and refresh recency on hits.
+Program upload charges include GPU buffer bytes and retained original bytecode.
+Pending draws and draw memos keep their own resource references across eviction;
+cache limits exclude those references, opaque driver allocations and temporary
+compiler memory. These are retention limits, not performance acceptance budgets.
+Routine preparation, compilation, upload and frame logs require
+`RECOMP_D3D9_TRACE_PIPELINES=1`; startup mode selection and compilation failures
+remain visible by default, as do evictions from caches that can require
+recompilation.
+
+Add `RECOMP_D3D9_UBER_TINT=1` to mix 15% red into interpreted fragment results
+after raster output processing, preserving alpha. The tint is a diagnostic to
+locate interpreted content; disable it for rendering comparisons. It is a
+per-draw uniform flag and creates no additional pipeline variant. Startup records
+include `tint=true` when enabled.
+In hybrid mode the tint disappears when a ready specialization is selected.
+For a visible handoff, `RECOMP_D3D9_ASYNC_DELAY_MS=5000` holds each successful
+worker result for five seconds before publication. It defaults to zero, delays
+only the compiler worker, and logs `debug-delay`; unset it for performance captures.
+
+Interpreter modes prepare one module during device initialization, including
+replacement devices: `compare-family11` creates one pipeline; hybrid and
+interpreter-only create 43 captured pipeline states, retaining the UI/video and
+additive families. The interpreter supports straight-line arithmetic, relative
+vertex constants, seven packed inputs, two color/eight UV varyings, texture-free shaders
+and five 2D textures plus two cube maps, projected 2D sampling, saturation,
+partial-precision hints and deferred TEXKILL; see [SHADERS.md](SHADERS.md) for exact limits.
+Program changes upload immutable data
+and reuse these prepared pipelines.
+`[d3d9-uber]` records include warmup time/manifest, program uploads and
+resident buffer/retained-bytecode sizes, and per-frame selected/total draw counts.
+With pipeline tracing, they also identify interpreted draws by program content,
+prepared pipeline, target/subresource and texture; frame counters separate CPU
+preparation and packing, packed bytes and logical constant/parameter bytes.
+Logical uniform bytes precede batch deduplication; existing batch upload counters
+report actual total uploads. CPU timings include diagnostic overhead and require
+pipeline tracing; driver pipeline memory and GPU execution time are not measured.
+
+`RECOMP_D3D9_UBER_CAPTURE=1` additionally logs original words and lowering once
+per interpreted content or the known baseline candidate pair
+(`dc32dcdca4f64c33` / `c49b28329a8ab277`), complete recipes/interfaces, and
+frame/draw, target/subresource, viewport, primitive and texture identities. It
+accepts `RECOMP_D3D9_UBER_CAPTURE_PAIR=VS_HEX:PS_HEX` to replace the baseline
+candidate with another pair, or `all` to capture every encountered program once;
+malformed selectors fail at initialization. It
+performs no readback. Capture hashes select diagnostics only; interpreter admission
+uses actual decoded programs and complete draw requirements. These records help
+locate the content before a targeted visual/readback comparison.
+
+`observed-family` records group the existing specialized pipeline descriptors
+without shader contents or guest handles. They include resource layouts, input
+linkage, stage variant state, vertex layouts and raster/output state. Family IDs
+use content equality and remain valid across cache clears; hashes are diagnostic
+fingerprints. `draw-family` records include memoized/cache-hit draws and correlate
+families with source-based recipe hashes. These conservative observed families
+are inventory, not interpreter eligibility or the eventual interpreter family
+manifest. Current constant bank sizes and native vertex layouts can split them.
+
+Summarize a timing/inventory log without launching the renderer:
+
+```sh
+ tools/.venv/bin/python recomp-kit/tools/analyze_d3d9_trace.py build/capture.log \
+   --start 0 --count 600 > build/ubershader/report.json
+```
+
+Run from the game repository root and create the output directory first. Omit
+`--count` to include all completed frames. The report ranks families by draw
+count, lists their program pairs and attributed synchronous compile cost, and
+reports p50/p95/p99/max frame counters. Compile costs are assigned to the draw
+causing each miss, including shared modules; unattributed costs remain explicit.
+Split captures at device replacement or process boundaries. The parser can
+reassemble the observed audio-sink message interruption between `frame=` and its
+numeric continuation, reporting the count explicitly; other malformed records
+still fail. GPU timing remains
+unavailable in this trace; rendering/performance acceptance requires separate
+matched GPU measurements.
+
+Per-frame records report successful nonempty draws, CPU time inside draw
+preparation (including synchronous compilation, trace logging and any batch
+flush), geometry preparation time and packed vertex bytes. Module and pipeline
+CPU times are separate, overlapping components of draw CPU time. These records
+are neither wall-clock frame durations nor GPU timings. Geometry time includes
+input linkage/native-fetch selection as well as packing; packed bytes exclude
+native streams, indices, constants and cached geometry uploads. Separate upload
+byte counters measure cached geometry creation and staged draw batches (including
+constants, streamed geometry, indices and alignment padding), attributed to the
+frame of upload. Texture transfers are excluded. Timing traces retain observed
+program bytecode and family metadata for content equality until device destruction; use bounded
+capture sessions when measuring memory.
 
 `RECOMP_D3D9_TRACE=1` logs draw state, shader bytecode/WGSL, constant values,
 buffer hashes and decoded vertex samples. `RECOMP_D3D9_TRACE_FRAME_START=<n>`

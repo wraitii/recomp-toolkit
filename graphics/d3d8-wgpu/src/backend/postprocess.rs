@@ -165,6 +165,7 @@ impl GpuContext {
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 pass.set_pipeline(&state.pipeline);
                 pass.set_bind_group(0, &group, &[]);
@@ -238,8 +239,8 @@ impl GpuContext {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("d3d8-fxaa"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
             });
         let pipeline = self
             .device
@@ -265,7 +266,7 @@ impl GpuContext {
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             });
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {

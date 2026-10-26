@@ -1,0 +1,407 @@
+use super::bindings::uniform_entry;
+use super::interface::{InterfaceKey, LayoutAttribute};
+use super::pipeline::{PipelineDescriptor, PreparedPipeline};
+use crate::RenderError;
+use crate::shader::interface::*;
+use crate::shader::uber::*;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+pub(crate) const SOURCE: &str = include_str!(concat!(env!("OUT_DIR"), "/d3d9-interpreter.wgsl"));
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct FamilyKey {
+    interpreter: u32,
+    abi: u32,
+    instructions: usize,
+    temporaries: u32,
+    constants: [u32; 2],
+    pub(crate) interface: InterfaceKey,
+    pub(crate) descriptor: PipelineDescriptor,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Manifest {
+    Comparison,
+    Production,
+}
+
+pub(crate) struct PreparedInterpreter {
+    pub(crate) source: Arc<str>,
+    pub(crate) families: Vec<PreparedFamily>,
+    pub(crate) module: wgpu::ShaderModule,
+    pub(crate) layout: wgpu::BindGroupLayout,
+    pub(crate) unused_texture: wgpu::TextureView,
+    pub(crate) unused_cube: wgpu::TextureView,
+    pub(crate) unused_sampler: wgpu::Sampler,
+}
+
+pub(crate) struct PreparedFamily {
+    pub(crate) key: FamilyKey,
+    pub(crate) fingerprint: u64,
+    pub(crate) pipeline: wgpu::RenderPipeline,
+}
+
+impl FamilyKey {
+    fn baseline() -> Self {
+        let vertex = wgpu::ShaderStages::VERTEX;
+        let fragment = wgpu::ShaderStages::FRAGMENT;
+        let mut bindings = vec![
+            uniform_entry(0, u64::from(VERTEX_CONSTANTS) * 16, vertex, true),
+            uniform_entry(1, VERTEX_PARAMETER_BYTES as u64, vertex, true),
+            uniform_entry(2, u64::from(PIXEL_CONSTANTS) * 16, fragment, true),
+            uniform_entry(3, INTERPRETER_PARAMETER_BYTES as u64, fragment, true),
+            uniform_entry(PROGRAM_BINDINGS[0], PROGRAM_BYTES, vertex, false),
+            uniform_entry(PROGRAM_BINDINGS[1], PROGRAM_BYTES, fragment, false),
+        ];
+        for slot in 0..TEXTURE_SLOTS {
+            bindings.push(wgpu::BindGroupLayoutEntry {
+                binding: TEXTURE_BINDING + slot,
+                visibility: fragment,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: if slot < TEXTURES_2D {
+                        wgpu::TextureViewDimension::D2
+                    } else {
+                        wgpu::TextureViewDimension::Cube
+                    },
+                    multisampled: false,
+                },
+                count: None,
+            });
+            bindings.push(wgpu::BindGroupLayoutEntry {
+                binding: SAMPLER_BINDING + slot,
+                visibility: fragment,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+        let component = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::SrcAlpha,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        Self {
+            interpreter: INTERPRETER_VERSION,
+            abi: ABI_VERSION,
+            instructions: MAX_INSTRUCTIONS,
+            temporaries: TEMP_REGISTERS,
+            constants: [VERTEX_CONSTANTS, PIXEL_CONSTANTS],
+            interface: InterfaceKey {
+                bindings: bindings.into(),
+                vertex_buffers: smallvec::smallvec![(
+                    VERTEX_STRIDE,
+                    (0..VERTEX_INPUTS)
+                        .map(|location| LayoutAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: location * 16,
+                            location,
+                        })
+                        .collect()
+                )],
+            },
+            descriptor: PipelineDescriptor {
+                entry_points: ["vs_main", "ps_main"],
+                target: Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Bgra8Unorm,
+                    blend: Some(wgpu::BlendState {
+                        color: component,
+                        alpha: component,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Cw,
+                    ..Default::default()
+                },
+                depth: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth24PlusStencil8,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    mask: u64::from(u32::MAX),
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    fn manifest(manifest: Manifest) -> Vec<Self> {
+        let mut keys = vec![Self::baseline()];
+        if matches!(manifest, Manifest::Production) {
+            use wgpu::PrimitiveTopology::{TriangleList, TriangleStrip};
+            use wgpu::TextureFormat::{Bgra8Unorm, Rgba8Unorm};
+            let front = Some(wgpu::Face::Front);
+            let back = Some(wgpu::Face::Back);
+            let alpha = Some((
+                wgpu::BlendFactor::SrcAlpha,
+                wgpu::BlendFactor::OneMinusSrcAlpha,
+            ));
+            let add_alpha = Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One));
+            let add = Some((wgpu::BlendFactor::One, wgpu::BlendFactor::One));
+            let src_alpha = Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::Zero));
+            let read_always = Some((false, wgpu::CompareFunction::Always));
+            let read_less = Some((false, wgpu::CompareFunction::Less));
+            let read_lequal = Some((false, wgpu::CompareFunction::LessEqual));
+            let write_always = Some((true, wgpu::CompareFunction::Always));
+            let write_less = Some((true, wgpu::CompareFunction::Less));
+            let write_lequal = Some((true, wgpu::CompareFunction::LessEqual));
+            for (format, cull_mode, blend, depth, topology) in [
+                (Bgra8Unorm, None, add_alpha, read_less, TriangleList),
+                (Bgra8Unorm, None, add_alpha, read_always, TriangleList),
+                (Rgba8Unorm, None, alpha, write_less, TriangleStrip),
+                (Rgba8Unorm, None, alpha, read_always, TriangleList),
+                (Bgra8Unorm, front, None, None, TriangleList),
+                (Bgra8Unorm, front, None, read_always, TriangleList),
+                (Bgra8Unorm, front, None, write_lequal, TriangleList),
+                (Bgra8Unorm, None, add, read_always, TriangleList),
+                (Bgra8Unorm, front, add, read_always, TriangleList),
+                (Bgra8Unorm, None, alpha, read_always, TriangleList),
+                (Bgra8Unorm, front, alpha, read_always, TriangleList),
+                (Bgra8Unorm, front, alpha, write_lequal, TriangleList),
+                (Rgba8Unorm, front, None, read_always, TriangleList),
+                (Bgra8Unorm, front, None, write_less, TriangleList),
+                (Bgra8Unorm, None, None, write_less, TriangleList),
+                (Bgra8Unorm, back, None, write_less, TriangleList),
+                (Bgra8Unorm, None, None, None, TriangleList),
+                (Bgra8Unorm, None, alpha, None, TriangleList),
+                (Bgra8Unorm, front, add_alpha, None, TriangleList),
+                (Bgra8Unorm, front, alpha, None, TriangleList),
+                (Bgra8Unorm, None, alpha, None, TriangleStrip),
+                (Bgra8Unorm, back, alpha, read_less, TriangleList),
+                (Bgra8Unorm, None, None, None, TriangleStrip),
+                (Bgra8Unorm, back, add_alpha, read_less, TriangleList),
+                (Bgra8Unorm, None, alpha, write_less, TriangleList),
+                (Rgba8Unorm, front, alpha, read_always, TriangleList),
+                (Rgba8Unorm, front, None, write_lequal, TriangleList),
+                (Bgra8Unorm, front, alpha, write_less, TriangleList),
+                (Rgba8Unorm, None, add_alpha, read_less, TriangleList),
+                (Rgba8Unorm, front, alpha, write_always, TriangleList),
+                (Rgba8Unorm, front, None, write_less, TriangleList),
+                (Rgba8Unorm, back, alpha, read_less, TriangleList),
+                (Rgba8Unorm, front, add_alpha, read_always, TriangleList),
+                (Rgba8Unorm, None, add_alpha, read_always, TriangleList),
+                (Rgba8Unorm, None, alpha, read_less, TriangleList),
+                (Bgra8Unorm, front, alpha, read_lequal, TriangleList),
+                (Rgba8Unorm, front, alpha, write_lequal, TriangleList),
+                (Bgra8Unorm, None, alpha, read_lequal, TriangleList),
+                (Rgba8Unorm, front, alpha, read_lequal, TriangleList),
+                (Rgba8Unorm, None, alpha, read_lequal, TriangleList),
+                (Bgra8Unorm, None, alpha, read_less, TriangleStrip),
+                (Bgra8Unorm, front, src_alpha, None, TriangleList),
+            ] {
+                let mut key = keys[0].clone();
+                let target = key.descriptor.target.as_mut().unwrap();
+                target.format = format;
+                target.blend = blend.map(|(src_factor, dst_factor)| {
+                    let component = wgpu::BlendComponent {
+                        src_factor,
+                        dst_factor,
+                        operation: wgpu::BlendOperation::Add,
+                    };
+                    wgpu::BlendState {
+                        color: component,
+                        alpha: component,
+                    }
+                });
+                key.descriptor.primitive.cull_mode = cull_mode;
+                key.descriptor.primitive.topology = topology;
+                key.descriptor.primitive.strip_index_format = None;
+                key.descriptor.depth = depth.map(|(write, compare)| {
+                    let mut state = keys[0].descriptor.depth.clone().unwrap();
+                    state.depth_write_enabled = Some(write);
+                    state.depth_compare = Some(compare);
+                    state
+                });
+                keys.push(key);
+            }
+        }
+        keys
+    }
+
+    pub(crate) fn check_limits(&self, limits: &wgpu::Limits) -> Result<(), RenderError> {
+        for (name, available, required) in [
+            (
+                "uniform-bank-bytes",
+                u64::from(limits.max_uniform_buffer_binding_size),
+                (u64::from(VERTEX_CONSTANTS) * 16).max(PROGRAM_BYTES),
+            ),
+            (
+                "buffer-bytes",
+                limits.max_buffer_size,
+                (u64::from(VERTEX_CONSTANTS) * 16).max(PROGRAM_BYTES),
+            ),
+            (
+                "dynamic-uniforms",
+                u64::from(limits.max_dynamic_uniform_buffers_per_pipeline_layout),
+                4,
+            ),
+            (
+                "uniforms-per-stage",
+                u64::from(limits.max_uniform_buffers_per_shader_stage),
+                3,
+            ),
+            (
+                "bindings",
+                u64::from(limits.max_bindings_per_bind_group),
+                38,
+            ),
+            ("bind-groups", u64::from(limits.max_bind_groups), 1),
+            (
+                "vertex-attributes",
+                u64::from(limits.max_vertex_attributes),
+                u64::from(VERTEX_INPUTS),
+            ),
+            ("vertex-buffers", u64::from(limits.max_vertex_buffers), 1),
+            (
+                "vertex-stride",
+                u64::from(limits.max_vertex_buffer_array_stride),
+                VERTEX_STRIDE,
+            ),
+            (
+                "inter-stage-variables",
+                u64::from(limits.max_inter_stage_shader_variables),
+                u64::from(INTER_STAGE_VARIABLES),
+            ),
+            (
+                "textures",
+                u64::from(limits.max_sampled_textures_per_shader_stage),
+                u64::from(TEXTURE_SLOTS),
+            ),
+            (
+                "samplers",
+                u64::from(limits.max_samplers_per_shader_stage),
+                u64::from(TEXTURE_SLOTS),
+            ),
+        ] {
+            if available < required {
+                return Err(RenderError::new(
+                    "InterpreterPrepare",
+                    format!("device-limit {name}: {available} < {required}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PreparedInterpreter {
+    pub(crate) fn find(&self, descriptor: &PipelineDescriptor) -> Option<&PreparedFamily> {
+        self.families
+            .iter()
+            .find(|family| family.key.descriptor == *descriptor)
+    }
+
+    pub(crate) fn for_pipeline(&self, pipeline: &wgpu::RenderPipeline) -> Option<&PreparedFamily> {
+        self.families
+            .iter()
+            .find(|family| family.pipeline == *pipeline)
+    }
+
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        manifest: Manifest,
+        trace: bool,
+    ) -> Result<Self, RenderError> {
+        let keys = FamilyKey::manifest(manifest);
+        let key = &keys[0];
+        key.check_limits(&device.limits())?;
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("d3d9-interpreter"),
+            entries: &key.interface.bindings,
+        });
+        let module_started = std::time::Instant::now();
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("d3d9-interpreter"),
+            source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
+        });
+        if trace {
+            eprintln!(
+                "[d3d9-uber] prepare-module ms={:.3} source_bytes={}",
+                module_started.elapsed().as_secs_f64() * 1000.0,
+                SOURCE.len()
+            );
+        }
+        let families = keys
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let started = std::time::Instant::now();
+                let d = &key.descriptor;
+                let pipeline = PreparedPipeline {
+                    entry_points: d.entry_points,
+                    modules: [module.clone(), module.clone()],
+                    layout: layout.clone(),
+                    buffers: key.interface.vertex_buffers.clone(),
+                    target: d.target.clone(),
+                    primitive: d.primitive,
+                    depth: d.depth.clone(),
+                    multisample: d.multisample,
+                }
+                .create(device, "d3d9-interpreter");
+                if trace {
+                    eprintln!(
+                        "[d3d9-uber] prepare-pipeline index={index} ms={:.3} descriptor={d:?}",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                let mut hasher = crate::fast_map::FastHasher::default();
+                key.hash(&mut hasher);
+                PreparedFamily {
+                    key,
+                    fingerprint: hasher.finish(),
+                    pipeline,
+                }
+            })
+            .collect();
+        let unused_texture = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("d3d9-interpreter-unused-texture"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let unused_cube = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("d3d9-interpreter-unused-cube"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 6,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::Cube),
+                ..Default::default()
+            });
+        let unused_sampler = device.create_sampler(&Default::default());
+        Ok(Self {
+            unused_texture,
+            unused_cube,
+            unused_sampler,
+            families,
+            module,
+            layout,
+            source: SOURCE.into(),
+        })
+    }
+}
