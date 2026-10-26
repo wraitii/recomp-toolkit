@@ -1,5 +1,5 @@
 use super::*;
-use crate::render::interpreter::PreparedInterpreter;
+use crate::render::interpreter::{Manifest, PreparedInterpreter};
 use crate::shader::uber::{self as program, EncodedKey, EncodedProgram};
 use wgpu::util::DeviceExt;
 
@@ -76,7 +76,11 @@ pub(crate) fn prepare(gpu: &D3d9Gpu) -> Result<(), RenderError> {
     let prepared = gpu.validate("InterpreterPrepare", || {
         PreparedInterpreter::new(
             &gpu.device,
-            mode != Mode::CompareFamily11,
+            if mode == Mode::CompareFamily11 {
+                Manifest::Comparison
+            } else {
+                Manifest::Production
+            },
             trace_compilation(),
         )
     })?;
@@ -126,7 +130,7 @@ struct SelectionKey {
 }
 
 impl SelectionKey {
-    fn new(state: &D3d9State, snapshot: &DrawSnapshot) -> Self {
+    fn new(state: &D3d9State, snapshot: &DrawSnapshot, sampled_slots: u16) -> Self {
         let surface = |surface: &SurfaceView| {
             (
                 surface.texture.format(),
@@ -135,7 +139,11 @@ impl SelectionKey {
             )
         };
         let mut textures = [(0, 0); MAX_SAMPLERS];
-        for texture in &snapshot.textures {
+        for texture in snapshot
+            .textures
+            .iter()
+            .filter(|t| sampled_slots & (1 << t.stage) != 0)
+        {
             textures[texture.stage as usize] = (
                 texture.format,
                 1 | u32::from(texture.depth) << 1
@@ -171,7 +179,13 @@ pub(super) fn select(
     if mode == Mode::Specialized {
         return Ok(Selection::default());
     }
-    let key = (mode == Mode::Hybrid).then(|| SelectionKey::new(state, snapshot));
+    let key = (mode == Mode::Hybrid).then(|| {
+        let sampled = [vs, ps]
+            .into_iter()
+            .flatten()
+            .fold(0, |slots, shader| slots | shader.program.sampled_slots());
+        SelectionKey::new(state, snapshot, sampled)
+    });
     if let Some(cached) = draw
         .specialization
         .selection
@@ -293,7 +307,7 @@ fn coverage(
     {
         return Err(unsupported("InterpreterDraw", "unsupported-multisample"));
     }
-    for (&stage, &kind) in &ps.unwrap().program.samplers {
+    for (stage, kind) in ps.unwrap().program.sampled_samplers() {
         let Some(texture) = snapshot.textures.iter().find(|t| t.stage == stage) else {
             continue;
         };
@@ -347,7 +361,7 @@ struct CachedRecipe {
 
 #[derive(Default)]
 pub(super) struct RecipeCache {
-    entries: FastMap<RecipeInputs, Arc<CachedRecipe>>,
+    entries: LruCache<RecipeInputs, Arc<CachedRecipe>, 512, { 8 << 20 }>,
     selection: Option<CachedSelection>,
     pub(super) hits: u64,
     pub(super) misses: u64,
@@ -451,7 +465,7 @@ fn prepare_recipe(
     for texture in snapshot
         .textures
         .iter()
-        .filter(|t| ps.program.samplers.contains_key(&t.stage))
+        .filter(|t| ps.program.samples(t.stage))
     {
         let stage = texture.stage;
         textures[stage as usize] = Some(TextureLayout {
@@ -471,51 +485,43 @@ fn prepare_recipe(
         vertex_buffers,
         descriptor,
     };
-    if draw.specialization.entries.len() >= 512
-        && !draw.specialization.entries.contains_key(&inputs)
-    {
-        evict_one(&mut draw.specialization.entries);
-    }
-    let (cached, prepared) = match draw.specialization.entries.entry(inputs) {
-        std::collections::hash_map::Entry::Occupied(entry) => (true, entry.into_mut()),
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            let inputs = entry.key();
-            let recipe = Arc::new(PipelineRecipe {
-                shaders: [0, 1].map(|index| {
-                    let shader = [vs, ps][index];
-                    ShaderRecipe::Program {
-                        key: shader.key.clone(),
-                        program: Arc::clone(&shader.program),
-                        settings: inputs.shaders[index].1.clone(),
-                    }
-                }),
-                interface: InterfaceKey {
-                    bindings: inputs.layout.entries().into(),
-                    vertex_buffers: inputs.vertex_buffers.clone(),
-                },
-                descriptor: inputs.descriptor.clone(),
-            });
-            (
-                false,
-                entry.insert(Arc::new(CachedRecipe {
-                    key: recipe.key(),
-                    recipe,
-                    raw_inputs,
-                })),
-            )
-        }
-    };
-    if cached {
+    if let Some(prepared) = draw.specialization.entries.get(&inputs) {
         draw.specialization.hits += 1;
-    } else {
-        draw.specialization.misses += 1;
+        return Ok(Arc::clone(prepared));
     }
-    Ok(Arc::clone(prepared))
+    let recipe = Arc::new(PipelineRecipe {
+        shaders: [0, 1].map(|index| {
+            let shader = [vs, ps][index];
+            ShaderRecipe::Program {
+                key: shader.key.clone(),
+                program: Arc::clone(&shader.program),
+                settings: inputs.shaders[index].1.clone(),
+            }
+        }),
+        interface: InterfaceKey {
+            bindings: inputs.layout.entries().into(),
+            vertex_buffers: inputs.vertex_buffers.clone(),
+        },
+        descriptor: inputs.descriptor.clone(),
+    });
+    let bytes = recipe.retained_bytes() * 2;
+    let prepared = Arc::new(CachedRecipe {
+        key: recipe.key(),
+        recipe,
+        raw_inputs,
+    });
+    draw.specialization
+        .entries
+        .insert(inputs, Arc::clone(&prepared), bytes);
+    draw.specialization.misses += 1;
+    Ok(prepared)
 }
+
+pub(super) type ProgramCache = LruCache<EncodedKey, wgpu::Buffer, 512, { 8 << 20 }>;
 
 fn upload(
     gpu: &D3d9Gpu,
-    programs: &mut FastMap<EncodedKey, wgpu::Buffer>,
+    programs: &mut ProgramCache,
     program: &EncodedProgram,
 ) -> Result<wgpu::Buffer, RenderError> {
     if let Some(buffer) = programs.get(&program.key) {
@@ -535,18 +541,19 @@ fn upload(
                 usage: wgpu::BufferUsages::UNIFORM,
             }))
     })?;
-    programs.insert(program.key.clone(), buffer.clone());
+    programs.insert(
+        program.key.clone(),
+        buffer.clone(),
+        bytes.len() + program.key.retained_bytecode_bytes(),
+    );
     if trace_compilation() {
         eprintln!(
-            "[d3d9-uber] program-upload identity={:?} bytes={} resident_programs={} resident_program_bytes={} retained_bytecode_bytes={}",
+            "[d3d9-uber] program-upload identity={:?} bytes={} resident_programs={} resident_program_bytes={} cache_bytes_estimate={}",
             program.key,
             bytes.len(),
             programs.len(),
             programs.len() as u64 * program::PROGRAM_BYTES,
-            programs
-                .keys()
-                .map(EncodedKey::retained_bytecode_bytes)
-                .sum::<usize>()
+            programs.bytes()
         );
     }
     Ok(buffer)

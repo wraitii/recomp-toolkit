@@ -1,4 +1,5 @@
 use crate::opcodes::*;
+use crate::shader_interface::*;
 use crate::uber_abi::*;
 
 pub fn source() -> String {
@@ -6,9 +7,6 @@ pub fn source() -> String {
         "struct Instruction {{ dst: vec4<u32>, a: vec4<u32>, b: vec4<u32>, c: vec4<u32> }}\n\
          struct Definition {{ index: vec4<u32>, value: vec4<f32> }}\n\
          struct Program {{ header: vec4<u32>, code: array<Instruction, {MAX_INSTRUCTIONS}>, definitions: array<Definition, {MAX_DEFINITIONS}> }}\n\
-         struct VSP {{ halfpix: vec4<f32>, ascale: array<vec4<f32>, 16> }}\n\
-         struct PSP {{ alpha_ref: f32, alpha_func: i32, fog_mode: i32, pad0: i32, fog_color: vec4<f32>, fog_start: f32, fog_end: f32, fog_density: f32, pad1: f32, texture_flags: vec4<u32> }}\n\
-         struct V2F {{ @builtin(position) pos: vec4<f32>, @location(0) d0: vec4<f32>, @location(1) d1: vec4<f32>, @location(2) t0: vec4<f32>, @location(3) t1: vec4<f32>, @location(4) t2: vec4<f32>, @location(5) t3: vec4<f32>, @location(6) t4: vec4<f32>, @location(7) t5: vec4<f32>, @location(8) t6: vec4<f32>, @location(9) t7: vec4<f32>, @location(10) fog: f32, @location(11) fogz: f32 }}\n\
          @group(0) @binding(0) var<uniform> vcb: array<vec4<f32>, {VERTEX_CONSTANTS}>;\n\
          @group(0) @binding(1) var<uniform> vsp: VSP;\n\
          @group(0) @binding(2) var<uniform> pcb: array<vec4<f32>, {PIXEL_CONSTANTS}>;\n\
@@ -18,12 +16,15 @@ pub fn source() -> String {
          struct Registers {{ temp: array<vec4<f32>, {TEMP_REGISTERS}>, input: array<vec4<f32>, {VERTEX_INPUTS}>, pos: vec4<f32>, color: array<vec4<f32>, 2>, address: vec4<f32>, tex: array<vec4<f32>, {TEXTURE_COORDINATES}> }}\n",
         PROGRAM_BINDINGS[0], PROGRAM_BINDINGS[1]
     );
+    source += VERTEX_PARAMETERS;
+    source += &pixel_parameters(true);
+    source += VARYINGS;
     for slot in 0..TEXTURE_SLOTS {
         let kind = if slot < TEXTURES_2D { "2d" } else { "cube" };
         source += &format!(
             "@group(0) @binding({}) var tx{slot}: texture_{kind}<f32>;\n@group(0) @binding({}) var sm{slot}: sampler;\n",
-            4 + slot,
-            20 + slot
+            TEXTURE_BINDING + slot,
+            SAMPLER_BINDING + slot
         );
     }
     source += "fn sample_texture(slot: u32, coord: vec4<f32>) -> vec4<f32> { if ((psp.texture_flags.z & (1u << slot)) != 0u) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); } var value = vec4<f32>(0.0); switch slot {\n";

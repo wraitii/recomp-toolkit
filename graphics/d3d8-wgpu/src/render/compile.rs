@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+const FAILURE_BYTES: usize = 4096;
+
 pub(crate) struct Limits {
     pub(crate) queued: usize,
     pub(crate) recipe_bytes: usize,
@@ -169,14 +171,16 @@ impl Compiler {
             .values()
             .filter(|t| matches!(t.entry, Entry::Compiling))
             .count();
-        let failed = self
+        let (failed, failed_bytes) = self
             .entries
             .values()
             .filter(|t| matches!(t.entry, Entry::Failed(_)))
-            .count();
+            .fold((0, 0), |(count, bytes), tracked| {
+                (count + 1, bytes + tracked.bytes)
+            });
         if self.trace {
             eprintln!(
-                "[d3d9-async] frame epoch={epoch} frame={frame} queued={queued} compiling={compiling} failed={failed} recipe_bytes_estimate={} queue_full={} memory_full={}",
+                "[d3d9-async] frame epoch={epoch} frame={frame} queued={queued} compiling={compiling} failed={failed} failed_bytes_estimate={failed_bytes} recipe_bytes_estimate={} queue_full={} memory_full={}",
                 self.bytes, self.queue_full, self.memory_full
             );
         }
@@ -215,7 +219,6 @@ impl Compiler {
                         .filter(|error| error.kind == crate::RenderErrorKind::OutOfMemory)
                         .cloned();
                     if let Some(mut tracked) = self.entries.remove(&key) {
-                        self.bytes -= tracked.bytes;
                         if self.trace {
                             eprintln!(
                                 "[d3d9-async] published epoch={epoch} recipe={:016x} frame={frame} requested_frame={} ok={} elapsed_ms={:.3} fallback_frames={} fallback_draws={}",
@@ -228,10 +231,21 @@ impl Compiler {
                             );
                         }
                         match result {
-                            Ok(compiled) => ready.push((recipe, compiled)),
-                            Err(error) => {
+                            Ok(compiled) => {
+                                self.bytes -= tracked.bytes;
+                                ready.push((recipe, compiled));
+                            }
+                            Err(mut error) => {
+                                if error.cause.len() > FAILURE_BYTES {
+                                    let mut end = FAILURE_BYTES - 3;
+                                    while !error.cause.is_char_boundary(end) {
+                                        end -= 1;
+                                    }
+                                    error.cause.truncate(end);
+                                    error.cause.push_str("...");
+                                }
+                                error.cause.shrink_to_fit();
                                 tracked.entry = Entry::Failed(error);
-                                tracked.bytes = 0;
                                 self.entries.insert(key, tracked);
                             }
                         }
@@ -265,7 +279,8 @@ impl Compiler {
         }
         let bytes = recipe.retained_bytes() * 2
             + std::mem::size_of::<Tracked>()
-            + std::mem::size_of::<PipelineRecipeKey>();
+            + std::mem::size_of::<PipelineRecipeKey>()
+            + FAILURE_BYTES;
         if bytes > self.limits.recipe_bytes.saturating_sub(self.bytes) {
             self.memory_full += 1;
             return Ok(());

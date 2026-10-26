@@ -1,6 +1,8 @@
+use super::bindings::uniform_entry;
 use super::interface::{InterfaceKey, LayoutAttribute};
 use super::pipeline::{PipelineDescriptor, PreparedPipeline};
 use crate::RenderError;
+use crate::shader::interface::*;
 use crate::shader::uber::*;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -16,6 +18,12 @@ pub(crate) struct FamilyKey {
     constants: [u32; 2],
     pub(crate) interface: InterfaceKey,
     pub(crate) descriptor: PipelineDescriptor,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Manifest {
+    Comparison,
+    Production,
 }
 
 pub(crate) struct PreparedInterpreter {
@@ -34,39 +42,21 @@ pub(crate) struct PreparedFamily {
     pub(crate) pipeline: wgpu::RenderPipeline,
 }
 
-fn uniform(
-    binding: u32,
-    size: u64,
-    stage: wgpu::ShaderStages,
-    dynamic: bool,
-) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: stage,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: dynamic,
-            min_binding_size: wgpu::BufferSize::new(size),
-        },
-        count: None,
-    }
-}
-
 impl FamilyKey {
-    pub(crate) fn mvp() -> Self {
+    fn baseline() -> Self {
         let vertex = wgpu::ShaderStages::VERTEX;
         let fragment = wgpu::ShaderStages::FRAGMENT;
         let mut bindings = vec![
-            uniform(0, u64::from(VERTEX_CONSTANTS) * 16, vertex, true),
-            uniform(1, 272, vertex, true),
-            uniform(2, u64::from(PIXEL_CONSTANTS) * 16, fragment, true),
-            uniform(3, 64, fragment, true),
-            uniform(PROGRAM_BINDINGS[0], PROGRAM_BYTES, vertex, false),
-            uniform(PROGRAM_BINDINGS[1], PROGRAM_BYTES, fragment, false),
+            uniform_entry(0, u64::from(VERTEX_CONSTANTS) * 16, vertex, true),
+            uniform_entry(1, VERTEX_PARAMETER_BYTES as u64, vertex, true),
+            uniform_entry(2, u64::from(PIXEL_CONSTANTS) * 16, fragment, true),
+            uniform_entry(3, INTERPRETER_PARAMETER_BYTES as u64, fragment, true),
+            uniform_entry(PROGRAM_BINDINGS[0], PROGRAM_BYTES, vertex, false),
+            uniform_entry(PROGRAM_BINDINGS[1], PROGRAM_BYTES, fragment, false),
         ];
         for slot in 0..TEXTURE_SLOTS {
             bindings.push(wgpu::BindGroupLayoutEntry {
-                binding: 4 + slot,
+                binding: TEXTURE_BINDING + slot,
                 visibility: fragment,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -80,7 +70,7 @@ impl FamilyKey {
                 count: None,
             });
             bindings.push(wgpu::BindGroupLayoutEntry {
-                binding: 20 + slot,
+                binding: SAMPLER_BINDING + slot,
                 visibility: fragment,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
@@ -138,6 +128,99 @@ impl FamilyKey {
                 },
             },
         }
+    }
+
+    fn manifest(manifest: Manifest) -> Vec<Self> {
+        let mut keys = vec![Self::baseline()];
+        if matches!(manifest, Manifest::Production) {
+            use wgpu::PrimitiveTopology::{TriangleList, TriangleStrip};
+            use wgpu::TextureFormat::{Bgra8Unorm, Rgba8Unorm};
+            let front = Some(wgpu::Face::Front);
+            let back = Some(wgpu::Face::Back);
+            let alpha = Some((
+                wgpu::BlendFactor::SrcAlpha,
+                wgpu::BlendFactor::OneMinusSrcAlpha,
+            ));
+            let add_alpha = Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One));
+            let add = Some((wgpu::BlendFactor::One, wgpu::BlendFactor::One));
+            let src_alpha = Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::Zero));
+            let read_always = Some((false, wgpu::CompareFunction::Always));
+            let read_less = Some((false, wgpu::CompareFunction::Less));
+            let read_lequal = Some((false, wgpu::CompareFunction::LessEqual));
+            let write_always = Some((true, wgpu::CompareFunction::Always));
+            let write_less = Some((true, wgpu::CompareFunction::Less));
+            let write_lequal = Some((true, wgpu::CompareFunction::LessEqual));
+            for (format, cull_mode, blend, depth, topology) in [
+                (Bgra8Unorm, None, add_alpha, read_less, TriangleList),
+                (Bgra8Unorm, None, add_alpha, read_always, TriangleList),
+                (Rgba8Unorm, None, alpha, write_less, TriangleStrip),
+                (Rgba8Unorm, None, alpha, read_always, TriangleList),
+                (Bgra8Unorm, front, None, None, TriangleList),
+                (Bgra8Unorm, front, None, read_always, TriangleList),
+                (Bgra8Unorm, front, None, write_lequal, TriangleList),
+                (Bgra8Unorm, None, add, read_always, TriangleList),
+                (Bgra8Unorm, front, add, read_always, TriangleList),
+                (Bgra8Unorm, None, alpha, read_always, TriangleList),
+                (Bgra8Unorm, front, alpha, read_always, TriangleList),
+                (Bgra8Unorm, front, alpha, write_lequal, TriangleList),
+                (Rgba8Unorm, front, None, read_always, TriangleList),
+                (Bgra8Unorm, front, None, write_less, TriangleList),
+                (Bgra8Unorm, None, None, write_less, TriangleList),
+                (Bgra8Unorm, back, None, write_less, TriangleList),
+                (Bgra8Unorm, None, None, None, TriangleList),
+                (Bgra8Unorm, None, alpha, None, TriangleList),
+                (Bgra8Unorm, front, add_alpha, None, TriangleList),
+                (Bgra8Unorm, front, alpha, None, TriangleList),
+                (Bgra8Unorm, None, alpha, None, TriangleStrip),
+                (Bgra8Unorm, back, alpha, read_less, TriangleList),
+                (Bgra8Unorm, None, None, None, TriangleStrip),
+                (Bgra8Unorm, back, add_alpha, read_less, TriangleList),
+                (Bgra8Unorm, None, alpha, write_less, TriangleList),
+                (Rgba8Unorm, front, alpha, read_always, TriangleList),
+                (Rgba8Unorm, front, None, write_lequal, TriangleList),
+                (Bgra8Unorm, front, alpha, write_less, TriangleList),
+                (Rgba8Unorm, None, add_alpha, read_less, TriangleList),
+                (Rgba8Unorm, front, alpha, write_always, TriangleList),
+                (Rgba8Unorm, front, None, write_less, TriangleList),
+                (Rgba8Unorm, back, alpha, read_less, TriangleList),
+                (Rgba8Unorm, front, add_alpha, read_always, TriangleList),
+                (Rgba8Unorm, None, add_alpha, read_always, TriangleList),
+                (Rgba8Unorm, None, alpha, read_less, TriangleList),
+                (Bgra8Unorm, front, alpha, read_lequal, TriangleList),
+                (Rgba8Unorm, front, alpha, write_lequal, TriangleList),
+                (Bgra8Unorm, None, alpha, read_lequal, TriangleList),
+                (Rgba8Unorm, front, alpha, read_lequal, TriangleList),
+                (Rgba8Unorm, None, alpha, read_lequal, TriangleList),
+                (Bgra8Unorm, None, alpha, read_less, TriangleStrip),
+                (Bgra8Unorm, front, src_alpha, None, TriangleList),
+            ] {
+                let mut key = keys[0].clone();
+                let target = key.descriptor.target.as_mut().unwrap();
+                target.format = format;
+                target.blend = blend.map(|(src_factor, dst_factor)| {
+                    let component = wgpu::BlendComponent {
+                        src_factor,
+                        dst_factor,
+                        operation: wgpu::BlendOperation::Add,
+                    };
+                    wgpu::BlendState {
+                        color: component,
+                        alpha: component,
+                    }
+                });
+                key.descriptor.primitive.cull_mode = cull_mode;
+                key.descriptor.primitive.topology = topology;
+                key.descriptor.primitive.strip_index_format = None;
+                key.descriptor.depth = depth.map(|(write, compare)| {
+                    let mut state = keys[0].descriptor.depth.clone().unwrap();
+                    state.depth_write_enabled = Some(write);
+                    state.depth_compare = Some(compare);
+                    state
+                });
+                keys.push(key);
+            }
+        }
+        keys
     }
 
     pub(crate) fn check_limits(&self, limits: &wgpu::Limits) -> Result<(), RenderError> {
@@ -221,10 +304,11 @@ impl PreparedInterpreter {
 
     pub(crate) fn new(
         device: &wgpu::Device,
-        expanded: bool,
+        manifest: Manifest,
         trace: bool,
     ) -> Result<Self, RenderError> {
-        let key = FamilyKey::mvp();
+        let keys = FamilyKey::manifest(manifest);
+        let key = &keys[0];
         key.check_limits(&device.limits())?;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("d3d9-interpreter"),
@@ -241,122 +325,6 @@ impl PreparedInterpreter {
                 module_started.elapsed().as_secs_f64() * 1000.0,
                 SOURCE.len()
             );
-        }
-        let mut keys = vec![key];
-        if expanded {
-            for compare in [wgpu::CompareFunction::Less, wgpu::CompareFunction::Always] {
-                let mut key = keys[0].clone();
-                let blend = key
-                    .descriptor
-                    .target
-                    .as_mut()
-                    .unwrap()
-                    .blend
-                    .as_mut()
-                    .unwrap();
-                blend.color.dst_factor = wgpu::BlendFactor::One;
-                blend.alpha.dst_factor = wgpu::BlendFactor::One;
-                key.descriptor.depth.as_mut().unwrap().depth_compare = Some(compare);
-                keys.push(key);
-            }
-            let mut key = keys[0].clone();
-            key.descriptor.target.as_mut().unwrap().format = wgpu::TextureFormat::Rgba8Unorm;
-            key.descriptor.primitive.topology = wgpu::PrimitiveTopology::TriangleStrip;
-            key.descriptor.primitive.strip_index_format = None;
-            key.descriptor.depth.as_mut().unwrap().depth_write_enabled = Some(true);
-            keys.push(key);
-            let mut key = keys[0].clone();
-            key.descriptor.target.as_mut().unwrap().format = wgpu::TextureFormat::Rgba8Unorm;
-            key.descriptor.depth.as_mut().unwrap().depth_compare =
-                Some(wgpu::CompareFunction::Always);
-            keys.push(key);
-            use wgpu::PrimitiveTopology::{TriangleList, TriangleStrip};
-            use wgpu::TextureFormat::{Bgra8Unorm, Rgba8Unorm};
-            let front = Some(wgpu::Face::Front);
-            let back = Some(wgpu::Face::Back);
-            let alpha = Some((
-                wgpu::BlendFactor::SrcAlpha,
-                wgpu::BlendFactor::OneMinusSrcAlpha,
-            ));
-            let add_alpha = Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::One));
-            let add = Some((wgpu::BlendFactor::One, wgpu::BlendFactor::One));
-            let src_alpha = Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::Zero));
-            let read_always = Some((false, wgpu::CompareFunction::Always));
-            let read_less = Some((false, wgpu::CompareFunction::Less));
-            let read_lequal = Some((false, wgpu::CompareFunction::LessEqual));
-            let write_always = Some((true, wgpu::CompareFunction::Always));
-            let write_less = Some((true, wgpu::CompareFunction::Less));
-            let write_lequal = Some((true, wgpu::CompareFunction::LessEqual));
-            for (format, cull_mode, blend, depth, topology) in [
-                (Bgra8Unorm, front, None, None, TriangleList),
-                (Bgra8Unorm, front, None, read_always, TriangleList),
-                (Bgra8Unorm, front, None, write_lequal, TriangleList),
-                (Bgra8Unorm, None, add, read_always, TriangleList),
-                (Bgra8Unorm, front, add, read_always, TriangleList),
-                (Bgra8Unorm, None, add_alpha, read_less, TriangleList),
-                (Bgra8Unorm, None, alpha, read_always, TriangleList),
-                (Bgra8Unorm, None, alpha, read_less, TriangleList),
-                (Bgra8Unorm, front, alpha, read_always, TriangleList),
-                (Bgra8Unorm, front, alpha, write_lequal, TriangleList),
-                (Rgba8Unorm, front, None, read_always, TriangleList),
-                (Bgra8Unorm, front, None, write_less, TriangleList),
-                (Bgra8Unorm, None, None, write_less, TriangleList),
-                (Bgra8Unorm, back, None, write_less, TriangleList),
-                (Bgra8Unorm, None, None, None, TriangleList),
-                (Bgra8Unorm, None, alpha, None, TriangleList),
-                (Bgra8Unorm, front, add_alpha, None, TriangleList),
-                (Bgra8Unorm, front, alpha, None, TriangleList),
-                (Bgra8Unorm, None, alpha, None, TriangleStrip),
-                (Rgba8Unorm, None, alpha, read_always, TriangleList),
-                (Bgra8Unorm, back, alpha, read_less, TriangleList),
-                (Bgra8Unorm, None, None, None, TriangleStrip),
-                (Bgra8Unorm, back, add_alpha, read_less, TriangleList),
-                (Bgra8Unorm, None, alpha, write_less, TriangleList),
-                (Rgba8Unorm, front, alpha, read_always, TriangleList),
-                (Rgba8Unorm, front, None, write_lequal, TriangleList),
-                (Bgra8Unorm, front, alpha, write_less, TriangleList),
-                (Rgba8Unorm, None, add_alpha, read_less, TriangleList),
-                (Rgba8Unorm, front, alpha, write_always, TriangleList),
-                (Rgba8Unorm, front, None, write_less, TriangleList),
-                (Rgba8Unorm, back, alpha, read_less, TriangleList),
-                (Rgba8Unorm, front, add_alpha, read_always, TriangleList),
-                (Rgba8Unorm, None, add_alpha, read_always, TriangleList),
-                (Rgba8Unorm, None, alpha, read_less, TriangleList),
-                (Bgra8Unorm, front, alpha, read_lequal, TriangleList),
-                (Rgba8Unorm, front, alpha, write_lequal, TriangleList),
-                (Bgra8Unorm, None, alpha, read_lequal, TriangleList),
-                (Rgba8Unorm, front, alpha, read_lequal, TriangleList),
-                (Rgba8Unorm, None, alpha, read_lequal, TriangleList),
-                (Bgra8Unorm, None, alpha, read_less, TriangleStrip),
-                (Bgra8Unorm, front, src_alpha, None, TriangleList),
-            ] {
-                let mut key = keys[0].clone();
-                let target = key.descriptor.target.as_mut().unwrap();
-                target.format = format;
-                target.blend = blend.map(|(src_factor, dst_factor)| {
-                    let component = wgpu::BlendComponent {
-                        src_factor,
-                        dst_factor,
-                        operation: wgpu::BlendOperation::Add,
-                    };
-                    wgpu::BlendState {
-                        color: component,
-                        alpha: component,
-                    }
-                });
-                key.descriptor.primitive.cull_mode = cull_mode;
-                key.descriptor.primitive.topology = topology;
-                key.descriptor.primitive.strip_index_format = None;
-                key.descriptor.depth = depth.map(|(write, compare)| {
-                    let mut state = keys[0].descriptor.depth.clone().unwrap();
-                    state.depth_write_enabled = Some(write);
-                    state.depth_compare = Some(compare);
-                    state
-                });
-                if !keys.contains(&key) {
-                    keys.push(key);
-                }
-            }
         }
         let families = keys
             .into_iter()

@@ -103,7 +103,8 @@ pub(super) fn capture_mvp(
     }
     let description = draw
         .pipelines
-        .values()
+        .iter()
+        .map(|(_, value)| value)
         .find(|(p, _)| p.pipeline == *pipeline)
         .map(|(_, recipe)| {
             (

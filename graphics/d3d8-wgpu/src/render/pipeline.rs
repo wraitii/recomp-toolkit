@@ -1,6 +1,6 @@
+use super::cache::LruCache;
 use super::interface::{InterfaceKey, VertexLayouts};
 use crate::RenderError;
-use crate::fast_map::FastMap;
 use crate::shader::recipe::{ShaderRecipe, ShaderRecipeKey};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -116,38 +116,28 @@ impl PreparedPipeline {
 
 #[derive(Default)]
 pub(crate) struct CompilationCache {
-    modules: FastMap<ShaderRecipeKey, wgpu::ShaderModule>,
-    layouts: FastMap<Arc<[wgpu::BindGroupLayoutEntry]>, wgpu::BindGroupLayout>,
+    modules: LruCache<ShaderRecipeKey, wgpu::ShaderModule, 512, { 32 << 20 }>,
+    layouts: LruCache<Arc<[wgpu::BindGroupLayoutEntry]>, wgpu::BindGroupLayout, 128>,
 }
 
 impl CompilationCache {
     fn retain(&mut self, recipe: &PipelineRecipe, compiled: &CompiledPipeline) {
         for (shader, module) in recipe.shaders.iter().zip(&compiled.modules) {
             let key = shader.key();
-            if self.modules.contains_key(&key) {
-                continue;
+            let evicted = self
+                .modules
+                .insert(key, module.clone(), shader.retained_bytes());
+            if evicted != 0 {
+                eprintln!(
+                    "[d3d9-cache] WARNING eviction cache=worker-shader-modules evicted={evicted} limit_entries=512 limit_bytes=33554432; may require recompilation"
+                );
             }
-            if self.modules.len() >= 512 {
-                if let Some(key) = self.modules.keys().next().cloned() {
-                    self.modules.remove(&key);
-                    eprintln!(
-                        "[d3d9-cache] WARNING eviction cache=worker-shader-modules evicted=1 limit_entries=512; may require recompilation"
-                    );
-                }
-            }
-            self.modules.insert(key, module.clone());
         }
-        if !self.layouts.contains_key(&recipe.interface.bindings) {
-            if self.layouts.len() >= 128 {
-                if let Some(key) = self.layouts.keys().next().cloned() {
-                    self.layouts.remove(&key);
-                }
-            }
-            self.layouts.insert(
-                Arc::clone(&recipe.interface.bindings),
-                compiled.layout.clone(),
-            );
-        }
+        self.layouts.insert(
+            Arc::clone(&recipe.interface.bindings),
+            compiled.layout.clone(),
+            std::mem::size_of_val(recipe.interface.bindings.as_ref()),
+        );
     }
 }
 

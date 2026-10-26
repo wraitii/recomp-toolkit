@@ -93,6 +93,17 @@ impl Program {
         self.sampled_slots
     }
 
+    pub(crate) fn samples(&self, slot: u32) -> bool {
+        self.sampled_slots & 1u16.checked_shl(slot).unwrap_or(0) != 0
+    }
+
+    pub(crate) fn sampled_samplers(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.samplers
+            .iter()
+            .filter(|(slot, _)| self.samples(**slot))
+            .map(|(&slot, &kind)| (slot, kind))
+    }
+
     pub fn const_limit(&self) -> u32 {
         if self.relative {
             if self.pixel { 32 } else { 256 }

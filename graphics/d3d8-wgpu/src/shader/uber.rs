@@ -86,9 +86,8 @@ impl std::fmt::Display for Exclusion {
 fn sampler_mapping(p: &Program) -> Vec<(u32, u32)> {
     let mut next_2d = 0;
     let mut next_cube = TEXTURES_2D;
-    p.samplers
-        .iter()
-        .map(|(&guest, &kind)| {
+    p.sampled_samplers()
+        .map(|(guest, kind)| {
             let physical = if kind == S_CUBE {
                 let slot = next_cube;
                 next_cube += 1;
@@ -105,17 +104,20 @@ fn sampler_mapping(p: &Program) -> Vec<(u32, u32)> {
 
 pub(crate) fn interface_candidate(p: &Program) -> bool {
     if p.pixel {
-        (p.samplers.keys().all(|&slot| slot < 16)
-            && p.samplers.values().all(|&kind| matches!(kind, 2 | S_CUBE))
-            && p.samplers.values().filter(|&&kind| kind == 2).count() <= TEXTURES_2D as usize
-            && p.samplers.values().filter(|&&kind| kind == S_CUBE).count() <= 2)
+        (p.sampled_samplers()
+            .all(|(_, kind)| matches!(kind, 2 | S_CUBE))
+            && p.sampled_samplers().filter(|&(_, kind)| kind == 2).count() <= TEXTURES_2D as usize
+            && p.sampled_samplers()
+                .filter(|&(_, kind)| kind == S_CUBE)
+                .count()
+                <= 2)
             && p.inputs.iter().all(|d| match d.ty {
                 R_INPUT => d.index < 2,
                 R_ADDR => d.index < TEXTURE_COORDINATES,
                 _ => false,
             })
     } else {
-        p.samplers.is_empty()
+        p.sampled_slots() == 0
             && !p.inputs.is_empty()
             && p.inputs.len() <= VERTEX_INPUTS as usize
             && (0..p.inputs.len() as u32)
@@ -290,6 +292,7 @@ pub(crate) fn lower(p: &Program, original: ProgramKey) -> Result<EncodedProgram,
                     if p.pixel
                         && inst.op == OP_TEX
                         && operand == 1
+                        && s.index < 16
                         && p.samplers.contains_key(&s.index)
                         && (inst.ctrl == 0 || p.samplers.get(&s.index) == Some(&2)) =>
                 {

@@ -784,11 +784,11 @@ impl D3d9State {
     fn track(&mut self, slot: u64, old: u32, new: u32) {
         if old != new {
             self.pipeline_fingerprint ^= fingerprint_word(slot, old) ^ fingerprint_word(slot, new);
-            if slot < FP_SAMPLER
-                || matches!(slot, FP_VERTEX_SHADER | FP_PIXEL_SHADER)
-                || ((FP_TEXTURE..FP_TEXTURE + MAX_SAMPLERS as u64).contains(&slot)
-                    && (old == 0) != (new == 0))
-            {
+            if matches!(slot,
+                7 | 8 | 9 | 14 | 19 | 20 | 22 | 23 | 27 | 28 | 35
+                | 52..=56 | 58 | 59 | 152 | 162 | 168 | 171 | 175
+                | 185..=189 | 195 | 206..=209 | FP_VERTEX_SHADER | FP_PIXEL_SHADER
+            ) {
                 self.selection_revision += 1;
             }
         }

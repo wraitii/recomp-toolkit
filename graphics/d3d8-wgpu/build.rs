@@ -3,6 +3,8 @@ use std::path::Path;
 #[allow(dead_code)]
 #[path = "src/shader/opcodes.rs"]
 mod opcodes;
+#[path = "src/shader/interface.rs"]
+mod shader_interface;
 #[path = "src/shader/uber/abi.rs"]
 mod uber_abi;
 #[path = "src/shader/uber/source.rs"]
@@ -27,8 +29,8 @@ fn interpreter_source() {
         ("Instruction", (uber_abi::INSTRUCTION_WORDS * 4) as u64),
         ("Definition", 32),
         ("VIn", uber_abi::VERTEX_STRIDE),
-        ("VSP", 272),
-        ("PSP", 64),
+        ("VSP", shader_interface::VERTEX_PARAMETER_BYTES as u64),
+        ("PSP", shader_interface::INTERPRETER_PARAMETER_BYTES as u64),
     ] {
         let (handle, _) = module
             .types
@@ -85,7 +87,7 @@ fn interpreter_source() {
             resources.resources.insert(
                 naga::ResourceBinding {
                     group: 0,
-                    binding: 4 + slot,
+                    binding: shader_interface::TEXTURE_BINDING + slot,
                 },
                 naga::back::msl::BindTarget {
                     texture: Some(slot as u8),
@@ -95,7 +97,7 @@ fn interpreter_source() {
             resources.resources.insert(
                 naga::ResourceBinding {
                     group: 0,
-                    binding: 20 + slot,
+                    binding: shader_interface::SAMPLER_BINDING + slot,
                 },
                 naga::back::msl::BindTarget {
                     sampler: Some(naga::back::msl::BindSamplerTarget::Resource(slot as u8)),

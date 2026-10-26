@@ -1,3 +1,4 @@
+use super::interface::{SAMPLER_BINDING, TEXTURE_BINDING};
 use crate::RenderError;
 use crate::shader::program::*;
 use std::collections::BTreeSet;
@@ -20,9 +21,6 @@ fn d9_lit(a: vec4<f32>) -> vec4<f32> { var o = vec4<f32>(1.0, max(a.x, 0.0), 0.0
 fn d9_round(v: vec4<f32>) -> vec4<f32> { return sign(v) * floor(abs(v) + 0.5); }
 fn d9_alpha(v: vec4<f32>) -> vec4<f32> { return vec4<f32>(0.0, 0.0, 0.0, v.r); }
 fn d9_shadow(t: texture_depth_2d, sm: sampler_comparison, c: vec4<f32>) -> vec4<f32> { let r = textureSampleCompareLevel(t, sm, c.xy, clamp(c.z, 0.0, 1.0)); return vec4<f32>(r, r, r, 1.0); }
-struct VSP { halfpix: vec4<f32>, ascale: array<vec4<f32>, 16> }
-struct PSP { alpha_ref: f32, alpha_func: i32, fog_mode: i32, pad0: i32, fog_color: vec4<f32>, fog_start: f32, fog_end: f32, fog_density: f32, pad1: f32 }
-struct V2F { @builtin(position) pos: vec4<f32>, @location(0) d0: vec4<f32>, @location(1) d1: vec4<f32>, @location(2) t0: vec4<f32>, @location(3) t1: vec4<f32>, @location(4) t2: vec4<f32>, @location(5) t3: vec4<f32>, @location(6) t4: vec4<f32>, @location(7) t5: vec4<f32>, @location(8) t6: vec4<f32>, @location(9) t7: vec4<f32>, @location(10) fog: f32, @location(11) fogz: f32 }
 "#;
 
 const COMP: &[u8; 4] = b"xyzw";
@@ -809,10 +807,13 @@ impl<'a> Gen<'a> {
             } else {
                 "sampler"
             };
-            s += &format!("@group(0) @binding({}) var tx{stage}: {ty};\n", 4 + stage);
+            s += &format!(
+                "@group(0) @binding({}) var tx{stage}: {ty};\n",
+                TEXTURE_BINDING + stage
+            );
             s += &format!(
                 "@group(0) @binding({}) var sm{stage}: {sampler};\n",
-                20 + stage
+                SAMPLER_BINDING + stage
             );
         }
         s += "@fragment\nfn ps_main(vin: V2F) -> @location(0) vec4<f32> {\n";
@@ -853,6 +854,9 @@ impl<'a> Gen<'a> {
 
     fn compose(&mut self) -> String {
         let mut s = String::from(PRELUDE);
+        s += super::interface::VERTEX_PARAMETERS;
+        s += &super::interface::pixel_parameters(false);
+        s += super::interface::VARYINGS;
         s += include_str!("arithmetic.wgsl");
         if self.p.pixel {
             s += &self.compose_pixel();

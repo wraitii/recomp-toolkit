@@ -181,21 +181,28 @@ residual reasons. Other backends reject hybrid pending backend acceptance.
 Unknown modes fail at
 initialization. See [SHADERS.md](SHADERS.md) for exact coverage and bindings.
 
-The worker admits 32 waiting recipes, charges at most 8 MiB of estimated retained
-recipe data while work is pending. Completion releases that charge and moves ready
-pipelines into the regular 512-entry renderer cache shared with synchronous
-specialization. Saturation keeps covered draws interpreted; failed jobs retain their
-diagnostic until reset rather than retrying. OOM remains a renderer error and
+The worker admits 32 waiting recipes with an 8 MiB budget for estimated retained
+recipe data and failure records. Successful completion releases that charge;
+failed jobs keep their charge and a bounded diagnostic until reset, without retry.
+Saturation keeps covered draws interpreted. OOM remains a renderer error and
 physical device loss uses the existing loss path. Reset retires the worker's
 private completion channel without joining compilation, so old results cannot
-enter a new epoch. `[d3d9-async]` logs queue/compile/publication
-timings, fallback residence, saturation, failures, epochs and residual counts.
+enter a new epoch. `[d3d9-async]` logs queue/compile/publication timings, fallback
+residence, saturation, failures, epochs and residual counts.
+
+Completed pipelines share a 512-entry, 32 MiB estimated recipe cache with
+synchronous specialization. Shader variants and module caches each have the same
+limits; worker binding layouts retain up to 128 entries. Recipe preparation and
+interpreter program uploads each have a separate 512-entry, 8 MiB cache. These
+caches evict the least recently accessed entry and refresh recency on hits.
+Program upload charges include GPU buffer bytes and retained original bytecode.
+Pending draws and draw memos keep their own resource references across eviction;
+cache limits exclude those references, opaque driver allocations and temporary
+compiler memory. These are retention limits, not performance acceptance budgets.
 Routine preparation, compilation, upload and frame logs require
 `RECOMP_D3D9_TRACE_PIPELINES=1`; startup mode selection and compilation failures
 remain visible by default, as do evictions from caches that can require
-recompilation. The worker reuses up to 512 shader modules and 128 binding layouts
-within its device epoch. Recipe accounting excludes opaque driver allocations and temporary compiler
-memory; these limits are not performance acceptance budgets.
+recompilation.
 
 Add `RECOMP_D3D9_UBER_TINT=1` to mix 15% red into interpreted fragment results
 after raster output processing, preserving alpha. The tint is a diagnostic to

@@ -50,14 +50,15 @@ The finite manifest is in `src/render/interpreter.rs`; other combinations fall b
 
 All share one module, layout and program allocations. Existing input conversion,
 half-pixel correction, raster output processing and sampler state are reused;
-opaque texture alpha is a per-binding bit in the per-draw flags. Declared guest
+opaque texture alpha is a per-binding bit in the per-draw flags. Sampled guest
 sampler slots s0–15 map deterministically to physical 2D slots 0–4 (ascending guest
-slot order) and cube slots 5–6. Bound resources must match those dimensions and be
-filterable. Unbound declared textures return (0, 0, 0, 1), matching specialization
+slot order) and cube slots 5–6. Bound sampled resources must match those dimensions
+and be filterable. Unbound declared textures return (0, 0, 0, 1), matching specialization
 and [Wine’s D3D9 conformance evidence](https://www.winehq.org/pipermail/wine-devel/2019-July/148434.html).
 The third texture-flags word holds a per-draw physical-slot mask that skips sampling; the specialized handoff omits those
 resource bindings. Unused and unbound bindings receive
-private 2D/cube views and samplers. Ready hybrid specializations retain guest
+private 2D/cube views and samplers. Unused declarations consume no mapped slots,
+coverage checks or specialized bindings. Ready hybrid specializations retain guest
 sampler bindings and use native vertex fetch where supported, otherwise the
 existing compact packer. Integer/bool banks, vertex textures, biased sampling,
 shader depth output and MRT have no coverage. Stencil writes remain disabled.
