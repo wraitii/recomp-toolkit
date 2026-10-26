@@ -59,7 +59,7 @@ pub fn prepare_with_publications(
     cg: &rk_ir::CgFunction,
     opts: &PrepareOptions,
 ) -> rk_core::Result<(Ssa, Option<BTreeMap<ValueId, Vec<StateKey>>>)> {
-    prepare_using(cg, opts, true, None)
+    prepare_using(cg, opts, None)
 }
 
 pub fn prepare_with_stack_dump(
@@ -67,51 +67,12 @@ pub fn prepare_with_stack_dump(
     opts: &PrepareOptions,
     out: &mut impl std::io::Write,
 ) -> rk_core::Result<Ssa> {
-    prepare_using(cg, opts, true, Some(out)).map(|(ssa, _)| ssa)
-}
-
-struct NoCleanup<'a>(&'a dyn CallFacts);
-
-impl CallFacts for NoCleanup<'_> {
-    fn readonly_memory(&self, site: rk_core::Addr, target: Option<rk_core::Addr>) -> bool {
-        self.0.readonly_memory(site, target)
-    }
-    fn checkpoints(&self, site: rk_core::Addr, target: Option<rk_core::Addr>) -> Option<u32> {
-        self.0.checkpoints(site, target)
-    }
-    fn call(&self, site: rk_core::Addr, target: Option<rk_core::Addr>) -> crate::CallEffect {
-        self.0.call(site, target)
-    }
-    fn cleanup(&self, _: rk_core::Addr, _: Option<rk_core::Addr>) -> Option<i32> {
-        None
-    }
-    fn stack(
-        &self,
-        site: rk_core::Addr,
-        target: Option<rk_core::Addr>,
-    ) -> Option<&crate::StackEffect> {
-        self.0.stack(site, target)
-    }
-    fn memory(
-        &self,
-        site: rk_core::Addr,
-        target: Option<rk_core::Addr>,
-    ) -> Option<&rk_core::memory::Effects> {
-        self.0.memory(site, target)
-    }
-    fn borrowed_stack(
-        &self,
-        site: rk_core::Addr,
-        target: Option<rk_core::Addr>,
-    ) -> Option<&crate::BorrowedStack> {
-        self.0.borrowed_stack(site, target)
-    }
+    prepare_using(cg, opts, Some(out)).map(|(ssa, _)| ssa)
 }
 
 fn prepare_using(
     cg: &rk_ir::CgFunction,
     opts: &PrepareOptions,
-    stack_cleanups: bool,
     mut trace: Option<&mut dyn std::io::Write>,
 ) -> rk_core::Result<(Ssa, Option<BTreeMap<ValueId, Vec<StateKey>>>)> {
     let build_options = BuildOptions {
@@ -134,7 +95,7 @@ fn prepare_using(
     if let Some(out) = trace.as_mut() {
         writeln!(
             out,
-            "before memory passes cleanup-inference={stack_cleanups} retirement={}",
+            "before memory passes retirement={}",
             opts.retire_reused_stack
         )
         .and_then(|_| crate::memory::dump_stack(&ssa, opts.call_facts, *out))
@@ -153,31 +114,11 @@ fn prepare_using(
     if let Some(out) = trace.as_mut() {
         writeln!(
             out,
-            "after memory passes cleanup-inference={stack_cleanups} retirement={}",
+            "after memory passes retirement={}",
             opts.retire_reused_stack
         )
         .and_then(|_| crate::memory::dump_stack(&ssa, opts.call_facts, *out))
         .map_err(|error| rk_core::Error::io("stack dump", error))?;
-    }
-    if stack_cleanups
-        && opts.policy != Policy::Conservative
-        && !ssa.cleanup_used
-        && ssa
-            .blocks
-            .iter()
-            .flat_map(|block| &block.ops)
-            .any(|&id| matches!(ssa.value(id).op, Op::Call { .. } | Op::CallInd))
-    {
-        let facts = NoCleanup(opts.call_facts);
-        return prepare_using(
-            cg,
-            &PrepareOptions {
-                call_facts: &facts,
-                ..*opts
-            },
-            false,
-            trace,
-        );
     }
     crate::flags::build_joins(&mut ssa);
     crate::coalesce::coalesce(&mut ssa, opts.coalesce_roots);

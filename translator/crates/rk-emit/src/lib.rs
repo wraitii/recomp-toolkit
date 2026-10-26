@@ -730,7 +730,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn kept_expr(&self, stack_pointer: bool, loaded: &str, old: &str) -> String {
-        if stack_pointer && !self.s.stack_guards.is_empty() {
+        if stack_pointer {
             loaded.to_string()
         } else if self.ctx.call_hooks {
             keep_expr(loaded, old)

@@ -33,27 +33,19 @@ impl CallEffect {
 }
 
 pub trait CallFacts: Sync {
-    fn readonly_memory(&self, _site: Addr, _target: Option<Addr>) -> bool {
-        false
-    }
-    fn checkpoints(&self, site: Addr, target: Option<Addr>) -> Option<u32> {
-        self.borrowed_stack(site, target)?.checkpoints
-    }
-    fn cleanup(&self, site: Addr, target: Option<Addr>) -> Option<i32> {
-        self.stack(site, target).map(|effect| effect.cleanup)
-    }
-    fn borrowed_stack(&self, _site: Addr, _target: Option<Addr>) -> Option<&BorrowedStack> {
-        None
-    }
-    fn memory(&self, _site: Addr, _target: Option<Addr>) -> Option<&rk_core::memory::Effects> {
-        None
-    }
-
     fn call(&self, site: Addr, target: Option<Addr>) -> CallEffect;
-
-    fn stack(&self, _site: Addr, _target: Option<Addr>) -> Option<&StackEffect> {
-        None
+    fn summary(&self, _site: Addr, _target: Option<Addr>) -> CallSummary<'_> {
+        CallSummary::default()
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CallSummary<'a> {
+    pub cleanup: Option<i32>,
+    pub effects: Option<std::borrow::Cow<'a, rk_core::memory::Effects>>,
+    pub borrowed: Option<&'a BorrowedStack>,
+    pub checkpoints: Option<u32>,
+    pub readonly: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -71,12 +63,6 @@ impl BorrowedStack {
             .and_modify(|old| *old = (*old).min(offset))
             .or_insert(offset);
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct StackEffect {
-    pub cleanup: i32,
-    pub writes: Vec<(i32, u32)>,
 }
 
 pub struct ConservativeCallFacts;
@@ -600,7 +586,6 @@ impl<'a> Builder<'a> {
             value_addr: self.value_addr,
             stack_states: self.stack_states,
             stack_guards: BTreeMap::new(),
-            cleanup_used: false,
             stack_calls: self.lazy_stack_writes,
             memory_partitioned: false,
             assume_private_stack: false,
@@ -1200,7 +1185,12 @@ impl<'a> Builder<'a> {
             _ => None,
         };
         let cleanup = (self.opts.policy != Policy::Conservative)
-            .then(|| self.opts.call_facts.cleanup(self.current_addr, target))
+            .then(|| {
+                self.opts
+                    .call_facts
+                    .summary(self.current_addr, target)
+                    .cleanup
+            })
             .flatten();
         let esp = Registers::get().require("ESP");
         let next_esp = if let Some(cleanup) = cleanup {

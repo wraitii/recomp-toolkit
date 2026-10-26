@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rk_core::contract::Fields;
+use rk_core::contract::{Field, Fields};
 use rk_core::ir::Policy;
 use rk_core::{Addr, Diagnostic, LookupSet, Result};
 use rk_ir::{CgFunction, StateKey};
@@ -244,23 +244,29 @@ fn reduce_publications(
                 .map(|(_, value)| *value)
         })
         .collect();
-    let mut reloads: BTreeMap<ValueId, Vec<(usize, ValueId)>> = BTreeMap::new();
+    let mut reloads: BTreeMap<ValueId, Vec<(usize, ValueId, bool)>> = BTreeMap::new();
     for (index, item) in s.values.iter().enumerate() {
         let value = index as ValueId;
         let (source, lane) = match item.op {
-            rk_ir::Op::StateReload(_) => (value, None),
+            rk_ir::Op::StateReload(_) | rk_ir::Op::StateKeep(_) => (value, None),
             rk_ir::Op::Byte(lane) => (s.args(value)[0], Some(lane)),
             _ => continue,
         };
-        let rk_ir::Op::StateReload(loaded) = s.value(source).op else {
-            continue;
+        let (loaded, kept) = match s.value(source).op {
+            rk_ir::Op::StateReload(loaded) => (loaded, false),
+            rk_ir::Op::StateKeep(loaded)
+                if rk_ir::field_lane(loaded).is_some_and(|(field, _)| field == Field::Esp) =>
+            {
+                (loaded, true)
+            }
+            _ => continue,
         };
         for (index, key) in s.keys.iter().enumerate() {
             if lane.map_or(loaded == *key, |lane| same_word_lane(loaded, *key, lane)) {
                 reloads
                     .entry(s.args(source)[0])
                     .or_default()
-                    .push((index, value));
+                    .push((index, value, kept));
             }
         }
     }
@@ -376,7 +382,7 @@ fn walk_block(
     call_facts: &dyn CallFacts,
     call_hooks: bool,
     key_index: &rk_core::Lookup<StateKey, usize>,
-    reloads: &BTreeMap<ValueId, Vec<(usize, ValueId)>>,
+    reloads: &BTreeMap<ValueId, Vec<(usize, ValueId, bool)>>,
     resident: &mut [Option<ValueId>],
     mut publish: Option<&mut BTreeMap<ValueId, Vec<StateKey>>>,
     mut guard: Option<&mut BTreeMap<ValueId, Vec<StateKey>>>,
@@ -460,6 +466,16 @@ fn walk_block(
                 }
             }
         }
+        let homes: Vec<bool> = reloads
+            .get(&value)
+            .into_iter()
+            .flatten()
+            .map(|&(index, _, kept)| {
+                !kept
+                    || resident[index].is_some()
+                        && resident[index] == current.get(&s.keys[index]).copied()
+            })
+            .collect();
         let writes = boundary_writes(s, call_facts, value);
         if writes != Fields::NONE {
             for (index, key) in s.keys.iter().enumerate() {
@@ -468,9 +484,13 @@ fn walk_block(
                 }
             }
         }
-        if let Some(values) = reloads.get(&value) {
-            for &(index, loaded) in values {
-                resident[index] = Some(loaded);
+        for kept in [false, true] {
+            for (&(index, loaded, keep), &home) in
+                reloads.get(&value).into_iter().flatten().zip(&homes)
+            {
+                if keep == kept && home {
+                    resident[index] = Some(loaded);
+                }
             }
         }
     }

@@ -57,7 +57,7 @@ pub fn calls(
         .filter_map(|(&addr, result)| {
             let fir = result.as_ref().ok()?;
             let summary = global.returns.functions.get(&addr)?;
-            let checkpoints = facts.checkpoints(0, Some(addr))?;
+            let checkpoints = facts.summary(0, Some(addr)).checkpoints?;
             (summary.returns == ReturnEffect::Exact
                 && summary.effect.cleanup >= 0
                 && summary

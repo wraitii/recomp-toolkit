@@ -24,7 +24,7 @@ use rk_core::settings::CallEffect as ConfiguredEffect;
 use rk_core::settings::Settings;
 use rk_core::{Addr, Result};
 use rk_frontend::Analysis;
-use rk_ssa::{CallEffect, CallFacts};
+use rk_ssa::{CallEffect, CallFacts, CallSummary};
 
 pub use modes::{ModeCondition, ReturnSummary, X87ModeFacts, CW_MASK, CW_PC_RC};
 pub use private::{specialize, PrivateAnalysis, PrivateLayout};
@@ -51,42 +51,31 @@ pub(crate) fn call_effect(contract: Contract) -> CallEffect {
 }
 
 impl CallFacts for ContractCallFacts<'_> {
-    fn readonly_memory(&self, site: Addr, target: Option<Addr>) -> bool {
-        let Some(returns) = self.returns else {
-            return false;
-        };
-        match target {
+    fn summary(&self, site: Addr, target: Option<Addr>) -> CallSummary<'_> {
+        let returns = self.returns.and_then(|returns| match target {
             Some(target) => returns.functions.get(&target),
             None => returns.sites.get(&site),
-        }
-        .is_some_and(|summary| {
-            !summary.writes_other
-                && summary.effect.writes.is_empty()
-                && !summary.mapped_noreturn
-                && summary.returns == stack::ReturnEffect::Exact
-        })
-    }
-    fn checkpoints(&self, site: Addr, target: Option<Addr>) -> Option<u32> {
-        let borrows = self.borrows?;
-        match target {
-            Some(target) => borrows.checkpoints.get(&target).copied(),
-            None => borrows.sites.get(&site)?.checkpoints,
-        }
-    }
-    fn cleanup(&self, site: Addr, target: Option<Addr>) -> Option<i32> {
-        let returns = self.returns?;
-        match target {
-            Some(target) => returns.functions.get(&target),
-            None => returns.sites.get(&site),
-        }
-        .map(|summary| summary.effect.cleanup)
-        .or_else(|| target.and_then(|target| returns.cleanups.get(&target).copied()))
-    }
-    fn borrowed_stack(&self, site: Addr, target: Option<Addr>) -> Option<&rk_ssa::BorrowedStack> {
-        let borrows = self.borrows?;
-        match target {
-            Some(target) => borrows.functions.get(&target),
-            None => borrows.sites.get(&site),
+        });
+        let borrows = self.borrows;
+        CallSummary {
+            cleanup: returns
+                .map(|summary| summary.effect.cleanup)
+                .or_else(|| target.and_then(|target| self.returns?.cleanups.get(&target).copied())),
+            effects: None,
+            borrowed: borrows.and_then(|borrows| match target {
+                Some(target) => borrows.functions.get(&target),
+                None => borrows.sites.get(&site),
+            }),
+            checkpoints: borrows.and_then(|borrows| match target {
+                Some(target) => borrows.checkpoints.get(&target).copied(),
+                None => borrows.sites.get(&site)?.checkpoints,
+            }),
+            readonly: returns.is_some_and(|summary| {
+                !summary.writes_other
+                    && summary.effect.writes.is_empty()
+                    && !summary.mapped_noreturn
+                    && summary.returns == stack::ReturnEffect::Exact
+            }),
         }
     }
     fn call(&self, site: Addr, target: Option<Addr>) -> CallEffect {

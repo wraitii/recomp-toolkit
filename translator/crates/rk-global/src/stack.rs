@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rk_core::contract::{Field, Fields};
 use rk_core::ir::{FunctionIr, Insn, OpCode, PcodeOp, Space, Varnode};
-use rk_core::memory::{Address, Base};
+use rk_core::memory::{Address, Base, Effects, Footprint, Range};
 use rk_core::program::Program;
 use rk_core::Addr;
 use rk_ir::Registers;
-use rk_ssa::StackEffect;
+use std::borrow::Cow;
 
 type Checked<T> = std::result::Result<T, &'static str>;
 
@@ -40,6 +40,12 @@ struct State {
 }
 
 #[derive(Clone, Debug)]
+pub struct StackEffect {
+    pub cleanup: i32,
+    pub writes: Vec<(i32, u32)>,
+}
+
+#[derive(Clone, Debug)]
 pub struct Summary {
     pub effect: StackEffect,
     pub reads: BTreeSet<(i32, u32)>,
@@ -69,20 +75,33 @@ pub struct CallFacts<'a> {
 }
 
 impl rk_ssa::CallFacts for CallFacts<'_> {
-    fn readonly_memory(&self, site: Addr, target: Option<Addr>) -> bool {
-        self.registers.readonly_memory(site, target)
-    }
-    fn cleanup(&self, site: Addr, target: Option<Addr>) -> Option<i32> {
-        self.summary(site, target)
-            .map(|summary| summary.effect.cleanup)
-            .or_else(|| self.registers.cleanup(site, target))
-    }
-    fn memory(&self, site: Addr, target: Option<Addr>) -> Option<&rk_core::memory::Effects> {
-        let effects = self.memory?;
-        match target {
+    fn summary(&self, site: Addr, target: Option<Addr>) -> rk_ssa::CallSummary<'_> {
+        let mut result = rk_ssa::CallSummary {
+            borrowed: None,
+            checkpoints: None,
+            ..self.registers.summary(site, target)
+        };
+        let summary = self.summary(site, target);
+        if let Some(summary) = summary {
+            result.cleanup = Some(summary.effect.cleanup);
+        }
+        let memory = self.memory.and_then(|effects| match target {
             Some(target) => effects.functions.get(&target),
             None => effects.sites.get(&site),
-        }
+        });
+        result.effects = memory.map(Cow::Borrowed).or_else(|| {
+            summary.map(|summary| {
+                let mut writes = Footprint::default();
+                for &(offset, size) in &summary.effect.writes {
+                    writes.insert(Range::new(Address::exact(Base::Frame, offset as u32), size));
+                }
+                Cow::Owned(Effects {
+                    reads: Footprint::unknown(),
+                    writes,
+                })
+            })
+        });
+        result
     }
 
     fn call(&self, site: Addr, target: Option<Addr>) -> rk_ssa::CallEffect {
@@ -96,10 +115,6 @@ impl rk_ssa::CallFacts for CallFacts<'_> {
             }
         }
         effect
-    }
-
-    fn stack(&self, site: Addr, target: Option<Addr>) -> Option<&StackEffect> {
-        self.summary(site, target).map(|summary| &summary.effect)
     }
 }
 

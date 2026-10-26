@@ -25,7 +25,7 @@ mod validate;
 pub use validate::validate;
 
 pub use build::{
-    build, BorrowedStack, BuildOptions, CallEffect, CallFacts, ConservativeCallFacts, StackEffect,
+    build, BorrowedStack, BuildOptions, CallEffect, CallFacts, CallSummary, ConservativeCallFacts,
     DEFAULT_VALUE_BUDGET,
 };
 pub use canonical::canonicalize;
@@ -146,7 +146,6 @@ pub struct Ssa {
     pub(crate) stack_states: BTreeMap<ValueId, [ValueId; 4]>,
     pub stack_guards: BTreeMap<ValueId, u32>,
     pub(crate) stack_calls: bool,
-    pub(crate) cleanup_used: bool,
     pub(crate) memory_partitioned: bool,
     pub(crate) assume_private_stack: bool,
     pub(crate) assume_stack_pointer_bases: bool,
@@ -245,6 +244,18 @@ impl Ssa {
             }
         }
         blocks
+    }
+
+    pub(crate) fn successors(&self) -> Vec<Vec<usize>> {
+        let mut result = vec![Vec::new(); self.blocks.len()];
+        for (block, item) in self.blocks.iter().enumerate() {
+            for &pred in &item.preds {
+                if pred != DISPATCH_BLOCK {
+                    result[pred as usize].push(block);
+                }
+            }
+        }
+        result
     }
 
     pub fn flushed_call(&self, block: BlockId, position: usize) -> Option<ValueId> {

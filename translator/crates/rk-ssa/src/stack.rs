@@ -5,8 +5,7 @@ use rk_core::ir::OpCode;
 use rk_core::memory::{Address, Base, Range};
 use rk_ir::{x87::X87Op, Op, StateKey};
 
-use crate::address::Addresses;
-use crate::memory::{local_accesses, PrivateFrame};
+use crate::memory::Frame;
 use crate::{Ssa, ValueId, DISPATCH_BLOCK};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -25,14 +24,12 @@ const CLEAN: u8 = 1;
 const PENDING: u8 = 2;
 
 pub(crate) fn split_x87(s: &mut Ssa, facts: &dyn crate::CallFacts) {
-    let accesses = local_accesses(s, None);
-    let private = PrivateFrame::new(s, &accesses, Some(facts));
-    if !private.eligible {
+    let private = Frame::new(s, Some(facts));
+    if !private.eligible() {
         return;
     }
-    let mut addresses = Addresses::local(s);
     let mut candidates = BTreeMap::new();
-    for (&id, access) in &accesses {
+    for (&id, access) in &private.accesses {
         let Op::X87(op) = s.value(id).op else {
             continue;
         };
@@ -60,12 +57,11 @@ pub(crate) fn split_x87(s: &mut Ssa, facts: &dyn crate::CallFacts) {
         if !range.address.is_exact() || !private.unexposed(range) {
             continue;
         }
-        addresses.get(s.args(id)[1]);
         let Address::Known {
             base: Base::Frame,
             offset,
             span,
-        } = addresses.relations.bounds(range.address)
+        } = private.relations.bounds(range.address)
         else {
             continue;
         };
@@ -123,18 +119,6 @@ pub(crate) fn split_x87(s: &mut Ssa, facts: &dyn crate::CallFacts) {
             s.args[start] = load;
         }
     }
-}
-
-fn successors(s: &Ssa) -> Vec<Vec<usize>> {
-    let mut result = vec![Vec::new(); s.blocks.len()];
-    for (block, item) in s.blocks.iter().enumerate() {
-        for &pred in &item.preds {
-            if pred != DISPATCH_BLOCK {
-                result[pred as usize].push(block);
-            }
-        }
-    }
-    result
 }
 
 fn delayed_stores(
@@ -323,14 +307,13 @@ pub(crate) fn promote(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate:
 }
 
 fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallFacts) {
-    let accesses = local_accesses(s, None);
-    let private = PrivateFrame::new(s, &accesses, Some(facts));
-    if !private.eligible {
+    let private = Frame::new(s, Some(facts));
+    if !private.eligible() {
         return;
     }
-    let mut addresses = Addresses::local(s);
+    let stack_at = |id: ValueId| private.esp.get(&id).copied().unwrap_or(Address::Unknown);
     let mut slots: BTreeMap<Range, BTreeSet<ValueId>> = BTreeMap::new();
-    for (&id, access) in &accesses {
+    for (&id, access) in &private.accesses {
         if s.value(id).op != Op::P(OpCode::Store) {
             continue;
         }
@@ -340,7 +323,6 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
         if !private.unexposed(range) {
             continue;
         }
-        addresses.get(s.args(id)[1]);
         let Address::Known {
             base,
             offset,
@@ -359,7 +341,7 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
             base: Base::Frame,
             offset: floor,
             span,
-        } = addresses.relations.bounds(range.address)
+        } = private.relations.bounds(range.address)
         else {
             continue;
         };
@@ -372,13 +354,13 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
         }
         let Address::Known {
             base: esp_base,
-            offset: esp,
+            offset: top,
             span: 0,
-        } = addresses.state(id, Field::Esp)
+        } = stack_at(id)
         else {
             continue;
         };
-        if esp_base == base && i64::from(esp as i32) <= start {
+        if esp_base == base && i64::from(top as i32) <= start {
             slots.entry(range).or_default().insert(id);
         }
     }
@@ -396,13 +378,13 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
         ranges.iter().all(|other| {
             range == other
                 || ordinary.contains(range) && !ordinary.contains(other)
-                || addresses.relations.disjoint(*range, *other)
+                || private.relations.disjoint(*range, *other)
         })
     });
     if slots.len() > 64 || slots.len().saturating_mul(s.blocks.len()) > 100_000 {
         return;
     }
-    let next = successors(s);
+    let next = s.successors();
     if next.iter().enumerate().any(|(block, next)| {
         next.is_empty()
             && s.blocks[block]
@@ -412,20 +394,6 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
     }) {
         return;
     }
-    let return_stacks: BTreeMap<_, _> = s
-        .blocks
-        .iter()
-        .flat_map(|block| &block.ops)
-        .filter(|&&id| s.value(id).op == Op::Return)
-        .map(|&id| (id, addresses.state(id, Field::Esp)))
-        .collect();
-    let stack_moves: BTreeMap<_, _> = s
-        .blocks
-        .iter()
-        .flat_map(|block| &block.ops)
-        .filter(|&&id| s.value(id).op == Op::StackBoundary)
-        .map(|&id| (id, addresses.get(s.args(id)[1])))
-        .collect();
     let mut changed = false;
     let mut settlements = BTreeSet::new();
     let mut constants = BTreeMap::new();
@@ -435,11 +403,6 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
         .collect();
     let frame = s.new_value(Op::Pack, 4, &esp, 0);
     s.blocks[s.entries[0].target as usize].ops.insert(0, frame);
-    let calls = s
-        .blocks
-        .iter()
-        .flat_map(|block| &block.ops)
-        .any(|&id| matches!(s.value(id).op, Op::Call { .. } | Op::CallInd));
     if !slots.is_empty() {
         for &id in s.blocks.iter().flat_map(|block| &block.ops) {
             if let (Op::Call { .. }, Some(checkpoints)) =
@@ -450,9 +413,13 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
         }
     }
     for (range, writes) in slots {
-        let Address::Known { base, .. } = range.address else {
+        let Address::Known {
+            base, offset: slot, ..
+        } = range.address
+        else {
             unreachable!()
         };
+        let slot = slot as i32;
         let mut actions = BTreeMap::new();
         for &id in s.blocks.iter().flat_map(|block| &block.ops) {
             let op = s.value(id).op;
@@ -461,23 +428,15 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
             } else if retire_reused_stack
                 && base == Base::Frame
                 && op == Op::Return
-                && matches!(return_stacks.get(&id).copied(), Some(Address::Known {
-                    base: Base::Frame, offset, span: 0
-                }) if i64::from(offset as i32) >= i64::from(match range.address {
-                    Address::Known { offset, .. } => offset as i32,
-                    _ => unreachable!(),
-                }) + i64::from(range.size))
+                && matches!(stack_at(id), Address::Known { base: Base::Frame, offset, span: 0 }
+                    if i64::from(offset as i32) >= i64::from(slot) + i64::from(range.size))
             {
                 Action::Retire
             } else if retire_reused_stack && op == Op::StackBoundary {
                 Action::Keep
             } else if op == Op::StackBoundary
-                && matches!(stack_moves.get(&id),
-                Some(Address::Known { base: moved_base, offset, span: 0 })
-                    if *moved_base == base && (*offset as i32) <= match range.address {
-                        Address::Known { offset, .. } => offset as i32,
-                        _ => unreachable!(),
-                    })
+                && matches!(stack_at(id),
+                Address::Known { base: moved, offset, span: 0 } if moved == base && offset as i32 <= slot)
             {
                 Action::Keep
             } else if s.stack_guards.contains_key(&id) && private.call_disjoint(id, range) {
@@ -491,7 +450,7 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
                 || rk_ir::properties(op).terminator && s.boundary(id).is_some()
             {
                 Action::Settle
-            } else if let Some(access) = accesses.get(&id) {
+            } else if let Some(access) = private.accesses.get(&id) {
                 if access.reads.disjoint(range) && access.writes.disjoint(range) {
                     Action::Keep
                 } else if private.disjoint(id, range) {
@@ -592,7 +551,6 @@ fn place_writes(s: &mut Ssa, retire_reused_stack: bool, facts: &dyn crate::CallF
         .map(|(index, boundary)| (boundary.at, index as u32))
         .collect();
     if changed {
-        s.cleanup_used |= calls;
         rebuild_memory(s);
     }
 }

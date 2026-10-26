@@ -184,8 +184,12 @@ slot; arguments and the return address remain conservative. Forwarding retains
 guest stores, and original-code analysis summaries do not use this assumption.
 With relaxed fault state, eligible x87 accesses split into rounded value and memory
 effects independently of lazy writes, preserving pop, status and ESP provenance.
-Loads can forward contained slices of wider values; dead-store elimination also
-recognizes earlier stores fully covered by a later exact write.
+Forwarding, region partitioning and dead-store elimination share one frame model
+and one clobber query per effect: a contained value, transparent, or may-write.
+Calls are transparent only to private-frame ranges. Loads forward contained slices
+of wider values, and stores fully covered on every path by a later exact write
+before any read are removed. Proved call cleanup is always used for ESP
+provenance; the emitted ESP after such a call is reread from guest state.
 
 `[translate] lazy_stack_writes` defaults to true when the private-stack assumption
 is enabled, fault state is relaxed, and store hooks are disabled. Exact negative
