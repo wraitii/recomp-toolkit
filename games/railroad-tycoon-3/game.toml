@@ -38,6 +38,22 @@ retire_reused_stack = true
 assume_stack_pointer_bases = true
 checked_returns = [0x005a10d0]
 state_contract_callers = [0x0042ce00, 0x0042c1b0]
+# MSVC CRT __SEH_prolog / __SEH_epilog: straight-line frame builders whose RET
+# leaves ESP moved by a caller-pushed frame size.
+stack_helpers = [0x005a7124, 0x005a715f]
+# MSVC CRT __chkstk: probes pages and lowers the caller's ESP by EAX.
+stack_probes = [0x005a15e0]
+# Calls with proven argument bytes. __FF_MSGBANNER and __callnewh call hooks
+# at 00dba1e0 and 00dba1c8 that are zero in the image and never written.
+# __crtInitCritSecAndSpinCount
+# calls InitializeCriticalSectionAndSpinCount or ___crtInitCritSecNoSpinCount@8.
+# CRT strcpy (cdecl) pushes EDI and jumps into strcat's shared tail.
+call_pops = [
+  { site = 0x005acf52, pop = 0 },
+  { site = 0x005a717d, pop = 0 },
+  { site = 0x005b0885, pop = 8 },
+  { function = 0x005ac3b0, pop = 0 },
+]
 
 [render]
 d3d8_wgpu = true

@@ -515,11 +515,21 @@ def load(game_dir, build_root=None):
         raise ValueError("%s: [translate] retire_reused_stack must be a boolean" % source)
     if type(translate.setdefault("assume_stack_pointer_bases", TRANSLATE_DEFAULTS["assume_stack_pointer_bases"])) is not bool:
         raise ValueError("%s: [translate] assume_stack_pointer_bases must be a boolean" % source)
-    exposed = translate.setdefault("exposed_stack_functions", [])
-    if (not isinstance(exposed, list)
-            or any(type(v) is not int or not 0 <= v <= 0xffffffff for v in exposed)
-            or len(set(exposed)) != len(exposed)):
-        raise ValueError("%s: [translate] exposed_stack_functions must be a list of unique 32-bit addresses" % source)
+    for key in ("exposed_stack_functions", "stack_helpers", "stack_probes"):
+        listed = translate.setdefault(key, [])
+        if (not isinstance(listed, list)
+                or any(type(v) is not int or not 0 <= v <= 0xffffffff for v in listed)
+                or len(set(listed)) != len(listed)):
+            raise ValueError("%s: [translate] %s must be a list of unique 32-bit addresses" % (source, key))
+    call_pops = translate.setdefault("call_pops", [])
+    if (not isinstance(call_pops, list)
+            or any(not isinstance(row, dict) or len(row) != 2 or "pop" not in row
+                   or not set(row) - {"pop"} <= {"site", "function"}
+                   or any(type(v) is not int or not 0 <= v <= 0xffffffff for v in row.values())
+                   or row["pop"] % 4
+                   for row in call_pops)
+            or len({(row.get("site"), row.get("function")) for row in call_pops}) != len(call_pops)):
+        raise ValueError("%s: [translate] call_pops must be a list of unique {site|function, pop} with dword pops" % source)
     if not isinstance(translate.setdefault("x87_cw_clone", TRANSLATE_DEFAULTS["x87_cw_clone"]), bool):
         raise ValueError("%s: [translate] x87_cw_clone must be a boolean" % source)
     if not isinstance(translate.setdefault("private_leaf_contracts", TRANSLATE_DEFAULTS["private_leaf_contracts"]), bool):

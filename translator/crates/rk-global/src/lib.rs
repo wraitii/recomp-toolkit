@@ -168,6 +168,7 @@ impl GlobalFacts {
                 &mode_opaque,
                 input.indirect,
                 false,
+                input.settings,
             )
         } else {
             stack::Analysis::default()
@@ -178,6 +179,7 @@ impl GlobalFacts {
             &mode_opaque,
             input.indirect,
             true,
+            input.settings,
         );
         let modes = modes::analyze(
             input.analysis,

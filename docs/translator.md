@@ -242,9 +242,26 @@ Named rejection counts and frame-checked cleanup counts are reported separately.
 Cleanup-only inference separately checks ESP balance over pcode, including x87,
 with conservative memory and register effects for unresolved recursive candidates.
 Candidates come from return encodings and tail targets; failed proofs remove them
-and their dependents. These facts establish only cleanup, without memory,
-return-address or checkpoint guarantees. `--dump global` lists per-function
-rejections, unresolved call edges and cleanup-only proofs.
+and their dependents. Candidates start out preserving EBX, ESI, EDI and EBP and
+narrow to what their proof keeps. Functions without returns, tail exits, import
+tails or unresolved jumps never return and take cleanup 0 unchecked. Code-map jump
+tables are followed. Calls through IAT slots, IAT thunks or registers loaded from
+an IAT slot pop the runtime shim's declared arguments (`import_abi.py` reads the
+shim tables into `import_pops`), keep EBX/ESI/EDI/EBP and write any memory; imports
+with unknown or conflicting argument counts stay unresolved. FS-relative stores
+leave stack slots intact. With `assume_private_stack`, other non-stack stores and
+opaque callees keep slots below entry ESP. Interior entries and SEH do not block
+cleanup proofs: only paths from the entry are checked, assuming MSVC `__except`
+resumption restores the frame's ESP and leaves through the same returns.
+`[translate] stack_helpers` lists straight-line helpers that move the caller's
+ESP, such as MSVC `__SEH_prolog`/`__SEH_epilog`; their instructions are evaluated
+on the caller's state. `stack_probes` lists `__chkstk`-style helpers that lower
+the caller's ESP by a constant EAX. `call_pops = [{ site|function, pop }]` states
+the bytes an indirect call site or a function pops; function entries are trusted
+as ordinary calls preserving EBX/ESI/EDI/EBP. Each entry needs binary evidence.
+These facts establish only cleanup, without memory, return-address or checkpoint
+guarantees. `--dump global` lists per-function rejections, unresolved call edges
+and cleanup-only proofs.
 
 At a bounded call, every returning candidate must have a summary with matching
 cleanup. Mapped noreturn candidates remain dispatch targets but contribute no

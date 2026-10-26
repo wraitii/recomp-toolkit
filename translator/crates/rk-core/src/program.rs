@@ -186,7 +186,7 @@ pub struct Program {
 }
 
 impl Program {
-    pub fn import_thunk_name(&self, va: Addr) -> Option<&str> {
+    pub fn import_thunk(&self, va: Addr) -> Option<&Import> {
         if !self.image.is_exec(va) || va + 6 > self.image.end() {
             return None;
         }
@@ -195,10 +195,24 @@ impl Program {
             return None;
         }
         let slot = u32::from_le_bytes([raw[2], raw[3], raw[4], raw[5]]);
-        self.image
-            .imports
-            .get(&slot)
-            .map(|import| import.name.as_str())
+        self.image.imports.get(&slot)
+    }
+
+    pub fn import_thunk_name(&self, va: Addr) -> Option<&str> {
+        self.import_thunk(va).map(|import| import.name.as_str())
+    }
+
+    pub fn iat_call(&self, insn: &crate::ir::Insn) -> Option<&Import> {
+        let raw = self.image.bytes(insn.addr, insn.length as usize)?;
+        let at = raw
+            .iter()
+            .take_while(|byte| matches!(byte, 0x26 | 0x2e | 0x36 | 0x3e))
+            .count();
+        if at + 6 != raw.len() || raw[at] != 0xff || raw[at + 1] != 0x15 {
+            return None;
+        }
+        let slot = u32::from_le_bytes([raw[at + 2], raw[at + 3], raw[at + 4], raw[at + 5]]);
+        self.image.imports.get(&slot)
     }
 
     pub fn is_setjmp_thunk(&self, va: Addr) -> bool {

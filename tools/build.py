@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "tools/recomp"))
 sys.path.insert(0, str(ROOT / "tools"))
 import game_config  # noqa: E402
 import buildlock  # noqa: E402
+import import_abi  # noqa: E402
 import copy_layouts  # noqa: E402
 import package_desktop  # noqa: E402
 import stage_game_files  # noqa: E402
@@ -360,7 +361,8 @@ def translation_input(cfg):
             "store_hooks": cfg["game"]["store_hooks"], "call_hooks": cfg["game"]["call_hooks"],
             "translate": stable(cfg["translate"]), "globals": stable(cfg["globals"]),
             "curated": stable(cfg["curated"]), "aux_modules": stable(cfg["aux_modules"]),
-            "reloc": str(reloc["manifest_path"]) if reloc else None}
+            "reloc": str(reloc["manifest_path"]) if reloc else None,
+            "import_pops": import_abi.import_pops()}
 
 
 def rust_pcode_library(build_root):

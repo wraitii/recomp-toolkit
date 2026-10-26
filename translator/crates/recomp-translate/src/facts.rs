@@ -352,7 +352,7 @@ fn merge_effect(mut site: CallEffect, import: CallEffect) -> CallEffect {
 fn called_import(program: &Program, insn: &rk_core::ir::Insn) -> Option<String> {
     let indirect = insn.ops.iter().any(|op| op.opcode == OpCode::CallInd);
     if indirect {
-        return absolute_iat_call(program, insn);
+        return program.iat_call(insn).map(|import| import.key());
     }
     let direct = insn.ops.iter().find(|op| op.opcode == OpCode::Call)?;
     let target = direct.inputs.first()?;
@@ -361,19 +361,6 @@ fn called_import(program: &Program, insn: &rk_core::ir::Insn) -> Option<String> 
         _ => return None,
     };
     import_thunk(program, value)
-}
-
-fn absolute_iat_call(program: &Program, insn: &rk_core::ir::Insn) -> Option<String> {
-    let raw = program.image.bytes(insn.addr, insn.length as usize)?;
-    let mut at = 0;
-    while at < raw.len() && matches!(raw[at], 0x26 | 0x2e | 0x36 | 0x3e) {
-        at += 1;
-    }
-    if at + 6 != raw.len() || raw[at] != 0xff || raw[at + 1] != 0x15 {
-        return None;
-    }
-    let slot = u32::from_le_bytes([raw[at + 2], raw[at + 3], raw[at + 4], raw[at + 5]]);
-    program.image.imports.get(&slot).map(|import| import.key())
 }
 
 fn import_thunk(program: &Program, value: Addr) -> Option<String> {

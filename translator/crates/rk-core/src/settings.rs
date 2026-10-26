@@ -30,6 +30,16 @@ struct Input {
     curated: Curated,
     #[serde(default)]
     aux_modules: Vec<Module>,
+    #[serde(default)]
+    import_pops: BTreeMap<String, i32>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallPop {
+    pub site: Option<Addr>,
+    pub function: Option<Addr>,
+    pub pop: i32,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -45,6 +55,9 @@ pub struct Translate {
     pub retire_reused_stack: bool,
     pub assume_stack_pointer_bases: bool,
     pub exposed_stack_functions: Vec<Addr>,
+    pub stack_helpers: Vec<Addr>,
+    pub stack_probes: Vec<Addr>,
+    pub call_pops: Vec<CallPop>,
     pub x87_cw_clone: bool,
     pub private_leaf_contracts: bool,
     pub private_input_arguments: bool,
@@ -273,6 +286,7 @@ pub struct Settings {
     pub discovery_evidence: Option<PathBuf>,
     pub native_header: Option<PathBuf>,
     pub call_effects: CallEffects,
+    pub import_pops: BTreeMap<String, i32>,
     pub call_contracts: bool,
     pub stack_memory: bool,
     pub assume_private_stack: bool,
@@ -280,6 +294,10 @@ pub struct Settings {
     pub retire_reused_stack: bool,
     pub assume_stack_pointer_bases: bool,
     pub exposed_stack_functions: BTreeSet<Addr>,
+    pub stack_helpers: BTreeSet<Addr>,
+    pub stack_probes: BTreeSet<Addr>,
+    pub call_pops: BTreeMap<Addr, i32>,
+    pub function_pops: BTreeMap<Addr, i32>,
     pub call_hooks: bool,
     pub private_leaf_contracts: bool,
     pub private_input_arguments: bool,
@@ -444,6 +462,7 @@ impl Settings {
             discovery_evidence: resolve(&t.discovery_evidence),
             native_header: resolve(&t.native.header),
             call_effects: CallEffects { sites, imports },
+            import_pops: input.import_pops,
             dispatch: t.dispatch.clone(),
             call_contracts: t.call_contracts,
             stack_memory: t.stack_memory,
@@ -453,6 +472,24 @@ impl Settings {
             retire_reused_stack: t.retire_reused_stack && !input.store_hooks.unwrap_or(true),
             assume_stack_pointer_bases: t.assume_stack_pointer_bases,
             exposed_stack_functions: only_main(&t.exposed_stack_functions),
+            stack_helpers: only_main(&t.stack_helpers),
+            stack_probes: only_main(&t.stack_probes),
+            call_pops: if main {
+                t.call_pops
+                    .iter()
+                    .filter_map(|row| Some((row.site?, row.pop)))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            },
+            function_pops: if main {
+                t.call_pops
+                    .iter()
+                    .filter_map(|row| Some((row.function?, row.pop)))
+                    .collect()
+            } else {
+                BTreeMap::new()
+            },
             call_hooks: input.call_hooks.unwrap_or(true),
             private_leaf_contracts: t.private_leaf_contracts && main,
             private_input_arguments: t.private_input_arguments && main,
