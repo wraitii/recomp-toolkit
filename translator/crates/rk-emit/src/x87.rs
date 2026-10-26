@@ -5,6 +5,7 @@ use rk_x87::{Event, Expr, Plan, Type};
 
 pub trait External {
     fn value(&self, id: ValueId) -> Result<String>;
+    fn call_hooks(&self) -> bool;
 }
 
 fn carry_name(position: i32, part: &str) -> String {
@@ -282,8 +283,13 @@ impl Printer<'_> {
                 Event::Activation(activation) => {
                     lines.push("x87_top_ = c->fpu_top;".into());
                     if activation.clone == Some("fast") && !activation.known_mode {
+                        let hooks = if self.external.call_hooks() {
+                            "recomp_hooks_ever || "
+                        } else {
+                            ""
+                        };
                         lines.push(format!(
-                            "if (RECOMP_UNLIKELY(recomp_hooks_ever || (c->fpu_cw & 0x0f00u) != 0u)) goto X87CW{};",
+                            "if (RECOMP_UNLIKELY({hooks}(c->fpu_cw & 0x0f00u) != 0u)) goto X87CW{};",
                             activation.index
                         ));
                     } else if activation.clone == Some("general") {

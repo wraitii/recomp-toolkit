@@ -535,6 +535,7 @@ void publish(int32_t index) {
         // sees the flag is guaranteed to see the pointer. recomp_hooks_ever
         // rises here only before guest entry; install_hook requires it after.
         __atomic_store_n(&recomp_hooks_ever, (uint8_t)1, __ATOMIC_RELEASE);
+        __atomic_store_n(&recomp_slow_routes, (uint8_t)1, __ATOMIC_RELEASE);
         __atomic_store_n(&recomp_hook_ptrs[index], (RecompHookFn)mods_hook_dispatch,
                          __ATOMIC_RELEASE);
         __atomic_store_n(&recomp_hooked[index], (uint8_t)1, __ATOMIC_RELEASE);
@@ -761,6 +762,10 @@ static PopModStatus install_hook(uint32_t owner, uint32_t addr, uint32_t return_
     snprintf(buf, sizeof buf, "mod %s hook on %08x (%s)", api && api->mod_id ? api->mod_id : "?",
              addr, what);
 
+    if (!RECOMP_CALL_HOOKS) {
+        LOGW("mods: %s refused: this build has no call hooks ([game] call_hooks = false)", buf);
+        return POP_E_STATE;
+    }
     sched_registry_lock();
     // Generated call sites test recomp_hooks_ever before a call to publish
     // the fields a hook observes, and again after it to reread kept fields.
@@ -1025,7 +1030,10 @@ void mods_hooks_set_cpu_size(uint32_t owner, uint32_t cpu_size) {
 }
 
 void mods_hooks_arm() {
+    if (!RECOMP_CALL_HOOKS)
+        return;
     __atomic_store_n(&recomp_hooks_ever, (uint8_t)1, __ATOMIC_RELEASE);
+    __atomic_store_n(&recomp_slow_routes, (uint8_t)1, __ATOMIC_RELEASE);
 }
 
 uint32_t mods_hooks_installed_count() {

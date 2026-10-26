@@ -25,6 +25,7 @@ uint8_t *g_mem = nullptr;
 // say. Armed from RECOMP_WATCH=<hex address>[:<length>], default length 4.
 // ---------------------------------------------------------------------------
 uint32_t recomp_frame_watch = 0;
+uint8_t recomp_slow_routes = 0;
 
 uint32_t g_watch_base = 0;
 uint32_t g_watch_len = 0;
@@ -36,8 +37,10 @@ namespace {
 struct WatchArm {
     WatchArm() {
         recomp_frame_watch = recomp_env("WATCH_FRAME") ? 1u : 0u;
-        if (recomp_frame_watch)
+        if (recomp_frame_watch) {
             memset(recomp_slow, 1, recomp_func_count);
+            recomp_slow_routes = 1;
+        }
         const char *s = recomp_env("WATCH");
         if (!s || !*s)
             return;

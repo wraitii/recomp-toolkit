@@ -33,6 +33,7 @@ pub struct PlanOptions<'a> {
     pub lazy_stack_writes: bool,
     pub retire_reused_stack: bool,
     pub assume_stack_pointer_bases: bool,
+    pub call_hooks: bool,
 }
 
 pub struct PlannedFunction {
@@ -61,7 +62,7 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     prepare_options.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
     let (ssa, base) = prepare_with_publications(cg, &prepare_options)?;
     let base = base.unwrap_or_else(|| publications(&ssa, opts.call_facts));
-    let (publish, guard) = reduce_publications(&ssa, &base, opts.call_facts);
+    let (publish, guard) = reduce_publications(&ssa, &base, opts.call_facts, opts.call_hooks);
     let flag_plan = ssa.flag_plan();
     let mut flag_publish = BTreeMap::new();
     let mut descriptor_roots = Vec::new();
@@ -216,6 +217,7 @@ fn reduce_publications(
     s: &Ssa,
     base: &BTreeMap<ValueId, Vec<StateKey>>,
     call_facts: &dyn CallFacts,
+    call_hooks: bool,
 ) -> (
     BTreeMap<ValueId, Vec<StateKey>>,
     BTreeMap<ValueId, Vec<StateKey>>,
@@ -275,6 +277,7 @@ fn reduce_publications(
             block,
             base,
             call_facts,
+            call_hooks,
             &key_index,
             &reloads,
             &mut resident,
@@ -300,6 +303,7 @@ fn reduce_publications(
             block,
             base,
             call_facts,
+            call_hooks,
             &key_index,
             &reloads,
             &mut resident,
@@ -370,6 +374,7 @@ fn walk_block(
     block: usize,
     base: &BTreeMap<ValueId, Vec<StateKey>>,
     call_facts: &dyn CallFacts,
+    call_hooks: bool,
     key_index: &rk_core::Lookup<StateKey, usize>,
     reloads: &BTreeMap<ValueId, Vec<(usize, ValueId)>>,
     resident: &mut [Option<ValueId>],
@@ -433,10 +438,12 @@ fn walk_block(
                 }
             }
         }
-        if matches!(
-            s.value(value).op,
-            rk_ir::Op::Call { .. } | rk_ir::Op::CallInd
-        ) {
+        if call_hooks
+            && matches!(
+                s.value(value).op,
+                rk_ir::Op::Call { .. } | rk_ir::Op::CallInd
+            )
+        {
             for (index, key) in s.keys.iter().enumerate() {
                 if *key == StateKey::Memory || s.field(*key).is_none() || keys.contains(key) {
                     continue;

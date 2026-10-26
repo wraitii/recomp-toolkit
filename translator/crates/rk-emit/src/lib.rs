@@ -55,6 +55,7 @@ pub struct EmitContext<'a> {
     pub reloc: Option<RelocEmit>,
     pub reused_stack: bool,
     pub reuse_calls: &'a BTreeMap<Addr, (Addr, u32)>,
+    pub call_hooks: bool,
 }
 
 pub struct EmitReport {
@@ -731,8 +732,10 @@ impl<'a> Emitter<'a> {
     fn kept_expr(&self, stack_pointer: bool, loaded: &str, old: &str) -> String {
         if stack_pointer && !self.s.stack_guards.is_empty() {
             loaded.to_string()
-        } else {
+        } else if self.ctx.call_hooks {
             keep_expr(loaded, old)
+        } else {
+            old.to_string()
         }
     }
 
@@ -3458,5 +3461,8 @@ struct ValueNames<'b, 'a> {
 impl External for ValueNames<'_, '_> {
     fn value(&self, id: ValueId) -> Result<String> {
         self.emitter.expr(id)
+    }
+    fn call_hooks(&self) -> bool {
+        self.emitter.ctx.call_hooks
     }
 }

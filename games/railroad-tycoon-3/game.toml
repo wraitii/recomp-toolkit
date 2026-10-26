@@ -18,6 +18,8 @@ entry_point = 0x005a313b
 guest_root = 'C:\Railroad Tycoon 3'
 # Remove per-store checks; DirectDraw Unlock compares the whole locked surface.
 store_hooks = false
+# No mod call hooks: calls skip hook publication and kept-field rereads.
+call_hooks = false
 
 [setup]
 supported_version = "GOG 1.05"

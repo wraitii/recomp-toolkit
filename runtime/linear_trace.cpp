@@ -383,6 +383,7 @@ bool install_hooks() {
         return false;
 
     __atomic_store_n(&recomp_hooks_ever, (uint8_t)1, __ATOMIC_RELEASE);
+    __atomic_store_n(&recomp_slow_routes, (uint8_t)1, __ATOMIC_RELEASE);
     for (uint32_t i = 0; i < recomp_func_count; ++i) {
         g_prev[i] = __atomic_load_n(&recomp_hook_ptrs[i], __ATOMIC_ACQUIRE);
         __atomic_store_n(&recomp_hook_ptrs[i], (RecompHookFn)linear_dispatch, __ATOMIC_RELEASE);
@@ -427,6 +428,11 @@ extern "C" void recomp_linear_trace_init(void) {
     const char *path = recomp_env("TRACE_LINEAR");
     if (!path || !*path)
         return;
+    if (!RECOMP_CALL_HOOKS) {
+        fprintf(stderr, "[recomp] RECOMP_TRACE_LINEAR ignored: this build has no call hooks "
+                        "([game] call_hooks = false)\n");
+        return;
+    }
 
     g_installed = 1;
     snprintf(g_path, sizeof g_path, "%s", path);

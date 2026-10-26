@@ -197,9 +197,11 @@ otherwise pending writes flush before ordinary dispatch consumes its checkpoint.
 Non-leaf callees require credit for the longest nested call path as well as entry;
 recursion, call-containing loops and unresolved dispatch retain eager publication.
 `DIVERGENCE(original):` scheduler work is assumed to preserve this thread's unescaped
-live frame. A guarded call has one route condition; its unlikely generic arm
-publishes the register fields hooks observe and flushes the pending slots before
-dispatch, and nothing is reloaded afterwards. Unproved calls flush and clear pending writes. ESP
+live frame. A guarded call has one route condition, `recomp_slow_routes`, raised by
+hooks, profiling and frame watch; its unlikely generic arm publishes the register
+fields hooks observe and flushes the pending slots before dispatch, and nothing is
+reloaded afterwards. `[game] call_hooks = false` removes hook publications and
+kept-field rereads everywhere. Unproved calls flush and clear pending writes. ESP
 changes retain allocated slots and flush released slots before subsequent effects.
 Publication requires a pending write on every
 incoming path. At mixed joins, definite-pending predecessors flush before merging;

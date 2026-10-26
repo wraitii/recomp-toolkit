@@ -14,8 +14,10 @@
 extern "C" const int recomp_profile_enabled = [] {
     const char *value = recomp_env("PROFILE");
     const bool on = value && std::strcmp(value, "1") == 0;
-    if (on)
+    if (on) {
         std::memset(recomp_slow, 1, recomp_func_count);
+        recomp_slow_routes = 1;
+    }
     return on;
 }();
 // Generated table supplies names; runtime-only tests need no generated table.

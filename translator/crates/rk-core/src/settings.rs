@@ -23,6 +23,8 @@ struct Input {
     #[serde(default)]
     store_hooks: Option<bool>,
     #[serde(default)]
+    call_hooks: Option<bool>,
+    #[serde(default)]
     globals: BTreeMap<String, Global>,
     #[serde(default)]
     curated: Curated,
@@ -278,6 +280,7 @@ pub struct Settings {
     pub retire_reused_stack: bool,
     pub assume_stack_pointer_bases: bool,
     pub exposed_stack_functions: BTreeSet<Addr>,
+    pub call_hooks: bool,
     pub private_leaf_contracts: bool,
     pub private_input_arguments: bool,
     pub private_input_registers: BTreeMap<Addr, String>,
@@ -450,6 +453,7 @@ impl Settings {
             retire_reused_stack: t.retire_reused_stack && !input.store_hooks.unwrap_or(true),
             assume_stack_pointer_bases: t.assume_stack_pointer_bases,
             exposed_stack_functions: only_main(&t.exposed_stack_functions),
+            call_hooks: input.call_hooks.unwrap_or(true),
             private_leaf_contracts: t.private_leaf_contracts && main,
             private_input_arguments: t.private_input_arguments && main,
             private_input_registers,

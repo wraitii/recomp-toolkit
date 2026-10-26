@@ -153,6 +153,7 @@ def render_cmake(cfg):
     lines.append("set(RECOMP_HOST_ARENA_BASE 0x%xull)" % game["host_arena_base"])
     lines.append("set(RECOMP_AUX_MODULES %s)" % ";".join(m["key"] for m in cfg["aux_modules"]))
     lines.append("set(RECOMP_STORE_HOOKS %d)" % int(game["store_hooks"]))
+    lines.append("set(RECOMP_CALL_HOOKS %d)" % int(game["call_hooks"]))
     lines.append("set(RECOMP_AUDIO_MIDI %d)" % int(cfg["audio"]["midi"]))
     # The generated sources include this header before they define FN_<addr>,
     # which is how a game replaces one translated function with a native one.

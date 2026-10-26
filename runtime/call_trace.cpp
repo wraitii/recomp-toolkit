@@ -440,6 +440,7 @@ void arm(const RecompModule *module, uint32_t addr, const char *label, const Dum
     }
     st.next = __atomic_load_n(slot_ptr, __ATOMIC_ACQUIRE);
     __atomic_store_n(&recomp_hooks_ever, (uint8_t)1, __ATOMIC_RELEASE);
+    __atomic_store_n(&recomp_slow_routes, (uint8_t)1, __ATOMIC_RELEASE);
     __atomic_store_n(slot_ptr, kSlotFns[g_trace_count], __ATOMIC_RELEASE);
     __atomic_store_n(slot_flag, (uint8_t)1, __ATOMIC_RELEASE);
     if (!module)
@@ -597,6 +598,11 @@ extern "C" void recomp_trace_calls_init(void) {
     const char *spec = recomp_env("TRACE_CALLS");
     if (!spec || !*spec)
         return;
+    if (!RECOMP_CALL_HOOKS) {
+        fprintf(stderr, "[recomp] RECOMP_TRACE_CALLS ignored: this build has no call hooks "
+                        "([game] call_hooks = false)\n");
+        return;
+    }
 
     if (const char *full = recomp_env("TRACE_CALLS_FULL"))
         g_full_limit = (uint32_t)strtoul(full, nullptr, 10);

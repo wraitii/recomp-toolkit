@@ -61,6 +61,12 @@ samples are gone, but scene differences leave the net performance change
 inconclusive.
 Set `store_hooks = true` and rebuild to restore dirty-range tracking and watchpoints.
 
+`[game] call_hooks = false` builds without mod call hooks: calls no longer
+republish register fields for hooks or reread kept fields afterwards, mods that
+install hooks are refused, and `RECOMP_TRACE_CALLS`/`RECOMP_TRACE_LINEAR` are
+ignored with a diagnostic. Profiling and frame watch still take the generic call
+routes. Set `call_hooks = true` and regenerate to restore them.
+
 ## Status
 
 Single-player gameplay is fully playable and performant. Networking is unsupported.

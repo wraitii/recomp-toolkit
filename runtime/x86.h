@@ -923,8 +923,16 @@ static inline void recomp_slow_update(uint32_t i) {
 }
 /* Set once any mod hook is installed and never cleared.  A call whose
  * contract dropped CPU fields publishes them anyway while this is set,
- * because a hook callback observes the full register file. */
+ * because a hook callback observes the full register file. A game built with
+ * [game] call_hooks = false (RECOMP_CALL_HOOKS=0) has no such publications:
+ * hook installation and the call tracers refuse with a diagnostic. */
+#ifndef RECOMP_CALL_HOOKS
+#define RECOMP_CALL_HOOKS 1
+#endif
 extern uint8_t recomp_hooks_ever;
+/* Set by hooks, profiling, frame watch and the diff harness's ordinary mode;
+ * specialized call sites then take their generic route. */
+extern uint8_t recomp_slow_routes;
 
 typedef void (*RecompEntryFn)(X86 *c);
 typedef struct RecompDispatchEntry {

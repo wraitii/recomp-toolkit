@@ -341,7 +341,7 @@ fn contract_prepare(addr: Addr, known_mode: bool) -> String {
         ""
     };
     format!(
-        "static inline int entry_contract_prepare_{addr:08x}(X86 *c, int mode_proven)\n{{\n{unused_mode}    if (RECOMP_UNLIKELY(recomp_hooks_ever || recomp_profile_enabled || recomp_frame_watch ||\n{mode_guard}        c->checkpoint_countdown == 0u || entry_contract_base_{addr:08x} != fn_{addr:08x}))\n        return 0;\n    --c->checkpoint_countdown;\n    return 1;\n}}\n"
+        "static inline int entry_contract_prepare_{addr:08x}(X86 *c, int mode_proven)\n{{\n{unused_mode}    if (RECOMP_UNLIKELY(recomp_slow_routes ||\n{mode_guard}        c->checkpoint_countdown == 0u || entry_contract_base_{addr:08x} != fn_{addr:08x}))\n        return 0;\n    --c->checkpoint_countdown;\n    return 1;\n}}\n"
     )
 }
 
@@ -379,14 +379,14 @@ fn entry_chunks(
                     match decl { Declaration::StackPrepare(target, cost) if target == addr => Some(*cost), _ => None }
                 }).max() {
                     let _ = writeln!(s,
-                        "int entry_stack_prepare_{addr:08x}(X86 *c) {{\n#ifdef RECOMP_RAW_{addr:08x}\n    if (!recomp_hooks_ever && !recomp_profile_enabled && !recomp_frame_watch && c->checkpoint_countdown > {checkpoints}u) {{\n        --c->checkpoint_countdown;\n        return 1;\n    }}\n#else\n    (void)c;\n#endif\n    return 0;\n}}");
+                        "int entry_stack_prepare_{addr:08x}(X86 *c) {{\n#ifdef RECOMP_RAW_{addr:08x}\n    if (!recomp_slow_routes && c->checkpoint_countdown > {checkpoints}u) {{\n        --c->checkpoint_countdown;\n        return 1;\n    }}\n#else\n    (void)c;\n#endif\n    return 0;\n}}");
                 }
                 if t.bodies.iter().any(|body| body.addr == *addr && body.reused_stack) {
                     let checkpoints = t.bodies.iter().flat_map(|body| &body.declarations).filter_map(|decl| {
                         match decl { Declaration::ReusedStack(target, cost) if target == addr => Some(*cost), _ => None }
                     }).max().unwrap_or(u32::MAX);
                     let _ = writeln!(s,
-                        "void fn_reuse_{addr:08x}(X86 *c);\nvoid entry_reuse_{addr:08x}(X86 *c) {{\n#ifdef RECOMP_RAW_{addr:08x}\n    if (!recomp_hooks_ever && !recomp_profile_enabled && !recomp_frame_watch && c->checkpoint_countdown > {checkpoints}u) {{\n        --c->checkpoint_countdown;\n        fn_reuse_{addr:08x}(c);\n        return;\n    }}\n#endif\n    entry_{addr:08x}(c);\n}}");
+                        "void fn_reuse_{addr:08x}(X86 *c);\nvoid entry_reuse_{addr:08x}(X86 *c) {{\n#ifdef RECOMP_RAW_{addr:08x}\n    if (!recomp_slow_routes && c->checkpoint_countdown > {checkpoints}u) {{\n        --c->checkpoint_countdown;\n        fn_reuse_{addr:08x}(c);\n        return;\n    }}\n#endif\n    entry_{addr:08x}(c);\n}}");
                 }
                 for mask in t.private_masks.get(addr).into_iter().flatten() {
                     let input = t.private_input_arguments.get(addr);

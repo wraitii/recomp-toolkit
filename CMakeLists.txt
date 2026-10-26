@@ -108,6 +108,7 @@ add_compile_definitions(GUEST_HEAP_END=${RECOMP_HEAP_END})
 add_compile_definitions(GUEST_SIZE=${RECOMP_GUEST_SIZE})
 add_compile_definitions(RECOMP_ARENA_ADDRESS=${RECOMP_HOST_ARENA_BASE})
 add_compile_definitions(RECOMP_STORE_HOOKS=${RECOMP_STORE_HOOKS})
+add_compile_definitions(RECOMP_CALL_HOOKS=${RECOMP_CALL_HOOKS})
 # Never fuse a*b+c into an FMA: the x87 helpers and native replacements must
 # round each operation as written, identically on every target. Clang contracts
 # within an expression by default and GCC across statements; cl does not

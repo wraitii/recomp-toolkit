@@ -462,6 +462,8 @@ def load(game_dir, build_root=None):
     # unavailable and a DirectDraw Unlock compares the whole surface.
     if not isinstance(game.setdefault("store_hooks", True), bool):
         raise ValueError("%s: [game] store_hooks must be a boolean" % source)
+    if not isinstance(game.setdefault("call_hooks", True), bool):
+        raise ValueError("%s: [game] call_hooks must be a boolean" % source)
     strict_imports = game.setdefault("strict_imports", False)
     if not isinstance(strict_imports, bool):
         raise ValueError("%s: [game] strict_imports must be a boolean" % source)

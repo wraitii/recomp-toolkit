@@ -249,6 +249,7 @@ struct BodyContext<'a> {
     assume_private_stack: bool,
     lazy_stack_writes: bool,
     assume_stack_pointer_bases: bool,
+    call_hooks: bool,
     reuse_calls: &'a BTreeMap<Addr, (Addr, u32)>,
     exposed_stack_functions: &'a BTreeSet<Addr>,
     known_entries: &'a BTreeSet<Addr>,
@@ -283,6 +284,7 @@ impl<'a> BodyContext<'a> {
             reloc: self.reloc,
             reused_stack: false,
             reuse_calls: self.reuse_calls,
+            call_hooks: self.call_hooks,
         }
     }
 }
@@ -312,6 +314,7 @@ fn plan_one(
             lazy_stack_writes: ctx.lazy_stack_writes,
             retire_reused_stack,
             assume_stack_pointer_bases: ctx.assume_stack_pointer_bases,
+            call_hooks: ctx.call_hooks,
             assume_private_stack: ctx.assume_private_stack
                 && !ctx.exposed_stack_functions.contains(&ir.addr),
         },
@@ -562,6 +565,7 @@ fn build_bodies(
         assume_private_stack: settings.assume_private_stack,
         lazy_stack_writes: settings.lazy_stack_writes,
         assume_stack_pointer_bases: settings.assume_stack_pointer_bases,
+        call_hooks: settings.call_hooks,
         reuse_calls: &reuse_calls,
         exposed_stack_functions: &settings.exposed_stack_functions,
         known_entries: &known_entries,
