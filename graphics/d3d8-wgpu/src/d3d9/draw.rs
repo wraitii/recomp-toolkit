@@ -3573,25 +3573,25 @@ pub(crate) fn execute(
         psp_words,
     );
     let parameters = if interpreted {
-        parameters.interpreter_flags(
-            ps.map_or(0, |shader| {
-                crate::shader::uber::sampler_mapping(&shader.program)
-                    .into_iter()
-                    .fold(0, |flags, (guest, physical)| {
-                        flags
-                            | if snapshot
-                                .textures
-                                .iter()
-                                .any(|t| t.stage == guest && opaque_format(t.format))
-                            {
-                                1 << physical
-                            } else {
-                                0
-                            }
-                    })
-            }),
-            uber::tint_enabled(),
-        )
+        let (opaque, unbound) = ps.map_or((0, 0), |shader| {
+            crate::shader::uber::sampler_mapping(&shader.program)
+                .into_iter()
+                .fold(
+                    (0, 0),
+                    |(opaque, unbound), (guest, physical)| match snapshot
+                        .textures
+                        .iter()
+                        .find(|t| t.stage == guest)
+                    {
+                        Some(texture) => (
+                            opaque | (u32::from(opaque_format(texture.format)) << physical),
+                            unbound,
+                        ),
+                        None => (opaque, unbound | (1 << physical)),
+                    },
+                )
+        });
+        parameters.interpreter_flags(opaque, unbound, uber::tint_enabled())
     } else {
         parameters
     };

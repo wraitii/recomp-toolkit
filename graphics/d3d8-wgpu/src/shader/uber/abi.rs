@@ -1,8 +1,8 @@
-pub(crate) const ABI_VERSION: u32 = 6;
-pub(crate) const INTERPRETER_VERSION: u32 = 12;
-pub(crate) const MAX_INSTRUCTIONS: usize = 128;
+pub(crate) const ABI_VERSION: u32 = 8;
+pub(crate) const INTERPRETER_VERSION: u32 = 14;
+pub(crate) const MAX_INSTRUCTIONS: usize = 256;
 pub(crate) const INSTRUCTION_WORDS: usize = 16;
-pub(crate) const TEMP_REGISTERS: u32 = 8;
+pub(crate) const TEMP_REGISTERS: u32 = 12;
 pub(crate) const VERTEX_INPUTS: u32 = 7;
 pub(crate) const VERTEX_CONSTANTS: u32 = 256;
 pub(crate) const PIXEL_CONSTANTS: u32 = 32;

@@ -26,7 +26,7 @@ pub fn source() -> String {
             20 + slot
         );
     }
-    source += "fn sample_texture(slot: u32, coord: vec4<f32>) -> vec4<f32> { var value = vec4<f32>(0.0); switch slot {\n";
+    source += "fn sample_texture(slot: u32, coord: vec4<f32>) -> vec4<f32> { if ((psp.texture_flags.z & (1u << slot)) != 0u) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); } var value = vec4<f32>(0.0); switch slot {\n";
     for slot in 0..TEXTURE_SLOTS {
         let components = if slot < TEXTURES_2D { "xy" } else { "xyz" };
         source += &format!(

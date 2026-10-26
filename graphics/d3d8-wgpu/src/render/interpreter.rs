@@ -254,6 +254,7 @@ impl PreparedInterpreter {
             let mut key = keys[0].clone();
             key.descriptor.target.as_mut().unwrap().format = wgpu::TextureFormat::Rgba8Unorm;
             key.descriptor.primitive.topology = wgpu::PrimitiveTopology::TriangleStrip;
+            key.descriptor.primitive.strip_index_format = None;
             key.descriptor.depth.as_mut().unwrap().depth_write_enabled = Some(true);
             keys.push(key);
             let mut key = keys[0].clone();
@@ -535,6 +536,83 @@ impl PreparedInterpreter {
                     Some((false, wgpu::CompareFunction::Always)),
                     wgpu::PrimitiveTopology::TriangleList,
                 ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    None,
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::LessEqual)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((true, wgpu::CompareFunction::LessEqual)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::LessEqual)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::LessEqual)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    None,
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::LessEqual)),
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    None,
+                    Some((
+                        wgpu::BlendFactor::SrcAlpha,
+                        wgpu::BlendFactor::OneMinusSrcAlpha,
+                    )),
+                    Some((false, wgpu::CompareFunction::Less)),
+                    wgpu::PrimitiveTopology::TriangleStrip,
+                ),
+                (
+                    wgpu::TextureFormat::Bgra8Unorm,
+                    Some(wgpu::Face::Front),
+                    Some((wgpu::BlendFactor::SrcAlpha, wgpu::BlendFactor::Zero)),
+                    None,
+                    wgpu::PrimitiveTopology::TriangleList,
+                ),
             ] {
                 let mut key = keys[0].clone();
                 let target = key.descriptor.target.as_mut().unwrap();
@@ -552,9 +630,7 @@ impl PreparedInterpreter {
                 });
                 key.descriptor.primitive.cull_mode = cull_mode;
                 key.descriptor.primitive.topology = topology;
-                key.descriptor.primitive.strip_index_format = (topology
-                    == wgpu::PrimitiveTopology::TriangleStrip)
-                    .then_some(wgpu::IndexFormat::Uint16);
+                key.descriptor.primitive.strip_index_format = None;
                 key.descriptor.depth = depth.map(|(write, compare)| {
                     let mut state = keys[0].descriptor.depth.clone().unwrap();
                     state.depth_write_enabled = Some(write);

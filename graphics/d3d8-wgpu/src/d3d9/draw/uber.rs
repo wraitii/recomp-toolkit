@@ -133,25 +133,31 @@ fn coverage(
         .interpreter
         .get()
         .ok_or_else(|| unsupported("InterpreterDraw", "unprepared-family family11"))?;
-    let candidate = matches!(
+    let exclusion = if !matches!(
         snapshot.command.primitive,
         D3DPT_TRIANGLELIST | D3DPT_TRIANGLESTRIP
-    ) && rs(state, 9) == 2
-        && prepared.find(&descriptor).is_some()
-        && vs.is_some_and(|s| program::interface_candidate(&s.program))
-        && ps.is_some_and(|s| program::interface_candidate(&s.program));
+    ) {
+        Some("unsupported-primitive")
+    } else if rs(state, 9) != 2 {
+        Some("unsupported-shading-mode")
+    } else if prepared.find(&descriptor).is_none() {
+        Some("unprepared-pipeline-state")
+    } else if !vs.is_some_and(|s| program::interface_candidate(&s.program)) {
+        Some("unsupported-vertex-interface")
+    } else if !ps.is_some_and(|s| program::interface_candidate(&s.program)) {
+        Some("unsupported-pixel-interface")
+    } else {
+        None
+    };
     if mode == Mode::CompareFamily11
-        && (!candidate
+        && (exclusion.is_some()
             || vs.is_some_and(|s| s.interpreter.is_err())
             || ps.is_some_and(|s| s.interpreter.is_err()))
     {
         return Ok(false);
     }
-    if !candidate {
-        return Err(unsupported(
-            "InterpreterDraw",
-            "unsupported-interface family11",
-        ));
+    if let Some(reason) = exclusion {
+        return Err(unsupported("InterpreterDraw", reason));
     }
     for (stage, shader) in [("vertex", vs), ("pixel", ps)] {
         let shader = shader.ok_or_else(|| {
@@ -177,11 +183,9 @@ fn coverage(
         return Err(unsupported("InterpreterDraw", "unsupported-multisample"));
     }
     for (&stage, &kind) in &ps.unwrap().program.samplers {
-        let texture = snapshot
-            .textures
-            .iter()
-            .find(|t| t.stage == stage)
-            .ok_or_else(|| unsupported("InterpreterDraw", format!("unbound-texture s{stage}")))?;
+        let Some(texture) = snapshot.textures.iter().find(|t| t.stage == stage) else {
+            continue;
+        };
         if texture.volume
             || texture.depth
             || texture.cube != (kind == crate::shader::program::S_CUBE)
@@ -249,6 +253,9 @@ pub(super) fn specialize(
     let [vertex, pixel] = shaders;
     let mut textures = [None; MAX_SAMPLERS];
     for (&stage, &kind) in &ps.program.samplers {
+        if !snapshot.textures.iter().any(|t| t.stage == stage) {
+            continue;
+        }
         textures[stage as usize] = Some(TextureLayout {
             depth: false,
             filterable: true,
@@ -374,16 +381,7 @@ pub(super) fn resolve(
             let bound = mapping
                 .iter()
                 .find(|&&(_, slot)| slot == physical)
-                .map(|&(guest, _)| {
-                    snapshot
-                        .textures
-                        .iter()
-                        .find(|t| t.stage == guest)
-                        .ok_or_else(|| {
-                            unsupported("InterpreterDraw", format!("unbound-texture s{guest}"))
-                        })
-                })
-                .transpose()?;
+                .and_then(|&(guest, _)| snapshot.textures.iter().find(|t| t.stage == guest));
             let binding = if let Some(texture) = bound {
                 let (key, descriptor) = sampler(gpu, state, texture)?;
                 PendingTexture {
@@ -406,11 +404,9 @@ pub(super) fn resolve(
         }
     } else {
         for (guest, _) in mapping {
-            let texture = snapshot
-                .textures
-                .iter()
-                .find(|t| t.stage == guest)
-                .ok_or_else(|| unsupported("HybridDraw", format!("unbound-texture s{guest}")))?;
+            let Some(texture) = snapshot.textures.iter().find(|t| t.stage == guest) else {
+                continue;
+            };
             let (key, descriptor) = sampler(gpu, state, texture)?;
             bindings.push(PendingTexture {
                 stage: guest,
