@@ -327,7 +327,7 @@ impl<'a> Builder<'a> {
             current_addr: 0,
             pending: Pending::default(),
             access_indices,
-            // DIVERGENCE(original): relaxed fault state does not preserve exact register state at a fault inside __try.
+            // DIVERGENCE(original): relaxed fault state does not preserve exact register state at a fault inside __try, nor ESP/EBP/EIP at a faulting store under lazy stack writes.
             observable_faults: fault_state == FaultState::Exact && !cg.seh.is_empty(),
         })
     }
@@ -1182,7 +1182,12 @@ impl<'a> Builder<'a> {
                     self.stack_states.insert(value, lanes);
                 }
                 if self.relaxed_memory() {
-                    self.access_boundary(value, state, block, cg_op.op == Op::P(OpCode::Store))?;
+                    self.access_boundary(
+                        value,
+                        state,
+                        block,
+                        cg_op.op == Op::P(OpCode::Store) && !self.lazy_stack_writes,
+                    )?;
                 } else {
                     self.boundary(value, state, block, false)?;
                 }
