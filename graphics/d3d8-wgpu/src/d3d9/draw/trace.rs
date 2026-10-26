@@ -104,7 +104,7 @@ pub(super) fn capture_mvp(
     let description = draw
         .pipelines
         .values()
-        .find(|(p, _)| p == pipeline)
+        .find(|(p, _)| p.pipeline == *pipeline)
         .map(|(_, recipe)| {
             (
                 fingerprint(&recipe.key()),

@@ -2539,7 +2539,7 @@ fn prepare_present(
     };
     let gpu = bridge_gpu(device).map_err(bridge_error)?;
     let result = flush_draws_with_gpu(device, &gpu);
-    device.draw.end_frame();
+    device.draw.end_frame(&gpu);
     let result = bridge_gpu_ok(&gpu, result);
     if result.code != StatusCode::Ok {
         return Err(result);

@@ -217,7 +217,11 @@ impl PreparedInterpreter {
             .find(|family| family.pipeline == *pipeline)
     }
 
-    pub(crate) fn new(device: &wgpu::Device, expanded: bool) -> Result<Self, RenderError> {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        expanded: bool,
+        trace: bool,
+    ) -> Result<Self, RenderError> {
         let key = FamilyKey::mvp();
         key.check_limits(&device.limits())?;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -229,11 +233,13 @@ impl PreparedInterpreter {
             label: Some("d3d9-interpreter"),
             source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
         });
-        eprintln!(
-            "[d3d9-uber] prepare-module ms={:.3} source_bytes={}",
-            module_started.elapsed().as_secs_f64() * 1000.0,
-            SOURCE.len()
-        );
+        if trace {
+            eprintln!(
+                "[d3d9-uber] prepare-module ms={:.3} source_bytes={}",
+                module_started.elapsed().as_secs_f64() * 1000.0,
+                SOURCE.len()
+            );
+        }
         let mut keys = vec![key];
         if expanded {
             for compare in [wgpu::CompareFunction::Less, wgpu::CompareFunction::Always] {
@@ -659,10 +665,12 @@ impl PreparedInterpreter {
                     multisample: d.multisample,
                 }
                 .create(device, "d3d9-interpreter");
-                eprintln!(
-                    "[d3d9-uber] prepare-pipeline index={index} ms={:.3} descriptor={d:?}",
-                    started.elapsed().as_secs_f64() * 1000.0
-                );
+                if trace {
+                    eprintln!(
+                        "[d3d9-uber] prepare-pipeline index={index} ms={:.3} descriptor={d:?}",
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
                 PreparedFamily { key, pipeline }
             })
             .collect();

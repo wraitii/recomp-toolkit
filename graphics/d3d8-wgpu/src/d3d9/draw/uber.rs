@@ -20,8 +20,8 @@ pub(super) struct FrameCounters {
     pub(super) uniform_bytes: u64,
 }
 
-pub(super) fn enabled() -> bool {
-    mode().is_ok_and(|m| m != Mode::Specialized)
+pub(super) fn enabled(gpu: &D3d9Gpu) -> bool {
+    mode(gpu).is_ok_and(|m| m != Mode::Specialized)
 }
 
 pub(super) fn tint_enabled() -> bool {
@@ -29,15 +29,16 @@ pub(super) fn tint_enabled() -> bool {
     *TINT.get_or_init(|| std::env::var("RECOMP_D3D9_UBER_TINT").is_ok_and(|value| value == "1"))
 }
 
-fn mode() -> Result<Mode, RenderError> {
-    static MODE: std::sync::OnceLock<Result<Mode, RenderError>> = std::sync::OnceLock::new();
+fn mode(gpu: &D3d9Gpu) -> Result<Mode, RenderError> {
+    static MODE: std::sync::OnceLock<Result<Option<Mode>, RenderError>> =
+        std::sync::OnceLock::new();
     MODE.get_or_init(|| match std::env::var("RECOMP_D3D9_SHADER_MODE") {
-        Err(std::env::VarError::NotPresent) => Ok(Mode::Specialized),
+        Err(std::env::VarError::NotPresent) => Ok(None),
         Ok(value) => match value.as_str() {
-            "specialized" => Ok(Mode::Specialized),
-            "compare-family11" => Ok(Mode::CompareFamily11),
-            "hybrid" => Ok(Mode::Hybrid),
-            "interpreter-only" => Ok(Mode::InterpreterOnly),
+            "specialized" => Ok(Some(Mode::Specialized)),
+            "compare-family11" => Ok(Some(Mode::CompareFamily11)),
+            "hybrid" => Ok(Some(Mode::Hybrid)),
+            "interpreter-only" => Ok(Some(Mode::InterpreterOnly)),
             _ => Err(unsupported(
                 "InterpreterMode",
                 format!("unknown mode {value:?}"),
@@ -46,10 +47,17 @@ fn mode() -> Result<Mode, RenderError> {
         Err(error) => Err(unsupported("InterpreterMode", error.to_string())),
     })
     .clone()
+    .map(|mode| {
+        mode.unwrap_or(if gpu.backend == wgpu::Backend::Metal {
+            Mode::Hybrid
+        } else {
+            Mode::Specialized
+        })
+    })
 }
 
 pub(crate) fn prepare(gpu: &D3d9Gpu) -> Result<(), RenderError> {
-    let mode = mode()?;
+    let mode = mode(gpu)?;
     trace::capture_pair()?;
     if mode == Mode::Hybrid && gpu.backend != wgpu::Backend::Metal {
         return Err(unsupported(
@@ -57,29 +65,46 @@ pub(crate) fn prepare(gpu: &D3d9Gpu) -> Result<(), RenderError> {
             format!("unverified-backend {:?}", gpu.backend),
         ));
     }
-    if mode == Mode::Specialized || gpu.interpreter.get().is_some() {
+    if mode == Mode::Specialized {
+        eprintln!("[d3d9-uber] mode={mode:?} backend={:?}", gpu.backend);
+        return Ok(());
+    }
+    if gpu.interpreter.get().is_some() {
         return Ok(());
     }
     let started = Instant::now();
     let prepared = gpu.validate("InterpreterPrepare", || {
-        PreparedInterpreter::new(&gpu.device, mode != Mode::CompareFamily11)
+        PreparedInterpreter::new(
+            &gpu.device,
+            mode != Mode::CompareFamily11,
+            trace_compilation(),
+        )
     })?;
     eprintln!(
-        "[d3d9-uber] prepare mode={mode:?} abi={} tint={} modules=1 pipelines={} ms={:.3} source_bytes={} program_bytes={} limits={:?}",
-        program::ABI_VERSION,
-        tint_enabled(),
+        "[d3d9-uber] mode={mode:?} backend={:?} pipelines={} prepare_ms={:.3} tint={}",
+        gpu.backend,
         prepared.families.len(),
         started.elapsed().as_secs_f64() * 1000.0,
-        prepared.source.len(),
-        program::PROGRAM_BYTES,
-        gpu.limits()
+        tint_enabled()
     );
-    for family in &prepared.families {
+    if trace_compilation() {
         eprintln!(
-            "[d3d9-uber] prepare-family family={:016x} manifest={:?}",
-            fingerprint(&family.key),
-            family.key
+            "[d3d9-uber] prepare mode={mode:?} abi={} tint={} modules=1 pipelines={} ms={:.3} source_bytes={} program_bytes={} limits={:?}",
+            program::ABI_VERSION,
+            tint_enabled(),
+            prepared.families.len(),
+            started.elapsed().as_secs_f64() * 1000.0,
+            prepared.source.len(),
+            program::PROGRAM_BYTES,
+            gpu.limits()
         );
+        for family in &prepared.families {
+            eprintln!(
+                "[d3d9-uber] prepare-family family={:016x} manifest={:?}",
+                fingerprint(&family.key),
+                family.key
+            );
+        }
     }
     gpu.interpreter
         .set(prepared)
@@ -95,14 +120,16 @@ pub(super) fn select(
     ps: Option<&super::super::shader::ShaderRecord>,
 ) -> Result<bool, RenderError> {
     let result = coverage(gpu, state, snapshot, vs, ps);
-    if hybrid() {
+    if hybrid(gpu) {
         let reason = match &result {
             Ok(true) => None,
             Ok(false) => Some("unsupported-instruction-or-interface".to_string()),
             Err(error) => Some(error.cause.clone()),
         };
         if let Some(reason) = reason {
-            *draw.residual_reasons.entry(reason).or_default() += 1;
+            if trace_compilation() {
+                *draw.residual_reasons.entry(reason).or_default() += 1;
+            }
             return Ok(false);
         }
     }
@@ -124,7 +151,7 @@ fn coverage(
     vs: Option<&super::super::shader::ShaderRecord>,
     ps: Option<&super::super::shader::ShaderRecord>,
 ) -> Result<bool, RenderError> {
-    let mode = mode()?;
+    let mode = mode(gpu)?;
     if mode == Mode::Specialized {
         return Ok(false);
     }
@@ -132,7 +159,7 @@ fn coverage(
     let prepared = gpu
         .interpreter
         .get()
-        .ok_or_else(|| unsupported("InterpreterDraw", "unprepared-family family11"))?;
+        .ok_or_else(|| unsupported("InterpreterDraw", "interpreter not prepared"))?;
     let exclusion = if !matches!(
         snapshot.command.primitive,
         D3DPT_TRIANGLELIST | D3DPT_TRIANGLESTRIP
@@ -216,8 +243,8 @@ fn coverage(
     Ok(true)
 }
 
-pub(super) fn hybrid() -> bool {
-    mode().is_ok_and(|mode| mode == Mode::Hybrid)
+pub(super) fn hybrid(gpu: &D3d9Gpu) -> bool {
+    mode(gpu).is_ok_and(|mode| mode == Mode::Hybrid)
 }
 
 pub(super) fn specialize(
@@ -231,7 +258,7 @@ pub(super) fn specialize(
     let prepared = gpu
         .interpreter
         .get()
-        .ok_or_else(|| unsupported("HybridDraw", "unprepared-family family11"))?;
+        .ok_or_else(|| unsupported("HybridDraw", "interpreter not prepared"))?;
     let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
     let family = prepared
         .find(&descriptor)
@@ -252,18 +279,16 @@ pub(super) fn specialize(
     });
     let [vertex, pixel] = shaders;
     let mut textures = [None; MAX_SAMPLERS];
-    for (&stage, &kind) in &ps.program.samplers {
-        if !snapshot.textures.iter().any(|t| t.stage == stage) {
-            continue;
-        }
+    for texture in snapshot
+        .textures
+        .iter()
+        .filter(|t| ps.program.samplers.contains_key(&t.stage))
+    {
+        let stage = texture.stage;
         textures[stage as usize] = Some(TextureLayout {
             depth: false,
             filterable: true,
-            dimension: if kind == crate::shader::program::S_CUBE {
-                wgpu::TextureViewDimension::Cube
-            } else {
-                wgpu::TextureViewDimension::D2
-            },
+            dimension: texture_dimension(texture),
         });
     }
     let layout_key = LayoutKey::Draw {
@@ -279,36 +304,31 @@ pub(super) fn specialize(
         },
         descriptor: family.key.descriptor.clone(),
     };
+    if let Some((compiled, _)) = draw.pipelines.get(&recipe.key()) {
+        return resolve(
+            gpu,
+            draw,
+            state,
+            snapshot,
+            vs,
+            ps,
+            Some((compiled.clone(), recipe)),
+        )
+        .map(Some);
+    }
     if draw.compiler.is_none() {
         draw.compiler = Some(crate::render::compile::Compiler::new(
             gpu.device.clone(),
             crate::render::compile::Limits {
                 queued: 32,
                 recipe_bytes: 8 << 20,
-                ready: 128,
             },
+            trace_compilation(),
         )?);
     }
     let compiler = draw.compiler.as_mut().unwrap();
-    let Some(compiled) = compiler.request(recipe.clone(), draw.frame)? else {
-        return Ok(None);
-    };
-    let mut memo = resolve(gpu, draw, state, snapshot, vs, ps, false)?;
-    memo.modules = compiled.modules;
-    memo.layout = compiled.layout;
-    memo.binding_entries = recipe.interface.bindings;
-    memo.recipes = recipe.shaders;
-    memo.vs_count = vs.program.const_limit();
-    memo.ps_count = ps.program.const_limit();
-    memo.pipeline = Some((
-        (
-            family.key.interface.vertex_buffers.clone(),
-            family.key.descriptor.primitive.topology,
-            None,
-        ),
-        compiled.pipeline,
-    ));
-    Ok(Some(memo))
+    compiler.request(recipe, draw.frame)?;
+    Ok(None)
 }
 
 fn upload(
@@ -334,17 +354,19 @@ fn upload(
             }))
     })?;
     programs.insert(program.key.clone(), buffer.clone());
-    eprintln!(
-        "[d3d9-uber] program-upload identity={:?} bytes={} resident_programs={} resident_program_bytes={} retained_bytecode_bytes={}",
-        program.key,
-        bytes.len(),
-        programs.len(),
-        programs.len() as u64 * program::PROGRAM_BYTES,
-        programs
-            .keys()
-            .map(EncodedKey::retained_bytecode_bytes)
-            .sum::<usize>()
-    );
+    if trace_compilation() {
+        eprintln!(
+            "[d3d9-uber] program-upload identity={:?} bytes={} resident_programs={} resident_program_bytes={} retained_bytecode_bytes={}",
+            program.key,
+            bytes.len(),
+            programs.len(),
+            programs.len() as u64 * program::PROGRAM_BYTES,
+            programs
+                .keys()
+                .map(EncodedKey::retained_bytecode_bytes)
+                .sum::<usize>()
+        );
+    }
     Ok(buffer)
 }
 
@@ -355,12 +377,13 @@ pub(super) fn resolve(
     snapshot: &DrawSnapshot,
     vs: &super::super::shader::ShaderRecord,
     ps: &super::super::shader::ShaderRecord,
-    interpreted: bool,
+    specialized: Option<(crate::render::pipeline::CompiledPipeline, PipelineRecipe)>,
 ) -> Result<Box<DrawMemo>, RenderError> {
+    let interpreted = specialized.is_none();
     let prepared = gpu
         .interpreter
         .get()
-        .ok_or_else(|| unsupported("InterpreterDraw", "unprepared-family family11"))?;
+        .ok_or_else(|| unsupported("InterpreterDraw", "interpreter not prepared"))?;
     let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
     let family = prepared
         .find(&descriptor)
@@ -416,10 +439,31 @@ pub(super) fn resolve(
         }
     }
     let bindings = bindings.into();
-    let recipes = [
-        ShaderRecipe::Source(Arc::clone(&prepared.source)),
-        ShaderRecipe::Source(Arc::clone(&prepared.source)),
-    ];
+    let (modules, layout, binding_entries, recipes, vs_count, ps_count, pipeline) =
+        if let Some((compiled, recipe)) = specialized {
+            (
+                compiled.modules,
+                compiled.layout,
+                recipe.interface.bindings,
+                recipe.shaders,
+                vs.program.const_limit(),
+                ps.program.const_limit(),
+                compiled.pipeline,
+            )
+        } else {
+            (
+                [prepared.module.clone(), prepared.module.clone()],
+                prepared.layout.clone(),
+                Arc::clone(&family.key.interface.bindings),
+                [
+                    ShaderRecipe::Source(Arc::clone(&prepared.source)),
+                    ShaderRecipe::Source(Arc::clone(&prepared.source)),
+                ],
+                program::VERTEX_CONSTANTS,
+                program::PIXEL_CONSTANTS,
+                family.pipeline.clone(),
+            )
+        };
     Ok(Box::new(DrawMemo {
         fingerprint: state.pipeline_fingerprint(),
         ff_key: None,
@@ -431,12 +475,12 @@ pub(super) fn resolve(
             .map(|d| (d.texture.format(), d.format)),
         textures: snapshot.textures.clone(),
         bindings,
-        vs_count: program::VERTEX_CONSTANTS,
-        ps_count: program::PIXEL_CONSTANTS,
-        modules: [prepared.module.clone(), prepared.module.clone()],
+        vs_count,
+        ps_count,
+        modules,
         recipes,
-        binding_entries: Arc::clone(&family.key.interface.bindings),
-        layout: prepared.layout.clone(),
+        binding_entries,
+        layout,
         programs,
         trace_interface: None,
         trace_pipeline: None,
@@ -446,7 +490,7 @@ pub(super) fn resolve(
                 family.key.descriptor.primitive.topology,
                 None,
             ),
-            family.pipeline.clone(),
+            pipeline,
         )),
     }))
 }

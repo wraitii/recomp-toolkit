@@ -166,8 +166,10 @@ interface/raster state use the prepared interpreter; other draws keep
 specialization. This is a scoped comparison, not whole-scene interpreter-only
 coverage. A selected draw with missing preparation or unsupported resources fails
 by name. `interpreter-only` rejects uncovered draws and never selects or schedules
-specialization. The default `specialized` creates no interpreter GPU resources.
-`hybrid` is opt-in on Metal: covered misses render through the prepared interpreter
+specialization. Metal defaults to `hybrid`; other backends default to
+`specialized`. Set `RECOMP_D3D9_SHADER_MODE=specialized` to roll back without
+creating interpreter GPU resources. Startup logs the effective mode and backend.
+In hybrid mode, covered misses render through the prepared interpreter
 while one worker generates and compiles the complete specialization. Ready results
 are adopted at draw boundaries. Covered hybrid draws retain canonical packed
 vertices after switching; uncovered draws retain synchronous specialization with
@@ -176,14 +178,17 @@ Unknown modes fail at
 initialization. See [SHADERS.md](SHADERS.md) for exact coverage and bindings.
 
 The worker admits 32 waiting recipes, charges at most 8 MiB of estimated retained
-recipe data, and retains up to 128 ready specializations with least-recently-used
-eviction. Saturation keeps covered draws interpreted; failed jobs retain their
+recipe data while work is pending. Completion releases that charge and moves ready
+pipelines into the regular 512-entry renderer cache shared with synchronous
+specialization. Saturation keeps covered draws interpreted; failed jobs retain their
 diagnostic until reset rather than retrying. OOM remains a renderer error and
 physical device loss uses the existing loss path. Reset retires the worker's
 private completion channel without joining compilation, so old results cannot
-enter a new epoch. `[d3d9-async]` logs queue/compile/publication/first-selection
+enter a new epoch. `[d3d9-async]` logs queue/compile/publication
 timings, fallback residence, saturation, failures, epochs and residual counts.
-Recipe accounting excludes opaque driver allocations and temporary compiler
+Routine preparation, compilation, upload and frame logs require
+`RECOMP_D3D9_TRACE_PIPELINES=1`; startup mode selection and compilation failures
+remain visible by default. Recipe accounting excludes opaque driver allocations and temporary compiler
 memory; these limits are not performance acceptance budgets.
 
 Add `RECOMP_D3D9_UBER_TINT=1` to mix 15% red into interpreted fragment results
@@ -196,7 +201,7 @@ For a visible handoff, `RECOMP_D3D9_ASYNC_DELAY_MS=5000` holds each successful
 worker result for five seconds before publication. It defaults to zero, delays
 only the compiler worker, and logs `debug-delay`; unset it for performance captures.
 
-Opt-in modes prepare one module during device initialization, including
+Interpreter modes prepare one module during device initialization, including
 replacement devices: `compare-family11` creates one pipeline; hybrid and
 interpreter-only create 43 captured pipeline states, retaining the UI/video and
 additive families. The interpreter supports straight-line arithmetic, relative

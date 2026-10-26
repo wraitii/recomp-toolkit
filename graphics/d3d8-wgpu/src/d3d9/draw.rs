@@ -8,7 +8,8 @@ use crate::fast_map::{FastHasher, FastMap};
 use crate::render::bindings::DrawParameters;
 use crate::render::interface::{InterfaceKey, LayoutAttribute, VertexAttributes, VertexLayouts};
 use crate::render::pipeline::{
-    PipelineDescriptor, PipelineRecipe, PreparedPipeline as PipelineKey,
+    CompiledPipeline, PipelineDescriptor, PipelineRecipe, PipelineRecipeKey,
+    PreparedPipeline as PipelineKey,
 };
 use crate::shader::identity::ProgramKey;
 use crate::shader::recipe::{ProgramSettings, ShaderRecipe, shading_source};
@@ -2229,7 +2230,7 @@ pub(crate) struct D3d9DrawState {
     shader_variants: FastMap<ShaderVariantKey, Arc<CachedShaderSource>>,
     samplers: FastMap<SamplerKey, wgpu::Sampler>,
     layouts: FastMap<LayoutKey, wgpu::BindGroupLayout>,
-    pipelines: FastMap<PipelineKey, (wgpu::RenderPipeline, Arc<PipelineRecipe>)>,
+    pipelines: FastMap<PipelineRecipeKey, (CompiledPipeline, Arc<PipelineRecipe>)>,
     batch: DrawBatch,
     index_remap: Vec<u32>,
     geometry: FastMap<usize, CachedGeometry>,
@@ -2291,8 +2292,8 @@ impl D3d9DrawState {
         self.geometry_seen.clear();
     }
 
-    pub(crate) fn end_frame(&mut self) {
-        if uber::hybrid() {
+    pub(crate) fn end_frame(&mut self, gpu: &D3d9Gpu) {
+        if uber::hybrid(gpu) {
             if let Some(compiler) = &mut self.compiler {
                 compiler.end_frame(self.frame);
             }
@@ -2317,7 +2318,7 @@ impl D3d9DrawState {
                 self.pipeline_ms
             );
         }
-        if uber::enabled() {
+        if trace_compilation() && uber::enabled(gpu) {
             let c = &self.interpreter_frame;
             eprintln!(
                 "[d3d9-uber] frame frame={} draws={} interpreted_draws={} total_interpreted_draws={} timing={} cpu_ms={:.3} packing_ms={:.3} packed_bytes={} uniform_bytes={} resident_program_bytes={}",
@@ -2358,7 +2359,6 @@ impl D3d9DrawState {
         self.discard_batch();
         self.interpreter_programs.clear();
         self.upload = None;
-        self.bind_groups.clear();
     }
     pub fn drop_resource(&mut self, _id: u32) {}
 
@@ -2570,8 +2570,8 @@ impl D3d9DrawState {
                 return Ok(pipeline.clone());
             }
         }
-        let pipeline = match self.pipelines.get(&key) {
-            Some((pipeline, _)) => pipeline.clone(),
+        let pipeline = match self.pipelines.get(&recipe.key()) {
+            Some((compiled, _)) => compiled.pipeline.clone(),
             None => self.compile_pipeline(gpu, key.clone(), recipe)?,
         };
         self.pipeline_memo = Some((key, pipeline.clone()));
@@ -2624,12 +2624,22 @@ impl D3d9DrawState {
         let pipeline = recipe
             .prepare(key.modules.clone(), key.layout.clone())
             .create(&gpu.device, "d3d9-cached");
+        self.cache_pipeline(
+            recipe,
+            CompiledPipeline {
+                pipeline: pipeline.clone(),
+                modules: key.modules,
+                layout: key.layout,
+            },
+        );
+        pipeline
+    }
+    fn cache_pipeline(&mut self, recipe: PipelineRecipe, compiled: CompiledPipeline) {
         if self.pipelines.len() >= 512 {
             evict_one(&mut self.pipelines);
         }
         self.pipelines
-            .insert(key, (pipeline.clone(), Arc::new(recipe)));
-        pipeline
+            .insert(recipe.key(), (compiled, Arc::new(recipe)));
     }
 }
 fn texture_dimension(t: &BoundTexture) -> wgpu::TextureViewDimension {
@@ -3051,9 +3061,13 @@ pub(crate) fn execute(
 ) -> Result<(), RenderError> {
     let draw_started = trace_compilation().then(Instant::now);
     if let Some(compiler) = &mut draw.compiler {
-        if compiler.publish()? {
+        let ready = compiler.publish(draw.frame)?;
+        if !ready.is_empty() {
             draw.memos.clear();
             draw.pipeline_memo = None;
+        }
+        for (recipe, compiled) in ready {
+            draw.cache_pipeline(recipe, compiled);
         }
     }
     if trace_compilation() && !draw.trace_identity {
@@ -3169,7 +3183,7 @@ pub(crate) fn execute(
         );
     }
     let eligible = uber::select(gpu, draw, state, snapshot, vs, ps)?;
-    let ready = if eligible && uber::hybrid() {
+    let ready = if eligible && uber::hybrid(gpu) {
         uber::specialize(gpu, draw, state, snapshot, vs.unwrap(), ps.unwrap())?
     } else {
         None
@@ -3507,7 +3521,7 @@ pub(crate) fn execute(
             snapshot,
             vs.ok_or_else(|| unsupported("InterpreterDraw", "missing vertex program"))?,
             ps.ok_or_else(|| unsupported("InterpreterDraw", "missing pixel program"))?,
-            true,
+            None,
         )?,
         None => resolve_shading(
             gpu,

@@ -1,7 +1,9 @@
-# D3D9 interpreter MVP
+# D3D9 interpreter coverage
 
-The opt-in interpreter implements a bounded SM2 VS/PS family; Spore rendering,
-native Metal compilation and GPU performance still require user-run validation.
+The interpreter implements a bounded SM2 VS/PS subset. Hybrid is the default on
+Metal, with a specialized override; other backends remain specialized by default.
+The current coverage has user visual and Metal GPU review. Runtime failure and
+device-reset stress checks remain outstanding.
 `src/shader/uber/` defines ABI v8 / interpreter v14. A program is 17424 bytes:
 a four-u32 header (ABI version, pixel flag, instruction count, definition count),
 256 zero-padded 16-u32 instruction records and 32 definition records (index/padding
