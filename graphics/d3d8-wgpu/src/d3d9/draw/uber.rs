@@ -110,10 +110,53 @@ pub(crate) fn prepare(gpu: &D3d9Gpu) -> Result<(), RenderError> {
         .map_err(|_| unsupported("InterpreterPrepare", "family already prepared"))
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct Selection {
     pub(super) eligible: Option<bool>,
     pub(super) family: Option<u64>,
+}
+
+#[derive(PartialEq, Eq)]
+struct SelectionKey {
+    revision: u64,
+    primitive: u32,
+    target: (wgpu::TextureFormat, u32, u32),
+    depth: Option<(wgpu::TextureFormat, u32, u32)>,
+    textures: [(u32, u32); MAX_SAMPLERS],
+}
+
+impl SelectionKey {
+    fn new(state: &D3d9State, snapshot: &DrawSnapshot) -> Self {
+        let surface = |surface: &SurfaceView| {
+            (
+                surface.texture.format(),
+                surface.format,
+                surface.texture.sample_count(),
+            )
+        };
+        let mut textures = [(0, 0); MAX_SAMPLERS];
+        for texture in &snapshot.textures {
+            textures[texture.stage as usize] = (
+                texture.format,
+                1 | u32::from(texture.depth) << 1
+                    | u32::from(texture.cube) << 2
+                    | u32::from(texture.volume) << 3,
+            );
+        }
+        Self {
+            revision: state.selection_revision(),
+            primitive: snapshot.command.primitive,
+            target: surface(&snapshot.target),
+            depth: snapshot.depth.as_ref().map(surface),
+            textures,
+        }
+    }
+}
+
+struct CachedSelection {
+    key: SelectionKey,
+    selection: Selection,
+    recipe: Option<Arc<CachedRecipe>>,
 }
 
 pub(super) fn select(
@@ -128,6 +171,17 @@ pub(super) fn select(
     if mode == Mode::Specialized {
         return Ok(Selection::default());
     }
+    let key = (mode == Mode::Hybrid).then(|| SelectionKey::new(state, snapshot));
+    if let Some(cached) = draw
+        .specialization
+        .selection
+        .as_ref()
+        .filter(|cached| key.as_ref().is_some_and(|key| *key == cached.key))
+    {
+        draw.specialization.selection_hits += 1;
+        return Ok(cached.selection);
+    }
+    draw.specialization.selection = None;
     let coverage = coverage(gpu, state, snapshot, vs, ps);
     let eligible = coverage.as_ref().is_ok_and(|eligible| *eligible);
     let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
@@ -159,10 +213,18 @@ pub(super) fn select(
     } else {
         result?;
     }
-    Ok(Selection {
+    let selection = Selection {
         eligible: Some(eligible),
         family,
-    })
+    };
+    if let Some(key) = key.filter(|_| family.is_some()) {
+        draw.specialization.selection = Some(CachedSelection {
+            key,
+            selection,
+            recipe: None,
+        });
+    }
+    Ok(selection)
 }
 
 pub(super) fn topology(snapshot: &DrawSnapshot) -> wgpu::PrimitiveTopology {
@@ -277,11 +339,20 @@ struct RecipeInputs {
     descriptor: PipelineDescriptor,
 }
 
+struct CachedRecipe {
+    key: PipelineRecipeKey,
+    recipe: Arc<PipelineRecipe>,
+    raw_inputs: u16,
+}
+
 #[derive(Default)]
 pub(super) struct RecipeCache {
-    entries: FastMap<RecipeInputs, (PipelineRecipeKey, Arc<PipelineRecipe>)>,
+    entries: FastMap<RecipeInputs, Arc<CachedRecipe>>,
+    selection: Option<CachedSelection>,
     pub(super) hits: u64,
     pub(super) misses: u64,
+    pub(super) selection_hits: u64,
+    pub(super) fast_hits: u64,
 }
 
 pub(super) fn specialize(
@@ -296,6 +367,83 @@ pub(super) fn specialize(
     strip_format: Option<wgpu::IndexFormat>,
     raw_inputs: u16,
 ) -> Result<Option<(CompiledPipeline, Arc<PipelineRecipe>)>, RenderError> {
+    let misses = draw.specialization.misses;
+    let fast = draw
+        .specialization
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.recipe.as_ref())
+        .filter(|cached| {
+            let recipe = &cached.recipe;
+            cached.raw_inputs == raw_inputs
+                && recipe.interface.vertex_buffers == vertex_buffers
+                && recipe.descriptor.primitive.topology == topology
+                && recipe.descriptor.primitive.strip_index_format == strip_format
+        })
+        .cloned();
+    let prepared = if let Some(prepared) = fast {
+        draw.specialization.hits += 1;
+        draw.specialization.fast_hits += 1;
+        prepared
+    } else {
+        let prepared = prepare_recipe(
+            gpu,
+            draw,
+            state,
+            snapshot,
+            vs,
+            ps,
+            vertex_buffers,
+            topology,
+            strip_format,
+            raw_inputs,
+        )?;
+        if let Some(selection) = &mut draw.specialization.selection {
+            selection.recipe = Some(Arc::clone(&prepared));
+        }
+        prepared
+    };
+    let key = &prepared.key;
+    let recipe = &prepared.recipe;
+    if trace_compilation() {
+        eprintln!(
+            "[d3d9-compile] draw-specialization frame={} draw={} recipe={:016x} cached={}",
+            draw.frame,
+            draw.measured_draws,
+            key.fingerprint(),
+            draw.specialization.misses == misses
+        );
+    }
+    if let Some((compiled, _)) = draw.pipelines.get(key) {
+        return Ok(Some((compiled.clone(), Arc::clone(recipe))));
+    }
+    if draw.compiler.is_none() {
+        draw.compiler = Some(crate::render::compile::Compiler::new(
+            gpu.device.clone(),
+            crate::render::compile::Limits {
+                queued: 32,
+                recipe_bytes: 8 << 20,
+            },
+            trace_compilation(),
+        )?);
+    }
+    let compiler = draw.compiler.as_mut().unwrap();
+    compiler.request(key, recipe, draw.frame)?;
+    Ok(None)
+}
+
+fn prepare_recipe(
+    gpu: &D3d9Gpu,
+    draw: &mut D3d9DrawState,
+    state: &D3d9State,
+    snapshot: &DrawSnapshot,
+    vs: &super::super::shader::ShaderRecord,
+    ps: &super::super::shader::ShaderRecord,
+    vertex_buffers: VertexLayouts,
+    topology: wgpu::PrimitiveTopology,
+    strip_format: Option<wgpu::IndexFormat>,
+    raw_inputs: u16,
+) -> Result<Arc<CachedRecipe>, RenderError> {
     let descriptor = pipeline_descriptor(gpu, state, snapshot, topology, strip_format)?;
     let vertex = translated_settings(&vs.program, state, &snapshot.textures, raw_inputs)?;
     let pixel = translated_settings(&ps.program, state, &snapshot.textures, raw_inputs)?;
@@ -328,7 +476,7 @@ pub(super) fn specialize(
     {
         evict_one(&mut draw.specialization.entries);
     }
-    let (cached, (key, recipe)) = match draw.specialization.entries.entry(inputs) {
+    let (cached, prepared) = match draw.specialization.entries.entry(inputs) {
         std::collections::hash_map::Entry::Occupied(entry) => (true, entry.into_mut()),
         std::collections::hash_map::Entry::Vacant(entry) => {
             let inputs = entry.key();
@@ -347,7 +495,14 @@ pub(super) fn specialize(
                 },
                 descriptor: inputs.descriptor.clone(),
             });
-            (false, entry.insert((recipe.key(), recipe)))
+            (
+                false,
+                entry.insert(Arc::new(CachedRecipe {
+                    key: recipe.key(),
+                    recipe,
+                    raw_inputs,
+                })),
+            )
         }
     };
     if cached {
@@ -355,31 +510,7 @@ pub(super) fn specialize(
     } else {
         draw.specialization.misses += 1;
     }
-    let key = &*key;
-    if trace_compilation() {
-        eprintln!(
-            "[d3d9-compile] draw-specialization frame={} draw={} recipe={:016x} cached={cached}",
-            draw.frame,
-            draw.measured_draws,
-            key.fingerprint()
-        );
-    }
-    if let Some((compiled, _)) = draw.pipelines.get(key) {
-        return Ok(Some((compiled.clone(), Arc::clone(recipe))));
-    }
-    if draw.compiler.is_none() {
-        draw.compiler = Some(crate::render::compile::Compiler::new(
-            gpu.device.clone(),
-            crate::render::compile::Limits {
-                queued: 32,
-                recipe_bytes: 8 << 20,
-            },
-            trace_compilation(),
-        )?);
-    }
-    let compiler = draw.compiler.as_mut().unwrap();
-    compiler.request(key, recipe, draw.frame)?;
-    Ok(None)
+    Ok(Arc::clone(prepared))
 }
 
 fn upload(

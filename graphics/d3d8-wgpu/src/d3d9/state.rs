@@ -591,6 +591,7 @@ pub struct D3d9State {
     recording: Option<D3d9StateBlock>,
     recording_handle: u32,
     pipeline_fingerprint: u64,
+    selection_revision: u64,
 }
 
 impl Default for D3d9State {
@@ -669,6 +670,7 @@ impl Default for D3d9State {
             recording: None,
             recording_handle: 0,
             pipeline_fingerprint: 0,
+            selection_revision: 0,
         };
         state.pipeline_fingerprint = state.full_fingerprint();
         state
@@ -775,9 +777,20 @@ impl D3d9State {
         self.pipeline_fingerprint
     }
 
+    pub(crate) fn selection_revision(&self) -> u64 {
+        self.selection_revision
+    }
+
     fn track(&mut self, slot: u64, old: u32, new: u32) {
         if old != new {
             self.pipeline_fingerprint ^= fingerprint_word(slot, old) ^ fingerprint_word(slot, new);
+            if slot < FP_SAMPLER
+                || matches!(slot, FP_VERTEX_SHADER | FP_PIXEL_SHADER)
+                || ((FP_TEXTURE..FP_TEXTURE + MAX_SAMPLERS as u64).contains(&slot)
+                    && (old == 0) != (new == 0))
+            {
+                self.selection_revision += 1;
+            }
         }
     }
 

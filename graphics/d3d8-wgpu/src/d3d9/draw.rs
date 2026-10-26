@@ -2354,7 +2354,7 @@ impl D3d9DrawState {
         }
         if trace_compilation() {
             eprintln!(
-                "[d3d9-compile] frame frame={} draws={} draw_cpu_ms={:.3} geometry_cpu_ms={:.3} packed_bytes={} geometry_upload_bytes={} batch_upload_bytes={} module_ms={:.3} pipeline_ms={:.3} specialization_cpu_ms={:.3} recipe_cache_hits={} recipe_cache_misses={}",
+                "[d3d9-compile] frame frame={} draws={} draw_cpu_ms={:.3} geometry_cpu_ms={:.3} packed_bytes={} geometry_upload_bytes={} batch_upload_bytes={} module_ms={:.3} pipeline_ms={:.3} specialization_cpu_ms={:.3} recipe_cache_hits={} recipe_cache_misses={} selection_cache_hits={} recipe_fast_hits={}",
                 self.frame,
                 self.measured_draws,
                 self.draw_cpu_ms,
@@ -2366,7 +2366,9 @@ impl D3d9DrawState {
                 self.pipeline_ms,
                 self.specialization_cpu_ms,
                 self.specialization.hits,
-                self.specialization.misses
+                self.specialization.misses,
+                self.specialization.selection_hits,
+                self.specialization.fast_hits
             );
         }
         if trace_compilation() && uber::enabled(gpu) {
@@ -2391,6 +2393,8 @@ impl D3d9DrawState {
         self.specialization_cpu_ms = 0.0;
         self.specialization.hits = 0;
         self.specialization.misses = 0;
+        self.specialization.selection_hits = 0;
+        self.specialization.fast_hits = 0;
         self.packed_bytes = 0;
         self.geometry_upload_bytes = 0;
         self.batch_upload_bytes = 0;
