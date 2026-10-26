@@ -90,6 +90,39 @@ RECOMP_HOT_INLINE void recomp_wr64_(uint8_t *arena, uint32_t a, uint64_t v) {
     RECOMP_BITCOPY(arena + a, &v, 8);
 #endif
 }
+#if RECOMP_STORE_HOOKS || (defined(RECOMP_NULL_CHECKS) && RECOMP_NULL_CHECKS) || \\
+    !(defined(__GNUC__) || defined(__clang__))
+RECOMP_HOT_INLINE void recomp_rd128_(uint8_t *arena, uint32_t a, uint32_t *v0, uint32_t *v1,
+                                     uint32_t *v2, uint32_t *v3) {
+    *v0 = recomp_rd32_(arena, a);
+    *v1 = recomp_rd32_(arena, a + 4u);
+    *v2 = recomp_rd32_(arena, a + 8u);
+    *v3 = recomp_rd32_(arena, a + 12u);
+}
+RECOMP_HOT_INLINE void recomp_wr128_(uint8_t *arena, uint32_t a, uint32_t v0, uint32_t v1,
+                                     uint32_t v2, uint32_t v3) {
+    recomp_wr32_(arena, a, v0);
+    recomp_wr32_(arena, a + 4u, v1);
+    recomp_wr32_(arena, a + 8u, v2);
+    recomp_wr32_(arena, a + 12u, v3);
+}
+#else
+typedef uint32_t recomp_u32x4_ __attribute__((vector_size(16)));
+RECOMP_HOT_INLINE void recomp_rd128_(uint8_t *arena, uint32_t a, uint32_t *v0, uint32_t *v1,
+                                     uint32_t *v2, uint32_t *v3) {
+    recomp_u32x4_ v;
+    RECOMP_BITCOPY(&v, arena + a, 16);
+    *v0 = v[0];
+    *v1 = v[1];
+    *v2 = v[2];
+    *v3 = v[3];
+}
+RECOMP_HOT_INLINE void recomp_wr128_(uint8_t *arena, uint32_t a, uint32_t v0, uint32_t v1,
+                                     uint32_t v2, uint32_t v3) {
+    recomp_u32x4_ v = {v0, v1, v2, v3};
+    RECOMP_BITCOPY(arena + a, &v, 16);
+}
+#endif
 RECOMP_HOT_INLINE float recomp_rdf32_(uint8_t *arena, uint32_t a) {
 #if RECOMP_STORE_HOOKS || (defined(RECOMP_NULL_CHECKS) && RECOMP_NULL_CHECKS)
     (void)arena;

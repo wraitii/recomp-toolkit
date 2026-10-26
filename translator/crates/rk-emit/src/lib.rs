@@ -840,6 +840,11 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 if live {
+                    if let Some(end) = self.wide_memory(&ops, position)? {
+                        self.wide_memory_emit(&ops[position..end])?;
+                        grouped = end;
+                        continue;
+                    }
                     if let Some(code) = self.packed_float4(&ops, position)? {
                         self.packed_float4_emit(code, &ops[position..position + 4])?;
                         for &lane in &ops[position..position + 4] {
@@ -2706,6 +2711,100 @@ impl<'a> Emitter<'a> {
             }
         }
         Ok(Some(code))
+    }
+
+    fn lane_address(&self, base: ValueId, address: ValueId, lane: u64) -> bool {
+        if lane == 0 {
+            return address == base;
+        }
+        match (self.s.value(base).op, self.s.value(address).op) {
+            (Op::Const(base), Op::Const(address)) => address == base + lane * 4,
+            (_, Op::P(OpCode::IntAdd)) => {
+                let args = self.s.args(address);
+                args.len() == 2
+                    && args[0] == base
+                    && self.s.value(args[1]).op == Op::Const(lane * 4)
+            }
+            _ => false,
+        }
+    }
+
+    fn wide_memory(&self, ops: &[ValueId], position: usize) -> Result<Option<usize>> {
+        let code = match self.s.value(ops[position]).op {
+            Op::P(code @ (OpCode::Load | OpCode::Store)) => code,
+            _ => return Ok(None),
+        };
+        let addr = self.s.value_addr[ops[position] as usize];
+        let Some(&base) = self.s.args(ops[position]).get(1) else {
+            return Ok(None);
+        };
+        let mut lane = 0u64;
+        for (end, &value) in ops.iter().enumerate().skip(position) {
+            let item = self.s.value(value);
+            if self.s.value_addr[value as usize] != addr
+                || self.reload_defs.contains_key(&value)
+                || self.keep_lane.contains_key(&value)
+                || (end > position && self.plan.publish.contains_key(&value))
+            {
+                return Ok(None);
+            }
+            let lines = self.x87_lines(|x87, names| x87.event_lines(self.clone, value, names))?;
+            if !lines.is_empty() {
+                return Ok(None);
+            }
+            if item.op == Op::P(OpCode::IntAdd) {
+                continue;
+            }
+            let args = self.s.args(value);
+            let lane_ok = item.op == Op::P(code)
+                && self.plan.live.contains(&value)
+                && args.get(1).is_some_and(|&address| self.lane_address(base, address, lane))
+                && match code {
+                    OpCode::Load => item.size == 4 && self.materialized[value as usize],
+                    _ => args.get(2).is_some_and(|&stored| {
+                        self.s.value(stored).size == 4 && self.packed_float_arg_ok(stored)
+                    }),
+                };
+            if !lane_ok {
+                return Ok(None);
+            }
+            lane += 1;
+            if lane == 4 {
+                return Ok(Some(end + 1));
+            }
+        }
+        Ok(None)
+    }
+
+    fn wide_memory_emit(&mut self, group: &[ValueId]) -> Result<()> {
+        let first = group[0];
+        self.publish(first)?;
+        let address = self.expr(self.s.args(first)[1])?;
+        let mut lanes = Vec::with_capacity(4);
+        for &value in group {
+            match self.s.value(value).op {
+                Op::P(OpCode::Load) => lanes.push(format!("&v{value}")),
+                Op::P(OpCode::Store) => {
+                    let stored = self.expr(self.s.args(value)[2])?;
+                    lanes.push(format!("(uint32_t)({stored})"));
+                }
+                _ if self.plan.live.contains(&value) => {
+                    let expr = self.operation(value)?;
+                    let _ = writeln!(self.out, "{}", self.assignment(value, &expr));
+                }
+                _ => {}
+            }
+        }
+        let helper = match self.s.value(first).op {
+            Op::P(OpCode::Load) => "recomp_rd128_",
+            _ => "recomp_wr128_",
+        };
+        let _ = writeln!(
+            self.out,
+            "{helper}(arena_, (uint32_t)({address}), {});",
+            lanes.join(", ")
+        );
+        Ok(())
     }
 
     fn packed_float4_emit(&mut self, code: OpCode, values: &[ValueId]) -> Result<()> {

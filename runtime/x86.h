@@ -579,11 +579,25 @@ RECOMP_HOT_INLINE uint32_t recomp_sse_divps(const X86 *c, uint32_t a, uint32_t b
     return recomp_sse_result(c, a, b, x / y, RECOMP_SSE_RESULT_DIV);
 }
 #if defined(__GNUC__) || defined(__clang__)
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 typedef float recomp_sse_f32x4 __attribute__((vector_size(16)));
 typedef uint32_t recomp_sse_u32x4 __attribute__((vector_size(16)));
 RECOMP_HOT_INLINE recomp_sse_u32x4 recomp_sse_bits4(recomp_sse_f32x4 v) {
     recomp_sse_u32x4 bits;
     memcpy(&bits, &v, sizeof bits);
+    return bits;
+}
+RECOMP_COLD recomp_sse_u32x4 recomp_sse_result4_slow(const X86 *c, recomp_sse_u32x4 a,
+                                                     recomp_sse_u32x4 b, recomp_sse_f32x4 result,
+                                                     unsigned operation) {
+    recomp_sse_u32x4 bits = recomp_sse_bits4(result);
+    for (unsigned lane = 0; lane < 4; lane++) {
+        uint32_t magnitude = bits[lane] & 0x7fffffffu;
+        if (magnitude - 1u < 0x00800000u || magnitude > 0x7f800000u)
+            bits[lane] = recomp_sse_result_slow(c, a[lane], b[lane], result[lane], operation);
+    }
     return bits;
 }
 RECOMP_HOT_INLINE void recomp_sse_result4(const X86 *c, uint32_t a0, uint32_t b0, uint32_t a1,
@@ -610,6 +624,11 @@ RECOMP_HOT_INLINE void recomp_sse_result4(const X86 *c, uint32_t a0, uint32_t b0
         break;
     }
     recomp_sse_u32x4 bits = recomp_sse_bits4(result);
+#if defined(__aarch64__)
+    float32x4_t value = (float32x4_t)result;
+    uint32x4_t fast = vorrq_u32(vcageq_f32(value, vdupq_n_f32(0x1p-126f)), vceqzq_f32(value));
+    if (RECOMP_UNLIKELY(vminvq_u32(fast) == 0)) {
+#else
     const recomp_sse_u32x4 one = {1u, 1u, 1u, 1u};
     const recomp_sse_u32x4 normal = {0x00800000u, 0x00800000u, 0x00800000u, 0x00800000u};
     const recomp_sse_u32x4 infinity = {0x7f800000u, 0x7f800000u, 0x7f800000u, 0x7f800000u};
@@ -617,15 +636,9 @@ RECOMP_HOT_INLINE void recomp_sse_result4(const X86 *c, uint32_t a0, uint32_t b0
     recomp_sse_u32x4 magnitude = bits & ~sign;
     recomp_sse_u32x4 slow = ((magnitude - one) < normal) | (magnitude > infinity);
     if (RECOMP_UNLIKELY(slow[0] | slow[1] | slow[2] | slow[3])) {
-        uint32_t a[4] = {a0, a1, a2, a3}, b[4] = {b0, b1, b2, b3};
-        uint32_t *out[4] = {r0, r1, r2, r3};
-        for (unsigned lane = 0; lane < 4; lane++) {
-            uint32_t lane_bits = bits[lane], lane_magnitude = lane_bits & 0x7fffffffu;
-            if (lane_magnitude - 1u < 0x00800000u || lane_magnitude > 0x7f800000u)
-                lane_bits = recomp_sse_result_slow(c, a[lane], b[lane], result[lane], operation);
-            *out[lane] = lane_bits;
-        }
-        return;
+#endif
+        recomp_sse_u32x4 a = {a0, a1, a2, a3}, b = {b0, b1, b2, b3};
+        bits = recomp_sse_result4_slow(c, a, b, result, operation);
     }
     *r0 = bits[0];
     *r1 = bits[1];
