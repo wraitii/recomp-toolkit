@@ -465,6 +465,22 @@ impl Frame {
                 }
             }
             let Some(borrowed) = summary.borrowed else {
+                if let Some(writes) = summary
+                    .argument_writes
+                    .filter(|_| summary.cleanup.is_some() && !calls.contains_key(&id))
+                {
+                    let mut effects = Effects {
+                        reads: Footprint::unknown(),
+                        writes: Footprint::default(),
+                    };
+                    for &(at, size) in writes {
+                        effects.writes.insert(
+                            Range::new(Address::exact(Base::Frame, at as u32), size)
+                                .in_frame(frame),
+                        );
+                    }
+                    calls.insert(id, effects);
+                }
                 continue;
             };
             if borrowed.checkpoints.is_none() && calls.contains_key(&id)

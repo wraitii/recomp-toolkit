@@ -76,6 +76,9 @@ impl CallFacts for ContractCallFacts<'_> {
                     && !summary.mapped_noreturn
                     && summary.returns == stack::ReturnEffect::Exact
             }),
+            argument_writes: target
+                .and_then(|target| self.returns?.argument_writes.get(&target))
+                .map(Vec::as_slice),
         }
     }
     fn call(&self, site: Addr, target: Option<Addr>) -> CallEffect {
@@ -316,6 +319,9 @@ impl GlobalFacts {
         }
         for (&addr, reason) in &self.returns.rejected_cleanups {
             writeln!(out, "cleanup-rejected {addr:08x} {reason}")?;
+        }
+        for (&addr, writes) in &self.returns.argument_writes {
+            writeln!(out, "argument-writes {addr:08x} {writes:?}")?;
         }
         writeln!(
             out,

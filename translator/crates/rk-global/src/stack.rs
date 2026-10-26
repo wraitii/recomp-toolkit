@@ -34,6 +34,7 @@ enum Value {
     ReturnOffset(i32),
     Thread,
     Import(Addr),
+    Derived(u32),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -57,6 +58,7 @@ pub struct Summary {
     pub preserves: Fields,
     pub mapped_noreturn: bool,
     pub returns: ReturnEffect,
+    pub escapes: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -69,6 +71,7 @@ pub struct Analysis {
     pub rejected_functions: BTreeMap<Addr, String>,
     pub cleanups: BTreeMap<Addr, i32>,
     pub rejected_cleanups: BTreeMap<Addr, String>,
+    pub argument_writes: BTreeMap<Addr, Vec<(i32, u32)>>,
 }
 
 pub struct CallFacts<'a> {
@@ -253,6 +256,43 @@ fn mask(size: u32) -> u64 {
 }
 
 fn evaluate(op: &PcodeOp, state: &State, locals: &BTreeMap<Varnode, Value>) -> Option<Value> {
+    exact(op, state, locals).or_else(|| derived(op, state, locals))
+}
+
+fn derived(op: &PcodeOp, state: &State, locals: &BTreeMap<Varnode, Value>) -> Option<Value> {
+    if op.output?.size != 4 {
+        return None;
+    }
+    let read = |index: usize| {
+        op.inputs
+            .get(index)
+            .and_then(|input| state.read(*input, locals))
+    };
+    let (a, b) = (read(0), read(1));
+    let base = |value| match value {
+        Some(Value::Stack(offset) | Value::Derived(offset)) => Some(offset),
+        _ => None,
+    };
+    let constant = |value| match value {
+        Some(Value::Constant(data)) => data as u32,
+        _ => 0,
+    };
+    let base = match op.opcode {
+        OpCode::IntAnd => base(a).or(base(b)),
+        OpCode::IntAdd => match (base(a), base(b)) {
+            (Some(offset), None) => Some(offset.wrapping_add(constant(b))),
+            (None, Some(offset)) => Some(offset.wrapping_add(constant(a))),
+            _ => None,
+        },
+        OpCode::IntSub if base(b).is_none() => {
+            base(a).map(|offset| offset.wrapping_sub(constant(b)))
+        }
+        _ => None,
+    }?;
+    Some(Value::Derived(base))
+}
+
+fn exact(op: &PcodeOp, state: &State, locals: &BTreeMap<Varnode, Value>) -> Option<Value> {
     let output = op.output?;
     let a = state.read(*op.inputs.first()?, locals)?;
     if op.opcode == OpCode::Copy && op.inputs[0].size == output.size {
@@ -440,6 +480,7 @@ struct Walk<'a> {
     reads_other: bool,
     writes_other: bool,
     mapped_noreturn: bool,
+    escapes: bool,
 }
 
 fn unmodeled(insn: &Insn) -> bool {
@@ -456,6 +497,25 @@ fn unmodeled(insn: &Insn) -> bool {
 impl Walk<'_> {
     fn private(&self) -> bool {
         self.mode == Mode::Cleanup && self.context.settings.assume_private_stack
+    }
+
+    fn caller_pointer(&self, value: Option<Value>) -> bool {
+        match value {
+            Some(Value::Stack(offset)) => offset as i32 >= 0,
+            Some(Value::Derived(offset)) => {
+                offset as i32 >= 0 || !self.context.settings.assume_stack_pointer_bases
+            }
+            _ => false,
+        }
+    }
+
+    fn pass_registers(&mut self, state: &State) {
+        let esp = Registers::get().require("ESP");
+        if fields().any(|(_, register)| {
+            register != esp && self.caller_pointer(state.registers.get(&register).copied())
+        }) {
+            self.escapes = true;
+        }
     }
 
     fn ops(&mut self, insn: &Insn, state: &mut State, depth: usize, table: bool) -> Checked<()> {
@@ -482,6 +542,12 @@ impl Walk<'_> {
                         return Err("unsupported store");
                     }
                     let address = state.read(op.inputs[0], &locals);
+                    if self.caller_pointer(state.read(op.inputs[1], &locals))
+                        || matches!(address, Some(Value::Derived(_)))
+                            && self.caller_pointer(address)
+                    {
+                        self.escapes = true;
+                    }
                     if address == Some(Value::Thread) && mode == Mode::Cleanup {
                         self.writes_other = true;
                         continue;
@@ -546,6 +612,7 @@ impl Walk<'_> {
                         )?;
                         continue;
                     }
+                    self.pass_registers(state);
                     if mode == Mode::Cleanup && !self.known.contains_key(&target) {
                         if let Some(pop) = program.import_thunk(target).and_then(|import| {
                             import_pop(&self.context.settings.import_pops, import)
@@ -581,6 +648,7 @@ impl Walk<'_> {
                     self.mapped_noreturn |= callee.mapped_noreturn;
                 }
                 OpCode::CallInd if mode == Mode::Cleanup => {
+                    self.pass_registers(state);
                     let pop = match op
                         .inputs
                         .first()
@@ -689,6 +757,7 @@ fn summarize(
         reads_other: false,
         writes_other: false,
         mapped_noreturn: false,
+        escapes: reentered,
     };
     let mut cleanups = BTreeSet::new();
     let mut preserves = Fields::ALL;
@@ -725,6 +794,14 @@ fn summarize(
                 return Err("return has successors");
             }
             let (preserved, effect) = state.returning()?;
+            if walk.caller_pointer(
+                state
+                    .registers
+                    .get(&Registers::get().require("EAX"))
+                    .copied(),
+            ) {
+                walk.escapes = true;
+            }
             preserves = preserves & preserved;
             returns = Some(match (returns, effect) {
                 (None, effect) => effect,
@@ -760,6 +837,8 @@ fn summarize(
                 continue;
             }
             let callee = known.get(&targets[0]).ok_or("unresolved tail")?;
+            walk.pass_registers(&state);
+            walk.escapes |= callee.escapes;
             let private = walk.private();
             compose(
                 &mut state,
@@ -823,6 +902,7 @@ fn summarize(
         preserves,
         mapped_noreturn: walk.mapped_noreturn,
         returns: returns.unwrap_or(ReturnEffect::Unknown),
+        escapes: walk.escapes,
     })
 }
 
@@ -953,6 +1033,7 @@ fn assumed(cleanup: i32) -> Summary {
         preserves: Fields::from_iter([Field::Ebx, Field::Esi, Field::Edi, Field::Ebp]),
         mapped_noreturn: false,
         returns: ReturnEffect::Unknown,
+        escapes: true,
     }
 }
 
@@ -1034,6 +1115,38 @@ fn infer_cleanups(context: &Context<'_>, output: &mut Analysis) {
             known.remove(&addr);
         }
     }
+    let mut exact = known.clone();
+    for _ in 0..2 {
+        let mut next = known.clone();
+        for &addr in &candidates {
+            let fir = analysis.ir[&addr].as_ref().unwrap();
+            if terminal(fir) {
+                continue;
+            }
+            if let Some(summary) = summarize(context, fir, &exact, Mode::Cleanup)
+                .ok()
+                .filter(|summary| summary.effect.cleanup == known[&addr].effect.cleanup)
+            {
+                next.insert(addr, summary);
+            }
+        }
+        exact = next;
+    }
+    output.argument_writes = exact
+        .into_iter()
+        .filter(|(_, summary)| !summary.escapes)
+        .map(|(addr, summary)| {
+            (
+                addr,
+                summary
+                    .effect
+                    .writes
+                    .into_iter()
+                    .filter(|&(at, _)| at >= 0)
+                    .collect(),
+            )
+        })
+        .collect();
     output.cleanups = candidates
         .into_iter()
         .chain(context.settings.function_pops.keys().copied())
@@ -1069,6 +1182,7 @@ fn join(
             result.writes_other |= next.writes_other;
             result.preserves = result.preserves & next.preserves;
             result.mapped_noreturn |= next.mapped_noreturn;
+            result.escapes |= next.escapes;
             if result.returns != next.returns {
                 result.returns = ReturnEffect::Unknown;
             }

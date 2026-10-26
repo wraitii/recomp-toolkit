@@ -262,8 +262,15 @@ the caller's ESP by a constant EAX. `call_pops = [{ site|function, pop }]` state
 the bytes an indirect call site or a function pops; function entries are trusted
 as ordinary calls preserving EBX/ESI/EDI/EBP. Each entry needs binary evidence.
 These facts establish only cleanup, without memory, return-address or checkpoint
-guarantees. `--dump global` lists per-function rejections, unresolved call edges
-and cleanup-only proofs.
+guarantees. Proved functions are summarised again against their callees' summaries
+to record constant writes at or above entry ESP (`argument-writes`). A function has
+none when an address at or above its entry ESP is stored, passed in a register,
+returned, or indexed for a store, or when it has SEH or interior entries.
+`DIVERGENCE(original):` with `assume_private_stack`, a callee reaches its caller's
+frame only through those writes, its own argument area and escaped addresses, so a
+call clobbers only the slots its argument writes cover. `--dump global` lists
+per-function rejections, unresolved call edges, cleanup-only proofs and argument
+writes.
 
 At a bounded call, every returning candidate must have a summary with matching
 cleanup. Mapped noreturn candidates remain dispatch targets but contribute no

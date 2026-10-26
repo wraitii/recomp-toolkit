@@ -47,6 +47,7 @@ pub struct CallSummary<'a> {
     pub borrowed: Option<&'a BorrowedStack>,
     pub checkpoints: Option<u32>,
     pub readonly: bool,
+    pub argument_writes: Option<&'a [(i32, u32)]>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
