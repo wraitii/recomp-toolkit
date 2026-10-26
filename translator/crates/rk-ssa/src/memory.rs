@@ -453,24 +453,22 @@ impl Frame {
                 continue;
             }
             if summary.readonly && summary.cleanup.is_some() {
+                calls.insert(
+                    id,
+                    Effects {
+                        reads: Footprint::unknown(),
+                        writes: Footprint::default(),
+                    },
+                );
                 if let Some(cost) = summary.checkpoints {
-                    calls.insert(
-                        id,
-                        Effects {
-                            reads: Footprint::unknown(),
-                            writes: Footprint::default(),
-                        },
-                    );
                     checkpoints.insert(id, cost);
                 }
             }
             let Some(borrowed) = summary.borrowed else {
                 continue;
             };
-            let Some(cost) = borrowed.checkpoints else {
-                continue;
-            };
-            if summary.cleanup.is_none()
+            if borrowed.checkpoints.is_none() && calls.contains_key(&id)
+                || summary.cleanup.is_none()
                 || borrowed.effects.writes.ranges.iter().any(|range| {
                     matches!(
                         range.address,
@@ -502,7 +500,9 @@ impl Frame {
                 }
             }
             calls.insert(id, effects);
-            checkpoints.insert(id, cost);
+            if let Some(cost) = borrowed.checkpoints {
+                checkpoints.insert(id, cost);
+            }
         }
         let mut independent = Lookup::default();
         for (&id, access) in &accesses {

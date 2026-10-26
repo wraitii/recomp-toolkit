@@ -205,8 +205,10 @@ Preparation consumes checkpoint credit only when accepted;
 otherwise pending slots publish before ordinary dispatch consumes its checkpoint.
 Non-leaf callees require credit for the longest nested call path as well as entry;
 recursion, call-containing loops and unresolved dispatch retain eager publication.
-`DIVERGENCE(original):` scheduler work is assumed to preserve this thread's unescaped
-live frame. A guarded call has one route condition, `recomp_slow_routes`, raised by
+`DIVERGENCE(original):` scheduler work, APCs and hooks installed at a checkpoint are
+assumed to preserve this thread's unescaped live frame, so a call whose memory summary
+excludes a slot does not reload it even without checkpoint credit; credit only lets the
+call skip publication. A guarded call has one route condition, `recomp_slow_routes`, raised by
 hooks, profiling and frame watch; its unlikely generic arm publishes the register
 fields hooks observe and the slots the call does not otherwise demand, and nothing is
 reloaded afterwards. `[game] call_hooks = false` removes hook publications and
