@@ -433,24 +433,22 @@ fn walk_block(
                 }
             }
         }
-        if let Some(out) = guard.as_deref_mut() {
-            if matches!(
-                s.value(value).op,
-                rk_ir::Op::Call { .. } | rk_ir::Op::CallInd
-            ) {
-                for (index, key) in s.keys.iter().enumerate() {
-                    if *key == StateKey::Memory || s.field(*key).is_none() {
-                        continue;
-                    }
-                    if keys.iter().any(|required| required == key) {
-                        continue;
-                    }
-                    let Some(&state_value) = current.get(key) else {
-                        continue;
-                    };
-                    if resident[index] == Some(state_value) {
-                        continue;
-                    }
+        if matches!(
+            s.value(value).op,
+            rk_ir::Op::Call { .. } | rk_ir::Op::CallInd
+        ) {
+            for (index, key) in s.keys.iter().enumerate() {
+                if *key == StateKey::Memory || s.field(*key).is_none() || keys.contains(key) {
+                    continue;
+                }
+                let Some(&state_value) = current.get(key) else {
+                    continue;
+                };
+                if resident[index] == Some(state_value) {
+                    continue;
+                }
+                resident[index] = None;
+                if let Some(out) = guard.as_deref_mut() {
                     out.entry(value).or_default().push(*key);
                 }
             }

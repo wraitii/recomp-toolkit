@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rk_core::ir::OpCode;
 use rk_core::memory::{Address, Base, Range};
@@ -145,12 +145,12 @@ pub(crate) fn dump_dependencies(
 }
 
 pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
-    let calls = s.assume_private_stack
+    let crossing: BTreeSet<_> = if s.assume_private_stack
         && s.blocks
             .iter()
             .flat_map(|block| &block.ops)
-            .any(|&id| matches!(s.value(id).op, Op::Call { .. } | Op::CallInd));
-    let guards: LookupSet<_> = if calls {
+            .any(|&id| matches!(s.value(id).op, Op::Call { .. } | Op::CallInd))
+    {
         let locations = crate::memory::local_accesses(s, call_facts);
         s.blocks
             .iter()
@@ -165,7 +165,7 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
             .copied()
             .collect()
     } else {
-        LookupSet::default()
+        BTreeSet::new()
     };
     crate::memory::partition(s, call_facts);
     let mut addresses = Addresses::local(s);
@@ -176,22 +176,19 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
         .filter(|&&id| matches!(s.value(id).op, Op::P(OpCode::Load | OpCode::Store)))
         .map(|&id| (id, addresses.get(s.args(id)[1])))
         .collect();
-    let guardable: LookupSet<_> = s
-        .blocks
+    let shared: BTreeSet<_> = crossing
         .iter()
-        .flat_map(|block| &block.ops)
-        .filter(|&&id| {
-            locations.get(&id).is_some_and(|&address| {
-                matches!(
-                    addresses.relations.bounds(address),
-                    Address::Known {
-                        base: Base::Frame,
-                        ..
-                    }
-                )
-            })
-        })
         .copied()
+        .filter(|&load| {
+            let address = addresses.get(s.args(load)[1]);
+            !matches!(
+                addresses.relations.bounds(address),
+                Address::Known {
+                    base: Base::Frame,
+                    ..
+                }
+            )
+        })
         .collect();
     let mut candidates = Vec::new();
     let mut alias: Lookup<ValueId, ValueId> = Lookup::default();
@@ -343,39 +340,15 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
             projection.s.args.truncate(old_args);
         }
     }
-    integers.retain(|&(load, _, _)| !guards.contains(&load));
-    for &load in s.blocks.iter().flat_map(|block| &block.ops) {
-        if guards.contains(&load) && !guardable.contains(&load) {
-            alias.remove(&load);
-        }
+    for load in &shared {
+        alias.remove(load);
     }
+    integers.retain(|(load, _, _)| !shared.contains(load));
     if alias.is_empty() && integers.is_empty() {
         return false;
     }
-    if calls {
-        let guarded: Vec<_> = s
-            .blocks
-            .iter()
-            .flat_map(|block| &block.ops)
-            .filter_map(|&load| {
-                let &saved = alias.get(&load)?;
-                if !guards.contains(&load) {
-                    return None;
-                }
-                guardable.contains(&load).then_some((load, saved))
-            })
-            .collect();
-        for (load, saved) in guarded {
-            let mut args = s.args(load).to_vec();
-            args.push(saved);
-            let start = s.args.len() as u32;
-            s.args.extend(args);
-            s.values[load as usize].op = Op::StackLoad;
-            s.values[load as usize].args_start = start;
-            s.values[load as usize].args_len = 3;
-            alias.remove(&load);
-        }
-    }
+    s.cleanup_used |= crossing.iter().any(|load| alias.contains_key(load))
+        || integers.iter().any(|(load, _, _)| crossing.contains(load));
     let mut forwarded: LookupSet<ValueId> = LookupSet::default();
     for &(load, _, _) in &integers {
         forwarded.insert(load);

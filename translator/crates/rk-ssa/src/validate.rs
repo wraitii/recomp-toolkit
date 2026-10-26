@@ -43,6 +43,14 @@ pub fn validate(s: &Ssa) -> Result<()> {
         {
             return Err(invalid(format!("block {index} has an invalid reference")));
         }
+        if let Some(position) = block.ops.iter().enumerate().position(|(position, &value)| {
+            s.value(value).op == Op::StackFlush && s.flushed_call(index as u32, position).is_none()
+        }) {
+            return Err(invalid(format!(
+                "block {index} flushes {} without a guarded call",
+                block.ops[position]
+            )));
+        }
         for &phi in &block.phis {
             if s.value(phi).op != Op::Phi
                 || s.args(phi).len() != block.preds.len()
@@ -142,17 +150,7 @@ fn shape(s: &Ssa, id: ValueId) -> bool {
             CallInd | CallOther | Unknown => n == 1 && size(0) == 0 && z == 0,
         },
         Op::StackBoundary => n == 2 && z == 0 && size(0) == 4 && size(1) == 4,
-        Op::StackCallGuard { .. } => n == 0 && z == 1,
-        Op::StackLoad => n == 3 && size(0) == 0 && size(1) == 4 && z == size(2),
-        Op::StackRefresh { .. } => {
-            n == 2
-                && matches!(s.value(args[0]).op, Op::Call { .. })
-                && z == size(1)
-                && matches!(z, 1 | 2 | 4 | 8)
-                && s.stack_guards.contains_key(&args[0])
-        }
-        Op::StackStore | Op::StackCommit => n == 3 && size(0) == 0 && size(1) == 4 && z == 0,
-        Op::StackFlush => n == 4 && size(0) == 0 && size(1) == 4 && size(3) == 1 && z == 0,
+        Op::StackFlush => n == 3 && size(0) == 0 && size(1) == 4 && z == 0,
         Op::Input(key) => n == 0 && state_width(key, z),
         Op::Const(_) => n == 0 && z > 0,
         Op::Target(_) => n == 0 && z == 4,

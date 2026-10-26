@@ -161,16 +161,12 @@ fn prepare_using(
     }
     if stack_cleanups
         && opts.policy != Policy::Conservative
+        && !ssa.cleanup_used
         && ssa
             .blocks
             .iter()
             .flat_map(|block| &block.ops)
             .any(|&id| matches!(ssa.value(id).op, Op::Call { .. } | Op::CallInd))
-        && !ssa
-            .blocks
-            .iter()
-            .flat_map(|block| &block.ops)
-            .any(|&id| matches!(ssa.value(id).op, Op::StackLoad | Op::StackStore))
     {
         let facts = NoCleanup(opts.call_facts);
         return prepare_using(
@@ -186,9 +182,6 @@ fn prepare_using(
     crate::flags::build_joins(&mut ssa);
     crate::coalesce::coalesce(&mut ssa, opts.coalesce_roots);
     canonicalize(&mut ssa, opts.signed_sub);
-    if opts.fault_state == FaultState::Relaxed {
-        crate::stack::refresh_loads(&mut ssa);
-    }
     let plans = opts.lazy_publications.then(|| {
         let base = publications(&ssa, opts.call_facts);
         let simplify = ssa

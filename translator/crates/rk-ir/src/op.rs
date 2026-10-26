@@ -91,11 +91,6 @@ pub enum Op {
     Pack,
     Memory,
     StackBoundary,
-    StackCallGuard { target: Addr, checkpoints: u32 },
-    StackLoad,
-    StackRefresh { offset: u32 },
-    StackStore,
-    StackCommit,
     StackFlush,
     StateReload(StateKey),
     StateKeep(StateKey),
@@ -247,15 +242,7 @@ pub fn properties(op: Op) -> Properties {
             synthetic: true,
             ..Properties::new()
         },
-        Op::StackCallGuard { .. } => Properties {
-            ordered: true,
-            ..Properties::new()
-        },
-        Op::StackLoad
-        | Op::StackRefresh { .. }
-        | Op::StackStore
-        | Op::StackCommit
-        | Op::StackFlush => Properties {
+        Op::StackFlush => Properties {
             ordered: true,
             observes: true,
             faults: true,

@@ -52,19 +52,15 @@ fn accesses_using(
             let op = s.value(id).op;
             let empty = Footprint::default();
             let access = match op {
-                Op::P(OpCode::Load | OpCode::Store)
-                | Op::StackLoad
-                | Op::StackStore
-                | Op::StackCommit
-                | Op::StackFlush => {
-                    let size = if matches!(op, Op::P(OpCode::Load) | Op::StackLoad) {
+                Op::P(OpCode::Load | OpCode::Store) | Op::StackFlush => {
+                    let size = if op == Op::P(OpCode::Load) {
                         s.value(id).size
                     } else {
                         s.value(args[2]).size
                     };
                     let range = Range::new(addresses.get(args[1]), size as u32);
                     let effect = footprint(range, local);
-                    if matches!(op, Op::P(OpCode::Load) | Op::StackLoad) {
+                    if op == Op::P(OpCode::Load) {
                         Access {
                             reads: effect,
                             writes: empty,

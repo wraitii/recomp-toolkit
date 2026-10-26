@@ -600,7 +600,7 @@ impl<'a> Builder<'a> {
             value_addr: self.value_addr,
             stack_states: self.stack_states,
             stack_guards: BTreeMap::new(),
-            stack_flush_sources: BTreeMap::new(),
+            cleanup_used: false,
             stack_calls: self.lazy_stack_writes,
             memory_partitioned: false,
             assume_private_stack: false,
@@ -1164,11 +1164,6 @@ impl<'a> Builder<'a> {
             | Op::Pack
             | Op::Memory
             | Op::StackBoundary
-            | Op::StackCallGuard { .. }
-            | Op::StackLoad
-            | Op::StackRefresh { .. }
-            | Op::StackStore
-            | Op::StackCommit
             | Op::StackFlush
             | Op::StateReload(_)
             | Op::StateKeep(_)

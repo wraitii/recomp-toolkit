@@ -167,17 +167,14 @@ alias normally. Load forwarding requires a single entry and no opaque non-call e
 or escaping branches. Escaped ranges retain conservative aliasing independently of
 unexposed slots. Cyclic address joins require agreeing outside inputs and zero net
 offset around every traversed cycle; unanchored cycles remain unknown.
-Guarded load forwarding includes aligned locals and proved read-only callees;
-unknown reads still require pending stores to settle before those calls.
+Frame loads forward across proved-disjoint calls, including aligned locals and
+read-only callees; other loads do not forward across calls. Unknown reads still
+require pending stores to settle before those calls. `DIVERGENCE(original):` the
+assumption extends to hooks, replacements and observers, which may read but not
+write unescaped caller frame bytes.
 Computed return values retain proved access footprints while recording their input
 capture sources; passed frame pointers remain exposed conservatively when their
 returned offsets are unknown. Unknown ESP-derived returns remain unsupported.
-Straight-line reloads with available cached values refresh inside the generic-call
-branch; subsequent uses need no load-site guard. Other control flow retains guarded loads.
-Functions with only refreshed loads and matched straight-line delayed stores assign
-ESP in the call branches and omit sticky stack validity state. Those stores publish
-their original address and value inside the unlikely generic-call branch. Unmatched
-flushes, guarded loads and final commits retain validity state.
 `[translate] assume_stack_pointer_bases` defaults to false.
 `DIVERGENCE(original):` when enabled, an escaped frame pointer is assumed to identify
 the beginning of its accessible region. Unknown upward extents expose the remainder
@@ -200,9 +197,9 @@ otherwise pending writes flush before ordinary dispatch consumes its checkpoint.
 Non-leaf callees require credit for the longest nested call path as well as entry;
 recursion, call-containing loops and unresolved dispatch retain eager publication.
 `DIVERGENCE(original):` scheduler work is assumed to preserve this thread's unescaped
-live frame. The hook/replacement/observer path flushes pending slots before dispatch
-and invalidates the function's cached stack state; subsequent stores become eager
-and forwarded reads reload. Unproved calls flush and clear pending writes. ESP
+live frame. A guarded call has one route condition; its unlikely generic arm
+publishes the register fields hooks observe and flushes the pending slots before
+dispatch, and nothing is reloaded afterwards. Unproved calls flush and clear pending writes. ESP
 changes retain allocated slots and flush released slots before subsequent effects.
 Publication requires a pending write on every
 incoming path. At mixed joins, definite-pending predecessors flush before merging;

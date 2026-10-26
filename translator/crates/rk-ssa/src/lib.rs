@@ -144,9 +144,9 @@ pub struct Ssa {
     pub loc: Vec<Option<InsnLoc>>,
     pub value_addr: Vec<Addr>,
     pub(crate) stack_states: BTreeMap<ValueId, [ValueId; 4]>,
-    pub stack_guards: BTreeMap<ValueId, ValueId>,
-    pub stack_flush_sources: BTreeMap<ValueId, ValueId>,
+    pub stack_guards: BTreeMap<ValueId, u32>,
     pub(crate) stack_calls: bool,
+    pub(crate) cleanup_used: bool,
     pub(crate) memory_partitioned: bool,
     pub(crate) assume_private_stack: bool,
     pub(crate) assume_stack_pointer_bases: bool,
@@ -245,6 +245,16 @@ impl Ssa {
             }
         }
         blocks
+    }
+
+    pub fn flushed_call(&self, block: BlockId, position: usize) -> Option<ValueId> {
+        self.blocks[block as usize].ops[position + 1..]
+            .iter()
+            .copied()
+            .find(|&id| {
+                self.value(id).op != Op::StackFlush && !rk_ir::properties(self.value(id).op).pure
+            })
+            .filter(|call| self.stack_guards.contains_key(call))
     }
 
     pub fn slow(&self, index: u32) -> Option<&SlowInsn> {

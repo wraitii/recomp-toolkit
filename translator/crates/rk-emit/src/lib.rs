@@ -100,10 +100,7 @@ struct Emitter<'a> {
     private: Option<&'a PrivateEmit>,
     materialized: Vec<bool>,
     uses_arena: bool,
-    stack_state: bool,
-    skipped_writes: BTreeSet<ValueId>,
-    call_writes: BTreeMap<ValueId, Vec<ValueId>>,
-    call_refreshes: BTreeMap<ValueId, Vec<ValueId>>,
+    flushes: BTreeMap<ValueId, Vec<ValueId>>,
     value_block: Vec<u32>,
     successors: Vec<Vec<usize>>,
     transfers: Transfers,
@@ -234,18 +231,18 @@ impl<'a> Emitter<'a> {
         let mut materialized = vec![false; s.values.len()];
         let mut value_block = vec![0u32; s.values.len()];
         let mut successors = vec![Vec::new(); s.blocks.len()];
-        let mut call_refreshes: BTreeMap<ValueId, Vec<ValueId>> = BTreeMap::new();
+        let mut flushes: BTreeMap<ValueId, Vec<ValueId>> = BTreeMap::new();
         for (index, block) in s.blocks.iter().enumerate() {
             for value in block.phis.iter().chain(block.ops.iter()) {
                 materialized[*value as usize] = true;
                 value_block[*value as usize] = index as u32;
-                if matches!(s.value(*value).op, Op::StackRefresh { .. })
-                    && plan.live.contains(value)
+            }
+            for (position, &value) in block.ops.iter().enumerate() {
+                if let Some(call) = (s.value(value).op == Op::StackFlush)
+                    .then(|| s.flushed_call(index as u32, position))
+                    .flatten()
                 {
-                    call_refreshes
-                        .entry(s.args(*value)[0])
-                        .or_default()
-                        .push(*value);
+                    flushes.entry(call).or_default().push(value);
                 }
             }
             for pred in &block.preds {
@@ -303,14 +300,7 @@ impl<'a> Emitter<'a> {
         let uses_arena = s.values.iter().any(|value| {
             matches!(
                 value.op,
-                Op::P(OpCode::Load)
-                    | Op::P(OpCode::Store)
-                    | Op::StackLoad
-                    | Op::StackRefresh { .. }
-                    | Op::StackStore
-                    | Op::StackCommit
-                    | Op::StackFlush
-                    | Op::ImportTail { .. }
+                Op::P(OpCode::Load) | Op::P(OpCode::Store) | Op::StackFlush | Op::ImportTail { .. }
             ) || matches!(value.op, Op::X87(op) if op.touches_memory())
         });
         let mut in_block = vec![false; s.values.len()];
@@ -385,9 +375,6 @@ impl<'a> Emitter<'a> {
                     && reads_c_field(s, id, &materialized, ctx.private)
             })
             .count();
-        let writes = call_writes(plan);
-        let scoped_stack = writes.is_some();
-        let (skipped_writes, call_writes) = writes.unwrap_or_default();
         Self {
             plan,
             s,
@@ -401,21 +388,7 @@ impl<'a> Emitter<'a> {
             private: ctx.private,
             materialized,
             uses_arena,
-            stack_state: !scoped_stack
-                && s.blocks.iter().flat_map(|block| &block.ops).any(|&id| {
-                    matches!(
-                        s.value(id).op,
-                        Op::StackLoad
-                            | Op::StackRefresh { .. }
-                            | Op::StackStore
-                            | Op::StackCommit
-                            | Op::StackFlush
-                            | Op::StackCallGuard { .. }
-                    )
-                }),
-            skipped_writes,
-            call_writes,
-            call_refreshes,
+            flushes,
             value_block,
             transfers: Transfers::new(plan, &successors, has_dynamic),
             successors,
@@ -454,10 +427,6 @@ impl<'a> Emitter<'a> {
         self.out.push_str(" {\n");
         if self.checked && self.private.is_none() {
             self.out.push_str("(void)expected_return_; (void)checked_return_;\n");
-        }
-        if self.stack_state {
-            self.out
-                .push_str("int stack_valid_ = !recomp_hooks_ever;\n");
         }
         self.write_declarations();
         self.write_x87_declarations()?;
@@ -705,7 +674,7 @@ impl<'a> Emitter<'a> {
             return Ok(());
         };
         for id in values {
-            if !self.stack_state && self.s.stack_guards.contains_key(&site) && self.stack_keep(id) {
+            if self.s.stack_guards.contains_key(&site) && self.stack_keep(id) {
                 continue;
             }
             if let Some(group) = self.keep_group.get(&id).copied() {
@@ -760,10 +729,8 @@ impl<'a> Emitter<'a> {
     }
 
     fn kept_expr(&self, stack_pointer: bool, loaded: &str, old: &str) -> String {
-        if stack_pointer && !self.stack_state && !self.s.stack_guards.is_empty() {
+        if stack_pointer && !self.s.stack_guards.is_empty() {
             loaded.to_string()
-        } else if self.stack_state && stack_pointer && loaded != old {
-            format!("(RECOMP_UNLIKELY(!stack_valid_ || recomp_hooks_ever) ? ({loaded}) : ({old}))")
         } else {
             keep_expr(loaded, old)
         }
@@ -1149,62 +1116,9 @@ impl<'a> Emitter<'a> {
                 self.out.push_str("x86_cc_settle(c);\n");
                 Ok(true)
             }
-            Op::P(OpCode::Load) | Op::StackLoad => self.load(value).map(|_| true),
-            Op::StackRefresh { .. } => Ok(true),
-            Op::P(OpCode::Store) | Op::StackStore | Op::StackCommit | Op::StackFlush => {
-                if self.skipped_writes.contains(&value) {
-                    return Ok(true);
-                }
-                let guard = match item.op {
-                    Op::StackStore => Some("!stack_valid_ || recomp_hooks_ever".to_string()),
-                    Op::StackCommit => Some("stack_valid_ && !recomp_hooks_ever".to_string()),
-                    Op::StackFlush => Some(format!(
-                        "stack_valid_ && !({})",
-                        self.expr(self.s.args(value)[3])?
-                    )),
-                    _ => None,
-                };
-                if let Some(guard) = &guard {
-                    let _ = writeln!(self.out, "if ({guard}) {{");
-                }
-                self.store(value)?;
-                if guard.is_some() {
-                    self.out.push_str("}\n");
-                }
-                Ok(true)
-            }
-            Op::StackCallGuard {
-                target,
-                checkpoints,
-            } => {
-                let site = self
-                    .s
-                    .stack_guards
-                    .iter()
-                    .find_map(|(&site, &guard)| (guard == value).then_some(site))
-                    .ok_or_else(|| self.error(addr, "stack guard without a call"))?;
-                self.publish(site)?;
-                self.publish_guard(site)?;
-                let prepare = if self.private_call(site, target)?.is_some() {
-                    let budget = if checkpoints == 0 {
-                        String::new()
-                    } else {
-                        format!("c->checkpoint_countdown > {checkpoints}u && ")
-                    };
-                    format!("{budget}entry_contract_prepare_{target:08x}(c, 0)")
-                } else {
-                    self.declarations
-                        .insert(Declaration::StackPrepare(target, checkpoints));
-                    format!("entry_stack_prepare_{target:08x}(c)")
-                };
-                let valid = if self.stack_state {
-                    "stack_valid_ && "
-                } else {
-                    ""
-                };
-                let _ = writeln!(self.out, "v{value} = {valid}{prepare};");
-                Ok(true)
-            }
+            Op::P(OpCode::Load) => self.load(value).map(|_| true),
+            Op::StackFlush => Ok(true),
+            Op::P(OpCode::Store) => self.store(value).map(|_| true),
             _ => {
                 let expr = self.operation(value)?;
                 let _ = writeln!(self.out, "{}", self.assignment(value, &expr));
@@ -1898,72 +1812,55 @@ impl<'a> Emitter<'a> {
     }
 
     fn call(&mut self, value: ValueId, target: Addr) -> Result<()> {
-        if !self.s.stack_guards.contains_key(&value) {
-            self.publish(value)?;
-            self.publish_guard(value)?;
-        }
-        if let Some(&guard) = self.s.stack_guards.get(&value) {
-            let (fast, fallback) = if let Some(call) = self.private_call(value, target)? {
+        self.publish(value)?;
+        if let Some(&checkpoints) = self.s.stack_guards.get(&value) {
+            let (prepare, fast, fallback) = if let Some(call) = self.private_call(value, target)? {
                 let expected = self.guest_addr(self.plan.return_addr[&value]);
-                (call, format!("CALL_FN_CHECKED({target:08x}, {expected});"))
+                let budget = if checkpoints == 0 {
+                    String::new()
+                } else {
+                    format!("c->checkpoint_countdown > {checkpoints}u && ")
+                };
+                (
+                    format!("{budget}entry_contract_prepare_{target:08x}(c, 0)"),
+                    call,
+                    format!("CALL_FN_CHECKED({target:08x}, {expected});"),
+                )
             } else {
+                self.declarations
+                    .insert(Declaration::StackPrepare(target, checkpoints));
                 self.declare_entry(target);
                 (
+                    format!("entry_stack_prepare_{target:08x}(c)"),
                     format!("fn_{target:08x}(c);"),
                     format!("CALL_FN({target:08x});"),
                 )
             };
-            let guard = self.expr(guard)?;
-            let refreshes = self.call_refreshes.get(&value).cloned().unwrap_or_default();
-            if refreshes.is_empty() && self.stack_state {
-                let _ = writeln!(self.out,
-                    "if (RECOMP_UNLIKELY(!({guard}))) {{ stack_valid_ = 0; {fallback} }} else {{ {fast} }}");
-                if let Some(&expected) = self.plan.return_addr.get(&value) {
-                    self.resume_check(value, target, expected);
-                }
-            } else {
-                let _ = writeln!(self.out, "if (RECOMP_UNLIKELY(!({guard}))) {{");
-                if self.stack_state {
-                    self.out.push_str("stack_valid_ = 0;\n");
-                }
-                for store in self.call_writes.get(&value).cloned().unwrap_or_default() {
-                    self.store(store)?;
-                }
-                let _ = writeln!(self.out, "{fallback}");
-                if let Some(&expected) = self.plan.return_addr.get(&value) {
-                    self.resume_check(value, target, expected);
-                }
-                if !self.stack_state {
-                    self.refresh_stack_pointer(value, false)?;
-                }
-                for &id in &refreshes {
-                    let Op::StackRefresh { offset } = self.s.value(id).op else {
-                        unreachable!()
-                    };
-                    let bits = self.s.value(id).size * 8;
-                    let read =
-                        format!("recomp_rd{bits}_(arena_, (uint32_t)(c->r[4] + 0x{offset:x}u))");
-                    let _ = writeln!(self.out, "{}", self.assignment(id, &read));
-                }
-                self.out.push_str("} else {\n");
-                let _ = writeln!(self.out, "{fast}");
-                if let Some(&expected) = self.plan.return_addr.get(&value) {
-                    self.resume_check(value, target, expected);
-                }
-                if !self.stack_state {
-                    self.refresh_stack_pointer(value, true)?;
-                }
-                for &id in &refreshes {
-                    let saved = self.expr(self.s.args(id)[1])?;
-                    let _ = writeln!(self.out, "{}", self.assignment(id, &saved));
-                }
-                self.out.push_str("}\n");
+            let _ = writeln!(self.out, "if (RECOMP_UNLIKELY(!({prepare}))) {{");
+            if let Some(keys) = self.plan.guard.get(&value).cloned() {
+                self.publish_keys(value, &keys, false)?;
             }
+            for flush in self.flushes.get(&value).cloned().unwrap_or_default() {
+                self.store(flush)?;
+            }
+            let _ = writeln!(self.out, "{fallback}");
+            if let Some(&expected) = self.plan.return_addr.get(&value) {
+                self.resume_check(value, target, expected);
+            }
+            self.refresh_stack_pointer(value, false)?;
+            self.out.push_str("} else {\n");
+            let _ = writeln!(self.out, "{fast}");
+            if let Some(&expected) = self.plan.return_addr.get(&value) {
+                self.resume_check(value, target, expected);
+            }
+            self.refresh_stack_pointer(value, true)?;
+            self.out.push_str("}\n");
             if self.plan.settle_sites.contains(&value) {
                 self.out.push_str("x86_cc_settle(c);\n");
             }
             return Ok(());
         }
+        self.publish_guard(value)?;
         if let Some(&(_, checkpoints)) = self
             .ctx
             .reuse_calls
@@ -2118,14 +2015,6 @@ impl<'a> Emitter<'a> {
         };
         let helper = format!("recomp_{read}_");
         let read = format!("{helper}(arena_, (uint32_t)({address}))");
-        let read = if self.s.value(value).op == Op::StackLoad {
-            format!(
-                "((!stack_valid_ || recomp_hooks_ever) ? ({read}) : ({}))",
-                self.expr(args[2])?
-            )
-        } else {
-            read
-        };
         let _ = writeln!(self.out, "{}", self.assignment(value, &read));
         Ok(())
     }
