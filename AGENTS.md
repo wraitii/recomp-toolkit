@@ -48,6 +48,9 @@ arguments, scratch memory and uninitialized globals, then compares registers,
 flags, x87 state and writable memory. Inputs where the original faults, calls an
 import or runs too long are discarded. Select functions with `--func ADDR`,
 `--sample N`, `--all`, `--changed`, or `--suite MANIFEST`.
+The default is 25 random inputs followed by five structured seeds with zero or
+uniform memory and simple pointers. `--iterations N` changes the random count;
+`--no-structured-inputs` restores random-only runs. Suites keep their recorded schedule.
 
 `--mode specialized` (default) runs the production contract call sites,
 `--mode ordinary` forces the ordinary fallback through `recomp_hooks_ever`, and
