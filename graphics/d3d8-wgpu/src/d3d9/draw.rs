@@ -2,6 +2,7 @@ use super::gpu::{D3d9Gpu, PendingClear};
 use super::query::D3d9Queries;
 use super::shader::VertexElement;
 use super::state::{D3d9State, MAX_ANISOTROPY, MAX_SAMPLERS};
+use super::stats;
 use super::{SurfaceView, TargetRect, wgsl};
 use crate::RenderError;
 use crate::fast_map::{FastHasher, FastMap};
@@ -1917,6 +1918,7 @@ impl D3d9DrawState {
     }
 
     pub(crate) fn end_frame(&mut self, gpu: &D3d9Gpu) {
+        stats::end_frame();
         if uber::hybrid(gpu) {
             if let Some(compiler) = &mut self.compiler {
                 compiler.end_frame(self.frame);
@@ -3109,11 +3111,20 @@ pub(crate) fn execute(
         .as_ref()
         .map(|depth| (depth.texture.format(), depth.format));
     let fingerprint = state.pipeline_fingerprint();
+    let count_stats = stats::enabled();
+    let mut memo_examined = 0;
+    let mut memo_fingerprint_matches = 0;
+    let mut memo_texture_rejects = 0;
     let memo = draw
         .memos
         .iter()
         .rposition(|memo| {
-            memo.fingerprint == fingerprint
+            let fingerprint_matches = memo.fingerprint == fingerprint;
+            if count_stats {
+                memo_examined += 1;
+                memo_fingerprint_matches += u64::from(fingerprint_matches);
+            }
+            let matches = fingerprint_matches
                 && memo.programs.is_some() == interpreted
                 && (!interpreted
                     || memo
@@ -3128,10 +3139,25 @@ pub(crate) fn execute(
                 && memo.ff_key == ff_key
                 && memo.raw_inputs == raw_inputs
                 && memo.target == target_key
-                && memo.depth == depth_key
-                && memo.textures == snapshot.textures
+                && memo.depth == depth_key;
+            if !matches {
+                return false;
+            }
+            let textures_match = memo.textures == snapshot.textures;
+            if count_stats && !textures_match {
+                memo_texture_rejects += 1;
+            }
+            textures_match
         })
         .map(|index| draw.memos.remove(index));
+    stats::record(|s| {
+        s.memo_lookups += 1;
+        s.memo_hits += u64::from(memo.is_some());
+        s.memo_misses += u64::from(memo.is_none());
+        s.memo_examined += memo_examined;
+        s.memo_fingerprint_matches += memo_fingerprint_matches;
+        s.memo_texture_rejects += memo_texture_rejects;
+    });
     let mut memo = match memo {
         Some(memo) => memo,
         None if covered => uber::resolve(
@@ -3613,6 +3639,7 @@ pub(crate) fn execute(
         scissor,
     });
     if draw.memos.len() >= DRAW_MEMOS {
+        stats::record(|s| s.memo_evictions += 1);
         draw.memos.remove(0);
     }
     draw.memos.push(memo);

@@ -12,6 +12,7 @@ use crate::d3d9::D3d9Device;
 use crate::d3d9::d3dx_shader;
 use crate::d3d9::resource::D3DPOOL_DEFAULT;
 use crate::d3d9::state::{EffectKeys, EffectSnapshot};
+use crate::d3d9::stats;
 use crate::fast_map::FastMap;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -951,6 +952,10 @@ struct CtabConst {
 }
 
 fn parse_ctab(code: &[u8]) -> Result<Vec<CtabConst>, RenderError> {
+    stats::record(|s| {
+        s.ctab_parses += 1;
+        s.ctab_input_bytes += code.len() as u64;
+    });
     let constants = d3dx_shader::ctab_constants(code)?;
     Ok(constants
         .into_iter()
@@ -1601,6 +1606,7 @@ pub fn d3dx_effect_saved_bindings(effect: &D3dxEffect) -> D3d9BindingsResult {
 }
 
 pub fn d3dx_effect_set(effect: &mut D3dxEffect, handle: u32, setter: u32, data: &[u8]) -> Status {
+    stats::record(|s| s.effect_setters += 1);
     if setter > SET_LAST {
         return invalid_call("ID3DXEffect::SetValue");
     }
@@ -1947,6 +1953,7 @@ fn get_string(effect: &D3dxEffect, target: &ParamTarget) -> D3dxBytesResult {
 }
 
 pub fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) -> ValueResult {
+    stats::record(|s| s.effect_texture_setters += 1);
     let Some(target) = effect.target(handle) else {
         return ValueResult {
             status: invalid_call("ID3DXEffect::SetTexture"),
@@ -3214,8 +3221,13 @@ impl StateSink<'_> {
         fill: impl FnOnce(&mut [f32]) -> Result<(), RenderError>,
     ) -> Result<(), RenderError> {
         let len = count as usize * 4;
+        stats::record(|s| {
+            s.constant_updates += 1;
+            s.constant_registers += u64::from(count);
+        });
         match self {
             StateSink::Device(_) => {
+                stats::record(|s| s.constant_temp_bytes += (len * size_of::<f32>()) as u64);
                 let mut values = vec![0.0f32; len];
                 fill(&mut values)?;
                 self.shader_constants(pixel, start, Cow::Owned(values))
@@ -3748,6 +3760,7 @@ fn shader_constant_keys(
             }
         }
     }
+    stats::record(|s| s.saved_ctab_parses += 1);
     for constant in parse_ctab(code)? {
         match constant.set {
             D3DXRS_FLOAT4 => {
@@ -3811,6 +3824,7 @@ fn shader_state_keys(
 }
 
 fn touched_keys(effect: &D3dxEffect, skip_shader: bool) -> Result<EffectKeys, RenderError> {
+    stats::record(|s| s.saved_key_builds += 1);
     let mut keys = EffectKeys::default();
     let Some(technique) = effect.techniques.get(effect.technique as usize) else {
         return Ok(keys);
@@ -3867,6 +3881,7 @@ pub fn d3dx_effect_begin(
     device: &mut D3d9Device,
     flags: u32,
 ) -> ValueResult {
+    stats::record(|s| s.effect_begins += 1);
     if effect.lost {
         return ValueResult {
             status: invalid_call("ID3DXEffect::Begin"),
@@ -3936,6 +3951,7 @@ pub fn d3dx_effect_begin_pass(
     device: &mut D3d9Device,
     index: u32,
 ) -> D3dxEffectRunResult {
+    stats::record(|s| s.effect_begin_passes += 1);
     if effect.lost {
         return run_result(invalid_call("ID3DXEffect::BeginPass"));
     }
@@ -3956,6 +3972,7 @@ pub fn d3dx_effect_begin_pass(
 }
 
 pub fn d3dx_effect_commit(effect: &mut D3dxEffect, device: &mut D3d9Device) -> D3dxEffectRunResult {
+    stats::record(|s| s.effect_commits += 1);
     if effect.lost {
         return run_result(invalid_call("ID3DXEffect::CommitChanges"));
     }

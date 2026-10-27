@@ -501,8 +501,14 @@ impl D3d9DrawState {
             .get(&key)
             .and_then(|cached| cached.ranges.get(&range))
         {
+            stats::record(|s| s.index_hits += 1);
             return bounds;
         }
+        stats::record(|s| {
+            s.index_misses += 1;
+            s.index_scanned += u64::from(count);
+            s.index_new_buffers += u64::from(!self.index_bounds.contains_key(&key));
+        });
         let mut min = u32::MAX;
         let mut max = 0;
         let start = command.start_vertex as usize;
@@ -512,9 +518,16 @@ impl D3d9DrawState {
             max = max.max(raw);
         }
         if !self.index_bounds.contains_key(&key) && self.index_bounds.len() >= 256 {
+            let before = self.index_bounds.len();
             self.index_bounds
                 .retain(|_, cached| cached.bytes.strong_count() != 0);
+            stats::record(|s| {
+                s.index_cleanup_scans += 1;
+                s.index_cleanup_entries += before as u64;
+                s.index_cleanup_removed += (before - self.index_bounds.len()) as u64;
+            });
             if self.index_bounds.len() >= 256 {
+                stats::record(|s| s.index_buffer_evictions += 1);
                 evict_one(&mut self.index_bounds);
             }
         }
@@ -526,6 +539,7 @@ impl D3d9DrawState {
                 ranges: FastMap::default(),
             });
         if cached.ranges.len() >= 256 {
+            stats::record(|s| s.index_range_evictions += 1);
             evict_one(&mut cached.ranges);
         }
         cached.ranges.insert(range, (min, max));

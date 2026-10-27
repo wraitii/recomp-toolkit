@@ -137,6 +137,16 @@ to draws with a stage-1 texture bound.
 
 D3D9 logs shader-module and pipeline creation taking at least 50 ms, plus
 shader/layout/pipeline cache clears, to stderr with the `[d3d9-compile]` prefix.
+`RECOMP_D3D9_STATS=1` independently emits `[d3d9-stats]` counter deltas every
+120 rendered frames per calling thread, plus a partial bucket at thread exit.
+These cover draw-memo lookups/probes/evictions, index-range cache misses and
+cleanup, texture-binding misses/invalidation, effect calls and CTAB parsing,
+constant-register fills/temporary bytes, and buffer uploads that copy snapshots
+or detach weak references. `frame` is the thread's cumulative rendered-frame
+count; `frames` and `elapsed_ms` describe the bucket. Counts include attempted
+operations; memo matches/rejects count candidates examined, not draws. Constant
+fill counters exclude preshader writes. This mode adds no per-draw clock reads
+or logs; use sampling separately for CPU costs and leave pipeline tracing off.
 `RECOMP_D3D9_TRACE_PIPELINES=1` also logs every pipeline miss before and after
 compilation, every module creation, and shader variants. Records include frame
 numbers, source hashes and byte counts (vertex then pixel), pipeline recipe

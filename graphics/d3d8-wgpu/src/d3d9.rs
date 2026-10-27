@@ -38,6 +38,7 @@ pub mod query;
 pub mod resource;
 pub mod shader;
 pub mod state;
+mod stats;
 pub mod wgsl;
 
 pub use d3dx::*;
@@ -2014,6 +2015,13 @@ pub fn d3d9_unregister_resource(device: &mut D3d9Device, id: u32) -> Status {
     device.registry_epoch += 1;
     device.locks.remove(&id);
     device.draw_views = None;
+    stats::record(|s| {
+        if let Some(textures) = &device.draw_textures {
+            s.texture_epoch_invalidations += 1;
+            s.texture_invalidated_slots +=
+                textures.bindings.iter().filter(|b| b.is_some()).count() as u64;
+        }
+    });
     device.draw_textures = None;
     if device.render_target_id == id {
         device.render_target_id = 0;
@@ -4673,12 +4681,22 @@ fn bound_textures_cached(
         require_unlocked(device, id, "Draw texture")?;
         let cached = match cache[stage as usize].take() {
             Some(mut cached) if cached.id == id => {
+                stats::record(|s| s.texture_hits += 1);
                 if let Some(lod) = &cached.lod {
                     cached.binding.lod = lod.load(Ordering::Acquire);
                 }
                 cached
             }
-            _ => resolve_binding(device, id, stage)?,
+            previous => {
+                stats::record(|s| {
+                    if previous.is_some() {
+                        s.texture_changed_misses += 1;
+                    } else {
+                        s.texture_cold_misses += 1;
+                    }
+                });
+                resolve_binding(device, id, stage)?
+            }
         };
         out.push(cached.binding.clone());
         cache[stage as usize] = Some(cached);
@@ -4794,6 +4812,7 @@ fn resolve_draw_views(
 }
 
 fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<(), RenderError> {
+    stats::record(|s| s.draws += 1);
     let gpu = bridge_gpu(device)?;
     require_unlocked(device, device.render_target_id, "D3D9 surface")?;
     if device.depth_target_id != 0 {
@@ -4810,10 +4829,19 @@ fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<
     };
     let mut textures = match device.draw_textures.take() {
         Some(textures) if textures.epoch == device.registry_epoch => textures,
-        _ => Box::new(DrawTextures {
-            epoch: device.registry_epoch,
-            bindings: Default::default(),
-        }),
+        previous => {
+            stats::record(|s| {
+                if let Some(textures) = &previous {
+                    s.texture_epoch_invalidations += 1;
+                    s.texture_invalidated_slots +=
+                        textures.bindings.iter().filter(|b| b.is_some()).count() as u64;
+                }
+            });
+            Box::new(DrawTextures {
+                epoch: device.registry_epoch,
+                bindings: Default::default(),
+            })
+        }
     };
     let bindings = bound_textures_cached(device, &mut textures.bindings)?;
     let snapshot = draw::DrawSnapshot {
