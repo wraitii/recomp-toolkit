@@ -26,6 +26,8 @@ use std::time::Instant;
 
 mod ffvs;
 mod geometry;
+mod memo;
+mod memo_trace;
 pub(crate) use geometry::vertex_element_bytes;
 use geometry::*;
 mod trace;
@@ -1808,7 +1810,7 @@ struct PaddedColor {
     source: SurfaceView,
 }
 
-const DRAW_MEMOS: usize = 16;
+const DRAW_MEMOS: usize = 1024;
 const BIND_GROUP_CACHE_LIMIT: usize = 4096;
 
 struct DrawMemo {
@@ -1885,7 +1887,8 @@ pub(crate) struct D3d9DrawState {
     native_streams: SmallVec<[(u32, VertexAttributes); 2]>,
     native_geometry_pool: Vec<Box<NativeGeometry>>,
     pipeline_memo: Option<(PipelineKey, wgpu::RenderPipeline)>,
-    memos: Vec<Box<DrawMemo>>,
+    memos: memo::Cache,
+    memo_capture: memo_trace::Capture,
     feedback_copies: FastMap<FeedbackShape, (wgpu::Texture, wgpu::TextureView)>,
 }
 impl D3d9DrawState {
@@ -1903,6 +1906,7 @@ impl D3d9DrawState {
     fn clear(&mut self, reason: &str) {
         self.log_cache_clear(reason);
         self.memos.clear();
+        self.memo_capture.clear();
         self.feedback_copies.clear();
         self.specialization = uber::RecipeCache::default();
         self.pipeline_memo = None;
@@ -1921,6 +1925,7 @@ impl D3d9DrawState {
 
     pub(crate) fn end_frame(&mut self, gpu: &D3d9Gpu) {
         stats::end_frame();
+        self.memo_capture.end_frame(self.frame);
         if uber::hybrid(gpu) {
             if let Some(compiler) = &mut self.compiler {
                 compiler.end_frame(self.frame);
@@ -3113,14 +3118,28 @@ pub(crate) fn execute(
         .as_ref()
         .map(|depth| (depth.texture.format(), depth.format));
     let fingerprint = state.pipeline_fingerprint();
+    let memo_trace_keys = memo_trace::enabled().then(|| {
+        memo_trace::keys(
+            state,
+            &snapshot.textures,
+            &(
+                ff_key,
+                raw_inputs,
+                target_key,
+                depth_key,
+                interpreted,
+                interpreted.then_some(topology),
+                ready.as_ref().map(|(compiled, _)| &compiled.pipeline),
+            ),
+        )
+    });
     let count_stats = stats::enabled();
     let mut memo_examined = 0;
     let mut memo_fingerprint_matches = 0;
     let mut memo_texture_rejects = 0;
     let memo = draw
         .memos
-        .iter()
-        .rposition(|memo| {
+        .take(fingerprint, |memo| {
             let fingerprint_matches = memo.fingerprint == fingerprint;
             if count_stats {
                 memo_examined += 1;
@@ -3150,8 +3169,7 @@ pub(crate) fn execute(
                 memo_texture_rejects += 1;
             }
             textures_match
-        })
-        .map(|index| draw.memos.remove(index));
+        });
     stats::record(|s| {
         s.memo_lookups += 1;
         s.memo_hits += u64::from(memo.is_some());
@@ -3160,6 +3178,7 @@ pub(crate) fn execute(
         s.memo_fingerprint_matches += memo_fingerprint_matches;
         s.memo_texture_rejects += memo_texture_rejects;
     });
+    let memo_hit = memo.is_some();
     let mut memo = match memo {
         Some(memo) => memo,
         None if covered => uber::resolve(
@@ -3640,11 +3659,12 @@ pub(crate) fn execute(
         blend_constant: blend,
         scissor,
     });
-    if draw.memos.len() >= DRAW_MEMOS {
+    if draw.memos.insert(memo) {
         stats::record(|s| s.memo_evictions += 1);
-        draw.memos.remove(0);
     }
-    draw.memos.push(memo);
+    if let Some(keys) = memo_trace_keys {
+        draw.memo_capture.record(keys, memo_hit);
+    }
     draw.linked = linked_inputs;
     draw.ff_uniforms = ff_uniforms;
     if draw.batch.data.len() >= 32 << 20 {

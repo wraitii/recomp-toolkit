@@ -777,6 +777,20 @@ impl D3d9State {
         self.pipeline_fingerprint
     }
 
+    pub(crate) fn memo_trace_fingerprints(&self) -> [u64; 3] {
+        let mut resources = self.pipeline_fingerprint;
+        for stage in 0..MAX_SAMPLERS {
+            resources ^= fingerprint_word(FP_TEXTURE + stage as u64, self.textures[stage]);
+        }
+        let mut bindings = resources;
+        for (stage, row) in self.sampler.iter().enumerate() {
+            for (index, &value) in row.iter().enumerate() {
+                bindings ^= fingerprint_word(FP_SAMPLER + (stage * 14 + index) as u64, value);
+            }
+        }
+        [self.pipeline_fingerprint, resources, bindings]
+    }
+
     pub(crate) fn selection_revision(&self) -> u64 {
         self.selection_revision
     }

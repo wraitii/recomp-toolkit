@@ -144,11 +144,26 @@ cleanup, texture-binding misses/invalidation, effect calls and CTAB parsing,
 constant-register fills/temporary bytes, and buffer uploads that copy snapshots
 or detach weak references. `frame` is the thread's cumulative rendered-frame
 count; `frames` and `elapsed_ms` describe the bucket. Counts include attempted
-operations; memo matches/rejects count candidates examined, not draws. Constant
+operations; memo probes/matches/rejects count candidates in the fingerprint bucket,
+not draws. The memo cache holds up to 1024 entries, indexes by fingerprint and
+retains the full state/texture checks; capacity eviction removes the least recently
+used memo. Memos retain their GPU resource references until eviction or reset. Constant
 fill counters exclude preshader writes; saved CTAB parses count actual cache fills.
 Index cleanup counts FIFO entries visited, with dead removals and live evictions
 reported separately. This mode adds no per-draw clock reads
 or logs; use sampling separately for CPU costs and leave pipeline tracing off.
+`RECOMP_D3D9_TRACE_MEMOS=1` independently reports `[d3d9-memos]` reuse buckets
+every 120 frames and a partial bucket at device destruction. Hash-only shadow
+LRUs predict hits at capacities 16/32/64/128/256/512/1024; `actual_miss_hits`
+counts predictions on draws that missed the real memo cache. `full` includes
+the current fingerprint, lookup qualifiers and complete bound-texture identity;
+`no_resources` omits texture handles/views while retaining texture metadata;
+`no_bindings` additionally omits sampler state, texture extents, LOD and levels,
+retaining stage/format/depth/cube/volume. Projected hits indicate possible reuse,
+not proven shading equivalence. Shadow histories survive buckets and reset with
+the real cache (`clears`); counters include successful draws only. This bounded
+diagnostic scans up to 1024 keys per kind per draw, retains no GPU resources and
+does not change rendering. Use it for reuse analysis, then disable it for timing.
 `RECOMP_D3D9_TRACE_PIPELINES=1` also logs every pipeline miss before and after
 compilation, every module creation, and shader variants. Records include frame
 numbers, source hashes and byte counts (vertex then pixel), pipeline recipe
