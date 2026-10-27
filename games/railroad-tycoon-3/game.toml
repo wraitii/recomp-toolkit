@@ -36,16 +36,11 @@ private_leaf_contracts = true
 assume = ["private-stack", "stack-pointer-bases"]
 checked_returns = [0x005a10d0]
 state_contract_callers = [0x0042ce00, 0x0042c1b0]
-# Calls with proven argument bytes. __FF_MSGBANNER and __callnewh call hooks
-# at 00dba1e0 and 00dba1c8 that are zero in the image and never written.
-# __crtInitCritSecAndSpinCount
-# calls InitializeCriticalSectionAndSpinCount or ___crtInitCritSecNoSpinCount@8.
-# CRT strcpy (cdecl) pushes EDI and jumps into strcat's shared tail.
-call_pops = [
-  { site = 0x005acf52, pop = 0 },
-  { site = 0x005a717d, pop = 0 },
-  { site = 0x005b0885, pop = 8 },
-  { function = 0x005ac3b0, pop = 0 },
+stack_cleanup = [
+  { call = 0x005acf52, bytes = 0, evidence = "__FF_MSGBANNER calls the hook at 00dba1e0, zero in the image and never written" },
+  { call = 0x005a717d, bytes = 0, evidence = "__callnewh calls the new handler at 00dba1c8, zero in the image and never written" },
+  { call = 0x005b0885, bytes = 8, evidence = "__crtInitCritSecAndSpinCount calls InitializeCriticalSectionAndSpinCount or ___crtInitCritSecNoSpinCount@8" },
+  { function = 0x005ac3b0, bytes = 0, evidence = "CRT strcpy (cdecl) pushes EDI and jumps into strcat's shared tail" },
 ]
 
 [render]

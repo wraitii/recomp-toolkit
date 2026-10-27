@@ -519,15 +519,18 @@ def load(game_dir, build_root=None):
                 or any(type(v) is not int or not 0 <= v <= 0xffffffff for v in listed)
                 or len(set(listed)) != len(listed)):
             raise ValueError("%s: [translate] %s must be a list of unique 32-bit addresses" % (source, key))
-    call_pops = translate.setdefault("call_pops", [])
-    if (not isinstance(call_pops, list)
-            or any(not isinstance(row, dict) or len(row) != 2 or "pop" not in row
-                   or not set(row) - {"pop"} <= {"site", "function"}
-                   or any(type(v) is not int or not 0 <= v <= 0xffffffff for v in row.values())
-                   or row["pop"] % 4
-                   for row in call_pops)
-            or len({(row.get("site"), row.get("function")) for row in call_pops}) != len(call_pops)):
-        raise ValueError("%s: [translate] call_pops must be a list of unique {site|function, pop} with dword pops" % source)
+    # Stack bytes a call site or function pops, where cleanup inference cannot prove them.
+    stack_cleanup = translate.setdefault("stack_cleanup", [])
+    if (not isinstance(stack_cleanup, list)
+            or any(not isinstance(row, dict) or len(row) != 3
+                   or not set(row) - {"bytes", "evidence"} <= {"call", "function"}
+                   or type(row.get("bytes")) is not int or not 0 <= row["bytes"] <= 0xffff or row["bytes"] % 4
+                   or type(row.get("call", row.get("function"))) is not int
+                   or not 0 <= row.get("call", row.get("function")) <= 0xffffffff
+                   or not isinstance(row.get("evidence"), str) or not row["evidence"].strip()
+                   for row in stack_cleanup)
+            or len({(row.get("call"), row.get("function")) for row in stack_cleanup}) != len(stack_cleanup)):
+        raise ValueError("%s: [translate] stack_cleanup must be a list of unique {call|function, bytes, evidence} with dword bytes" % source)
     if not isinstance(translate.setdefault("x87_cw_clone", TRANSLATE_DEFAULTS["x87_cw_clone"]), bool):
         raise ValueError("%s: [translate] x87_cw_clone must be a boolean" % source)
     if not isinstance(translate.setdefault("private_leaf_contracts", TRANSLATE_DEFAULTS["private_leaf_contracts"]), bool):

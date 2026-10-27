@@ -36,10 +36,11 @@ struct Input {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CallPop {
-    pub site: Option<Addr>,
+pub struct StackCleanup {
+    pub call: Option<Addr>,
     pub function: Option<Addr>,
-    pub pop: i32,
+    pub bytes: i32,
+    pub evidence: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -55,7 +56,7 @@ pub struct Translate {
     pub exposed_stack_functions: Vec<Addr>,
     pub stack_helpers: Vec<Addr>,
     pub stack_probes: Vec<Addr>,
-    pub call_pops: Vec<CallPop>,
+    pub stack_cleanup: Vec<StackCleanup>,
     pub x87_cw_clone: bool,
     pub private_leaf_contracts: bool,
     pub private_input_arguments: bool,
@@ -300,6 +301,7 @@ pub struct Settings {
     pub exposed_stack_functions: BTreeSet<Addr>,
     pub stack_helpers: BTreeSet<Addr>,
     pub stack_probes: BTreeSet<Addr>,
+    pub stack_cleanup: Vec<StackCleanup>,
     pub call_pops: BTreeMap<Addr, i32>,
     pub function_pops: BTreeMap<Addr, i32>,
     pub call_hooks: bool,
@@ -481,18 +483,23 @@ impl Settings {
             exposed_stack_functions: only_main(&t.exposed_stack_functions),
             stack_helpers: only_main(&t.stack_helpers),
             stack_probes: only_main(&t.stack_probes),
+            stack_cleanup: if main {
+                t.stack_cleanup.clone()
+            } else {
+                Vec::new()
+            },
             call_pops: if main {
-                t.call_pops
+                t.stack_cleanup
                     .iter()
-                    .filter_map(|row| Some((row.site?, row.pop)))
+                    .filter_map(|row| Some((row.call?, row.bytes)))
                     .collect()
             } else {
                 BTreeMap::new()
             },
             function_pops: if main {
-                t.call_pops
+                t.stack_cleanup
                     .iter()
-                    .filter_map(|row| Some((row.function?, row.pop)))
+                    .filter_map(|row| Some((row.function?, row.bytes)))
                     .collect()
             } else {
                 BTreeMap::new()

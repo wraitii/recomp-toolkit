@@ -21,7 +21,7 @@ use rk_core::contract::{Contract, Field};
 use rk_core::facts::Summary as FactSummary;
 use rk_core::program::Program;
 use rk_core::settings::CallEffect as ConfiguredEffect;
-use rk_core::settings::Settings;
+use rk_core::settings::{Settings, StackCleanup};
 use rk_core::{Addr, Result};
 use rk_frontend::Analysis;
 use rk_ssa::{CallEffect, CallFacts, CallSummary};
@@ -153,6 +153,7 @@ pub struct GlobalFacts {
     pub contracts: BTreeMap<Addr, Contract>,
     pub indirect_contracts: BTreeMap<Addr, Contract>,
     pub site_effects: BTreeMap<Addr, ConfiguredEffect>,
+    stack_cleanup: Vec<StackCleanup>,
     pub private: PrivateAnalysis,
     pub x87: X87ModeFacts,
     pub report: GlobalReport,
@@ -281,6 +282,7 @@ impl GlobalFacts {
             contracts: contracts.contracts,
             indirect_contracts: contracts.indirect,
             site_effects: input.site_effects.clone(),
+            stack_cleanup: input.settings.stack_cleanup.clone(),
             private,
             x87: modes.facts,
             report,
@@ -319,6 +321,17 @@ impl GlobalFacts {
         }
         for (&addr, source) in &self.returns.stack_probes {
             writeln!(out, "stack-probe {addr:08x} {source}")?;
+        }
+        for row in &self.stack_cleanup {
+            let (kind, addr) = match (row.call, row.function) {
+                (Some(call), _) => ("call", call),
+                (_, function) => ("function", function.unwrap_or_default()),
+            };
+            writeln!(
+                out,
+                "stack-cleanup {kind} {addr:08x} bytes={} evidence={:?}",
+                row.bytes, row.evidence
+            )?;
         }
         for (&addr, cleanup) in &self.returns.cleanups {
             writeln!(out, "cleanup-only {addr:08x} pop={cleanup}")?;

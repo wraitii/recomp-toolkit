@@ -252,9 +252,10 @@ Straight-line helpers that move the caller's ESP have their instructions evaluat
 on the caller's state, and probes lower the caller's ESP by a constant EAX. MSVC
 `__SEH_prolog`/`__SEH_epilog` and the MSVC 7 `_chkstk` are detected by their bytes;
 `[translate] stack_helpers` and `stack_probes` add helpers that do not match, and
-`--dump global` lists each as detected or configured. `call_pops = [{ site|function, pop }]` states
-the bytes an indirect call site or a function pops; function entries are trusted
-as ordinary calls preserving EBX/ESI/EDI/EBP. Each entry needs binary evidence.
+`--dump global` lists each as detected or configured. `stack_cleanup = [{ call|function, bytes, evidence }]`
+states the bytes an indirect call site or a function pops; function entries are
+trusted as ordinary calls preserving EBX/ESI/EDI/EBP. `evidence` records the binary
+evidence and `--dump global` prints it.
 These facts establish only cleanup, without memory, return-address or checkpoint
 guarantees. Proved functions are summarised again against their callees' summaries
 to record constant writes at or above entry ESP (`argument-writes`). A function has
