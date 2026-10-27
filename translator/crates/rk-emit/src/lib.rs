@@ -61,13 +61,19 @@ pub struct EmitReport {
     pub fallbacks: BTreeSet<(Addr, String)>,
     pub slow_ops: BTreeSet<(Addr, String)>,
     pub promotion_failure: Option<String>,
+    pub return_slot: std::result::Result<(), &'static str>,
 }
 
 pub fn argument_parameters(arguments: PrivateArguments) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = arguments
         .registers
         .iter()
-        .map(|field| ("uint32_t".to_string(), format!("{}_", field.name().to_lowercase())))
+        .map(|field| {
+            (
+                "uint32_t".to_string(),
+                format!("{}_", field.name().to_lowercase()),
+            )
+        })
         .collect();
     if arguments.st0 {
         out.push(("double".to_string(), "st0_".to_string()));
@@ -84,6 +90,7 @@ pub fn emit_body(planned: &PlannedFunction, ctx: &EmitContext<'_>) -> Result<(Bo
         fallbacks: std::mem::take(&mut emitter.fallbacks),
         slow_ops: std::mem::take(&mut emitter.slow_ops),
         promotion_failure: planned.ssa.promotion_failure.clone(),
+        return_slot: planned.ssa.return_slot,
     };
     Ok((
         Body {
@@ -661,7 +668,9 @@ impl<'a> Emitter<'a> {
             }
             if let Some(private) = self.private {
                 if let Some((field, _)) = field_lane(key) {
-                    if !private.inputs.contains(field) && !private.input_arguments.registers.contains(field) {
+                    if !private.inputs.contains(field)
+                        && !private.input_arguments.registers.contains(field)
+                    {
                         continue;
                     }
                 }
@@ -2391,7 +2400,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn entry_keys(&self, value: ValueId, mut keys: Vec<StateKey>) -> Vec<StateKey> {
-        if self.private.is_none_or(|private| private.input_arguments.registers.is_empty()) {
+        if self
+            .private
+            .is_none_or(|private| private.input_arguments.registers.is_empty())
+        {
             return keys;
         }
         for &(key, state) in self.s.boundary(value).unwrap_or_default() {

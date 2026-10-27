@@ -69,8 +69,9 @@ staging directory (`aux-KEY/` for auxiliary images) and syncs the tree into
 buckets under a 4 MiB source budget), `chunk_entries_*.c` entry thunks,
 `funcs.h`, `body.h`, `table.c`, `call_facts.c` and `symbols.json`. The report,
 `recomp/translate[-KEY]-report.json`, gives counts, entry kinds, global-analysis
-statistics, fact bounds and effects consumed, trap and fallback reasons, stack slot promotion failures, slow
-operations, discovery traps, diagnostics and phase timings. `--discovery-report`
+statistics, fact bounds and effects consumed, trap and fallback reasons, stack slot
+promotion failures, return-slot proofs, slow operations, discovery traps, diagnostics
+and phase timings. `--discovery-report`
 writes the discovered code map, instruction lengths and every rejected function
 or entry with its pass and reason. `--dump program|fir|ssa|prepared|stack|global|bodies|all`
 prints intermediate stages to stdout, and `--only` restricts the dump to a set
@@ -180,8 +181,11 @@ Without `stack-pointer-bases`, an escaped frame pointer exposes the whole frame.
 With it, unknown upward extents expose the remainder of the frame, and proved callee
 ranges can narrow exposure and include negative accesses. Each exempted write needs a
 proved current ESP below the entire negative-offset slot; arguments and the return
-address remain conservative. Forwarding retains guest stores, and original-code
-analysis summaries do not use this premise.
+address remain conservative. The report's `return_slot` applies the private-frame
+rule to the return address alone: a function is proved when every RET reads the
+slot at entry ESP and no effect may write it. Code generation does not use it yet.
+Forwarding retains guest stores, and original-code analysis summaries do not use
+this premise.
 With relaxed fault state, eligible x87 accesses split into rounded value and memory
 effects independently of lazy writes, preserving pop, status and ESP provenance.
 Forwarding, region partitioning and dead-store elimination share one frame model

@@ -534,7 +534,7 @@ impl Frame {
                 .bounds(esp.get(&id).copied().unwrap_or(Address::Unknown))
             {
                 let top = i64::from(offset as i32) + i64::from(span);
-                if (offset as i32) < 0 && top < 0 {
+                if (offset as i32) <= 0 && top <= 0 {
                     independent.insert(id, top as i32);
                 }
             }
@@ -585,10 +585,22 @@ impl Frame {
             return false;
         };
         let start = i64::from(offset as i32);
+        start < 0
+            && start + i64::from(span) + i64::from(range.size) <= 0
+            && self.private(effect, range)
+    }
+
+    fn private(&self, effect: ValueId, range: Range) -> bool {
+        let Address::Known {
+            base: Base::Frame,
+            offset,
+            ..
+        } = range.address
+        else {
+            return false;
+        };
         self.unexposed(range)
             && range.size != 0
-            && start < 0
-            && start + i64::from(span) + i64::from(range.size) <= 0
             && (self
                 .calls
                 .get(&effect)
@@ -596,7 +608,7 @@ impl Frame {
                 || self
                     .independent
                     .get(&effect)
-                    .is_some_and(|&esp| i64::from(esp) <= start)
+                    .is_some_and(|&esp| i64::from(esp) <= i64::from(offset as i32))
                 || self
                     .accesses
                     .get(&effect)
@@ -661,6 +673,94 @@ impl Frame {
             _ => Link::End,
         }
     }
+}
+
+pub(crate) fn return_slot(s: &Ssa, facts: &dyn CallFacts) -> Result<(), &'static str> {
+    let frame = Frame::new(s, Some(facts));
+    if let Some((reason, _)) = frame.rejection {
+        return Err(reason);
+    }
+    let eip = rk_ir::Registers::get().require("EIP").offset as u32;
+    let slot = Range::new(Address::exact(Base::Frame, 0), 4);
+    let mut returns = 0;
+    for &id in s.blocks.iter().flat_map(|block| &block.ops) {
+        if s.value(id).op != Op::Return {
+            continue;
+        }
+        returns += 1;
+        let lanes: Vec<Option<ValueId>> = (0..4u8)
+            .map(|index| {
+                let &(_, value) = s
+                    .boundary(id)?
+                    .iter()
+                    .find(|(key, _)| *key == rk_ir::StateKey::Register(eip + u32::from(index)))?;
+                (s.value(value).op == Op::Byte(index)).then(|| s.args(value)[0])
+            })
+            .collect();
+        let target = lanes[0].ok_or("return-target-not-a-load")?;
+        if lanes.iter().any(|lane| *lane != Some(target))
+            || s.value(target).op != Op::P(OpCode::Load)
+        {
+            return Err("return-target-not-a-load");
+        }
+        let located = frame
+            .accesses
+            .get(&target)
+            .and_then(|access| access.location)
+            .map(|range| Range::new(frame.relations.bounds(range.address), range.size));
+        if located != Some(slot) {
+            return Err(match located.map(|range| range.address) {
+                Some(Address::Known {
+                    base: Base::Stack(_),
+                    ..
+                }) => "return-esp-after-unbounded-call",
+                Some(Address::Known {
+                    base: Base::Value(_),
+                    ..
+                }) => "return-esp-from-value",
+                Some(Address::Known {
+                    base: Base::Frame, ..
+                }) => "return-esp-unbalanced",
+                _ => "return-esp-unknown",
+            });
+        }
+        let mut pending = vec![s.args(target)[0]];
+        let mut seen = LookupSet::default();
+        while let Some(token) = pending.pop() {
+            if !seen.insert(token) {
+                continue;
+            }
+            if seen.len() > 4096 {
+                return Err("memory-chain-budget");
+            }
+            match frame.link(s, token, slot) {
+                Link::Phi(args) | Link::Merge(args) => pending.extend_from_slice(args),
+                Link::Effect(_, Clobber::Transparent, prior) => pending.push(prior),
+                Link::Effect(effect, Clobber::Value(..), prior)
+                    if s.value(effect).op == Op::P(OpCode::Load) =>
+                {
+                    pending.push(prior)
+                }
+                Link::Effect(_, Clobber::Value(..), _) => return Err("slot-written"),
+                Link::Effect(effect, Clobber::May, prior) if frame.private(effect, slot) => {
+                    pending.push(prior)
+                }
+                Link::Effect(effect, Clobber::May, _) => {
+                    return Err(match s.value(effect).op {
+                        Op::Call { .. } | Op::CallInd => "call-may-write",
+                        Op::P(OpCode::Store) => "store-may-write",
+                        _ => "effect-may-write",
+                    })
+                }
+                Link::End if matches!(s.value(token).op, Op::Input(rk_ir::StateKey::Memory)) => {}
+                Link::End => return Err("unknown-memory-root"),
+            }
+        }
+    }
+    if returns == 0 {
+        return Err("no-return");
+    }
+    Ok(())
 }
 
 pub(crate) fn dump_stack(

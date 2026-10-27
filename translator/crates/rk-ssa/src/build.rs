@@ -636,6 +636,7 @@ impl<'a> Builder<'a> {
             aligned: self.frame.and_then(|frame| frame.aligned),
             frame_guard: self.frame_guard,
             promotion_failure: None,
+            return_slot: Err("unanalysed"),
             origins: self.origins,
             stack_calls: self.lazy_stack_writes,
             memory_partitioned: false,

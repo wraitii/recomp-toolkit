@@ -150,6 +150,7 @@ pub struct Ssa {
     pub frame_publish: BTreeMap<ValueId, Vec<StateKey>>,
     pub frame_guard: BTreeMap<ValueId, Vec<StateKey>>,
     pub promotion_failure: Option<String>,
+    pub return_slot: Result<(), &'static str>,
     pub(crate) origins: Lookup<ValueId, (u32, u16)>,
     pub(crate) stack_calls: bool,
     pub(crate) memory_partitioned: bool,

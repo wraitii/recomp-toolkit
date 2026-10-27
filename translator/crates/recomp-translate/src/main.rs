@@ -152,6 +152,27 @@ fn sites_json(functions: usize, by_reason: &BTreeMap<String, Sites>) -> serde_js
     })
 }
 
+fn return_slot_json(
+    slots: &BTreeMap<Addr, std::result::Result<(), &'static str>>,
+) -> serde_json::Value {
+    let mut reasons: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (addr, slot) in slots {
+        if let Err(reason) = slot {
+            reasons
+                .entry(reason)
+                .or_default()
+                .push(Hex(*addr).to_string());
+        }
+    }
+    serde_json::json!({
+        "functions": slots.len(),
+        "proven": slots.values().filter(|slot| slot.is_ok()).count(),
+        "unproven": reasons.iter().map(|(reason, addrs)| {
+            (*reason, serde_json::json!({ "count": addrs.len(), "functions": addrs }))
+        }).collect::<BTreeMap<_, _>>(),
+    })
+}
+
 fn summary_line(by_reason: &BTreeMap<String, Sites>) -> String {
     by_reason
         .iter()
@@ -174,6 +195,7 @@ struct EmitStats {
     c_field_residency_violations: usize,
     c_field_residency_violation_addrs: Vec<Addr>,
     promotion_failures: BTreeMap<Addr, String>,
+    return_slots: BTreeMap<Addr, std::result::Result<(), &'static str>>,
 }
 
 struct IrSummary {
@@ -409,6 +431,7 @@ fn account(stats: &mut EmitStats, (addr, body, reason, report): BodyRow, bodies:
         if let Some(failure) = report.promotion_failure {
             stats.promotion_failures.insert(addr, failure);
         }
+        stats.return_slots.insert(addr, report.return_slot);
         tally(
             &mut stats.fallback_functions,
             &mut stats.fallbacks,
@@ -653,7 +676,9 @@ fn build_bodies(
                         let fast = global.private.known_modes.contains(&addr)
                             && ctx2.x87_options.cw_clone
                             && ctx2.x87_options.force == rk_x87::ModeForce::Auto;
-                        let st0 = private_arguments.get(&addr).is_some_and(|arguments| arguments.st0);
+                        let st0 = private_arguments
+                            .get(&addr)
+                            .is_some_and(|arguments| arguments.st0);
                         if fast || st0 {
                             let mut options = ctx2.x87_options.clone();
                             if fast {
@@ -1022,6 +1047,7 @@ fn report(input: &ReportInputs<'_>) -> Result<String> {
             .iter()
             .map(|(addr, failure)| (format!("{addr:08x}"), failure))
             .collect::<BTreeMap<_, _>>(),
+        "return_slot": return_slot_json(&emitted.return_slots),
         "discovery_traps": traps,
         "diagnostics": diagnostics,
         "diagnostics_histogram": histogram,

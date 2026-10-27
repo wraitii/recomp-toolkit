@@ -121,10 +121,13 @@ fn prepare_using(
     if opts.policy == Policy::Optimizing && opts.fault_state == FaultState::Relaxed {
         crate::memory::eliminate_dead_stores(&mut ssa, Some(opts.call_facts));
     }
+    if opts.policy == Policy::Optimizing {
+        ssa.return_slot = crate::memory::return_slot(&ssa, opts.call_facts);
+    }
     if let Some(out) = trace.as_mut() {
         writeln!(out, "after memory passes")
-        .and_then(|_| crate::memory::dump_stack(&ssa, opts.call_facts, *out))
-        .map_err(|error| rk_core::Error::io("stack dump", error))?;
+            .and_then(|_| crate::memory::dump_stack(&ssa, opts.call_facts, *out))
+            .map_err(|error| rk_core::Error::io("stack dump", error))?;
     }
     crate::flags::build_joins(&mut ssa);
     crate::coalesce::coalesce(&mut ssa, opts.coalesce_roots);
