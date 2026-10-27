@@ -168,6 +168,18 @@ ConfigureActions preferences_actions() {
         return false;
     };
     actions.restore_recommended = [](std::string *error) { return host_preferences::reset(error); };
+    actions.test_rumble = [](std::string *error) {
+        controls::gamepad_poll();
+        if (!controls::gamepad_connected()) {
+            *error = "Could not test rumble: no controller connected.";
+            return false;
+        }
+        if (!controls::gamepad_rumble(0xffff, 0xffff, 1000)) {
+            *error = "Could not test rumble: " + std::string(SDL_GetError());
+            return false;
+        }
+        return true;
+    };
     return actions;
 }
 
