@@ -1,10 +1,9 @@
 # d3d8-wgpu
 
-Isolated Rust + wgpu prototype of a **D3D8-semantics renderer**. It exists to
-answer one question independently of the game: can a small, reusable D3D8 host
-layer (state, resources, fixed-function emulation,
-rendering) be built on wgpu — and specifically on Metal on ARM64 macOS, where
-the DXVK/MoltenVK experiment failed?
+Reusable Rust + wgpu renderer for D3D7, D3D8 and D3D9 state, resources,
+fixed-function emulation and programmable shaders. D3D9 uses prepared GPU
+interpreters while specialized pipelines compile in the background on Metal.
+See [execution modes](#d3d9-execution-modes) and [shader coverage](SHADERS.md).
 
 The crate exports a host-only C ABI used by recomp-kit. It contains no guest CPU
 or COM types and no game addresses. C++ owns guest dispatch, interface identity,
@@ -95,6 +94,9 @@ src/d3d8/            reusable D3D8 layer (no windowing, no game types)
   fixed_function.rs  FVF -> vertex layout and fixed-function WGSL
   device.rs          Clear / Draw* / Present / resource creation
 src/backend/         wgpu instance / adapter / device / surface / readback
+src/d3d9/            D3D9 objects, state, resources and draw submission
+src/shader/          D3D9 decoding, admission, specialization and interpreter lowering
+src/render/          interfaces, pipeline recipes, compiler worker and prepared interpreter
 src/bridge.rs        CXX shared types, device/resource ownership and D3D7 state
 src/probe/           shared probe harness and assertions
 src/bin/             probe-headless (offscreen readback), probe-windowed (present)
@@ -109,6 +111,71 @@ src/bin/             probe-headless (offscreen readback), probe-windowed (presen
 5. Textures, then depth/stencil (`D3DFMT_D24S8` as a probe target).
 
 Unsupported operations must fail with a named diagnostic, never silently succeed.
+
+## D3D9 shader architecture
+
+The programmable ubershader executes decoded guest instructions supplied as
+immutable buffer data. Hardware still performs rasterization between the vertex
+and fragment stages. Changing a program can reuse a prepared pipeline, but static
+texture types, vertex/varying interfaces, attachment formats and raster state
+still constrain which pipeline can execute a draw. Preparation therefore uses a
+finite family manifest, not every possible combination of D3D9 state.
+
+| Source | Responsibility |
+| --- | --- |
+| `src/shader/program.rs`, `validate.rs`, `opcodes.rs` | Shared decoding, register/resource metadata and shader admission. |
+| `src/shader/specialize.rs`, `recipe.rs` | Specialized WGSL generation from decoded programs and owned variant inputs. |
+| `src/shader/uber.rs`, `uber/` | Interpreter coverage, versioned instruction ABI and WGSL generation. |
+| `src/shader/interface.rs`, shared `.wgsl` files | Varying/parameter declarations, arithmetic and raster output helpers. |
+| `src/render/interface.rs`, `bindings.rs`, `pipeline.rs` | Immutable interfaces, complete pipeline recipes and compilation caches. |
+| `src/render/interpreter.rs` | Prepared family manifest, device-limit checks and resident interpreter resources. |
+| `src/render/compile.rs` | Bounded compiler queue, failure retention and completion publication. |
+| `src/d3d9/draw/uber.rs`, `geometry.rs`, `draw.rs` | D3D state interpretation, whole-draw coverage, execution selection, geometry and ordered submission. |
+
+Program keys retain original bytecode with equality checking; family keys exclude
+program contents but include interpreter/ABI versions, capacities, interfaces and
+static pipeline descriptors. Complete specialization recipes own stage inputs,
+layouts and descriptor data without borrowing guest state. Hashes accelerate
+lookup and identify traces; equality establishes identity. Keep these boundaries
+crate-private and independent of game logic. D3D8 adoption and fixed-function
+unification are separate work, not prerequisites for extending D3D9 coverage.
+
+`CreateShader` still decodes, generates default WGSL and validates it with Naga
+before allocating a handle. It also lowers interpreter data once, retaining an
+exclusion when the program cannot be interpreted. Guest shader admission,
+specializer support and interpreter coverage are separate decisions. Removing
+creation-time CPU work would require equivalent admission behavior.
+
+## D3D9 compilation contract
+
+For a covered hybrid draw with a prepared interpreter family, submission creates
+neither shader modules nor render pipelines and never waits for specialization.
+It selects a ready specialization or queues the complete recipe once and uses
+the interpreter. Variant source generation and module/pipeline creation belong
+to the worker. Foreground work still includes coverage and recipe lookup,
+constant/resource snapshots, geometry packing and uploads. Execution selection
+precedes path-specific packing.
+
+An uncovered or unprepared draw uses synchronous specialization with a residual
+reason available through pipeline tracing. Interpreter-only mode fails on either
+case; it never compiles a missing interpreter on submission. If neither path
+supports a draw, it fails by name. Draws must not be skipped, approximated or
+silently truncated to increase coverage. The contract excludes guest D3DX
+compilation and does not promise to eliminate every first-use graphics stall.
+
+Worker states progress from queued to compiling, then publish a ready pipeline
+to the regular cache or retain a failure. Queue saturation leaves draws on the
+interpreter and permits later scheduling without blocking. Publication at draw
+boundaries invalidates pipeline memoization; already queued draws retain their
+selected pipeline and resource snapshots. Interpreter residency is independent
+of specialization eviction. Reset/replacement retires old completion channels
+and recreates device resources without a render-thread compiler join.
+
+Foreground and worker compilation use wgpu 30's thread-local validation/OOM
+scope guards. Preserve error attribution, named failures and device-loss handling
+without a device-wide compilation lock. Backend driver contention still needs
+measurement; moving compilation to a worker alone does not establish a frame-time
+improvement. Hybrid acceptance currently covers Metal only.
 
 ## Implementation handoff
 
@@ -190,7 +257,9 @@ interpreter eligibility and the prepared family; specialized-only mode leaves
 eligibility unknown. The analyzer reports these alongside worker queue,
 compilation, publication and saturation metrics, correlated by recipe identity.
 
-`RECOMP_D3D9_SHADER_MODE=compare-family11` enables the M2 scoped comparison:
+## D3D9 execution modes
+
+`RECOMP_D3D9_SHADER_MODE=compare-family11` enables a scoped comparison:
 draws matching the supported SM2 program subset and baseline family-11 static
 interface/raster state use the prepared interpreter; other draws keep
 specialization. This is a scoped comparison, not whole-scene interpreter-only
@@ -231,9 +300,12 @@ Routine preparation, compilation, upload and frame logs require
 remain visible by default, as do evictions from caches that can require
 recompilation.
 
+### Interpreter diagnostics and measurement
+
 Add `RECOMP_D3D9_UBER_TINT=1` to mix 15% red into interpreted fragment results
 after raster output processing, preserving alpha. The tint is a diagnostic to
-locate interpreted content; disable it for rendering comparisons. It is a
+locate interpreted content; it can also change intermediate render targets
+consumed by later passes, so disable it for rendering comparisons. It is a
 per-draw uniform flag and creates no additional pipeline variant. Startup records
 include `tint=true` when enabled.
 In hybrid mode the tint disappears when a ready specialization is selected.
@@ -319,6 +391,39 @@ Without a frame window, the limit applies to the first draws across all frames.
 Tracing preserves native geometry submission; `RECOMP_D3D9_TRACE_READBACK=1`
 additionally flushes selected draws and logs the target's nonblack pixel count.
 Readback changes GPU synchronization; leave it off for the initial capture.
+
+### Validation status and further work
+
+The October 2026 Metal rollout received user visual review of coverage expansion,
+delayed interpreter-to-specialization handoff, default mode and shared pipeline
+caching. Temporary fallback performance was accepted with further profiling
+deferred. Build-time WGSL/ABI validation and Metal source generation establish
+compiler acceptance, not original-D3D9 fidelity or universal backend coverage.
+Runtime reset/device-loss/failure and queue-saturation stress checks remain
+outstanding, as do rendering and cache-pressure review after the final resource
+normalization/cache cleanup. No general numeric performance budget was qualified.
+
+For further coverage or performance changes, compare matched scene/camera,
+resolution and revision in specialized, scoped/interpreter-only and hybrid modes.
+Separate startup, naturally new content and repeat visits; keep detailed capture,
+tint, artificial publication delays and readback out of timing runs. Report:
+
+- Eligible and prepared draws separately as fractions of all draws, plus the
+  baseline synchronous compile cost covered by those families.
+- Warmup, resident memory, foreground preparation/packing and upload volume;
+  p50/p95/p99/max over a named window with its frame count.
+- Queue wait, compilation/publication time and interpreter residence before
+  specialization selection, including residual reasons and compilation-active frames.
+- Matched GPU execution measurements and rendering comparisons with reference
+  provenance. CPU creation times are neither GPU times nor wall-clock frame times;
+  agreement between our two paths alone does not prove original fidelity.
+
+Captures guide the manifest but do not prove future coverage. Keep game bytecode,
+raw captures and detailed reports in ignored game-local storage. Choose added
+families from measured residuals and record their limits in [SHADERS.md](SHADERS.md).
+Reassess startup cost, steady-state performance and adapter requirements before
+expanding the default configuration. Storage-buffer vertex pulling, independent
+stage mixing and persistent driver caches remain optional future work.
 
 ## Supported slice and remaining work
 

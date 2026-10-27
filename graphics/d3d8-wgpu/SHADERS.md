@@ -3,11 +3,13 @@
 The interpreter implements a bounded SM2 VS/PS subset. Hybrid is the default on
 Metal, with a specialized override; other backends remain specialized by default.
 The current coverage has user visual and Metal GPU review. Runtime failure and
-device-reset stress checks remain outstanding.
+device-reset stress checks remain outstanding. The [renderer README](README.md#d3d9-compilation-contract)
+documents the compilation contract, ownership, modes and validation status.
 `src/shader/uber/` defines ABI v8 / interpreter v14. A program is 17424 bytes:
 a four-u32 header (ABI version, pixel flag, instruction count, definition count),
 256 zero-padded 16-u32 instruction records and 32 definition records (index/padding
-and float bits). Opcode bits 8–10 mark immediate sources bit 16 selects projected TEX and bit 17 saturates the result before masked writes; source records
+and float bits). Opcode bits 8–10 mark immediate sources, bit 16 selects projected
+TEX and bit 17 saturates the result before masked writes; source records
 hold type/index/swizzle/flags. Flag bit 0 negates, bit 8 selects relative addressing,
 and bits 9–10 select the address component. Original bytecode equality plus ABI
 version identifies program data; capacity overflow is excluded.
@@ -92,6 +94,38 @@ Semantic references: Microsoft's [MOVA](https://learn.microsoft.com/en-us/window
 [RCP](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/rcp---vs) and
 [RSQ](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/rsq---ps)
 and [WGSL uniformity](https://www.w3.org/TR/WGSL/#uniformity).
+
+## Extending D3D9 coverage
+
+Extend the shared decoder/admission and specialization semantics as needed before
+interpreter lowering. Preserve shader creation errors and handle allocation,
+source-before-write aliasing, DEF precedence, register defaults and model-specific
+modifiers. Encode float bits and explicit integer records; change ABI/version
+identities when their contracts change. Check original shader bytes and relevant
+callers alongside semantic references. Record accepted differences explicitly as
+`DIVERGENCE(original):` or `BUGFIX(original)` with evidence.
+
+Every added family needs complete texture/sampler, uniform, vertex/varying and
+output budgets checked against device limits. Keep guest sampler mapping separate
+from physical bindings and shader execution choice separate from vertex fetch.
+Depth output and MRT require explicit output families; an always-present depth
+output can change early-depth behavior. Prepared families must contain reusable
+descriptions, never game shader bytes.
+
+Fragment control flow requires an execution model for active lanes,
+reconvergence, derivatives and discard/helper lanes before admission. A
+per-fragment program counter, suppressed uniformity diagnostics or fixed-LOD
+sampling does not establish correct implicit derivatives. Do not silently cap
+legal loops or truncate execution. Unsupported forms stay on specialization
+where implemented, otherwise fail by name.
+
+SM1 expansion and SM3 are unfinished capability work. SM3 needs declared semantic
+linkage and masks, register/address/predicate rules, loops/calls, VPOS/VFACE,
+vertex sampling, derivative/texture operations, depth/MRT outputs and legal stage
+pairings. The current fixed varying layout is not a universal SM3 interface.
+Specialization and interpretation may gain coverage separately; advertise a
+shader model only when its required contract is implemented, not merely because
+its version token is accepted.
 
 # D3D8 shader-model 1.1
 
