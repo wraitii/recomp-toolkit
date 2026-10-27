@@ -242,12 +242,20 @@ static void d3d9_reconcile(std::set<uint32_t> &current, const std::set<uint32_t>
 }
 static void d3d9_reconcile_bindings(std::array<uint32_t, 38> &snapshot,
                                     const std::array<uint32_t, 38> &ids) {
-    for (size_t i = 0; i < ids.size(); ++i)
-        if (snapshot[i] != ids[i] && ids[i])
+    if (snapshot == ids)
+        return;
+    std::array<uint32_t, 38> released;
+    size_t count = 0;
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (snapshot[i] == ids[i])
+            continue;
+        if (ids[i])
             d3d9_ref_add(ids[i]);
-    for (size_t i = 0; i < ids.size(); ++i)
-        if (snapshot[i] != ids[i] && snapshot[i])
-            d3d9_ref_del(snapshot[i]);
+        if (snapshot[i])
+            released[count++] = snapshot[i];
+    }
+    for (size_t i = 0; i < count; ++i)
+        d3d9_ref_del(released[i]);
     snapshot = ids;
 }
 static void d3d9_refresh_bindings(ComObj *dev) {
