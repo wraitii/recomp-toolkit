@@ -61,13 +61,13 @@ pub(crate) fn identity_assignment(line: &str) -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Location {
+    Frame(StateKey),
     Gpr(usize),
     Flag(Field),
     Xmm(usize, usize),
     Eip,
     Fs,
     Df,
-    Frame(StateKey),
 }
 
 pub(crate) fn x87_reads_flags(line: &str) -> bool {
@@ -127,7 +127,7 @@ pub(crate) fn location(key: StateKey) -> Option<Location> {
 pub(crate) fn private_loads(private: Option<&PrivateEmit>, key: StateKey) -> bool {
     let Some(private) = private else { return true };
     match field_lane(key) {
-        Some((field, _)) => private.inputs.contains(field) || private.input_argument == Some(field),
+        Some((field, _)) => private.inputs.contains(field) || private.input_arguments.contains(field),
         None => true,
     }
 }

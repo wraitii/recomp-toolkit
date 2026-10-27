@@ -80,7 +80,7 @@ pub struct Translation<'a> {
     pub cw_effects: BTreeMap<Addr, (u16, u16, u16)>,
     pub checked_returns: BTreeSet<Addr>,
     pub private_masks: BTreeMap<Addr, BTreeSet<Fields>>,
-    pub private_input_arguments: BTreeMap<Addr, String>,
+    pub private_input_arguments: BTreeMap<Addr, Fields>,
     pub known_modes: BTreeSet<Addr>,
 }
 
@@ -274,9 +274,9 @@ next(c);\n}\n",
             Declaration::PrivateContract {
                 addr,
                 mask,
-                input_argument,
+                input_arguments,
             } => {
-                private.insert((*addr, *mask, input_argument.clone()));
+                private.insert((*addr, *mask, *input_arguments));
             }
         }
     }
@@ -296,10 +296,8 @@ next(c);\n}\n",
         );
         s.push_str(&contract_prepare(addr, t.known_modes.contains(&addr)));
     }
-    for (addr, mask, input_argument) in private {
-        let parameter = input_argument.as_deref().map_or(String::new(), |name| {
-            format!("uint32_t {}_, ", name.to_lowercase())
-        });
+    for (addr, mask, input_arguments) in private {
+        let parameter = argument_parameters(input_arguments);
         let _ = writeln!(
             s,
             "void entry_contract_{addr:08x}_{:04x}(X86 *c, {parameter}uint32_t expected);",
@@ -324,6 +322,13 @@ next(c);\n}\n",
         s.push_str("\n\n");
     }
     s
+}
+
+fn argument_parameters(fields: Fields) -> String {
+    fields
+        .iter()
+        .map(|field| format!("uint32_t {}_, ", field.name().to_lowercase()))
+        .collect()
 }
 
 fn contract_prepare(addr: Addr, known_mode: bool) -> String {
@@ -390,9 +395,13 @@ fn entry_chunks(
                     let _ = writeln!(s, "int entry_stack_prepare_{addr:08x}(X86 *c) {{\n{route}    (void)c;\n    return 0;\n}}");
                 }
                 for mask in t.private_masks.get(addr).into_iter().flatten() {
-                    let input = t.private_input_arguments.get(addr);
-                    let parameter = input.map_or(String::new(), |name| format!("uint32_t {}_, ", name.to_lowercase()));
-                    let argument = input.map_or("c, expected".to_string(), |name| format!("c, {}_, expected", name.to_lowercase()));
+                    let inputs = t.private_input_arguments.get(addr).copied().unwrap_or_default();
+                    let parameter = argument_parameters(inputs);
+                    let argument: String = std::iter::once("c".to_string())
+                        .chain(inputs.iter().map(|field| format!("{}_", field.name().to_lowercase())))
+                        .chain(std::iter::once("expected".to_string()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     let _ = writeln!(s, "void fn_contract_{addr:08x}_{:04x}(X86 *c, {parameter}uint32_t expected);", mask.0);
                     let _ = writeln!(s, "void entry_contract_{addr:08x}_{:04x}(X86 *c, {parameter}uint32_t expected) {{ fn_contract_{addr:08x}_{:04x}({argument}); }}", mask.0, mask.0);
                 }

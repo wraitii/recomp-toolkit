@@ -27,6 +27,7 @@ pub struct PlanOptions<'a> {
     pub x87_options: rk_x87::Options,
     pub fault_state: rk_core::settings::FaultState,
     pub private_targets: &'a BTreeSet<Addr>,
+    pub private_arguments: &'a BTreeMap<Addr, Fields>,
     pub descriptors: bool,
     pub coalesce_roots: bool,
     pub assume_private_stack: bool,
@@ -46,6 +47,7 @@ pub struct PlannedFunction {
     pub flag_publish: BTreeMap<ValueId, FlagPublication>,
     pub entry_settle: bool,
     pub call_masks: BTreeMap<ValueId, (Addr, Fields)>,
+    pub arguments: BTreeMap<ValueId, Vec<StateKey>>,
     pub requests: ContractRequests,
     pub x87: Option<rk_x87::Plan>,
 }
@@ -59,8 +61,15 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     prepare_options.lazy_stack_writes = opts.lazy_stack_writes;
     prepare_options.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
     let (ssa, base) = prepare_with_publications(cg, &prepare_options)?;
-    let base = base.unwrap_or_else(|| publications(&ssa, opts.call_facts));
-    let (publish, guard) = reduce_publications(&ssa, &base, opts.call_facts, opts.call_hooks);
+    let mut base = base.unwrap_or_else(|| publications(&ssa, opts.call_facts));
+    let arguments = private_arguments(&ssa, opts);
+    for (value, keys) in &arguments {
+        if let Some(published) = base.get_mut(value) {
+            published.retain(|key| !keys.contains(key));
+        }
+    }
+    let (publish, guard) =
+        reduce_publications(&ssa, &base, &arguments, opts.call_facts, opts.call_hooks);
     let flag_plan = ssa.flag_plan();
     let mut flag_publish = BTreeMap::new();
     let mut descriptor_roots = Vec::new();
@@ -104,6 +113,12 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     }
     for boundary in &ssa.boundaries {
         live_publish.entry(boundary.at).or_default();
+    }
+    for (value, keys) in &arguments {
+        live_publish
+            .entry(*value)
+            .or_default()
+            .extend(keys.iter().copied());
     }
     descriptor_roots.extend(ssa.frame);
     let live = live_values(&ssa, Some(&live_publish), &descriptor_roots, &[]);
@@ -207,14 +222,37 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
         flag_publish,
         entry_settle,
         call_masks,
+        arguments,
         requests,
         x87,
     })
 }
 
+fn private_arguments(ssa: &Ssa, opts: &PlanOptions<'_>) -> BTreeMap<ValueId, Vec<StateKey>> {
+    let mut out = BTreeMap::new();
+    for (index, value) in ssa.values.iter().enumerate() {
+        let rk_ir::Op::Call { target } = value.op else {
+            continue;
+        };
+        if !opts.private_targets.contains(&target) {
+            continue;
+        }
+        let Some(fields) = opts.private_arguments.get(&target) else {
+            continue;
+        };
+        let keys: Vec<StateKey> = fields
+            .iter()
+            .flat_map(|field| rk_ir::lanes(field).iter().copied())
+            .collect();
+        out.insert(index as ValueId, keys);
+    }
+    out
+}
+
 fn reduce_publications(
     s: &Ssa,
     base: &BTreeMap<ValueId, Vec<StateKey>>,
+    arguments: &BTreeMap<ValueId, Vec<StateKey>>,
     call_facts: &dyn CallFacts,
     call_hooks: bool,
 ) -> (
@@ -289,6 +327,7 @@ fn reduce_publications(
             s,
             block,
             base,
+            arguments,
             call_facts,
             call_hooks,
             &key_index,
@@ -322,6 +361,7 @@ fn reduce_publications(
             s,
             block,
             base,
+            arguments,
             call_facts,
             call_hooks,
             &key_index,
@@ -390,6 +430,7 @@ fn walk_block(
     s: &Ssa,
     block: usize,
     base: &BTreeMap<ValueId, Vec<StateKey>>,
+    arguments: &BTreeMap<ValueId, Vec<StateKey>>,
     call_facts: &dyn CallFacts,
     call_hooks: bool,
     key_index: &rk_core::Lookup<StateKey, usize>,
@@ -453,6 +494,11 @@ fn walk_block(
                 if let Some(out) = publish.as_deref_mut() {
                     out.entry(value).or_default().push(*key);
                 }
+            }
+        }
+        for key in arguments.get(&value).into_iter().flatten() {
+            if let Some(&index) = key_index.get(key) {
+                resident[index] = None;
             }
         }
         if call_hooks

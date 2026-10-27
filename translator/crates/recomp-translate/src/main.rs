@@ -257,7 +257,7 @@ struct BodyContext<'a> {
     host_calls: &'a BTreeSet<Addr>,
     private_targets: &'a BTreeSet<Addr>,
     private_masks: BTreeMap<Addr, BTreeSet<Fields>>,
-    private_input_arguments: BTreeMap<Addr, String>,
+    private_input_arguments: BTreeMap<Addr, Fields>,
     switches: Switches,
     reloc: Option<rk_emit::RelocEmit>,
 }
@@ -302,6 +302,7 @@ fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::
             x87_options: ctx.x87_options.clone(),
             fault_state: ctx.fault_state,
             private_targets: ctx.private_targets,
+            private_arguments: &ctx.private_input_arguments,
             descriptors: ctx.switches.descriptors,
             coalesce_roots: ctx.switches.coalesce_roots,
             lazy_stack_writes: ctx.lazy_stack_writes,
@@ -512,7 +513,7 @@ fn build_bodies(
     Vec<Body>,
     EmitStats,
     BTreeMap<Addr, BTreeSet<Fields>>,
-    BTreeMap<Addr, String>,
+    BTreeMap<Addr, Fields>,
     BTreeSet<Addr>,
 )> {
     let known_entries: BTreeSet<Addr> = program
@@ -562,7 +563,14 @@ fn build_bodies(
         switches,
         reloc,
     };
-    let ctx = make_ctx(BTreeMap::new(), BTreeMap::new());
+    let private_arguments: BTreeMap<Addr, Fields> = global
+        .private
+        .input_arguments
+        .iter()
+        .filter(|(addr, _)| private_targets.contains(addr))
+        .map(|(&addr, &fields)| (addr, fields))
+        .collect();
+    let ctx = make_ctx(BTreeMap::new(), private_arguments.clone());
     let selected: BTreeSet<Addr> = only.iter().copied().collect();
     let wanted = |addr: Addr| selected.is_empty() || selected.contains(&addr);
     let sources: Vec<(Addr, Option<FunctionIr>)> = match owned {
@@ -625,12 +633,7 @@ fn build_bodies(
         &global.contracts,
         &global.private.input_arguments,
     );
-    let private_arguments: BTreeMap<Addr, String> = specialized
-        .input_arguments
-        .iter()
-        .map(|(&addr, &field)| (addr, field.name().to_string()))
-        .collect();
-    let ctx2 = make_ctx(specialized.masks.clone(), private_arguments);
+    let ctx2 = make_ctx(specialized.masks.clone(), private_arguments.clone());
     let phase2: Vec<(Vec<BodyRow>, Vec<Body>)> = retained
         .into_par_iter()
         .map(|item| -> Result<(Vec<BodyRow>, Vec<Body>)> {
@@ -655,7 +658,7 @@ fn build_bodies(
                             let private = rk_emit::PrivateEmit {
                                 mask: layout.outputs,
                                 inputs: layout.inputs,
-                                input_argument: layout.input_argument,
+                                input_arguments: layout.input_arguments,
                             };
                             let emit_ctx = ctx2.emit_context(&ir, Some(&private));
                             match rk_emit::emit_body(&planned, &emit_ctx) {
@@ -690,11 +693,7 @@ fn build_bodies(
         bodies,
         stats,
         specialized.masks,
-        specialized
-            .input_arguments
-            .iter()
-            .map(|(&addr, &field)| (addr, field.name().to_string()))
-            .collect(),
+        private_arguments,
         global.private.known_modes.clone(),
     ))
 }

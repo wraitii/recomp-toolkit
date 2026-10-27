@@ -13,7 +13,7 @@ use crate::modes::ModeAnalysis;
 pub struct PrivateLayout {
     pub inputs: Fields,
     pub outputs: Fields,
-    pub input_argument: Option<Field>,
+    pub input_arguments: Fields,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -21,7 +21,7 @@ pub struct PrivateAnalysis {
     pub targets: BTreeMap<Addr, Contract>,
     pub layouts: BTreeMap<Addr, Vec<PrivateLayout>>,
     pub masks: BTreeMap<Addr, BTreeSet<Fields>>,
-    pub input_arguments: BTreeMap<Addr, Field>,
+    pub input_arguments: BTreeMap<Addr, Fields>,
     pub checked_returns: BTreeSet<Addr>,
     pub callers: BTreeSet<Addr>,
     pub rejections: BTreeMap<Addr, Reason>,
@@ -39,12 +39,7 @@ pub(crate) struct PrivateInput<'a> {
 pub(crate) fn analyze(input: &PrivateInput<'_>) -> PrivateAnalysis {
     let enabled = input.settings.call_contracts && input.settings.module.is_none();
     let mut result = PrivateAnalysis {
-        input_arguments: input
-            .settings
-            .private_input_registers
-            .iter()
-            .filter_map(|(&addr, name)| Field::from_name(name).map(|field| (addr, field)))
-            .collect(),
+        input_arguments: input.settings.private_input_registers.clone(),
         ..PrivateAnalysis::default()
     };
     if !enabled {
@@ -105,6 +100,15 @@ pub(crate) fn analyze(input: &PrivateInput<'_>) -> PrivateAnalysis {
         };
         result.targets.insert(addr, contract);
     }
+    result.input_arguments = result
+        .input_arguments
+        .iter()
+        .filter_map(|(addr, arguments)| {
+            let reads = result.targets.get(addr)?.reads;
+            Some((*addr, arguments.intersection(reads)))
+        })
+        .filter(|(_, arguments)| !arguments.is_empty())
+        .collect();
     result.checked_returns = input.settings.checked_returns.iter().copied().collect();
     result
         .checked_returns
@@ -126,7 +130,7 @@ pub(crate) fn analyze(input: &PrivateInput<'_>) -> PrivateAnalysis {
 pub fn specialize(
     requests: &BTreeMap<Addr, BTreeSet<(Addr, Fields)>>,
     contracts: &BTreeMap<Addr, Contract>,
-    input_arguments: &BTreeMap<Addr, Field>,
+    input_arguments: &BTreeMap<Addr, Fields>,
 ) -> PrivateAnalysis {
     let mut masks: BTreeMap<Addr, Fields> = BTreeMap::new();
     let mut flagless: BTreeMap<Addr, Fields> = BTreeMap::new();
@@ -168,7 +172,7 @@ pub fn specialize(
         }
     }
     for layouts in result.layouts.values_mut() {
-        layouts.sort_by_key(|layout| (layout.outputs, layout.input_argument));
+        layouts.sort_by_key(|layout| (layout.outputs, layout.input_arguments));
         layouts.dedup();
     }
     result
@@ -179,15 +183,13 @@ fn push_layout(
     target: Addr,
     mask: Fields,
     input_contract: Fields,
-    input_arguments: &BTreeMap<Addr, Field>,
+    input_arguments: &BTreeMap<Addr, Fields>,
 ) {
-    let argument = input_arguments.get(&target).copied();
-    let argument_fields = Fields(argument.map_or(0, Field::bit));
-    let inputs = input_contract.difference(argument_fields);
+    let arguments = input_arguments.get(&target).copied().unwrap_or_default();
     let layout = PrivateLayout {
-        inputs,
+        inputs: input_contract.difference(arguments),
         outputs: mask,
-        input_argument: argument,
+        input_arguments: arguments,
     };
     result.layouts.entry(target).or_default().push(layout);
     result.masks.entry(target).or_default().insert(mask);

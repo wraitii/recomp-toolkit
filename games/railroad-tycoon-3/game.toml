@@ -35,6 +35,7 @@ indirect_targets = "metadata/indirect-targets.tsv"
 private_leaf_contracts = true
 assume = ["private-stack", "stack-pointer-bases"]
 checked_returns = [0x005a10d0]
+private_input_registers = { "005a10d0" = ["ECX", "EBP"] }
 state_contract_callers = [0x0042ce00, 0x0042c1b0]
 stack_cleanup = [
   { call = 0x005acf52, bytes = 0, evidence = "__FF_MSGBANNER calls the hook at 00dba1e0, zero in the image and never written" },

@@ -441,16 +441,16 @@ impl GlobalFacts {
             for layout in layouts {
                 writeln!(
                     out,
-                    "layout {:08x} mask={:04x} inputs={} argument={}",
+                    "layout {:08x} mask={:04x} inputs={} arguments={}",
                     addr,
                     layout.outputs.0,
                     fields(layout.inputs),
-                    layout.input_argument.map_or("-", Field::name),
+                    fields(layout.input_arguments),
                 )?;
             }
         }
-        for (&addr, field) in &self.private.input_arguments {
-            writeln!(out, "input-argument {:08x} {}", addr, field.name())?;
+        for (&addr, arguments) in &self.private.input_arguments {
+            writeln!(out, "input-arguments {:08x} {}", addr, fields(*arguments))?;
         }
         for addr in &self.private.known_modes {
             writeln!(out, "known-mode {:08x}", addr)?;

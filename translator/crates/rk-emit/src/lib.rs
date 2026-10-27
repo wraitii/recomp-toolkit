@@ -31,7 +31,7 @@ use rk_ssa::{FlagDescriptor, ValueId, DISPATCH_BLOCK};
 pub struct PrivateEmit {
     pub mask: Fields,
     pub inputs: Fields,
-    pub input_argument: Option<Field>,
+    pub input_arguments: Fields,
 }
 
 #[derive(Clone, Copy)]
@@ -45,7 +45,7 @@ pub struct EmitContext<'a> {
     pub checked_returns: &'a BTreeSet<Addr>,
     pub effect_returns: &'a BTreeSet<Addr>,
     pub private_masks: &'a BTreeMap<Addr, BTreeSet<Fields>>,
-    pub private_input_arguments: &'a BTreeMap<Addr, String>,
+    pub private_input_arguments: &'a BTreeMap<Addr, Fields>,
     pub known_entries: &'a BTreeSet<Addr>,
     pub region_entries: &'a BTreeMap<Addr, Addr>,
     pub setjmp_targets: &'a BTreeSet<Addr>,
@@ -486,7 +486,7 @@ impl<'a> Emitter<'a> {
             params.push("uint32_t base_".to_string());
         }
         if let Some(private) = self.private {
-            if let Some(argument) = private.input_argument {
+            for argument in private.input_arguments.iter() {
                 params.push(format!("uint32_t {}_", argument.name().to_lowercase()));
             }
             params.push("uint32_t expected_return_".to_string());
@@ -649,7 +649,7 @@ impl<'a> Emitter<'a> {
             }
             if let Some(private) = self.private {
                 if let Some((field, _)) = field_lane(key) {
-                    if !private.inputs.contains(field) && private.input_argument != Some(field) {
+                    if !private.inputs.contains(field) && !private.input_arguments.contains(field) {
                         continue;
                     }
                 }
@@ -1780,24 +1780,26 @@ impl<'a> Emitter<'a> {
                 "call without return address",
             )
         })?;
-        let argument = self
+        let arguments = self
             .ctx
             .private_input_arguments
             .get(&target)
-            .and_then(|name| Field::from_name(name));
+            .copied()
+            .unwrap_or_default();
         self.declarations
             .insert(Declaration::PrivatePrepare(target));
         self.declarations.insert(Declaration::Checked(target));
         self.declarations.insert(Declaration::PrivateContract {
             addr: target,
             mask,
-            input_argument: argument.map(|field| field.name().to_string()),
+            input_arguments: arguments,
         });
-        let expected = self.guest_addr(expected);
-        let args = argument.map_or_else(
-            || format!("c, {expected}"),
-            |field| format!("c, c->r[{}], {expected}", field as usize),
-        );
+        let mut args = vec!["c".to_string()];
+        for field in arguments.iter() {
+            args.push(self.boundary_field(value, field)?);
+        }
+        args.push(self.guest_addr(expected));
+        let args = args.join(", ");
         Ok(Some(format!(
             "entry_contract_{target:08x}_{:04x}({args});",
             mask.0
@@ -1814,7 +1816,9 @@ impl<'a> Emitter<'a> {
 
     fn direct_call(&mut self, value: ValueId, target: Addr) -> Result<bool> {
         if let Some(&checkpoints) = self.s.stack_guards.get(&value) {
-            let (prepare, fast, fallback) = if let Some(call) = self.private_call(value, target)? {
+            let private = self.private_call(value, target)?;
+            let arguments = private.is_some();
+            let (prepare, fast, fallback) = if let Some(call) = private {
                 let expected = self.guest_addr(self.plan.return_addr[&value]);
                 let budget = if checkpoints == 0 {
                     String::new()
@@ -1827,6 +1831,7 @@ impl<'a> Emitter<'a> {
                     format!("CALL_FN_CHECKED({target:08x}, {expected});"),
                 )
             } else {
+                self.publish_arguments(value)?;
                 self.declarations
                     .insert(Declaration::StackPrepare(target, checkpoints));
                 self.declare_entry(target);
@@ -1839,6 +1844,9 @@ impl<'a> Emitter<'a> {
             let _ = writeln!(self.out, "if (RECOMP_UNLIKELY(!({prepare}))) {{");
             if let Some(keys) = self.plan.guard.get(&value).cloned() {
                 self.publish_keys(value, &keys, false)?;
+            }
+            if arguments {
+                self.publish_arguments(value)?;
             }
             let _ = writeln!(self.out, "{fallback}");
             if let Some(&expected) = self.plan.return_addr.get(&value) {
@@ -1856,25 +1864,28 @@ impl<'a> Emitter<'a> {
         }
         self.publish_guard(value)?;
         if self.ctx.setjmp_targets.contains(&target) {
+            self.publish_arguments(value)?;
             self.out.push_str("RECOMP_SETJMP3(c);\n");
             return Ok(false);
         }
-        if !self.ctx.known_entries.contains(&target) {
-            self.emit_call_target(value, target)?;
-            return Ok(true);
-        }
-        if self.reloc_internal(target) {
+        if !self.ctx.known_entries.contains(&target) || self.reloc_internal(target) {
+            self.publish_arguments(value)?;
             self.emit_call_target(value, target)?;
             return Ok(true);
         }
         if let Some(call) = self.private_call(value, target)? {
             let expected_addr = self.plan.return_addr[&value];
             let expected = self.guest_addr(expected_addr);
-            let _ = writeln!(self.out,
-                "if (entry_contract_prepare_{target:08x}(c, 0)) {{ {call} }} else {{ CALL_FN_CHECKED({target:08x}, {expected}); }}");
+            let _ = writeln!(
+                self.out,
+                "if (entry_contract_prepare_{target:08x}(c, 0)) {{ {call} }} else {{"
+            );
+            self.publish_arguments(value)?;
+            let _ = writeln!(self.out, "CALL_FN_CHECKED({target:08x}, {expected}); }}");
             self.resume_check(value, target, expected_addr);
             return Ok(true);
         }
+        self.publish_arguments(value)?;
         let checked = self.ctx.checked_returns.contains(&target);
         if checked {
             let expected = self.plan.return_addr.get(&value).copied().ok_or_else(|| {
@@ -2239,10 +2250,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn publish_private_return(&mut self, value: ValueId, private: &PrivateEmit) -> Result<()> {
-        let Some(keys) = self.plan.publish.get(&value).cloned() else {
-            return Ok(());
-        };
-        let keys: Vec<StateKey> = keys
+        let keys = self.plan.publish.get(&value).cloned().unwrap_or_default();
+        let keys: Vec<StateKey> = self
+            .entry_keys(value, keys)
             .into_iter()
             .filter(|key| {
                 self.s
@@ -2250,21 +2260,93 @@ impl<'a> Emitter<'a> {
                     .is_none_or(|field| private.mask.contains(field))
             })
             .collect();
-        self.publish_keys(value, &keys, true)
+        self.publish_state(value, &keys, true)
     }
 
     fn publish_private_fallback(&mut self, value: ValueId) -> Result<()> {
-        let Some(keys) = self.plan.publish.get(&value).cloned() else {
-            return Ok(());
-        };
         let Some(state) = self.s.boundary(value) else {
             return Ok(());
         };
-        let keys: Vec<StateKey> = keys
+        let keys: Vec<StateKey> = self
+            .plan
+            .publish
+            .get(&value)
             .into_iter()
+            .flatten()
+            .copied()
             .filter(|key| state.iter().any(|(candidate, _)| candidate == key))
             .collect();
         self.publish_keys(value, &keys, true)
+    }
+
+    fn publish_arguments(&mut self, value: ValueId) -> Result<()> {
+        let Some(keys) = self.plan.arguments.get(&value).cloned() else {
+            return Ok(());
+        };
+        self.publish_keys(value, &keys, false)
+    }
+
+    fn boundary_field(&self, value: ValueId, field: Field) -> Result<String> {
+        let state = self.s.boundary(value).unwrap_or_default();
+        let lanes: Vec<Option<ValueId>> = rk_ir::lanes(field)
+            .iter()
+            .map(|key| {
+                state
+                    .iter()
+                    .find(|(candidate, _)| candidate == key)
+                    .map(|(_, value)| *value)
+            })
+            .collect();
+        if let Some(all) = lanes.iter().copied().collect::<Option<Vec<_>>>() {
+            if let Some(text) = self.pack_lanes(&all) {
+                return Ok(text);
+            }
+        }
+        let (base, _, _) = self
+            .lane_origin(rk_ir::lanes(field)[0])
+            .ok_or_else(|| self.error(0, "argument register has no origin"))?;
+        let mut parts = Vec::new();
+        for (lane, value) in lanes.into_iter().enumerate() {
+            let expr = match value {
+                Some(value) => self.expr(value)?,
+                None => format!("({base} >> {})", lane * 8),
+            };
+            parts.push(format!("((({expr}) & 0xffu) << {})", lane * 8));
+        }
+        Ok(format!("({})", parts.join(" | ")))
+    }
+
+    fn entry_argument(&self, key: StateKey, value: ValueId) -> bool {
+        let Some(private) = self.private else {
+            return false;
+        };
+        let Some((field, lane)) = field_lane(key) else {
+            return false;
+        };
+        if !private.input_arguments.contains(field) {
+            return false;
+        }
+        let (input, byte) = match self.s.value(value).op {
+            Op::Input(input) => (input, 0),
+            Op::Byte(byte) => match self.s.args(value).first().map(|arg| self.s.value(*arg).op) {
+                Some(Op::Input(input)) => (input, byte),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        field_lane(input).is_some_and(|(origin, first)| origin == field && first + byte == lane)
+    }
+
+    fn entry_keys(&self, value: ValueId, mut keys: Vec<StateKey>) -> Vec<StateKey> {
+        if self.private.is_none_or(|private| private.input_arguments.is_empty()) {
+            return keys;
+        }
+        for &(key, state) in self.s.boundary(value).unwrap_or_default() {
+            if self.entry_argument(key, state) && !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        keys
     }
 
     fn seh(&mut self, kind: SehEffect, addr: Addr) {
@@ -2290,9 +2372,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn publish(&mut self, value: ValueId) -> Result<()> {
-        let Some(keys) = self.plan.publish.get(&value).cloned() else {
-            return Ok(());
-        };
+        let keys = self.plan.publish.get(&value).cloned().unwrap_or_default();
         self.publish_keys(value, &keys, true)
     }
 
@@ -2302,7 +2382,7 @@ impl<'a> Emitter<'a> {
         };
         self.out
             .push_str("if (RECOMP_UNLIKELY(recomp_hooks_ever)) {\n");
-        self.publish_keys(value, &keys, false)?;
+        self.publish_state(value, &keys, false)?;
         self.out.push_str("}\n");
         Ok(())
     }
@@ -2313,13 +2393,28 @@ impl<'a> Emitter<'a> {
         keys: &[StateKey],
         flags_action: bool,
     ) -> Result<()> {
+        let keys = self.entry_keys(value, keys.to_vec());
+        self.publish_state(value, &keys, flags_action)
+    }
+
+    fn publish_state(
+        &mut self,
+        value: ValueId,
+        keys: &[StateKey],
+        flags_action: bool,
+    ) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
         let Some(state) = self.s.boundary(value) else {
             return Ok(());
         };
         let state: BTreeMap<StateKey, ValueId> = state
             .iter()
             .copied()
-            .filter(|(_, value)| flags_action || self.available(*value))
+            .filter(|(key, value)| {
+                flags_action || self.available(*value) || self.entry_argument(*key, *value)
+            })
             .collect();
         let mut locations = BTreeSet::new();
         for key in keys {
@@ -2439,6 +2534,17 @@ impl<'a> Emitter<'a> {
             Location::Gpr(index) => {
                 let field = Field::ALL[index];
                 let lanes = rk_ir::lanes(field);
+                let entry: Vec<bool> = lanes
+                    .iter()
+                    .map(|key| {
+                        state
+                            .get(key)
+                            .is_some_and(|value| self.entry_argument(*key, *value))
+                    })
+                    .collect();
+                if entry.iter().any(|entry| *entry) {
+                    return self.publish_entry_argument(index, &entry, state, keys);
+                }
                 let mut values = Vec::with_capacity(4);
                 for lane in 0..4 {
                     let Some(&key) = lanes.get(lane) else {
@@ -2523,6 +2629,34 @@ impl<'a> Emitter<'a> {
                 let _ = writeln!(self.out, "c->eflags_df = (uint32_t)(({expr}) & 1u);");
             }
         }
+        Ok(())
+    }
+
+    fn publish_entry_argument(
+        &mut self,
+        index: usize,
+        entry: &[bool],
+        state: &BTreeMap<StateKey, ValueId>,
+        keys: &[StateKey],
+    ) -> Result<()> {
+        let parameter = format!("{}_", Field::ALL[index].name().to_lowercase());
+        if entry.iter().all(|entry| *entry) {
+            let _ = writeln!(self.out, "c->r[{index}] = {parameter};");
+            return Ok(());
+        }
+        let mut parts = Vec::new();
+        for (lane, key) in rk_ir::lanes(Field::ALL[index]).iter().enumerate() {
+            let expr = if entry[lane] {
+                format!("({parameter} >> {})", lane * 8)
+            } else {
+                match self.listed_value(state, keys, *key)? {
+                    Some(value) => self.expr(value)?,
+                    None => format!("(c->r[{index}] >> {})", lane * 8),
+                }
+            };
+            parts.push(format!("((({expr}) & 0xffu) << {})", lane * 8));
+        }
+        let _ = writeln!(self.out, "c->r[{index}] = {};", parts.join(" | "));
         Ok(())
     }
 
@@ -3295,7 +3429,7 @@ impl<'a> Emitter<'a> {
         if let Some((field, lane)) = field_lane(key) {
             if (field as usize) < 8 {
                 if let Some(private) = self.private {
-                    if private.input_argument == Some(field) {
+                    if private.input_arguments.contains(field) {
                         return Some((format!("{}_", field.name().to_lowercase()), lane as u32, 4));
                     }
                 }

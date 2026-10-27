@@ -60,7 +60,7 @@ pub struct Translate {
     pub x87_cw_clone: bool,
     pub private_leaf_contracts: bool,
     pub private_input_arguments: bool,
-    pub private_input_registers: BTreeMap<String, String>,
+    pub private_input_registers: BTreeMap<String, Vec<String>>,
     pub x87_imports_preserve_pc_rc: bool,
     pub x87_facts: Option<String>,
     pub x87_mode_metadata: Option<String>,
@@ -307,7 +307,7 @@ pub struct Settings {
     pub call_hooks: bool,
     pub private_leaf_contracts: bool,
     pub private_input_arguments: bool,
-    pub private_input_registers: BTreeMap<Addr, String>,
+    pub private_input_registers: BTreeMap<Addr, Fields>,
     pub checked_returns: BTreeSet<Addr>,
     pub state_contract_callers: BTreeSet<Addr>,
     pub discover: bool,
@@ -412,13 +412,23 @@ impl Settings {
         }
         let mut private_input_registers = BTreeMap::new();
         if main {
-            for (addr, register) in &t.private_input_registers {
+            for (addr, registers) in &t.private_input_registers {
                 let addr = parse_hex(addr).ok_or_else(|| {
                     Error::input(format!(
                         "private_input_registers key {addr} is not an address"
                     ))
                 })?;
-                private_input_registers.insert(addr, register.clone());
+                let fields = fields(registers.clone(), "private_input_registers")
+                    .map_err(Error::input)?;
+                if fields.is_empty()
+                    || fields.contains(Field::Esp)
+                    || !fields.difference(Fields::GPRS).is_empty()
+                {
+                    return Err(Error::input(format!(
+                        "private_input_registers {addr:08x} must list general registers other than ESP"
+                    )));
+                }
+                private_input_registers.insert(addr, fields);
             }
         }
         let alternate_entries: BTreeSet<Addr> = t.alternate_entries.iter().copied().collect();

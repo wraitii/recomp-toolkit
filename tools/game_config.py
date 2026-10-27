@@ -69,7 +69,7 @@ TRANSLATE_DEFAULTS = {
     "x87_cw_clone": True,
 }
 ASSUMPTIONS = frozenset(("private-stack", "stack-pointer-bases"))
-PRIVATE_INPUT_REGISTERS = frozenset(("EAX", "ECX", "EDX", "EBX", "ESI", "EDI"))
+PRIVATE_INPUT_REGISTERS = frozenset(("EAX", "ECX", "EDX", "EBX", "EBP", "ESI", "EDI"))
 
 def add_game_args(parser):
     """--game <id> for a kit game under games/, or --game-dir for any directory holding game.toml."""
@@ -553,8 +553,9 @@ def load(game_dir, build_root=None):
         addr = int(address, 16)
         if addr in parsed_input_registers:
             raise ValueError("%s: [translate] private_input_registers repeats address %08x" % (source, addr))
-        if not isinstance(register, str) or register not in PRIVATE_INPUT_REGISTERS:
-            raise ValueError("%s: [translate] private_input_registers values must be one of %s"
+        if (not isinstance(register, list) or not register or len(set(register)) != len(register)
+                or any(not isinstance(name, str) or name not in PRIVATE_INPUT_REGISTERS for name in register)):
+            raise ValueError("%s: [translate] private_input_registers values must be lists of distinct %s"
                              % (source, ", ".join(sorted(PRIVATE_INPUT_REGISTERS))))
         parsed_input_registers[addr] = register
     translate["private_input_registers"] = parsed_input_registers

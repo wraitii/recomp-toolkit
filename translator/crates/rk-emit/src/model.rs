@@ -12,7 +12,7 @@ pub enum Declaration {
     PrivateContract {
         addr: Addr,
         mask: Fields,
-        input_argument: Option<String>,
+        input_arguments: Fields,
     },
 }
 
