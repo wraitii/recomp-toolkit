@@ -266,6 +266,8 @@ void write_object_instance(uint32_t at, uint32_t size, bool wide, const ComObj *
     uint32_t ofs = guest_ofs(d, index);
     wr32(at + DIDOI_OFF_dwOfs, ofs == 0xFFFFFFFFu ? o.ofs : ofs);
     wr32(at + DIDOI_OFF_dwType, o.type);
+    if (index == 0)
+        wr32(at + DIDOI_OFF_dwFlags, 1);
     uint32_t tail = DIDOI_OFF_tszName + DIDOI_NAME_CHARS * (wide ? 2u : 1u);
     if (wide)
         di_put_wide(at + DIDOI_OFF_tszName, o.name, DIDOI_NAME_CHARS);
@@ -434,7 +436,7 @@ void joy_write_device_instance(uint32_t at, uint32_t size, bool wide, uint32_t d
 }
 
 uint32_t joy_get_capabilities(ComObj *d, uint32_t out, uint32_t size) {
-    wr32(out + DIDC_OFF_dwFlags, DIDC_ATTACHED);
+    wr32(out + DIDC_OFF_dwFlags, DIDC_ATTACHED | 0x100u);
     wr32(out + DIDC_OFF_dwDevType, joy_devtype(d->di_version));
     if (size >= DIDEVCAPS_DX3_SIZE) {
         wr32(out + DIDC_OFF_dwAxes, JOY_AXES);
@@ -497,14 +499,14 @@ uint32_t joy_set_data_format(ComObj *d, uint32_t df) {
 uint32_t joy_enum_objects(X86 *c, ComObj *d, uint32_t cb, uint32_t ref, uint32_t flags) {
     if (!cb)
         return DIERR_INVALIDPARAM;
-    // The pad has no force-feedback, output, alias or vendor objects, so a
-    // filter asking for any of those attributes matches nothing.
-    if (flags & 0x1F000000u)
+    if (flags & 0x1E000000u)
         return DI_OK;
     uint32_t size = d->di_wide ? DIDEVICEOBJECTINSTANCEW_SIZE : DIDEVICEOBJECTINSTANCEA_SIZE;
     uint32_t bits = flags & DIDFT_TYPEMASK;
     const std::vector<JoyObject> &objs = joy_objects();
     for (uint32_t i = 0; i < objs.size(); ++i) {
+        if ((flags & 0x01000000u) && i != 0)
+            continue;
         if (bits && !(objs[i].type & bits))
             continue;
         uint32_t a = di_scratch(size);

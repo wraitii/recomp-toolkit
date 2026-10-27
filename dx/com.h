@@ -82,6 +82,7 @@ enum ComIface : uint16_t {
     IF_DSNOTIFY,
     IF_DINPUT,
     IF_DINPUTDEVICE,
+    IF_DINPUTEFFECT,
     // DirectShow multimedia streaming (dshow.cpp)
     IF_MMSTREAM,         // IAMMultiMediaStream, and IMultiMediaStream as its prefix
     IF_MEDIASTREAM,      // IMediaStream
@@ -199,6 +200,7 @@ enum ComKind : uint16_t {
     K_DSBUFFER,
     K_DINPUT,
     K_DIDEVICE,
+    K_DINPUTEFFECT,
     K_MMSTREAM,         // a multimedia stream over one audio file
     K_MEDIASTREAM,      // its audio media stream
     K_AUDIODATA,        // a guest buffer wrapped for sampling
