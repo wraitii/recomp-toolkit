@@ -34,7 +34,7 @@ const BODY_HEADER: &str = r#"/* generated -- translated bodies do not depend on 
 #define RECOMP_ENTRY_CAT_(a, b) a##b
 #define RECOMP_ENTRY_CAT(a, b) RECOMP_ENTRY_CAT_(a, b)
 #define CALL_FN(a) RECOMP_ENTRY_CAT(entry_, a)(c)
-#define CALL_FN_CHECKED(a, expected) RECOMP_ENTRY_CAT(entry_checked_, a)(c, expected)
+#define CALL_RAW(a) RECOMP_ENTRY_CAT(call_, a)(c)
 #endif
 "#;
 
@@ -45,6 +45,7 @@ const ENTRY_STUB_INCLUDES: &str = r#"#include "x86.h"
 "#;
 
 const ENTRY_STUB_PRELUDE: &str = r#"void recomp_enter(X86 *c, uint32_t index);
+void recomp_enter_raw(X86 *c, uint32_t index, void (*raw)(X86 *));
 #if RECOMP_CALL_HOOKS
 #define RECOMP_SLOW_(i) RECOMP_UNLIKELY(__atomic_load_n(&recomp_slow[i], __ATOMIC_RELAXED))
 #else
@@ -52,9 +53,8 @@ const ENTRY_STUB_PRELUDE: &str = r#"void recomp_enter(X86 *c, uint32_t index);
 #endif
 #define RECOMP_ENTER(i, base) \
     do { recomp_execution_checkpoint(c); if (RECOMP_SLOW_(i)) recomp_enter(c, i); else base; } while (0)
-#define RECOMP_ENTER_CHECKED(i, body, base) \
-    do { recomp_execution_checkpoint(c); \
-         if (RECOMP_SLOW_(i)) recomp_enter_checked(c, i, expected, body); else base; } while (0)
+#define RECOMP_CALL(i, raw) \
+    do { recomp_execution_checkpoint(c); if (RECOMP_SLOW_(i)) recomp_enter_raw(c, i, raw); else raw(c); } while (0)
 "#;
 
 const MODULE_ENTRY_STUB_PRELUDE: &str = r#"
@@ -81,6 +81,16 @@ void recomp_hook_{key}(X86 *c, uint32_t index);
         else { recomp_execution_checkpoint(c); base; } \
     } while (0)
 #endif
+#define RECOMP_CALL(i, raw) RECOMP_ENTER(i, raw(c))
+"#;
+
+const DIRECT_GUARD: &str = r#"static inline int recomp_direct_(X86 *c, uint32_t checkpoints, uint8_t ready)
+{
+    if (RECOMP_UNLIKELY(recomp_slow_routes || !ready || c->checkpoint_countdown <= checkpoints))
+        return 0;
+    --c->checkpoint_countdown;
+    return 1;
+}
 "#;
 
 pub struct Translation<'a> {
@@ -91,10 +101,8 @@ pub struct Translation<'a> {
     pub call_returns: Vec<Addr>,
     pub call_facts: BTreeMap<Addr, Vec<Addr>>,
     pub cw_effects: BTreeMap<Addr, (u16, u16, u16)>,
-    pub checked_returns: BTreeSet<Addr>,
     pub private_masks: BTreeMap<Addr, BTreeSet<Fields>>,
     pub private_input_arguments: BTreeMap<Addr, PrivateArguments>,
-    pub known_modes: BTreeSet<Addr>,
 }
 
 pub struct Written {
@@ -156,7 +164,6 @@ pub fn write(out: &Path, t: &Translation) -> Result<Written> {
             &entry_names,
             &symbols,
             &t.call_returns,
-            &t.private_masks,
             t.program,
             t.settings.dispatch.as_ref(),
         )?,
@@ -263,26 +270,16 @@ next(c);\n}\n",
         s.push_str(&t.preludes.float_helpers);
     }
     let declarations: BTreeSet<&Declaration> = group.iter().flat_map(|b| &b.declarations).collect();
-    let mut entries = BTreeSet::new();
-    let mut checked = BTreeSet::new();
-    let mut prepare = BTreeSet::new();
+    let mut raw = BTreeSet::new();
+    let mut direct = BTreeSet::new();
     let mut private = BTreeSet::new();
     for declaration in declarations {
         match declaration {
-            Declaration::Entry(addr) => {
-                entries.insert(*addr);
+            Declaration::Raw(addr) => {
+                raw.insert(*addr);
             }
-            Declaration::Checked(addr) => {
-                checked.insert(*addr);
-            }
-            Declaration::PrivatePrepare(addr) => {
-                prepare.insert(*addr);
-            }
-            Declaration::StackPrepare(addr, _) => {
-                let _ = writeln!(
-                    s,
-                    "int entry_stack_prepare_{addr:08x}(X86 *c);\nvoid fn_{addr:08x}(X86 *c);"
-                );
+            Declaration::Direct(addr) => {
+                direct.insert(*addr);
             }
             Declaration::PrivateContract {
                 addr,
@@ -293,27 +290,23 @@ next(c);\n}\n",
             }
         }
     }
-    for addr in entries {
-        let _ = writeln!(s, "void entry_{addr:08x}(X86 *c);");
+    for addr in raw {
+        let _ = writeln!(s, "void call_{addr:08x}(X86 *c);");
     }
-    for addr in checked {
+    if !direct.is_empty() {
+        s.push_str(DIRECT_GUARD);
+    }
+    for addr in direct {
         let _ = writeln!(
             s,
-            "void entry_checked_{addr:08x}(X86 *c, uint32_t expected);"
+            "void raw_{addr:08x}(X86 *c);\nextern const uint8_t call_ready_{addr:08x};"
         );
-    }
-    for addr in prepare {
-        let _ = writeln!(
-            s,
-            "void fn_{addr:08x}(X86 *c);\nextern void (*const entry_contract_base_{addr:08x})(X86 *);"
-        );
-        s.push_str(&contract_prepare(addr, t.known_modes.contains(&addr)));
     }
     for (addr, mask, input_arguments) in private {
         let parameter = argument_parameters(input_arguments);
         let _ = writeln!(
             s,
-            "void entry_contract_{addr:08x}_{:04x}(X86 *c, {parameter}uint32_t expected);",
+            "void entry_contract_{addr:08x}_{:04x}(X86 *c{parameter});",
             mask.0
         );
     }
@@ -340,30 +333,8 @@ next(c);\n}\n",
 fn argument_parameters(arguments: PrivateArguments) -> String {
     rk_emit::argument_parameters(arguments)
         .into_iter()
-        .map(|(ty, name)| format!("{ty} {name}, "))
+        .map(|(ty, name)| format!(", {ty} {name}"))
         .collect()
-}
-
-fn contract_prepare(addr: Addr, known_mode: bool) -> String {
-    let unused_mode = if known_mode {
-        ""
-    } else {
-        "    (void)mode_proven;\n"
-    };
-    let mode_guard = if known_mode {
-        "        (!mode_proven && (c->fpu_cw & 0x0f00u) != 0u) ||\n"
-    } else {
-        ""
-    };
-    format!(
-        "static inline int entry_contract_prepare_{addr:08x}(X86 *c, int mode_proven)\n{{\n{unused_mode}    if (RECOMP_UNLIKELY(recomp_slow_routes ||\n{mode_guard}        c->checkpoint_countdown == 0u || entry_contract_base_{addr:08x} != fn_{addr:08x}))\n        return 0;\n    --c->checkpoint_countdown;\n    return 1;\n}}\n"
-    )
-}
-
-fn checkpoint_route(addr: Addr, checkpoints: u32, fast: &str) -> String {
-    format!(
-        "#ifdef RECOMP_RAW_{addr:08x}\n    if (!recomp_slow_routes && c->checkpoint_countdown > {checkpoints}u) {{\n        --c->checkpoint_countdown;\n        {fast}\n    }}\n#endif\n"
-    )
 }
 
 fn entry_chunks(
@@ -371,11 +342,17 @@ fn entry_chunks(
     module: Option<&str>,
     t: &Translation,
 ) -> Vec<(String, String)> {
-    let mut stack_prepare: BTreeMap<Addr, u32> = BTreeMap::new();
+    let mut raw = BTreeSet::new();
+    let mut direct = BTreeSet::new();
     for declaration in t.bodies.iter().flat_map(|body| &body.declarations) {
-        if let Declaration::StackPrepare(target, cost) = *declaration {
-            let entry = stack_prepare.entry(target).or_insert(cost);
-            *entry = (*entry).max(cost);
+        match *declaration {
+            Declaration::Raw(target) => {
+                raw.insert(target);
+            }
+            Declaration::Direct(target) => {
+                direct.insert(target);
+            }
+            Declaration::PrivateContract { .. } => {}
         }
     }
     let mut groups: BTreeMap<Addr, Vec<(usize, Addr)>> = BTreeMap::new();
@@ -402,36 +379,29 @@ fn entry_chunks(
                      void entry_{addr:08x}(X86 *c) {{\n#ifndef RECOMP_RAW_{addr:08x}\n    x86_cc_settle(c);\n#endif\n    RECOMP_ENTER({index}u, FN_{addr:08x}(c));\n}}\n"
                 );
             }
-            for (_, addr) in &entries {
-                if let Some(checkpoints) = stack_prepare.get(addr) {
-                    let route = checkpoint_route(*addr, *checkpoints, "return 1;");
-                    let _ = writeln!(s, "int entry_stack_prepare_{addr:08x}(X86 *c) {{\n{route}    (void)c;\n    return 0;\n}}");
+            for (index, addr) in &entries {
+                if raw.contains(addr) {
+                    let _ = write!(
+                        s,
+                        "#ifdef RECOMP_RAW_{addr:08x}\nvoid raw_{addr:08x}(X86 *c);\n#endif\n\
+                         void call_{addr:08x}(X86 *c) {{\n#ifdef RECOMP_RAW_{addr:08x}\n    RECOMP_CALL({index}u, raw_{addr:08x});\n#else\n    x86_cc_settle(c);\n    RECOMP_ENTER({index}u, FN_{addr:08x}(c));\n#endif\n}}\n"
+                    );
+                }
+                if direct.contains(addr) {
+                    let _ = write!(
+                        s,
+                        "#ifdef RECOMP_RAW_{addr:08x}\nconst uint8_t call_ready_{addr:08x} = 1;\n#else\nconst uint8_t call_ready_{addr:08x} = 0;\n#endif\n"
+                    );
                 }
                 for mask in t.private_masks.get(addr).into_iter().flatten() {
                     let inputs = t.private_input_arguments.get(addr).copied().unwrap_or_default();
                     let parameter = argument_parameters(inputs);
                     let argument: String = std::iter::once("c".to_string())
                         .chain(rk_emit::argument_parameters(inputs).into_iter().map(|(_, name)| name))
-                        .chain(std::iter::once("expected".to_string()))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    let _ = writeln!(s, "void fn_contract_{addr:08x}_{:04x}(X86 *c, {parameter}uint32_t expected);", mask.0);
-                    let _ = writeln!(s, "void entry_contract_{addr:08x}_{:04x}(X86 *c, {parameter}uint32_t expected) {{ fn_contract_{addr:08x}_{:04x}({argument}); }}", mask.0, mask.0);
-                }
-            }
-            let checked: Vec<&(usize, Addr)> = entries
-                .iter()
-                .filter(|(_, addr)| t.checked_returns.contains(addr))
-                .collect();
-            if !checked.is_empty() {
-                s.push_str("void recomp_enter_checked(X86 *c, uint32_t index, uint32_t expected, void (*body)(X86 *, uint32_t));\n");
-                for (index, addr) in checked {
-                    let _ = writeln!(s, "void fn_checked_{addr:08x}(X86 *c, uint32_t expected);");
-                    if module.is_some() {
-                        let _ = writeln!(s, "void entry_checked_{addr:08x}(X86 *c, uint32_t expected) {{ recomp_enter_checked(c, {index}u, expected, fn_checked_{addr:08x}); }}");
-                    } else {
-                        let _ = write!(s, "void entry_checked_{addr:08x}(X86 *c, uint32_t expected) {{\n#ifdef RECOMP_RAW_{addr:08x}\n    RECOMP_ENTER_CHECKED({index}u, fn_checked_{addr:08x}, fn_checked_{addr:08x}(c, expected));\n#else\n    RECOMP_ENTER_CHECKED({index}u, fn_checked_{addr:08x}, FN_{addr:08x}(c));\n#endif\n}}\n");
-                    }
+                    let _ = writeln!(s, "void fn_contract_{addr:08x}_{:04x}(X86 *c{parameter});", mask.0);
+                    let _ = writeln!(s, "void entry_contract_{addr:08x}_{:04x}(X86 *c{parameter}) {{ fn_contract_{addr:08x}_{:04x}({argument}); }}", mask.0, mask.0);
                 }
             }
             (format!("chunk_entries_{:08x}.c", bucket << ENTRY_ADDRESS_BITS), s)

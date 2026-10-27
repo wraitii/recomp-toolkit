@@ -23,11 +23,10 @@ or `--engine` overrides the default. The generated-code contract is documented i
 set that SSA, planning and emission share. `rk-analysis` is a separate offline
 binary that produces the facts the Facts stage reads (see below).
 
-Plan and emit run in parallel per function, in two passes. The first pass emits
-every function that neither calls a private-contract target nor is one. It
-collects the field masks those calls need, `rk_global::specialize` merges them
-into variant layouts, and the second pass emits the remaining functions and
-their private variants. Bodies are sorted by address afterwards, so output does
+Plan and emit run in parallel per function, in two passes. The first plans every
+function, collecting return-slot proofs and the field masks private-contract calls
+need; `rk_global::specialize` merges the masks into variant layouts, and the second
+pass emits every function and its private variants. Bodies are sorted by address afterwards, so output does
 not depend on scheduling. Unordered hash maps are banned by `clippy.toml`.
 
 A function that cannot be lifted, planned or emitted becomes a
@@ -183,7 +182,9 @@ ranges can narrow exposure and include negative accesses. Each exempted write ne
 proved current ESP below the entire negative-offset slot; arguments and the return
 address remain conservative. The report's `return_slot` applies the private-frame
 rule to the return address alone: a function is proved when every RET reads the
-slot at entry ESP and no effect may write it. Code generation does not use it yet.
+slot at entry ESP and no effect may write it. Direct callers of a proved function
+skip the return check; other direct calls compare EIP with the continuation and take
+the general return on a mismatch.
 Forwarding retains guest stores, and original-code analysis summaries do not use
 this premise.
 With relaxed fault state, eligible x87 accesses split into rounded value and memory
@@ -211,7 +212,10 @@ Non-leaf callees require credit for the longest nested call path as well as entr
 recursion, call-containing loops and unresolved dispatch retain eager publication.
 Under `private-stack`, a call whose memory summary excludes a slot does not reload it
 even without checkpoint credit; credit only lets the call skip publication. A guarded
-call has one route condition, `recomp_slow_routes`, raised by hooks, profiling and frame watch; its unlikely generic arm publishes the register
+call has one inline guard, `recomp_direct_`: `recomp_slow_routes` (raised by hooks,
+profiling and frame watch), the callee's `call_ready_` byte (clear under a native
+replacement), checkpoint credit, and the ST0 and x87-mode conditions of a private
+variant. Its unlikely generic arm publishes the register
 fields hooks observe and the slots the call does not otherwise demand, and nothing is
 reloaded afterwards. `[game] call_hooks = false` removes hook publications and
 kept-field rereads everywhere, and entry stubs test `recomp_slow_routes` instead of
@@ -347,7 +351,7 @@ generic path may observe. Remaining steps:
 - Cleanup roots behind indirect calls, such as RT3's `005193f0` and `00518de0`.
 - A shared SCC solver for the `rk-global` stack, memory and borrowed-stack analyses.
 - Address-list hook sets, so only hookable targets keep the hook route.
-- Cheaper `entry_contract_prepare_` routes: leaf callees that cannot yield need no
+- Cheaper `recomp_direct_` routes: leaf callees that cannot yield need no
   checkpoint decrement.
 - Narrow `stack-pointer-bases` with facts: a frame pointer pushed as an argument
   of a callee whose borrowed-stack summary bounds that argument needs no premise.
@@ -358,4 +362,4 @@ generic path may observe. Remaining steps:
   may alias released bytes, and a retired contract variant.
 - Stack arguments as contract inputs, values passed in host registers, x87 spill
   slots as plain values, leaf functions without ESP materialization, and one
-  specialization key instead of separate contract, checked and x87-mode clones.
+  specialization key instead of separate contract and x87-mode clones.

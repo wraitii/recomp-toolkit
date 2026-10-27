@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use rk_core::contract::Fields;
 use rk_core::program::Program;
 use rk_core::settings::{Dispatch, Module};
 use rk_core::{Addr, Error, Result};
@@ -189,7 +188,6 @@ pub fn main_table(
     entry_names: &[Addr],
     symbols: &[SymbolRow],
     call_returns: &[Addr],
-    private_masks: &BTreeMap<Addr, BTreeSet<Fields>>,
     program: &Program,
     dispatch: Option<&Dispatch>,
 ) -> Result<String> {
@@ -252,15 +250,9 @@ pub fn main_table(
         "        recomp_base_ptrs[i](c);",
     ));
     s.push_str(&entry_dispatch(
-        "void recomp_enter_checked(X86 *c, uint32_t i, uint32_t expected, void (*body)(X86 *, uint32_t))",
-        "        if (recomp_base_ptrs[i] == recomp_raw_ptrs[i]) body(c, expected);\n        else recomp_base_ptrs[i](c);",
+        "void recomp_enter_raw(X86 *c, uint32_t i, void (*raw)(X86 *))",
+        "        raw(c);",
     ));
-    for addr in private_masks.keys() {
-        let _ = writeln!(
-            s,
-            "void (*const entry_contract_base_{addr:08x})(X86 *) = FN({addr:08x});"
-        );
-    }
     call_return_bitmap(&mut s, call_returns, "recomp_");
     dispatch_table(&mut s, entry_names, dispatch, "recomp_", false)?;
     s.push_str(TABLE_TAIL);

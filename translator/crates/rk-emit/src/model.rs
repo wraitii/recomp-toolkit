@@ -5,10 +5,8 @@ use rk_core::Addr;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Declaration {
-    Entry(Addr),
-    Checked(Addr),
-    PrivatePrepare(Addr),
-    StackPrepare(Addr, u32),
+    Raw(Addr),
+    Direct(Addr),
     PrivateContract {
         addr: Addr,
         mask: Fields,

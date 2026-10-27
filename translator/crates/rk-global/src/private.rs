@@ -22,7 +22,6 @@ pub struct PrivateAnalysis {
     pub layouts: BTreeMap<Addr, Vec<PrivateLayout>>,
     pub masks: BTreeMap<Addr, BTreeSet<Fields>>,
     pub input_arguments: BTreeMap<Addr, PrivateArguments>,
-    pub checked_returns: BTreeSet<Addr>,
     pub callers: BTreeSet<Addr>,
     pub rejections: BTreeMap<Addr, Reason>,
     pub known_modes: BTreeSet<Addr>,
@@ -46,15 +45,14 @@ pub(crate) fn analyze(input: &PrivateInput<'_>) -> PrivateAnalysis {
         return result;
     }
     let uses = call_uses(input.analysis, input.modes, input.contracts, input.opaque);
-    let mut candidates: BTreeSet<Addr> = BTreeSet::new();
-    for &addr in &input.settings.checked_returns {
-        if no_calls(input.analysis, addr) {
-            candidates.insert(addr);
-        }
-    }
-    candidates.extend(input.settings.private_input_registers.keys().copied());
+    let mut candidates: BTreeSet<Addr> = input
+        .settings
+        .private_input_registers
+        .keys()
+        .copied()
+        .collect();
     if input.settings.private_leaf_contracts {
-        for (&addr, contract) in &input.contracts.contracts {
+        for &addr in input.contracts.contracts.keys() {
             if input.opaque.contains(&addr)
                 || input.contracts.rejected.contains_key(&addr)
                 || !input.modes.prepared.contains(&addr)
@@ -72,8 +70,6 @@ pub(crate) fn analyze(input: &PrivateInput<'_>) -> PrivateAnalysis {
                 .and_then(|result| result.as_ref().ok())
                 .map_or(0, |fir| fir.insns.len());
             if count >= 2 && instructions <= 64 * count {
-                let written = contract.writes;
-                let _ = written;
                 candidates.insert(addr);
             }
         }
@@ -83,8 +79,7 @@ pub(crate) fn analyze(input: &PrivateInput<'_>) -> PrivateAnalysis {
             result.rejections.insert(
                 addr,
                 Reason::Conservative {
-                    detail: "private state entry requires a checked leaf without opaque observers"
-                        .into(),
+                    detail: "private state entry requires a leaf without opaque observers".into(),
                 },
             );
             continue;
@@ -115,10 +110,6 @@ pub(crate) fn analyze(input: &PrivateInput<'_>) -> PrivateAnalysis {
         })
         .filter(|(_, arguments)| !arguments.is_empty())
         .collect();
-    result.checked_returns = input.settings.checked_returns.iter().copied().collect();
-    result
-        .checked_returns
-        .extend(result.targets.keys().copied());
     result.known_modes = result
         .targets
         .keys()
@@ -278,31 +269,6 @@ fn call_uses(
         }
     }
     uses
-}
-
-fn no_calls(analysis: &Analysis, addr: Addr) -> bool {
-    analysis
-        .ir
-        .get(&addr)
-        .and_then(|result| result.as_ref().ok())
-        .is_some_and(|fir| {
-            let tail = fir.exits.keys().any(|index| {
-                let index = *index;
-                fir.succ[index as usize].is_empty()
-                    && fir.insns[index as usize]
-                        .mnemonic
-                        .eq_ignore_ascii_case("JMP")
-            });
-            !tail
-                && fir.insns.iter().all(|insn| {
-                    !insn.ops.iter().any(|op| {
-                        matches!(
-                            op.opcode,
-                            OpCode::Call | OpCode::CallInd | OpCode::CallOther
-                        )
-                    })
-                })
-        })
 }
 
 fn single_entry(analysis: &Analysis, addr: Addr) -> bool {

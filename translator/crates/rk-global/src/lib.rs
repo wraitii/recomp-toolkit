@@ -1,8 +1,8 @@
 //! Whole-program analysis between lifting and planning. `contracts` builds SSA for every function
 //! and solves register and flag call contracts over call-graph SCCs, using indirect call and jump
 //! bounds and configured site effects. Functions it cannot prove stay conservative, with a reason.
-//! `modes` propagates x87 control-word facts. `private` selects private-contract targets and
-//! checked returns, and `specialize` merges the planner's call-site requests into variant layouts.
+//! `modes` propagates x87 control-word facts. `private` selects private-contract targets, and
+//! `specialize` merges the planner's call-site requests into variant layouts.
 //! `GlobalFacts::call_facts` feeds the contracts back into SSA.
 
 mod borrows;
@@ -136,7 +136,6 @@ pub struct GlobalReport {
     pub sccs: usize,
     pub private_targets: usize,
     pub private_variants: usize,
-    pub checked_returns: usize,
     pub selected_callers: usize,
     pub known_modes: usize,
     pub instruction_checks: usize,
@@ -258,7 +257,6 @@ impl GlobalFacts {
             fact_evidence: input.fact_summary.evidence,
             private_targets: private.targets.len(),
             private_variants: private.masks.values().map(BTreeSet::len).sum(),
-            checked_returns: private.checked_returns.len(),
             selected_callers: private.callers.len(),
             known_modes: private.known_modes.len(),
             sccs: modes.sccs,
@@ -431,9 +429,6 @@ impl GlobalFacts {
                 fields(contract.preserves),
             )?;
         }
-        for addr in &self.private.checked_returns {
-            writeln!(out, "checked {:08x}", addr)?;
-        }
         for addr in &self.private.callers {
             writeln!(out, "caller {:08x}", addr)?;
         }
@@ -491,7 +486,7 @@ fn format_report(report: &GlobalReport) -> String {
         .map(|(reason, count)| format!("{reason}={count}"))
         .collect();
     format!(
-        "functions={} contracts={} indirect={} bounds={}/{} jumps_consumed={} jumps_unsupported={} effects={}/{} evidence={} excluded=[{}] private={} variants={} checked={} callers={} known_modes={} instruction_checks={} instruction_mismatches={}",
+        "functions={} contracts={} indirect={} bounds={}/{} jumps_consumed={} jumps_unsupported={} effects={}/{} evidence={} excluded=[{}] private={} variants={} callers={} known_modes={} instruction_checks={} instruction_mismatches={}",
         report.functions,
         report.contracts,
         report.indirect_contracts,
@@ -505,7 +500,6 @@ fn format_report(report: &GlobalReport) -> String {
         excluded.join(","),
         report.private_targets,
         report.private_variants,
-        report.checked_returns,
         report.selected_callers,
         report.known_modes,
         report.instruction_checks,

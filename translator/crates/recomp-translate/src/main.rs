@@ -1,8 +1,8 @@
 //! Driver that `tools/build.py` runs once per image. It reads the `recomp-translate-input-v1` JSON,
 //! loads the image and code map, discovers uncovered code, lifts every function, validates analysis
-//! facts against the lifted code (`facts`), runs whole-program analysis, then plans and emits every
-//! function in two parallel passes: the second re-emits callers of private-contract targets once
-//! `rk_global::specialize` has merged their requests. A function that fails planning or emission
+//! facts against the lifted code (`facts`), runs whole-program analysis, then plans every function
+//! and emits them in a second parallel pass, once return-slot proofs are known and
+//! `rk_global::specialize` has merged private-contract requests. A function that fails planning or emission
 //! becomes a named trap body. See `docs/translator.md`.
 
 mod facts;
@@ -263,8 +263,9 @@ impl Switches {
 struct BodyContext<'a> {
     program: &'a Program,
     facts: rk_global::ContractCallFacts<'a>,
-    checked: &'a BTreeSet<Addr>,
     effect_returns: &'a BTreeSet<Addr>,
+    proven_returns: BTreeSet<Addr>,
+    known_modes: &'a BTreeSet<Addr>,
     x87_modes: rk_x87::ModeInput,
     x87_options: rk_x87::Options,
     fault_state: rk_core::settings::FaultState,
@@ -292,8 +293,9 @@ impl<'a> BodyContext<'a> {
     ) -> rk_emit::EmitContext<'b> {
         rk_emit::EmitContext {
             ir,
-            checked_returns: self.checked,
             effect_returns: self.effect_returns,
+            proven_returns: &self.proven_returns,
+            known_modes: self.known_modes,
             private_masks: &self.private_masks,
             private_input_arguments: &self.private_input_arguments,
             known_entries: self.known_entries,
@@ -403,7 +405,7 @@ fn emit_row(
                         .fallbacks
                         .insert((*entry, "uncovered entry".to_string()));
                     body.text.push_str(&format!(
-                        "\nvoid fn_{entry:08x}(X86 *c) {{ recomp_unmodelled(c, 0x{entry:08x}u); }}"
+                        "\nvoid raw_{entry:08x}(X86 *c) {{ recomp_unmodelled(c, 0x{entry:08x}u); }}\nvoid fn_{entry:08x}(X86 *c) {{ raw_{entry:08x}(c); }}"
                     ));
                 }
             }
@@ -537,7 +539,6 @@ fn build_bodies(
     EmitStats,
     BTreeMap<Addr, BTreeSet<Fields>>,
     BTreeMap<Addr, PrivateArguments>,
-    BTreeSet<Addr>,
 )> {
     let known_entries: BTreeSet<Addr> = program
         .functions
@@ -570,11 +571,12 @@ fn build_bodies(
         .filter(|(_, arguments)| arguments.st0)
         .map(|(&addr, _)| addr)
         .collect();
-    let make_ctx = |private_masks, private_input_arguments| BodyContext {
+    let make_ctx = |private_masks, proven_returns| BodyContext {
         program,
         facts: global.call_facts(),
-        checked: &global.private.checked_returns,
         effect_returns: &effect_returns,
+        proven_returns,
+        known_modes: &global.private.known_modes,
         x87_modes: rk_x87::ModeInput::from(&global.x87),
         x87_options: rk_x87::Options {
             strict: settings.fault_state == rk_core::settings::FaultState::Exact,
@@ -596,11 +598,11 @@ fn build_bodies(
         host_calls,
         private_targets: &private_targets,
         private_masks,
-        private_input_arguments,
+        private_input_arguments: private_arguments.clone(),
         switches,
         reloc,
     };
-    let ctx = make_ctx(BTreeMap::new(), private_arguments.clone());
+    let ctx = make_ctx(BTreeMap::new(), BTreeSet::new());
     let selected: BTreeSet<Addr> = only.iter().copied().collect();
     let wanted = |addr: Addr| selected.is_empty() || selected.contains(&addr);
     let sources: Vec<(Addr, Option<FunctionIr>)> = match owned {
@@ -630,23 +632,21 @@ fn build_bodies(
                 return Prepared::Emitted((addr, trap_body(program, addr, None), None, None));
             };
             match plan_one(&ctx, &ir) {
-                Ok(planned) => {
-                    if !planned.requests.by_caller.is_empty() || private_targets.contains(&addr) {
-                        Prepared::Retained { addr, ir, planned }
-                    } else {
-                        Prepared::Emitted(emit_row(&ctx, addr, &ir, &planned))
-                    }
-                }
+                Ok(planned) => Prepared::Retained { addr, ir, planned },
                 Err(error) => Prepared::Emitted(error_row(&ctx, addr, &ir, &error)),
             }
         })
         .collect();
     let mut requests = rk_plan::ContractRequests::default();
+    let mut proven_returns = BTreeSet::new();
     let mut retained = Vec::new();
     for item in prepared {
         match item {
             Prepared::Emitted(row) => retained.push(Err(row)),
             Prepared::Retained { addr, ir, planned } => {
+                if planned.ssa.return_slot.is_ok() {
+                    proven_returns.insert(addr);
+                }
                 for (caller, wanted) in &planned.requests.by_caller {
                     requests
                         .by_caller
@@ -663,7 +663,7 @@ fn build_bodies(
         &global.contracts,
         &global.private.input_arguments,
     );
-    let ctx2 = make_ctx(specialized.masks.clone(), private_arguments.clone());
+    let ctx2 = make_ctx(specialized.masks.clone(), proven_returns);
     let phase2: Vec<(Vec<BodyRow>, Vec<Body>)> = retained
         .into_par_iter()
         .map(|item| -> Result<(Vec<BodyRow>, Vec<Body>)> {
@@ -725,25 +725,20 @@ fn build_bodies(
     bodies.sort_by_key(|body| body.addr);
     private_bodies.sort_by_key(|body| (body.addr, body.private_mask.unwrap_or_default()));
     bodies.extend(private_bodies);
-    Ok((
-        bodies,
-        stats,
-        specialized.masks,
-        private_arguments,
-        global.private.known_modes.clone(),
-    ))
+    Ok((bodies, stats, specialized.masks, private_arguments))
 }
 
 fn trap_body(program: &Program, addr: Addr, ir: Option<&FunctionIr>) -> Body {
-    let mut text = format!("void fn_{addr:08x}(X86 *c) {{ recomp_unmodelled(c, 0x{addr:08x}u); }}");
-    for entry in program
-        .interior_by_function
-        .get(&addr)
-        .into_iter()
-        .flatten()
-    {
+    let mut text = String::new();
+    for entry in std::iter::once(&addr).chain(
+        program
+            .interior_by_function
+            .get(&addr)
+            .into_iter()
+            .flatten(),
+    ) {
         text.push_str(&format!(
-            "\nvoid fn_{entry:08x}(X86 *c) {{ recomp_unmodelled(c, 0x{entry:08x}u); }}"
+            "void raw_{entry:08x}(X86 *c) {{ recomp_unmodelled(c, 0x{entry:08x}u); }}\nvoid fn_{entry:08x}(X86 *c) {{ raw_{entry:08x}(c); }}\n"
         ));
     }
     if program.region_entries.values().any(|&owner| owner == addr) {
@@ -1025,7 +1020,6 @@ fn report(input: &ReportInputs<'_>) -> Result<String> {
             "sccs": global.sccs,
             "private_targets": global.private_targets,
             "private_variants": global.private_variants,
-            "checked_returns": global.checked_returns,
             "selected_callers": global.selected_callers,
             "known_modes": global.known_modes,
             "instruction_checks": global.instruction_checks,
@@ -1213,7 +1207,7 @@ fn main() -> Result<()> {
         || [Stage::Global, Stage::Prepared, Stage::Stack, Stage::Bodies]
             .into_iter()
             .any(|stage| args.wants(stage));
-    let mut global = if wants_global {
+    let global = if wants_global {
         rk_global::GlobalFacts::analyze(&rk_global::GlobalInput {
             settings: &settings,
             program: &program,
@@ -1232,34 +1226,10 @@ fn main() -> Result<()> {
     } else {
         BTreeMap::new()
     };
-    let effect_returns = effect_returns(&global.returns);
-    global
-        .private
-        .checked_returns
-        .extend(effect_returns.iter().copied());
-    let mut pending: Vec<_> = global.private.checked_returns.iter().copied().collect();
-    while let Some(addr) = pending.pop() {
-        let Some(Ok(fir)) = analysis.ir.get(&addr) else {
-            continue;
-        };
-        for (&index, targets) in &fir.exits {
-            if fir.insns[index as usize].mnemonic != "JMP" {
-                continue;
-            }
-            for &target in targets {
-                if matches!(analysis.ir.get(&target), Some(Ok(_)))
-                    && global.private.checked_returns.insert(target)
-                {
-                    pending.push(target);
-                }
-            }
-        }
-    }
     let only = if whole { &[][..] } else { &args.only[..] };
     let wants_bodies = whole || args.wants(Stage::Bodies);
     let owned = (wants_bodies && args.dump.is_empty()).then(|| std::mem::take(&mut analysis.ir));
-    let (bodies, emit_stats, private_masks, private_input_arguments, known_modes) = if wants_bodies
-    {
+    let (bodies, emit_stats, private_masks, private_input_arguments) = if wants_bodies {
         build_bodies(
             &program,
             &analysis,
@@ -1283,7 +1253,6 @@ fn main() -> Result<()> {
             EmitStats::default(),
             BTreeMap::new(),
             BTreeMap::new(),
-            BTreeSet::new(),
         )
     };
     phases.mark("emit");
@@ -1304,10 +1273,8 @@ fn main() -> Result<()> {
         call_returns,
         call_facts: facts.runtime_call_facts,
         cw_effects: facts.cw_effects,
-        checked_returns: global.private.checked_returns.clone(),
         private_masks,
         private_input_arguments,
-        known_modes,
     };
 
     if !args.dump.is_empty() {

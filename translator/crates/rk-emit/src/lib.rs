@@ -1,9 +1,11 @@
 //! Prints a `PlannedFunction` as C: the body (blocks, phi moves, publications, flag descriptors,
-//! calls, dynamic dispatch, x87 clones) plus its entry, checked-return, alternate-entry and
-//! private-contract wrappers. Unrepresentable forms return a diagnostic, and the driver then emits
-//! a trap body. Individual unsupported instructions become named runtime traps listed in
-//! `EmitReport`. It owns all translated C text: `x87` prints x87 clone events, `helpers` holds the
-//! generated C preludes and `model` the emitted-body types that `rk-output` lays out into files.
+//! calls, dynamic dispatch, x87 clones) plus its entry, alternate-entry and private-contract
+//! wrappers. Bodies return without checking the guest return; `fn_` wrappers check it for generic
+//! callers, and direct call sites check it themselves unless the target's return slot is proved.
+//! Unrepresentable forms return a diagnostic, and the driver then emits a trap body. Individual
+//! unsupported instructions become named runtime traps listed in `EmitReport`. It owns all
+//! translated C text: `x87` prints x87 clone events, `helpers` holds the generated C preludes and
+//! `model` the emitted-body types that `rk-output` lays out into files.
 
 mod helpers;
 mod model;
@@ -42,8 +44,9 @@ pub struct RelocEmit {
 
 pub struct EmitContext<'a> {
     pub ir: &'a FunctionIr,
-    pub checked_returns: &'a BTreeSet<Addr>,
     pub effect_returns: &'a BTreeSet<Addr>,
+    pub proven_returns: &'a BTreeSet<Addr>,
+    pub known_modes: &'a BTreeSet<Addr>,
     pub private_masks: &'a BTreeMap<Addr, BTreeSet<Fields>>,
     pub private_input_arguments: &'a BTreeMap<Addr, PrivateArguments>,
     pub known_entries: &'a BTreeSet<Addr>,
@@ -115,7 +118,6 @@ struct Emitter<'a> {
     requires: Requires,
     declarations: BTreeSet<Declaration>,
     multi: bool,
-    checked: bool,
     private: Option<&'a PrivateEmit>,
     materialized: Vec<bool>,
     uses_arena: bool,
@@ -393,7 +395,6 @@ impl<'a> Emitter<'a> {
             requires: Requires::default(),
             declarations: BTreeSet::new(),
             multi: s.entries.len() > 1,
-            checked: ctx.checked_returns.contains(&s.addr) || ctx.private.is_some(),
             private: ctx.private,
             materialized,
             uses_arena,
@@ -421,12 +422,10 @@ impl<'a> Emitter<'a> {
         let addr = self.s.addr;
         let body_name = if let Some(private) = self.private {
             format!("fn_contract_{addr:08x}_{:04x}", private.mask.0)
-        } else if self.checked {
-            format!("body_checked_{addr:08x}")
         } else if self.multi {
             format!("body_{addr:08x}")
         } else {
-            format!("fn_{addr:08x}")
+            format!("raw_{addr:08x}")
         };
         let signature = self.signature(&body_name);
         self.out.push_str(&signature);
@@ -508,20 +507,13 @@ impl<'a> Emitter<'a> {
             for (ty, name) in argument_parameters(private.input_arguments) {
                 params.push(format!("{ty} {name}"));
             }
-            params.push("uint32_t expected_return_".to_string());
-        } else {
-            if self.multi {
-                params.push("uint32_t entry_".to_string());
-            }
-            if self.checked {
-                params.push("uint32_t expected_return_".to_string());
-                params.push("int checked_return_".to_string());
-            }
+        } else if self.multi {
+            params.push("uint32_t entry_".to_string());
         }
         format!("void {name}({})", params.join(", "))
     }
 
-    fn call_args(&self, entry: Option<Addr>, expected: Option<&str>) -> String {
+    fn call_args(&self, entry: Option<Addr>) -> String {
         let mut args = vec!["c".to_string()];
         if self.ctx.reloc.is_some() {
             args.push("base_".to_string());
@@ -529,10 +521,6 @@ impl<'a> Emitter<'a> {
         if self.multi {
             let entry = entry.or_else(|| self.ctx.reloc.map(|_| self.s.addr));
             args.push(entry.map_or("0u".to_string(), |addr| self.guest_addr(addr)));
-        }
-        if self.checked {
-            args.push(expected.unwrap_or("0u").to_string());
-            args.push(if expected.is_some() { "1" } else { "0" }.to_string());
         }
         args.join(", ")
     }
@@ -542,32 +530,19 @@ impl<'a> Emitter<'a> {
         if self.private.is_some() {
             return;
         }
-        let base_param = if self.ctx.reloc.is_some() {
-            ", uint32_t base_"
+        let (base_param, base_arg) = if self.ctx.reloc.is_some() {
+            (", uint32_t base_", ", base_")
         } else {
-            ""
+            ("", "")
         };
-        if body != format!("fn_{addr:08x}") {
-            let args = self.call_args(None, None);
-            let _ = writeln!(
-                self.out,
-                "void fn_{addr:08x}(X86 *c{base_param}) {{ {body}({args}); }}"
-            );
-        }
-        if self.checked {
-            let args = self.call_args(None, Some("expected"));
-            let _ = writeln!(
-                self.out,
-                "void fn_checked_{addr:08x}(X86 *c{base_param}, uint32_t expected) {{ {body}({args}); }}"
-            );
-        }
+        let mut entries = vec![addr];
         if self.multi {
             if self.ctx.region_entries.values().any(|&owner| owner == addr) {
                 let primary = self.guest_addr(addr);
-                let args = self.call_args(Some(addr), None).replace(&primary, "target");
+                let args = self.call_args(Some(addr)).replace(&primary, "target");
                 let _ = writeln!(
                     self.out,
-                    "void region_{addr:08x}(X86 *c{base_param}, uint32_t target) {{ {body}({args}); }}"
+                    "void region_{addr:08x}(X86 *c{base_param}, uint32_t target) {{ {body}({args}); recomp_return_fast_(c); }}"
                 );
             }
             for entry in &self.s.entries {
@@ -578,18 +553,25 @@ impl<'a> Emitter<'a> {
                             .iter()
                             .any(|kind| matches!(kind, SehEffect::Enter | SehEffect::Adopt))
                 });
-                if entry.addr == addr
-                    || (self.ctx.region_entries.contains_key(&entry.addr) && !seh_callback)
+                if entry.addr != addr
+                    && (!self.ctx.region_entries.contains_key(&entry.addr) || seh_callback)
                 {
-                    continue;
+                    entries.push(entry.addr);
                 }
-                let args = self.call_args(Some(entry.addr), None);
+            }
+        }
+        for entry in entries {
+            if self.multi {
+                let args = self.call_args((entry != addr).then_some(entry));
                 let _ = writeln!(
                     self.out,
-                    "void fn_{:08x}(X86 *c{base_param}) {{ {body}({args}); }}",
-                    entry.addr
+                    "void raw_{entry:08x}(X86 *c{base_param}) {{ {body}({args}); }}"
                 );
             }
+            let _ = writeln!(
+                self.out,
+                "void fn_{entry:08x}(X86 *c{base_param}) {{ raw_{entry:08x}(c{base_arg}); recomp_return_fast_(c); }}"
+            );
         }
     }
 
@@ -984,8 +966,8 @@ impl<'a> Emitter<'a> {
                             let target = self.guest_addr(addr);
                             let _ = writeln!(self.out, "recomp_jump(c, {target}); return;");
                         } else {
-                            self.declare_entry(addr);
-                            let _ = writeln!(self.out, "CALL_FN({addr:08x}); return;");
+                            self.declare_raw(addr);
+                            let _ = writeln!(self.out, "CALL_RAW({addr:08x}); return;");
                         }
                     }
                     None if end_addr.is_some() => {
@@ -1059,8 +1041,8 @@ impl<'a> Emitter<'a> {
                 let at = self.guest_addr(addr);
                 let target_expr = self.guest_addr(target);
                 if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
-                    self.declare_entry(target);
-                    let _ = writeln!(self.out, "CALL_FN({target:08x}); return;");
+                    self.declare_raw(target);
+                    let _ = writeln!(self.out, "CALL_RAW({target:08x}); return;");
                 } else {
                     let _ = writeln!(
                         self.out,
@@ -1102,10 +1084,10 @@ impl<'a> Emitter<'a> {
                         .ok_or_else(|| self.error(addr, "SEH site without instruction"))?;
                     let next = insn.addr + Addr::from(insn.length);
                     let callback = if self.ctx.ir.index_of(next).is_some() {
-                        format!("fn_{next:08x}")
+                        format!("raw_{next:08x}")
                     } else if self.ctx.known_entries.contains(&next) {
-                        self.declare_entry(next);
-                        format!("entry_{next:08x}")
+                        self.declare_raw(next);
+                        format!("call_{next:08x}")
                     } else {
                         return Err(self.error(addr, "SEH continuation without entry"));
                     };
@@ -1795,21 +1777,12 @@ impl<'a> Emitter<'a> {
         else {
             return Ok(None);
         };
-        let expected = self.plan.return_addr.get(&value).copied().ok_or_else(|| {
-            self.error(
-                self.s.value_addr[value as usize],
-                "call without return address",
-            )
-        })?;
         let arguments = self
             .ctx
             .private_input_arguments
             .get(&target)
             .copied()
             .unwrap_or_default();
-        self.declarations
-            .insert(Declaration::PrivatePrepare(target));
-        self.declarations.insert(Declaration::Checked(target));
         self.declarations.insert(Declaration::PrivateContract {
             addr: target,
             mask,
@@ -1828,7 +1801,6 @@ impl<'a> Emitter<'a> {
             })?;
             args.push(st0.value);
         }
-        args.push(self.guest_addr(expected));
         let args = args.join(", ");
         Ok(Some(format!(
             "entry_contract_{target:08x}_{:04x}({args});",
@@ -1845,96 +1817,103 @@ impl<'a> Emitter<'a> {
     }
 
     fn direct_call(&mut self, value: ValueId, target: Addr) -> Result<bool> {
-        if let Some(&checkpoints) = self.s.stack_guards.get(&value) {
-            let private = self.private_call(value, target)?;
-            let arguments = private.is_some();
-            let (prepare, fast, fallback) = if let Some(call) = private {
-                let expected = self.guest_addr(self.plan.return_addr[&value]);
-                let budget = if checkpoints == 0 {
-                    String::new()
-                } else {
-                    format!("c->checkpoint_countdown > {checkpoints}u && ")
-                };
-                let guard = self.st0_guard(value)?;
-                (
-                    format!("{budget}{guard}entry_contract_prepare_{target:08x}(c, 0)"),
-                    call,
-                    format!("CALL_FN_CHECKED({target:08x}, {expected});"),
-                )
-            } else {
+        let checkpoints = self.s.stack_guards.get(&value).copied();
+        if checkpoints.is_none() {
+            self.publish_guard(value)?;
+            if self.ctx.setjmp_targets.contains(&target) {
                 self.publish_arguments(value)?;
-                self.declarations
-                    .insert(Declaration::StackPrepare(target, checkpoints));
-                self.declare_entry(target);
-                (
-                    format!("entry_stack_prepare_{target:08x}(c)"),
-                    format!("fn_{target:08x}(c);"),
-                    format!("CALL_FN({target:08x});"),
-                )
-            };
-            let _ = writeln!(self.out, "if (RECOMP_UNLIKELY(!({prepare}))) {{");
+                self.out.push_str("RECOMP_SETJMP3(c);\n");
+                return Ok(false);
+            }
+            if !self.ctx.known_entries.contains(&target) || self.reloc_internal(target) {
+                self.publish_arguments(value)?;
+                self.emit_call_target(value, target)?;
+                return Ok(true);
+            }
+        }
+        let private = self.private_call(value, target)?;
+        self.declare_raw(target);
+        if checkpoints.is_none() && private.is_none() {
+            self.publish_arguments(value)?;
+            let _ = writeln!(self.out, "CALL_RAW({target:08x});");
+            self.returned(value, target)?;
+            return Ok(true);
+        }
+        if private.is_none() {
+            self.publish_arguments(value)?;
+        }
+        let guard = self.direct_guard(value, target, private.is_some(), checkpoints)?;
+        let _ = writeln!(self.out, "if (RECOMP_UNLIKELY(!({guard}))) {{");
+        if checkpoints.is_some() {
             if let Some(keys) = self.plan.guard.get(&value).cloned() {
                 self.publish_keys(value, &keys, false)?;
             }
-            if arguments {
-                self.publish_arguments(value)?;
-            }
-            let _ = writeln!(self.out, "{fallback}");
-            if let Some(&expected) = self.plan.return_addr.get(&value) {
-                self.resume_check(value, target, expected);
-            }
+        }
+        if private.is_some() {
+            self.publish_arguments(value)?;
+        }
+        let _ = writeln!(self.out, "CALL_RAW({target:08x});");
+        self.returned(value, target)?;
+        if checkpoints.is_some() {
             self.refresh_stack_pointer(value, false)?;
-            self.out.push_str("} else {\n");
-            let _ = writeln!(self.out, "{fast}");
-            if let Some(&expected) = self.plan.return_addr.get(&value) {
-                self.resume_check(value, target, expected);
-            }
+        }
+        self.out.push_str("} else {\n");
+        let fast = private.unwrap_or_else(|| format!("raw_{target:08x}(c);"));
+        let _ = writeln!(self.out, "{fast}");
+        self.returned(value, target)?;
+        if checkpoints.is_some() {
             self.refresh_stack_pointer(value, true)?;
-            self.out.push_str("}\n");
-            return Ok(true);
         }
-        self.publish_guard(value)?;
-        if self.ctx.setjmp_targets.contains(&target) {
-            self.publish_arguments(value)?;
-            self.out.push_str("RECOMP_SETJMP3(c);\n");
-            return Ok(false);
-        }
-        if !self.ctx.known_entries.contains(&target) || self.reloc_internal(target) {
-            self.publish_arguments(value)?;
-            self.emit_call_target(value, target)?;
-            return Ok(true);
-        }
-        if let Some(call) = self.private_call(value, target)? {
-            let guard = self.st0_guard(value)?;
-            let expected_addr = self.plan.return_addr[&value];
-            let expected = self.guest_addr(expected_addr);
+        self.out.push_str("}\n");
+        Ok(true)
+    }
+
+    fn direct_guard(
+        &mut self,
+        value: ValueId,
+        target: Addr,
+        private: bool,
+        checkpoints: Option<u32>,
+    ) -> Result<String> {
+        self.declarations.insert(Declaration::Direct(target));
+        let (st0, mode) = if private {
+            let mode = if self.ctx.known_modes.contains(&target) {
+                "(c->fpu_cw & 0x0f00u) == 0u && "
+            } else {
+                ""
+            };
+            (self.st0_guard(value)?, mode)
+        } else {
+            (String::new(), "")
+        };
+        Ok(format!(
+            "{st0}{mode}recomp_direct_(c, {}u, call_ready_{target:08x})",
+            checkpoints.unwrap_or(0)
+        ))
+    }
+
+    fn returned(&mut self, value: ValueId, target: Addr) -> Result<()> {
+        let expected = self.plan.return_addr.get(&value).copied().ok_or_else(|| {
+            self.error(
+                self.s.value_addr[value as usize],
+                "call without return address",
+            )
+        })?;
+        if self.ctx.effect_returns.contains(&target) {
+            let site = self.guest_addr(self.s.value_addr[value as usize]);
+            let expected = self.guest_addr(expected);
             let _ = writeln!(
                 self.out,
-                "if ({guard}entry_contract_prepare_{target:08x}(c, 0)) {{ {call} }} else {{"
+                "if (RECOMP_UNLIKELY(c->eip != {expected})) {{ recomp_return_resume(c, {site}, {expected}, c->eip); return; }}"
             );
-            self.publish_arguments(value)?;
-            let _ = writeln!(self.out, "CALL_FN_CHECKED({target:08x}, {expected}); }}");
-            self.resume_check(value, target, expected_addr);
-            return Ok(true);
-        }
-        self.publish_arguments(value)?;
-        let checked = self.ctx.checked_returns.contains(&target);
-        if checked {
-            let expected = self.plan.return_addr.get(&value).copied().ok_or_else(|| {
-                self.error(
-                    self.s.value_addr[value as usize],
-                    "call without return address",
-                )
-            })?;
-            self.declarations.insert(Declaration::Checked(target));
+        } else if !self.ctx.proven_returns.contains(&target) {
             let expected = self.guest_addr(expected);
-            let _ = writeln!(self.out, "CALL_FN_CHECKED({target:08x}, {expected});");
-            self.resume_check(value, target, self.plan.return_addr[&value]);
-        } else {
-            self.declare_entry(target);
-            let _ = writeln!(self.out, "CALL_FN({target:08x});");
+            let _ = writeln!(
+                self.out,
+                "if (RECOMP_UNLIKELY(c->eip != {expected})) recomp_return_slow_(c);"
+            );
         }
-        Ok(true)
+        Ok(())
     }
 
     fn emit_call_target(&mut self, value: ValueId, target: Addr) -> Result<()> {
@@ -2074,21 +2053,8 @@ impl<'a> Emitter<'a> {
         let at = self.guest_addr(self.s.value_addr[value as usize]);
         let target_expr = self.guest_addr(target);
         if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
-            if self.checked && self.ctx.checked_returns.contains(&target) {
-                self.declarations.insert(Declaration::Checked(target));
-                if self.private.is_some() {
-                    let _ = writeln!(
-                        self.out,
-                        "CALL_FN_CHECKED({target:08x}, rd32(c->r[R_ESP])); return;"
-                    );
-                } else {
-                    self.declare_entry(target);
-                    let _ = writeln!(self.out, "if (checked_return_) {{ CALL_FN_CHECKED({target:08x}, rd32(c->r[R_ESP])); }} else {{ CALL_FN({target:08x}); }} return;");
-                }
-            } else {
-                self.declare_entry(target);
-                let _ = writeln!(self.out, "CALL_FN({target:08x}); return;");
-            }
+            self.declare_raw(target);
+            let _ = writeln!(self.out, "CALL_RAW({target:08x}); return;");
         } else {
             let _ = writeln!(
                 self.out,
@@ -2129,10 +2095,10 @@ impl<'a> Emitter<'a> {
         let at = self.guest_addr(self.s.value_addr[value as usize]);
         let target_expr = self.guest_addr(target);
         if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
-            self.declare_entry(target);
+            self.declare_raw(target);
             let _ = writeln!(
                 self.out,
-                "if ((uint32_t)({condition})) {{ CALL_FN({target:08x}); return; }}"
+                "if ((uint32_t)({condition})) {{ CALL_RAW({target:08x}); return; }}"
             );
         } else {
             let _ = writeln!(
@@ -2209,37 +2175,16 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
-    fn resume_check(&mut self, value: ValueId, target: Addr, expected: Addr) {
-        if self.ctx.effect_returns.contains(&target) {
-            let site = self.guest_addr(self.s.value_addr[value as usize]);
-            let expected = self.guest_addr(expected);
-            let _ = writeln!(
-                self.out,
-                "if (RECOMP_UNLIKELY(c->eip != {expected})) {{ recomp_return_resume(c, {site}, {expected}, c->eip); return; }}"
-            );
-        }
-    }
-
     fn return_value(&mut self, value: ValueId) -> Result<()> {
         if let Some(private) = self.private {
             self.publish_private_return(value, private)?;
-            self.out
-                .push_str("if (RECOMP_UNLIKELY(c->eip != expected_return_)) {\n");
-            self.publish_private_fallback(value)?;
-            if !self.ctx.effect_returns.contains(&self.s.addr) {
-                self.out.push_str("recomp_return_fast_(c);\n");
-            }
-            self.out.push_str("return;\n}\nreturn;\n");
+            self.out.push_str("return;\n");
             return Ok(());
         }
         self.publish(value)?;
-        if self.ctx.effect_returns.contains(&self.s.addr) {
-            self.out.push_str(
-                "if (!checked_return_) { recomp_return_fast_(c); return; }\nif (RECOMP_UNLIKELY(c->eip != expected_return_)) return;\nrecomp_return_fast_(c);\nreturn;\n",
-            );
-            return Ok(());
-        }
-        if !self.ctx.ir.intra_call_returns.is_empty() {
+        if !self.ctx.ir.intra_call_returns.is_empty()
+            && !self.ctx.effect_returns.contains(&self.s.addr)
+        {
             let current = self.block_of(value);
             let targets: Vec<usize> = self
                 .successors(current)
@@ -2259,25 +2204,11 @@ impl<'a> Emitter<'a> {
                     let _ = writeln!(self.out, "case {target_addr}:");
                     self.edge(Some(current), target)?;
                 }
-                self.out.push_str("default:\n");
-                if self.checked {
-                    self.out.push_str(
-                        "if (!checked_return_ || RECOMP_UNLIKELY(c->eip != expected_return_)) recomp_return_fast_(c);\nreturn;\n",
-                    );
-                } else {
-                    self.out.push_str("recomp_return_fast_(c);\nreturn;\n");
-                }
-                self.out.push_str("}\n");
+                self.out.push_str("default:\nreturn;\n}\n");
                 return Ok(());
             }
         }
-        if self.checked {
-            self.out.push_str(
-                "if (!checked_return_ || RECOMP_UNLIKELY(c->eip != expected_return_)) recomp_return_fast_(c);\nreturn;\n",
-            );
-        } else {
-            self.out.push_str("recomp_return_fast_(c);\nreturn;\n");
-        }
+        self.out.push_str("return;\n");
         Ok(())
     }
 
@@ -2293,22 +2224,6 @@ impl<'a> Emitter<'a> {
             })
             .collect();
         self.publish_state(value, &keys, true)
-    }
-
-    fn publish_private_fallback(&mut self, value: ValueId) -> Result<()> {
-        let Some(state) = self.s.boundary(value) else {
-            return Ok(());
-        };
-        let keys: Vec<StateKey> = self
-            .plan
-            .publish
-            .get(&value)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|key| state.iter().any(|(candidate, _)| candidate == key))
-            .collect();
-        self.publish_keys(value, &keys, true)
     }
 
     fn publish_arguments(&mut self, value: ValueId) -> Result<()> {
@@ -2900,8 +2815,8 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn declare_entry(&mut self, target: Addr) {
-        self.declarations.insert(Declaration::Entry(target));
+    fn declare_raw(&mut self, target: Addr) {
+        self.declarations.insert(Declaration::Raw(target));
     }
 
     fn assignment(&self, value: ValueId, expr: &str) -> String {

@@ -182,7 +182,6 @@ fn reloc_settings(settings: &Settings) -> Settings {
     reloc.curated = Curated::default();
     reloc.alternate_entries.clear();
     reloc.configured_entries.clear();
-    reloc.checked_returns.clear();
     reloc.state_contract_callers.clear();
     reloc.private_input_registers.clear();
     reloc.call_effects.sites.clear();
@@ -248,7 +247,7 @@ pub fn translate(
                 local_size: program.image.size,
             }),
         )?;
-        let (bodies, stats, _, _, _) = built;
+        let (bodies, stats, _, _) = built;
 
         let mut refusal = refuse(&program, &analysis, template, &targets);
         if refusal.is_none() && stats.trapping != 0 {

@@ -175,15 +175,12 @@ this-adjustor, which nothing references as a pointer. Without `stack-pointer-bas
 goes from 44 to 67 static guest reads. Remove a name from `[translate] assume` to
 drop its premise.
 
-The checked-return pilot selects `0x005a10d0` (through `0x005a1144`), the x87
+The private-argument pilot selects `0x005a10d0` (through `0x005a1144`), the x87
 integer-conversion helper. Original bytes show a single-entry leaf with aligned
 stack scratch, path-dependent ECX/flags and one RET; callers include `0x0042c1b0`
-and `0x0042ce00`. Eligible SSA direct calls pass their decoded continuation and
-skip general return lookup on a match. Stack writes, x87 effects and all existing
-state publication remain translated. Decoded callers, indirect calls, callbacks,
-hooks and profiling retain the ordinary entry. Set `checked_returns = []` under
-`[translate]`, also disable `private_leaf_contracts`, and regenerate to disable checked calls. Savings across the conversion call's
-state transfer are piloted separately below; scratch memory remains translated.
+and `0x0042ce00`. Stack writes, x87 effects and all existing state publication
+remain translated. Savings across the conversion call's state transfer are
+piloted separately below; scratch memory remains translated.
 
 The experimental integer-state pilot selects the reviewed callers
 `0x0042c1b0` and `0x0042ce00` through
@@ -213,8 +210,7 @@ built-in guest profiler selects ordinary fallback. No workload gain is establish
 
 Static control-word analysis proves the conversion leaf preserves its incoming
 mode. Private preparation now requires `(CW & 0x0f00) == 0`, and each private
-body emits only the fast arithmetic; other modes reuse the ordinary checked
-entry. `x87_cw_clone = false` keeps x87 calls on general ordinary entries. In the linked
+body emits only the fast arithmetic; other modes reuse the ordinary entry. `x87_cw_clone = false` keeps x87 calls on general ordinary entries. In the linked
 ARM64 diff harness, the two private bodies shrink from 4,680 to 1,120 bytes;
 preparation grows by 12 bytes. The existing rounding fixture, routed through
 preparation for private calls, matches the captured ordinary implementation in

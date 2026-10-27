@@ -80,7 +80,7 @@ class Settings(object):
         if any(len(names) != 1 or names[0] == "ST0" for names in registers.values()):
             raise ValueError("the Python translator passes one general private input register per function")
         self.private_input_registers = {addr: names[0] for addr, names in registers.items()}
-        self.checked_returns = frozenset(translate["checked_returns"]) if not self.module else frozenset()
+        self.checked_returns = frozenset(translate.get("checked_returns", ())) if not self.module else frozenset()
         self.state_contract_callers = frozenset(translate["state_contract_callers"]) if not self.module else frozenset()
         self.discover = translate.get("discover", True)
         self.discovered = None

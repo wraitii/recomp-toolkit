@@ -33,9 +33,13 @@ instruction helpers used by generated functions. Functions retain stable guest
 addresses for dispatch, hooks and diagnostics. Those addresses are identifiers,
 not host pointers and not evidence of human-recovered intent.
 
-Generated callers use `entry_ADDR` thunks. Those small, separately compiled
-thunks supply the current dense table index to one per-image dispatch function;
-hook checks, profiling and frame diagnostics no longer expand at every call.
+Dispatch uses `entry_ADDR` thunks and generated direct calls use `call_ADDR` thunks.
+Those small, separately compiled thunks supply the current dense table index to one
+per-image dispatch function; hook checks, profiling and frame diagnostics no longer
+expand at every call. A translated body (`raw_ADDR`) returns without checking the
+guest return; `fn_ADDR` adds the check for generic callers, while `call_ADDR` runs the
+raw body and leaves the check to the call site, which compares EIP with its
+continuation unless the callee's return slot is proved unchanged.
 The base-pointer table selects native replacements, while the raw-pointer table
 retains translated originals. Direct, tail and computed transfers preserve their
 guest stack operations. Replacement headers are compilation dependencies of
