@@ -24,6 +24,7 @@ use cfg::{build_raw, finalize, RawFunction};
 use seh::seh_helpers;
 
 pub use dump::dump;
+pub use seh::{msvc_chkstk, msvc_seh_epilog, msvc_seh_prolog};
 
 pub(crate) const R_EAX: u8 = 0;
 pub(crate) const R_ECX: u8 = 1;

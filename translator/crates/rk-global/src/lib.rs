@@ -314,6 +314,12 @@ impl GlobalFacts {
         for (&addr, reason) in &self.returns.rejected_functions {
             writeln!(out, "return-rejected {addr:08x} {reason}")?;
         }
+        for (&addr, source) in &self.returns.stack_helpers {
+            writeln!(out, "stack-helper {addr:08x} {source}")?;
+        }
+        for (&addr, source) in &self.returns.stack_probes {
+            writeln!(out, "stack-probe {addr:08x} {source}")?;
+        }
         for (&addr, cleanup) in &self.returns.cleanups {
             writeln!(out, "cleanup-only {addr:08x} pop={cleanup}")?;
         }

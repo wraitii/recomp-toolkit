@@ -36,11 +36,6 @@ private_leaf_contracts = true
 assume = ["private-stack", "stack-pointer-bases"]
 checked_returns = [0x005a10d0]
 state_contract_callers = [0x0042ce00, 0x0042c1b0]
-# MSVC CRT __SEH_prolog / __SEH_epilog: straight-line frame builders whose RET
-# leaves ESP moved by a caller-pushed frame size.
-stack_helpers = [0x005a7124, 0x005a715f]
-# MSVC CRT __chkstk: probes pages and lowers the caller's ESP by EAX.
-stack_probes = [0x005a15e0]
 # Calls with proven argument bytes. __FF_MSGBANNER and __callnewh call hooks
 # at 00dba1e0 and 00dba1c8 that are zero in the image and never written.
 # __crtInitCritSecAndSpinCount

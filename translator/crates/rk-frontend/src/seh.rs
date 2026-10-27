@@ -10,6 +10,7 @@ use crate::{R_EAX, R_EBP, R_ECX, R_EDX, R_ESP};
 
 const MSVC_SEH_PROLOG_HEX: &str = "68????????64a100000000508b442410896c24108d6c24102be05356578b45f88965e8508b45fcc745fcffffffff8945f88d45f064a300000000c3";
 const MSVC_SEH_EPILOG_HEX: &str = "8b4df064890d00000000595f5e5bc951c3";
+const MSVC_CHKSTK_HEX: &str = "3d00100000730ef7d803c483c0048500948b0050c3518d4c240881e9001000002d0010000085013d0010000073ec2bc88bc485018be18b088b400450c3";
 const MSVC_EH3_FRAME_HEX: &str = "558bec6aff6800000000680000000064a1000000005064892500000000";
 pub(crate) const MSVC_SEH_PROLOG_LEN: u32 = 59;
 pub(crate) const MSVC_EH3_FRAME_LEN: u32 = 29;
@@ -69,6 +70,10 @@ pub fn msvc_seh_prolog(image: &rk_core::program::Image, va: Addr) -> Option<Addr
 
 pub fn msvc_seh_epilog(image: &rk_core::program::Image, va: Addr) -> bool {
     code_matches(image, va, &seh_pattern(MSVC_SEH_EPILOG_HEX, &[]))
+}
+
+pub fn msvc_chkstk(image: &rk_core::program::Image, va: Addr) -> bool {
+    code_matches(image, va, &seh_pattern(MSVC_CHKSTK_HEX, &[]))
 }
 
 pub(crate) fn msvc_unwind_only(image: &rk_core::program::Image, handler: Option<Addr>) -> bool {

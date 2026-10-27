@@ -72,6 +72,8 @@ pub struct Analysis {
     pub cleanups: BTreeMap<Addr, i32>,
     pub rejected_cleanups: BTreeMap<Addr, String>,
     pub argument_writes: BTreeMap<Addr, Vec<(i32, u32)>>,
+    pub stack_helpers: BTreeMap<Addr, &'static str>,
+    pub stack_probes: BTreeMap<Addr, &'static str>,
 }
 
 pub struct CallFacts<'a> {
@@ -469,6 +471,8 @@ struct Context<'a> {
     analysis: &'a rk_frontend::Analysis,
     excluded: &'a BTreeSet<Addr>,
     settings: &'a Settings,
+    helpers: BTreeSet<Addr>,
+    probes: BTreeSet<Addr>,
 }
 
 struct Walk<'a> {
@@ -586,12 +590,12 @@ impl Walk<'_> {
                 OpCode::Call => {
                     let target = target(insn).ok_or("unknown direct call")?;
                     if mode == Mode::Cleanup
-                        && self.context.settings.stack_helpers.contains(&target)
+                        && self.context.helpers.contains(&target)
                     {
                         self.inline(target, state, depth)?;
                         continue;
                     }
-                    if mode == Mode::Cleanup && self.context.settings.stack_probes.contains(&target)
+                    if mode == Mode::Cleanup && self.context.probes.contains(&target)
                     {
                         let (esp, eax) = (
                             Registers::get().require("ESP"),
@@ -935,11 +939,27 @@ pub fn analyze(
             }
         }
     }
+    let image = &program.image;
+    for &addr in program.functions.keys() {
+        let helper = rk_frontend::msvc_seh_prolog(image, addr).is_some()
+            || rk_frontend::msvc_seh_epilog(image, addr);
+        if helper || settings.stack_helpers.contains(&addr) {
+            let source = if helper { "detected" } else { "configured" };
+            output.stack_helpers.insert(addr, source);
+        }
+        let probe = rk_frontend::msvc_chkstk(image, addr);
+        if probe || settings.stack_probes.contains(&addr) {
+            let source = if probe { "detected" } else { "configured" };
+            output.stack_probes.insert(addr, source);
+        }
+    }
     let context = Context {
         program,
         analysis,
         excluded,
         settings,
+        helpers: output.stack_helpers.keys().copied().collect(),
+        probes: output.stack_probes.keys().copied().collect(),
     };
     let mut pending: BTreeSet<Addr> = analysis.ir.keys().copied().collect();
     let mut failures = BTreeMap::new();
@@ -1049,8 +1069,8 @@ fn infer_cleanups(context: &Context<'_>, output: &mut Analysis) {
         for (&addr, result) in &analysis.ir {
             if excluded.contains(&addr)
                 || known.contains_key(&addr)
-                || context.settings.stack_helpers.contains(&addr)
-                || context.settings.stack_probes.contains(&addr)
+                || context.helpers.contains(&addr)
+                || context.probes.contains(&addr)
             {
                 continue;
             }
