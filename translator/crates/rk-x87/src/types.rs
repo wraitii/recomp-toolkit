@@ -45,6 +45,7 @@ pub enum Expr {
     Constant(&'static str),
     Local(u32, Type),
     Carry(i32, &'static str),
+    St0Argument,
     Environment(&'static str),
     Resident(&'static str),
     Cw(u16),
@@ -95,6 +96,7 @@ impl Expr {
             Expr::Constant(_) => Type::F64,
             Expr::Local(_, ty) => *ty,
             Expr::Carry(_, part) => part_type(part),
+            Expr::St0Argument => Type::F64,
             Expr::Environment(name) | Expr::Resident(name) => match *name {
                 "cw" => Type::Cw,
                 "sw" => Type::Sw,

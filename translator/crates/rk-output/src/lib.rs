@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use rayon::prelude::*;
-use rk_core::contract::Fields;
+use rk_core::contract::{Fields, PrivateArguments};
 use rk_core::program::Program;
 use rk_core::settings::Settings;
 use rk_core::{Addr, Error, Result};
@@ -80,7 +80,7 @@ pub struct Translation<'a> {
     pub cw_effects: BTreeMap<Addr, (u16, u16, u16)>,
     pub checked_returns: BTreeSet<Addr>,
     pub private_masks: BTreeMap<Addr, BTreeSet<Fields>>,
-    pub private_input_arguments: BTreeMap<Addr, Fields>,
+    pub private_input_arguments: BTreeMap<Addr, PrivateArguments>,
     pub known_modes: BTreeSet<Addr>,
 }
 
@@ -324,10 +324,10 @@ next(c);\n}\n",
     s
 }
 
-fn argument_parameters(fields: Fields) -> String {
-    fields
-        .iter()
-        .map(|field| format!("uint32_t {}_, ", field.name().to_lowercase()))
+fn argument_parameters(arguments: PrivateArguments) -> String {
+    rk_emit::argument_parameters(arguments)
+        .into_iter()
+        .map(|(ty, name)| format!("{ty} {name}, "))
         .collect()
 }
 
@@ -398,7 +398,7 @@ fn entry_chunks(
                     let inputs = t.private_input_arguments.get(addr).copied().unwrap_or_default();
                     let parameter = argument_parameters(inputs);
                     let argument: String = std::iter::once("c".to_string())
-                        .chain(inputs.iter().map(|field| format!("{}_", field.name().to_lowercase())))
+                        .chain(rk_emit::argument_parameters(inputs).into_iter().map(|(_, name)| name))
                         .chain(std::iter::once("expected".to_string()))
                         .collect::<Vec<_>>()
                         .join(", ");

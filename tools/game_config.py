@@ -69,7 +69,7 @@ TRANSLATE_DEFAULTS = {
     "x87_cw_clone": True,
 }
 ASSUMPTIONS = frozenset(("private-stack", "stack-pointer-bases"))
-PRIVATE_INPUT_REGISTERS = frozenset(("EAX", "ECX", "EDX", "EBX", "EBP", "ESI", "EDI"))
+PRIVATE_INPUT_REGISTERS = frozenset(("EAX", "ECX", "EDX", "EBX", "EBP", "ESI", "EDI", "ST0"))
 
 def add_game_args(parser):
     """--game <id> for a kit game under games/, or --game-dir for any directory holding game.toml."""

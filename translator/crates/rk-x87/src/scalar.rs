@@ -93,6 +93,37 @@ pub struct CarryShape {
     pub status_dirty: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct St0Handover {
+    pub value: Expr,
+    pub bits: Expr,
+    pub exact: Expr,
+    pub tag: Expr,
+    pub canonical: bool,
+}
+
+pub fn st0_argument_shape() -> CarryShape {
+    CarryShape {
+        active: true,
+        slots: vec![(
+            0,
+            SlotShape {
+                parts: 0xf,
+                narrow: false,
+                consts: Vec::new(),
+                dirty: 0xf,
+                quiet: false,
+                pending: false,
+            },
+        )],
+        base: 1,
+        low: 0,
+        high: 0,
+        top_unknown: false,
+        status_dirty: false,
+    }
+}
+
 pub const INACTIVE: CarryShape = CarryShape {
     active: false,
     slots: Vec::new(),
@@ -639,6 +670,39 @@ impl Scalar {
         self.base -= delta;
         self.low -= delta;
         self.high -= delta;
+    }
+
+    pub fn enter_with_st0(&mut self) -> Vec<Event> {
+        let mut events = self.activation();
+        events.push(Event::Assign(Assign::new(env("top"), self.phys(7))));
+        for (part, value) in [
+            ("value", Expr::St0Argument),
+            ("bits", literal(0, Type::U64)),
+            ("exact", zero()),
+            ("tag", helper("ftag_classify", vec![Expr::St0Argument])),
+        ] {
+            events.push(Event::Assign(Assign::new(carry(0, part), value)));
+        }
+        events
+    }
+
+    pub fn take_st0(&mut self, events: &mut Vec<Event>) -> St0Handover {
+        self.activate(events);
+        self.fold(0, events, true);
+        let value = self.read(0, "value", events);
+        let bits = self.read(0, "bits", events);
+        let exact = self.read(0, "exact", events);
+        let tag = self.read(0, "tag", events);
+        self.drop_slot(events, false);
+        let canonical = matches!(exact, Expr::Literal(_, 0))
+            && matches!(&tag, Expr::Helper("ftag_classify", _));
+        St0Handover {
+            value,
+            bits,
+            exact,
+            tag,
+            canonical,
+        }
     }
 
     fn cw(&self) -> Expr {

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
 
-use crate::contract::{Contract, Field, Fields};
+use crate::contract::{Contract, Field, Fields, PrivateArguments};
 use crate::{parse_hex, Addr, Error, Result};
 
 pub const INPUT_FORMAT: &str = "recomp-translate-input-v1";
@@ -307,7 +307,7 @@ pub struct Settings {
     pub call_hooks: bool,
     pub private_leaf_contracts: bool,
     pub private_input_arguments: bool,
-    pub private_input_registers: BTreeMap<Addr, Fields>,
+    pub private_input_registers: BTreeMap<Addr, PrivateArguments>,
     pub checked_returns: BTreeSet<Addr>,
     pub state_contract_callers: BTreeSet<Addr>,
     pub discover: bool,
@@ -418,17 +418,28 @@ impl Settings {
                         "private_input_registers key {addr} is not an address"
                     ))
                 })?;
-                let fields = fields(registers.clone(), "private_input_registers")
-                    .map_err(Error::input)?;
-                if fields.is_empty()
+                let st0 = registers.iter().filter(|name| *name == "ST0").count();
+                let fields = fields(
+                    registers.iter().filter(|name| *name != "ST0").cloned().collect(),
+                    "private_input_registers",
+                )
+                .map_err(Error::input)?;
+                if registers.is_empty()
+                    || st0 > 1
                     || fields.contains(Field::Esp)
                     || !fields.difference(Fields::GPRS).is_empty()
                 {
                     return Err(Error::input(format!(
-                        "private_input_registers {addr:08x} must list general registers other than ESP"
+                        "private_input_registers {addr:08x} must list distinct general registers other than ESP, or ST0"
                     )));
                 }
-                private_input_registers.insert(addr, fields);
+                private_input_registers.insert(
+                    addr,
+                    PrivateArguments {
+                        registers: fields,
+                        st0: st0 == 1,
+                    },
+                );
             }
         }
         let alternate_entries: BTreeSet<Addr> = t.alternate_entries.iter().copied().collect();

@@ -77,8 +77,8 @@ class Settings(object):
         self.private_leaf_contracts = translate["private_leaf_contracts"] and not self.module
         self.private_input_arguments = translate["private_input_arguments"] and not self.module
         registers = translate.get("private_input_registers", {}) if not self.module else {}
-        if any(len(names) != 1 for names in registers.values()):
-            raise ValueError("the Python translator passes one private input register per function")
+        if any(len(names) != 1 or names[0] == "ST0" for names in registers.values()):
+            raise ValueError("the Python translator passes one general private input register per function")
         self.private_input_registers = {addr: names[0] for addr, names in registers.items()}
         self.checked_returns = frozenset(translate["checked_returns"]) if not self.module else frozenset()
         self.state_contract_callers = frozenset(translate["state_contract_callers"]) if not self.module else frozenset()

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rk_core::contract::{Field, Fields};
+use rk_core::contract::{Field, Fields, PrivateArguments};
 use rk_core::ir::Policy;
 use rk_core::{Addr, Diagnostic, LookupSet, Result};
 use rk_ir::{CgFunction, StateKey};
@@ -27,7 +27,7 @@ pub struct PlanOptions<'a> {
     pub x87_options: rk_x87::Options,
     pub fault_state: rk_core::settings::FaultState,
     pub private_targets: &'a BTreeSet<Addr>,
-    pub private_arguments: &'a BTreeMap<Addr, Fields>,
+    pub private_arguments: &'a BTreeMap<Addr, PrivateArguments>,
     pub descriptors: bool,
     pub coalesce_roots: bool,
     pub assume_private_stack: bool,
@@ -237,10 +237,14 @@ fn private_arguments(ssa: &Ssa, opts: &PlanOptions<'_>) -> BTreeMap<ValueId, Vec
         if !opts.private_targets.contains(&target) {
             continue;
         }
-        let Some(fields) = opts.private_arguments.get(&target) else {
+        let Some(arguments) = opts.private_arguments.get(&target) else {
             continue;
         };
-        let keys: Vec<StateKey> = fields
+        if arguments.registers.is_empty() {
+            continue;
+        }
+        let keys: Vec<StateKey> = arguments
+            .registers
             .iter()
             .flat_map(|field| rk_ir::lanes(field).iter().copied())
             .collect();

@@ -445,12 +445,12 @@ impl GlobalFacts {
                     addr,
                     layout.outputs.0,
                     fields(layout.inputs),
-                    fields(layout.input_arguments),
+                    arguments(layout.input_arguments),
                 )?;
             }
         }
-        for (&addr, arguments) in &self.private.input_arguments {
-            writeln!(out, "input-arguments {:08x} {}", addr, fields(*arguments))?;
+        for (&addr, input) in &self.private.input_arguments {
+            writeln!(out, "input-arguments {:08x} {}", addr, arguments(*input))?;
         }
         for addr in &self.private.known_modes {
             writeln!(out, "known-mode {:08x}", addr)?;
@@ -473,6 +473,14 @@ fn fields(fields: rk_core::contract::Fields) -> String {
         "-".to_string()
     } else {
         names.join(",")
+    }
+}
+
+fn arguments(arguments: rk_core::contract::PrivateArguments) -> String {
+    if arguments.st0 {
+        format!("{}+ST0", fields(arguments.registers))
+    } else {
+        fields(arguments.registers)
     }
 }
 

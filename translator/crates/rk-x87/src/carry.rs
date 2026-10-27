@@ -4,7 +4,7 @@ use rk_core::Reason;
 use rk_ir::{properties, Op};
 use rk_ssa::{BlockId, Ssa, ValueId, DISPATCH_BLOCK};
 
-use crate::scalar::{merge_shapes, parts, CarryShape, Scalar, Shape, INACTIVE};
+use crate::scalar::{merge_shapes, parts, st0_argument_shape, CarryShape, Scalar, Shape, INACTIVE};
 use crate::types::Expr;
 
 pub fn reset_op(op: Op) -> bool {
@@ -71,7 +71,11 @@ fn transfer(
     scalar.snapshot()
 }
 
-pub fn analyze(s: &Ssa, factory: &dyn Fn() -> Scalar) -> Result<BTreeMap<BlockId, Shape>, Reason> {
+pub fn analyze(
+    s: &Ssa,
+    factory: &dyn Fn() -> Scalar,
+    st0_argument: bool,
+) -> Result<BTreeMap<BlockId, Shape>, Reason> {
     let mut succ: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
     for (index, block) in s.blocks.iter().enumerate() {
         succ.entry(index as BlockId).or_default();
@@ -94,12 +98,22 @@ pub fn analyze(s: &Ssa, factory: &dyn Fn() -> Scalar) -> Result<BTreeMap<BlockId
         .enumerate()
         .map(|(index, _)| (index as BlockId, Shape::Unknown))
         .collect();
-    entry.insert(primary, Shape::Known(INACTIVE));
+    let primary_shape = if st0_argument {
+        st0_argument_shape()
+    } else {
+        INACTIVE
+    };
+    entry.insert(primary, Shape::Known(primary_shape.clone()));
     let mut resets: BTreeSet<BlockId> = roots.iter().copied().skip(1).collect();
     if s.blocks
         .get(primary as usize)
         .is_some_and(|block| block.preds.iter().any(|pred| *pred != DISPATCH_BLOCK))
     {
+        if st0_argument {
+            return Err(Reason::UnsupportedX87 {
+                detail: "ST0 argument entry block has in-function predecessors".into(),
+            });
+        }
         resets.insert(primary);
     }
     for block in resets {
@@ -153,7 +167,11 @@ pub fn analyze(s: &Ssa, factory: &dyn Fn() -> Scalar) -> Result<BTreeMap<BlockId
             let mut shapes = Vec::new();
             for &pred in &block_ref.preds {
                 if pred == DISPATCH_BLOCK {
-                    shapes.push(Shape::Known(INACTIVE));
+                    shapes.push(Shape::Known(if block == primary {
+                        primary_shape.clone()
+                    } else {
+                        INACTIVE
+                    }));
                 } else if let Some(shape) = exit.get(&pred) {
                     shapes.push(shape.clone());
                 }

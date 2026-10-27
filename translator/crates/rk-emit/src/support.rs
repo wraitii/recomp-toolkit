@@ -127,7 +127,7 @@ pub(crate) fn location(key: StateKey) -> Option<Location> {
 pub(crate) fn private_loads(private: Option<&PrivateEmit>, key: StateKey) -> bool {
     let Some(private) = private else { return true };
     match field_lane(key) {
-        Some((field, _)) => private.inputs.contains(field) || private.input_arguments.contains(field),
+        Some((field, _)) => private.inputs.contains(field) || private.input_arguments.registers.contains(field),
         None => true,
     }
 }

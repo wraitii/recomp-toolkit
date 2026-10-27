@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use rk_core::contract::{Contract, Field, Fields};
+use rk_core::contract::{Contract, Field, Fields, PrivateArguments};
 use rk_core::ir::{OpCode, Space};
 use rk_core::settings::Settings;
 use rk_core::{Addr, Reason};
@@ -13,7 +13,7 @@ use crate::modes::ModeAnalysis;
 pub struct PrivateLayout {
     pub inputs: Fields,
     pub outputs: Fields,
-    pub input_arguments: Fields,
+    pub input_arguments: PrivateArguments,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -21,7 +21,7 @@ pub struct PrivateAnalysis {
     pub targets: BTreeMap<Addr, Contract>,
     pub layouts: BTreeMap<Addr, Vec<PrivateLayout>>,
     pub masks: BTreeMap<Addr, BTreeSet<Fields>>,
-    pub input_arguments: BTreeMap<Addr, Fields>,
+    pub input_arguments: BTreeMap<Addr, PrivateArguments>,
     pub checked_returns: BTreeSet<Addr>,
     pub callers: BTreeSet<Addr>,
     pub rejections: BTreeMap<Addr, Reason>,
@@ -105,7 +105,13 @@ pub(crate) fn analyze(input: &PrivateInput<'_>) -> PrivateAnalysis {
         .iter()
         .filter_map(|(addr, arguments)| {
             let reads = result.targets.get(addr)?.reads;
-            Some((*addr, arguments.intersection(reads)))
+            Some((
+                *addr,
+                PrivateArguments {
+                    registers: arguments.registers.intersection(reads),
+                    st0: arguments.st0,
+                },
+            ))
         })
         .filter(|(_, arguments)| !arguments.is_empty())
         .collect();
@@ -130,7 +136,7 @@ pub(crate) fn analyze(input: &PrivateInput<'_>) -> PrivateAnalysis {
 pub fn specialize(
     requests: &BTreeMap<Addr, BTreeSet<(Addr, Fields)>>,
     contracts: &BTreeMap<Addr, Contract>,
-    input_arguments: &BTreeMap<Addr, Fields>,
+    input_arguments: &BTreeMap<Addr, PrivateArguments>,
 ) -> PrivateAnalysis {
     let mut masks: BTreeMap<Addr, Fields> = BTreeMap::new();
     let mut flagless: BTreeMap<Addr, Fields> = BTreeMap::new();
@@ -183,11 +189,11 @@ fn push_layout(
     target: Addr,
     mask: Fields,
     input_contract: Fields,
-    input_arguments: &BTreeMap<Addr, Fields>,
+    input_arguments: &BTreeMap<Addr, PrivateArguments>,
 ) {
     let arguments = input_arguments.get(&target).copied().unwrap_or_default();
     let layout = PrivateLayout {
-        inputs: input_contract.difference(arguments),
+        inputs: input_contract.difference(arguments.registers),
         outputs: mask,
         input_arguments: arguments,
     };

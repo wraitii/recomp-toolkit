@@ -95,6 +95,20 @@ impl Fields {
     }
 }
 
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct PrivateArguments {
+    pub registers: Fields,
+    pub st0: bool,
+}
+
+impl PrivateArguments {
+    pub fn is_empty(self) -> bool {
+        self.registers.is_empty() && !self.st0
+    }
+}
+
 impl FromIterator<Field> for Fields {
     fn from_iter<I: IntoIterator<Item = Field>>(iter: I) -> Self {
         iter.into_iter()

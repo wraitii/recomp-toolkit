@@ -6,7 +6,7 @@ use rk_ir::{properties, Op};
 use rk_ssa::{BlockId, Ssa, ValueId, DISPATCH_BLOCK};
 
 use crate::carry::{self, assert_covers, reset_op};
-use crate::scalar::{carry_values, parts, CarryShape, Scalar, Shape};
+use crate::scalar::{carry_values, parts, CarryShape, Scalar, Shape, St0Handover};
 use crate::types::{carry, env, Assign, Choice, Event, Expr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,6 +22,8 @@ pub struct Options {
     pub convention: bool,
     pub cw_clone: bool,
     pub force: ModeForce,
+    pub st0_targets: BTreeSet<Addr>,
+    pub st0_argument: bool,
 }
 
 impl Default for Options {
@@ -31,6 +33,8 @@ impl Default for Options {
             convention: true,
             cw_clone: true,
             force: ModeForce::Auto,
+            st0_targets: BTreeSet::new(),
+            st0_argument: false,
         }
     }
 }
@@ -53,6 +57,7 @@ pub struct CloneProgram {
     pub events: BTreeMap<ValueId, Vec<Event>>,
     pub defaults: BTreeMap<ValueId, Vec<Event>>,
     pub ends: BTreeMap<BlockId, Vec<Event>>,
+    pub arguments: BTreeMap<ValueId, St0Handover>,
     pub activations: u32,
 }
 
@@ -339,8 +344,7 @@ fn lower_clone(
     clone: Option<&'static str>,
     choice: Choice,
     known_mode: bool,
-    strict: bool,
-    _convention: bool,
+    options: &Options,
     carry_mode: bool,
     entry: &BTreeMap<BlockId, Shape>,
     linear: &BTreeMap<BlockId, BlockId>,
@@ -356,6 +360,8 @@ fn lower_clone(
         clone,
         ..CloneProgram::default()
     };
+    let strict = options.strict;
+    let primary = s.entries.first().map(|entry| entry.target);
     let mut previous: Option<BlockId> = None;
     for (index, block) in s.blocks.iter().enumerate() {
         let id = index as BlockId;
@@ -374,6 +380,9 @@ fn lower_clone(
                         status_dirty: false,
                     })),
                 );
+                if options.st0_argument && Some(id) == primary {
+                    start.extend(scalar.enter_with_st0());
+                }
             }
         } else if previous != linear.get(&id).copied() {
             scalar.reset();
@@ -399,6 +408,12 @@ fn lower_clone(
                     events.extend(scalar.apply(op, address, result));
                 }
                 op if reset_op(op) => {
+                    if let Op::Call { target } = op {
+                        if options.st0_targets.contains(&target) {
+                            let arguments = scalar.take_st0(&mut events);
+                            program.arguments.insert(value, arguments);
+                        }
+                    }
                     events.extend(scalar.flush());
                     events.push(Event::Reset);
                     scalar.reset();
@@ -458,12 +473,14 @@ fn lower_clone(
 }
 
 pub fn prepare(s: &Ssa, modes: &ModeInput, options: &Options) -> Result<Plan, Reason> {
-    let used = s.blocks.iter().any(|block| {
-        block
-            .ops
-            .iter()
-            .any(|value| matches!(s.value(*value).op, Op::X87(_)))
-    });
+    let used = options.st0_argument
+        || s.blocks.iter().any(|block| {
+            block.ops.iter().any(|value| match s.value(*value).op {
+                Op::X87(_) => true,
+                Op::Call { target } => options.st0_targets.contains(&target),
+                _ => false,
+            })
+        });
     if !used {
         return Ok(Plan::default());
     }
@@ -471,9 +488,14 @@ pub fn prepare(s: &Ssa, modes: &ModeInput, options: &Options) -> Result<Plan, Re
     let succ = successors(s);
     let preds = predecessor_map(s);
     let carry_mode = !options.strict && options.convention;
+    if options.st0_argument && !carry_mode {
+        return Err(Reason::UnsupportedX87 {
+            detail: "ST0 arguments require the relaxed MSVC x87 convention".into(),
+        });
+    }
     let entry = if carry_mode {
         let factory = || Scalar::new(options.convention, choice, known_mode, options.strict);
-        carry::analyze(s, &factory)?
+        carry::analyze(s, &factory, options.st0_argument)?
     } else {
         BTreeMap::new()
     };
@@ -494,8 +516,7 @@ pub fn prepare(s: &Ssa, modes: &ModeInput, options: &Options) -> Result<Plan, Re
             *clone,
             clone_choice,
             known_mode,
-            options.strict,
-            options.convention,
+            options,
             carry_mode,
             &entry,
             &linear,
@@ -509,10 +530,8 @@ pub fn prepare(s: &Ssa, modes: &ModeInput, options: &Options) -> Result<Plan, Re
         && programs[0].activations > 1
     {
         let dynamic = Options {
-            strict: options.strict,
-            convention: options.convention,
-            cw_clone: options.cw_clone,
             force: ModeForce::Dynamic,
+            ..options.clone()
         };
         return prepare(s, modes, &dynamic);
     }

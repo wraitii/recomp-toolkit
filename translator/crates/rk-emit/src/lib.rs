@@ -19,8 +19,8 @@ use std::fmt::Write as _;
 
 use crate::slow::*;
 use crate::support::*;
-use crate::x87::{External, PlanLines};
-use rk_core::contract::{Field, Fields};
+use crate::x87::{External, PlanLines, St0Text};
+use rk_core::contract::{Field, Fields, PrivateArguments};
 use rk_core::ir::{FunctionIr, Insn, OpCode, SehEffect};
 use rk_core::{Addr, Diagnostic, Reason, Result};
 use rk_ir::{field_lane, Op, Registers, SlowFamily, StateKey};
@@ -31,7 +31,7 @@ use rk_ssa::{FlagDescriptor, ValueId, DISPATCH_BLOCK};
 pub struct PrivateEmit {
     pub mask: Fields,
     pub inputs: Fields,
-    pub input_arguments: Fields,
+    pub input_arguments: PrivateArguments,
 }
 
 #[derive(Clone, Copy)]
@@ -45,7 +45,7 @@ pub struct EmitContext<'a> {
     pub checked_returns: &'a BTreeSet<Addr>,
     pub effect_returns: &'a BTreeSet<Addr>,
     pub private_masks: &'a BTreeMap<Addr, BTreeSet<Fields>>,
-    pub private_input_arguments: &'a BTreeMap<Addr, Fields>,
+    pub private_input_arguments: &'a BTreeMap<Addr, PrivateArguments>,
     pub known_entries: &'a BTreeSet<Addr>,
     pub region_entries: &'a BTreeMap<Addr, Addr>,
     pub setjmp_targets: &'a BTreeSet<Addr>,
@@ -61,6 +61,18 @@ pub struct EmitReport {
     pub fallbacks: BTreeSet<(Addr, String)>,
     pub slow_ops: BTreeSet<(Addr, String)>,
     pub promotion_failure: Option<String>,
+}
+
+pub fn argument_parameters(arguments: PrivateArguments) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = arguments
+        .registers
+        .iter()
+        .map(|field| ("uint32_t".to_string(), format!("{}_", field.name().to_lowercase())))
+        .collect();
+    if arguments.st0 {
+        out.push(("double".to_string(), "st0_".to_string()));
+    }
+    out
 }
 
 pub fn emit_body(planned: &PlannedFunction, ctx: &EmitContext<'_>) -> Result<(Body, EmitReport)> {
@@ -486,8 +498,8 @@ impl<'a> Emitter<'a> {
             params.push("uint32_t base_".to_string());
         }
         if let Some(private) = self.private {
-            for argument in private.input_arguments.iter() {
-                params.push(format!("uint32_t {}_", argument.name().to_lowercase()));
+            for (ty, name) in argument_parameters(private.input_arguments) {
+                params.push(format!("{ty} {name}"));
             }
             params.push("uint32_t expected_return_".to_string());
         } else {
@@ -649,7 +661,7 @@ impl<'a> Emitter<'a> {
             }
             if let Some(private) = self.private {
                 if let Some((field, _)) = field_lane(key) {
-                    if !private.inputs.contains(field) && !private.input_arguments.contains(field) {
+                    if !private.inputs.contains(field) && !private.input_arguments.registers.contains(field) {
                         continue;
                     }
                 }
@@ -1795,8 +1807,17 @@ impl<'a> Emitter<'a> {
             input_arguments: arguments,
         });
         let mut args = vec!["c".to_string()];
-        for field in arguments.iter() {
+        for field in arguments.registers.iter() {
             args.push(self.boundary_field(value, field)?);
+        }
+        if arguments.st0 {
+            let st0 = self.st0_handover(value)?.ok_or_else(|| {
+                self.error(
+                    self.s.value_addr[value as usize],
+                    "x87 plan did not hand ST0 to the private call",
+                )
+            })?;
+            args.push(st0.value);
         }
         args.push(self.guest_addr(expected));
         let args = args.join(", ");
@@ -1825,8 +1846,9 @@ impl<'a> Emitter<'a> {
                 } else {
                     format!("c->checkpoint_countdown > {checkpoints}u && ")
                 };
+                let guard = self.st0_guard(value)?;
                 (
-                    format!("{budget}entry_contract_prepare_{target:08x}(c, 0)"),
+                    format!("{budget}{guard}entry_contract_prepare_{target:08x}(c, 0)"),
                     call,
                     format!("CALL_FN_CHECKED({target:08x}, {expected});"),
                 )
@@ -1874,11 +1896,12 @@ impl<'a> Emitter<'a> {
             return Ok(true);
         }
         if let Some(call) = self.private_call(value, target)? {
+            let guard = self.st0_guard(value)?;
             let expected_addr = self.plan.return_addr[&value];
             let expected = self.guest_addr(expected_addr);
             let _ = writeln!(
                 self.out,
-                "if (entry_contract_prepare_{target:08x}(c, 0)) {{ {call} }} else {{"
+                "if ({guard}entry_contract_prepare_{target:08x}(c, 0)) {{ {call} }} else {{"
             );
             self.publish_arguments(value)?;
             let _ = writeln!(self.out, "CALL_FN_CHECKED({target:08x}, {expected}); }}");
@@ -2280,10 +2303,40 @@ impl<'a> Emitter<'a> {
     }
 
     fn publish_arguments(&mut self, value: ValueId) -> Result<()> {
-        let Some(keys) = self.plan.arguments.get(&value).cloned() else {
-            return Ok(());
+        if let Some(keys) = self.plan.arguments.get(&value).cloned() {
+            self.publish_keys(value, &keys, false)?;
+        }
+        if let Some(St0Text {
+            value: st0,
+            bits,
+            exact,
+            tag,
+            ..
+        }) = self.st0_handover(value)?
+        {
+            let _ = writeln!(
+                self.out,
+                "{{ uint32_t x87_push_ = (c->fpu_top + 7u) & 7u; c->st[x87_push_] = {st0}; c->st_bits[x87_push_] = {bits}; c->st_exact[x87_push_] = {exact}; c->fpu_tag = (uint16_t)((c->fpu_tag & ~(3u << (2u * x87_push_))) | (({tag}) << (2u * x87_push_))); c->fpu_top = x87_push_; }}"
+            );
+        }
+        Ok(())
+    }
+
+    fn st0_handover(&self, value: ValueId) -> Result<Option<St0Text>> {
+        let Some(x87) = self.plan.x87.as_ref() else {
+            return Ok(None);
         };
-        self.publish_keys(value, &keys, false)
+        x87.st0_handover(self.clone, value, &ValueNames { emitter: self })
+    }
+
+    fn st0_guard(&self, value: ValueId) -> Result<String> {
+        Ok(match self.st0_handover(value)? {
+            Some(st0) if !st0.canonical => format!(
+                "({}) == 0 && ({}) == ftag_classify({}) && ",
+                st0.exact, st0.tag, st0.value
+            ),
+            _ => String::new(),
+        })
     }
 
     fn boundary_field(&self, value: ValueId, field: Field) -> Result<String> {
@@ -2323,7 +2376,7 @@ impl<'a> Emitter<'a> {
         let Some((field, lane)) = field_lane(key) else {
             return false;
         };
-        if !private.input_arguments.contains(field) {
+        if !private.input_arguments.registers.contains(field) {
             return false;
         }
         let (input, byte) = match self.s.value(value).op {
@@ -2338,7 +2391,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn entry_keys(&self, value: ValueId, mut keys: Vec<StateKey>) -> Vec<StateKey> {
-        if self.private.is_none_or(|private| private.input_arguments.is_empty()) {
+        if self.private.is_none_or(|private| private.input_arguments.registers.is_empty()) {
             return keys;
         }
         for &(key, state) in self.s.boundary(value).unwrap_or_default() {
@@ -3429,7 +3482,7 @@ impl<'a> Emitter<'a> {
         if let Some((field, lane)) = field_lane(key) {
             if (field as usize) < 8 {
                 if let Some(private) = self.private {
-                    if private.input_arguments.contains(field) {
+                    if private.input_arguments.registers.contains(field) {
                         return Some((format!("{}_", field.name().to_lowercase()), lane as u32, 4));
                     }
                 }

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
-use rk_core::contract::Fields;
+use rk_core::contract::{Fields, PrivateArguments};
 use rk_core::ir::{FunctionIr, OpCode, Space};
 use rk_core::program::{EntryKind, Program};
 use rk_core::settings::Settings;
@@ -257,7 +257,7 @@ struct BodyContext<'a> {
     host_calls: &'a BTreeSet<Addr>,
     private_targets: &'a BTreeSet<Addr>,
     private_masks: BTreeMap<Addr, BTreeSet<Fields>>,
-    private_input_arguments: BTreeMap<Addr, Fields>,
+    private_input_arguments: BTreeMap<Addr, PrivateArguments>,
     switches: Switches,
     reloc: Option<rk_emit::RelocEmit>,
 }
@@ -513,7 +513,7 @@ fn build_bodies(
     Vec<Body>,
     EmitStats,
     BTreeMap<Addr, BTreeSet<Fields>>,
-    BTreeMap<Addr, Fields>,
+    BTreeMap<Addr, PrivateArguments>,
     BTreeSet<Addr>,
 )> {
     let known_entries: BTreeSet<Addr> = program
@@ -535,6 +535,18 @@ fn build_bodies(
         BTreeSet::new()
     };
     let effect_returns = effect_returns(&global.returns);
+    let private_arguments: BTreeMap<Addr, PrivateArguments> = global
+        .private
+        .input_arguments
+        .iter()
+        .filter(|(addr, _)| private_targets.contains(addr))
+        .map(|(&addr, &arguments)| (addr, arguments))
+        .collect();
+    let st0_targets: BTreeSet<Addr> = private_arguments
+        .iter()
+        .filter(|(_, arguments)| arguments.st0)
+        .map(|(&addr, _)| addr)
+        .collect();
     let make_ctx = |private_masks, private_input_arguments| BodyContext {
         program,
         facts: global.call_facts(),
@@ -546,6 +558,8 @@ fn build_bodies(
             convention: settings.msvc_x87_convention,
             cw_clone: settings.x87_cw_clone,
             force: x87_mode.into(),
+            st0_targets: st0_targets.clone(),
+            st0_argument: false,
         },
         fault_state: settings.fault_state,
         assume_private_stack: settings.assume_private_stack,
@@ -563,13 +577,6 @@ fn build_bodies(
         switches,
         reloc,
     };
-    let private_arguments: BTreeMap<Addr, Fields> = global
-        .private
-        .input_arguments
-        .iter()
-        .filter(|(addr, _)| private_targets.contains(addr))
-        .map(|(&addr, &fields)| (addr, fields))
-        .collect();
     let ctx = make_ctx(BTreeMap::new(), private_arguments.clone());
     let selected: BTreeSet<Addr> = only.iter().copied().collect();
     let wanted = |addr: Addr| selected.is_empty() || selected.contains(&addr);
@@ -643,12 +650,16 @@ fn build_bodies(
                     let rows = vec![emit_row(&ctx2, addr, &ir, &planned)];
                     let mut private_bodies = Vec::new();
                     if let Some(layouts) = specialized.layouts.get(&addr) {
-                        if global.private.known_modes.contains(&addr)
+                        let fast = global.private.known_modes.contains(&addr)
                             && ctx2.x87_options.cw_clone
-                            && ctx2.x87_options.force == rk_x87::ModeForce::Auto
-                        {
+                            && ctx2.x87_options.force == rk_x87::ModeForce::Auto;
+                        let st0 = private_arguments.get(&addr).is_some_and(|arguments| arguments.st0);
+                        if fast || st0 {
                             let mut options = ctx2.x87_options.clone();
-                            options.force = rk_x87::ModeForce::Fast;
+                            if fast {
+                                options.force = rk_x87::ModeForce::Fast;
+                            }
+                            options.st0_argument = st0;
                             planned.x87 = Some(
                                 rk_x87::prepare(&planned.ssa, &ctx2.x87_modes, &options)
                                     .map_err(|reason| Diagnostic::error(addr, reason))?,

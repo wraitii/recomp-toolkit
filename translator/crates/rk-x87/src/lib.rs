@@ -11,5 +11,6 @@ mod scalar;
 mod types;
 
 pub use plan::{prepare, CloneProgram, ModeCondition, ModeForce, ModeInput, Options, Plan};
+pub use scalar::St0Handover;
 pub use recipes::Recipes;
 pub use types::{Event, Expr, Type};

@@ -3,6 +3,14 @@ use rk_ir::x87::X87Condition;
 use rk_ssa::{BlockId, ValueId};
 use rk_x87::{Event, Expr, Plan, Type};
 
+pub struct St0Text {
+    pub value: String,
+    pub bits: String,
+    pub exact: String,
+    pub tag: String,
+    pub canonical: bool,
+}
+
 pub trait External {
     fn value(&self, id: ValueId) -> Result<String>;
     fn call_hooks(&self) -> bool;
@@ -62,6 +70,7 @@ impl Printer<'_> {
             Expr::Constant(name) => constant(name).into(),
             Expr::Local(index, _) => format!("x87s{index}"),
             Expr::Carry(position, part) => carry_name(*position, part),
+            Expr::St0Argument => "st0_".into(),
             Expr::Environment(part) => format!("x87_{part}_"),
             Expr::Resident(part) => format!("c->fpu_{part}"),
             Expr::Cw(value) => format!("0x{value:x}u"),
@@ -341,6 +350,12 @@ pub trait PlanLines {
         external: &dyn External,
     ) -> Result<Vec<String>>;
     fn declaration_lines(&self, external: &dyn External) -> Result<Vec<String>>;
+    fn st0_handover(
+        &self,
+        clone: usize,
+        value: ValueId,
+        external: &dyn External,
+    ) -> Result<Option<St0Text>>;
 }
 
 impl PlanLines for Plan {
@@ -406,6 +421,25 @@ impl PlanLines for Plan {
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
         )
+    }
+
+    fn st0_handover(
+        &self,
+        clone: usize,
+        value: ValueId,
+        external: &dyn External,
+    ) -> Result<Option<St0Text>> {
+        let printer = Printer { external };
+        let Some(handover) = self.programs[clone].arguments.get(&value) else {
+            return Ok(None);
+        };
+        Ok(Some(St0Text {
+            value: printer.expr(&handover.value)?,
+            bits: printer.expr(&handover.bits)?,
+            exact: printer.expr(&handover.exact)?,
+            tag: printer.expr(&handover.tag)?,
+            canonical: handover.canonical,
+        }))
     }
 
     fn declaration_lines(&self, external: &dyn External) -> Result<Vec<String>> {

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use rk_core::contract::Fields;
+use rk_core::contract::{Fields, PrivateArguments};
 use rk_core::Addr;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -12,7 +12,7 @@ pub enum Declaration {
     PrivateContract {
         addr: Addr,
         mask: Fields,
-        input_arguments: Fields,
+        input_arguments: PrivateArguments,
     },
 }
 
