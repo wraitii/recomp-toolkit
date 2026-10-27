@@ -160,7 +160,7 @@ fn wgpu_format(view: &SurfaceView, op: &'static str) -> Result<wgpu::TextureForm
         })
 }
 
-fn opaque_destination(format_value: u32) -> bool {
+fn opaque_format(format_value: u32) -> bool {
     matches!(
         format::info(format_value),
         Some(format::FormatInfo {
@@ -168,6 +168,11 @@ fn opaque_destination(format_value: u32) -> bool {
             ..
         })
     )
+}
+
+pub(crate) fn supports_format_conversion(src: u32, dst: u32) -> bool {
+    matches!(src, format::D3DFMT_A8R8G8B8 | format::D3DFMT_X8R8G8B8)
+        && matches!(dst, format::D3DFMT_A8R8G8B8 | format::D3DFMT_X8R8G8B8)
 }
 
 fn reject_depth(src: &SurfaceView, dst: &SurfaceView, op: &'static str) -> Result<(), RenderError> {
@@ -338,7 +343,7 @@ fn blit(
         dst_rect.top as f32,
         dst_rect.width() as f32,
         dst_rect.height() as f32,
-        if opaque_destination(dst.format) {
+        if opaque_format(src.format) || opaque_format(dst.format) {
             1.0
         } else {
             0.0
@@ -565,10 +570,13 @@ pub(crate) fn stretch_rect(
     if same_format && same_extent {
         return raw_copy(gpu, src, src_rect, dst, dst_rect, OP);
     }
-    if !same_format {
+    if !same_format && !supports_format_conversion(src.format, dst.format) {
         return Err(RenderError::new(
             OP,
-            "format conversion is not supported; source and destination formats must match",
+            format!(
+                "format conversion from D3DFORMAT {} to {} is not supported",
+                src.format, dst.format
+            ),
         ));
     }
     if src.texture == dst.texture {
@@ -752,7 +760,7 @@ pub(crate) fn color_fill(
         ));
     }
     let dst_view = subresource_view(dst, OP, "d3d9-fill-target")?;
-    let alpha = if opaque_destination(dst.format) {
+    let alpha = if opaque_format(dst.format) {
         1.0
     } else {
         ((color >> 24) & 0xff) as f32 / 255.0

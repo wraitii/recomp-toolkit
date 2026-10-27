@@ -3504,9 +3504,10 @@ pub fn d3d9_check_device_format_conversion(request: &D3d9CheckFormatConversionRe
     if let Err(status) = check_adapter(request.adapter, request.device_type) {
         return status;
     }
-    if request.source_format == request.destination_format
-        && format::is_supported(request.source_format)
-        && !format::is_block(request.source_format)
+    if copy::supports_format_conversion(request.source_format, request.destination_format)
+        || (request.source_format == request.destination_format
+            && format::is_supported(request.source_format)
+            && !format::is_block(request.source_format))
     {
         return status(StatusCode::Ok, "");
     }
