@@ -204,6 +204,7 @@ const SUPPORTED: &[&str] = &[
     "SQRTPS",
     "RCPPS",
     "RSQRTPS",
+    "RCPSS",
     "RSQRTSS",
     "CMPEQPS",
     "CMPLTPS",
@@ -592,6 +593,7 @@ impl Lowerer<'_> {
                     | "SQRTPS"
                     | "RCPPS"
                     | "RSQRTPS"
+                    | "RCPSS"
                     | "RSQRTSS"
                     | "MOVMSKPS"
             );
@@ -975,22 +977,22 @@ fn correct_sse(
             })
             .collect());
     }
-    if mnem == "RSQRTSS" {
+    if let Some((userop, code)) = match mnem {
+        "RCPSS" => Some((0xa4, OpCode::FloatRcp)),
+        "RSQRTSS" => Some((0xa6, OpCode::FloatRsqrt)),
+        _ => None,
+    } {
         let mut out = Vec::with_capacity(ops.len());
         for item in ops {
-            if item.opcode == OpCode::CallOther && item.userop == Some(0xa6) {
+            if item.opcode == OpCode::CallOther && item.userop == Some(userop) {
                 let output = item.output.ok_or_else(unsupported)?;
                 let source = *item.inputs.last().ok_or_else(unsupported)?;
                 if output.size == 16 && source.size == 16 {
                     let output_lanes = wide_output(output, regs, fresh)?;
                     let source_lanes = wide_lanes(source, &BTreeMap::new(), regs, fresh)?;
-                    out.push(op(
-                        OpCode::FloatRsqrt,
-                        output_lanes[0],
-                        vec![source_lanes[0]],
-                    ));
+                    out.push(op(code, output_lanes[0], vec![source_lanes[0]]));
                 } else if output.size == 4 && source.size == 4 {
-                    out.push(op(OpCode::FloatRsqrt, output, vec![source]));
+                    out.push(op(code, output, vec![source]));
                 } else {
                     return Err(unsupported());
                 }

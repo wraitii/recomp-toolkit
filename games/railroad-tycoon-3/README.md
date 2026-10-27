@@ -78,10 +78,9 @@ renders the 3D world (terrain colour and detail, UI, DXT textures).
 
 Unsupported SSE/XMM and 3DNow instructions emit named traps. The previous
 52 `skip_functions` entries are unnecessary with the current kit; all mapped
-functions are translated. The kit now lowers `movups xmm3, xmmword ptr [ecx]` at the former first stop,
-`00581699`; `mulps xmm2, xmm3` at `005816a8` still traps. The runtime reports a CPUID
-without MMX/SSE/3DNow, so the guest selects the x87 math tier. Full vector
-lowering remains necessary before advertising those features.
+functions are translated. The runtime reports a Pentium III with
+MMX and SSE but no SSE2 or 3DNow, so D3DX selects its SSE math tier; the
+remaining traps are in the 3DNow and SSE2 paths.
 
 The v3 map adds Ghidra's jump targets, referenced interior entries and
 non-returning functions/calls. Its migration exposed stale function bodies,
@@ -167,7 +166,7 @@ python tools/recomp/code_map.py --pack /path/to/v3-export --exe /path/to/RT3.exe
 
 The map pins the executable SHA-256 and preserves disconnected function bodies and exceptional instruction boundaries. It also records Ghidra jump targets, referenced interior entries and non-returning functions/calls. Verify every boundary repair against original bytes before exporting.
 
-Unsupported vector instructions emit named traps at their original addresses; the previous 52 `skip_functions` entries are no longer needed. The kit now lowers `movups xmm3, xmmword ptr [ecx]` at the former first stop, `0x00581699`; `mulps xmm2, xmm3` at `0x005816a8` still traps. Remaining SSE/3DNow gaps still trap; CPUID feature advertisement is unchanged.
+Unsupported vector instructions emit named traps at their original addresses; the previous 52 `skip_functions` entries are no longer needed.
 
 `DIVERGENCE(original):` RT3 assumes `private-stack` and `stack-pointer-bases`
 ([premises](../../docs/translator.md)). The binary has no RTTI and one `sub ecx`
