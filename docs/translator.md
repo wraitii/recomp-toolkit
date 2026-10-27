@@ -157,31 +157,31 @@ Unknown targets, captures and unbounded parameter accesses remain conservative. 
 indirect target sets combine every target's effects; cross-call deferral currently requires
 a direct call. General original-code summaries feed the offline inference below.
 
-`[translate] assume = ["private-stack"]` opts into the private-stack premise; without
-it frame aliasing stays conservative. `exposed_stack_functions = [0x00401000]`
-disables the assumption for the listed function owners in the main image, including
-their compiled variants. `DIVERGENCE(original):` newly allocated, unescaped frame
-storage is assumed inaccessible through pointers independent of entry ESP, including
-pre-existing pointers and wrapping arithmetic. Explicit ESP-derived accesses still
-alias normally. Load forwarding requires a single entry and no opaque non-call effects
-or escaping branches. Escaped ranges retain conservative aliasing independently of
-unexposed slots. Cyclic address joins require agreeing outside inputs and zero net
-offset around every traversed cycle; unanchored cycles remain unknown.
-Frame loads forward across proved-disjoint calls, including aligned locals and
-read-only callees; other loads do not forward across calls. `DIVERGENCE(original):` the
-assumption extends to hooks, replacements and observers, which may read but not
-write unescaped caller frame bytes.
+`[translate] assume` lists opt-in premises about the original code; it is empty by
+default. `DIVERGENCE(original):` a listed premise is trusted, not checked, and code that
+breaks it can read stale or wrong frame bytes.
+
+| Name | Assumes | Breaks on | How to check |
+| --- | --- | --- | --- |
+| `private-stack` | Frame bytes whose address never escapes are reached only through ESP/EBP-derived addresses of their function, not through pre-existing or wrapped pointers. Callees reach the caller's frame only through their argument area, argument writes and escaped addresses. Hooks, replacements, observers and scheduler work at checkpoints may read but not write it. | Dangling pointers into a returned or reused frame; frame walks the escape tracking cannot see; hooks or replacements writing caller locals; one thread inspecting another's stack. | `--dump stack --only ADDR` shows exposure and rejections; translate without it and run the paired diff. `exposed_stack_functions` drops it for listed owners. |
+| `stack-pointer-bases` | An escaped frame pointer is the lowest address its consumers touch: exposure is `[pointer, entry ESP)`, and base plus an unknown index stays in that range. | Callees stepping below a passed pointer: `sub ecx, N` this-adjustors for secondary bases of stack objects, member-to-container conversions, negative indices, reverse walks from a buffer end. | Look for adjustor thunks referenced as pointers and for classes with secondary bases constructed on the stack. |
+
+Without `private-stack`, frame aliasing stays conservative. With it, explicit
+ESP-derived accesses still alias normally. Load forwarding requires a single entry
+and no opaque non-call effects or escaping branches. Escaped ranges retain
+conservative aliasing independently of unexposed slots. Cyclic address joins require
+agreeing outside inputs and zero net offset around every traversed cycle; unanchored
+cycles remain unknown. Frame loads forward across proved-disjoint calls, including
+aligned locals and read-only callees; other loads do not forward across calls.
 Computed return values retain proved access footprints while recording their input
 capture sources; passed frame pointers remain exposed conservatively when their
 returned offsets are unknown. Unknown ESP-derived returns remain unsupported.
-`assume = ["stack-pointer-bases"]` is also opt-in.
-`DIVERGENCE(original):` when listed, an escaped frame pointer is assumed to identify
-the beginning of its accessible region. Unknown upward extents expose the remainder
-of the frame; proved callee ranges can narrow exposure and include negative accesses.
-Likewise a frame address plus an unknown index addresses only the frame from that
-address up to entry ESP. Each exempted write needs a proved current ESP below the entire negative-offset
-slot; arguments and the return address remain conservative. Forwarding retains
-guest stores, and original-code analysis summaries do not use this assumption.
+Without `stack-pointer-bases`, an escaped frame pointer exposes the whole frame.
+With it, unknown upward extents expose the remainder of the frame, and proved callee
+ranges can narrow exposure and include negative accesses. Each exempted write needs a
+proved current ESP below the entire negative-offset slot; arguments and the return
+address remain conservative. Forwarding retains guest stores, and original-code
+analysis summaries do not use this premise.
 With relaxed fault state, eligible x87 accesses split into rounded value and memory
 effects independently of lazy writes, preserving pop, status and ESP provenance.
 Forwarding, region partitioning and dead-store elimination share one frame model
@@ -191,9 +191,9 @@ of wider values, and stores fully covered on every path by a later exact write
 before any read are removed. Proved call cleanup is always used for ESP
 provenance; the emitted ESP after such a call is reread from guest state.
 
-`[translate] lazy_stack_writes` defaults to true when the private-stack assumption
-is enabled, fault state is relaxed, and store hooks are disabled. Up to 64 exact
-negative frame slots of 1, 2, 4 or 8 bytes become state keys: the SSA is rebuilt
+Lazy stack writes run under `private-stack` when fault state is relaxed and store
+hooks are disabled; `[translate] lazy_stack_writes = false` turns them off for
+debugging. Up to 64 exact negative frame slots of 1, 2, 4 or 8 bytes become state keys: the SSA is rebuilt
 with their contained loads, stores and x87 values as key reads and writes, so they
 share register publication and residency. Slots are relative to entry ESP or to the
 function's most used ESP alignment, `(entry ESP + c) & mask`. Calls, returns and
@@ -205,18 +205,15 @@ Preparation consumes checkpoint credit only when accepted;
 otherwise pending slots publish before ordinary dispatch consumes its checkpoint.
 Non-leaf callees require credit for the longest nested call path as well as entry;
 recursion, call-containing loops and unresolved dispatch retain eager publication.
-`DIVERGENCE(original):` scheduler work, APCs and hooks installed at a checkpoint are
-assumed to preserve this thread's unescaped live frame, so a call whose memory summary
-excludes a slot does not reload it even without checkpoint credit; credit only lets the
-call skip publication. A guarded call has one route condition, `recomp_slow_routes`, raised by
-hooks, profiling and frame watch; its unlikely generic arm publishes the register
+Under `private-stack`, a call whose memory summary excludes a slot does not reload it
+even without checkpoint credit; credit only lets the call skip publication. A guarded
+call has one route condition, `recomp_slow_routes`, raised by hooks, profiling and frame watch; its unlikely generic arm publishes the register
 fields hooks observe and the slots the call does not otherwise demand, and nothing is
 reloaded afterwards. `[game] call_hooks = false` removes hook publications and
 kept-field rereads everywhere. Slots below a call's ESP are published before it and
 reloaded after it. Unknown effects, alternate entries and exposed ranges keep frame
 stores in memory. `DIVERGENCE(original):` eligible private-frame writes are delayed;
-ordinary entry paths preserve final bytes. Set `lazy_stack_writes = false` to retain forwarding with eager
-stores; `exposed_stack_functions` disables both optimizations for an owner.
+ordinary entry paths preserve final bytes.
 
 `[translate] stack_memory` enables additional original-code summaries for offline
 inference; it defaults to false. Ghost Recon enables it with the explicit premise
@@ -244,7 +241,7 @@ tables are followed. Calls through IAT slots, IAT thunks or registers loaded fro
 an IAT slot pop the runtime shim's declared arguments (`import_abi.py` reads the
 shim tables into `import_pops`), keep EBX/ESI/EDI/EBP and write any memory; imports
 with unknown or conflicting argument counts stay unresolved. FS-relative stores
-leave stack slots intact. Under the private-stack premise, other non-stack stores and
+leave stack slots intact. Under `private-stack`, other non-stack stores and
 opaque callees keep slots below entry ESP. Interior entries and SEH do not block
 cleanup proofs: only paths from the entry are checked, assuming MSVC `__except`
 resumption restores the frame's ESP and leaves through the same returns.
@@ -261,10 +258,8 @@ guarantees. Proved functions are summarised again against their callees' summari
 to record constant writes at or above entry ESP (`argument-writes`). A function has
 none when an address at or above its entry ESP is stored, passed in a register,
 returned, or indexed for a store, or when it has SEH or interior entries.
-`DIVERGENCE(original):` under the private-stack premise, a callee reaches its caller's
-frame only through those writes, its own argument area and escaped addresses, so a
-call clobbers only the slots its argument writes cover. `--dump global` lists
-per-function rejections, unresolved call edges, cleanup-only proofs and argument
+Under `private-stack`, a call clobbers only the caller slots its argument writes
+cover. `--dump global` lists per-function rejections, unresolved call edges, cleanup-only proofs and argument
 writes.
 
 At a bounded call, every returning candidate must have a summary with matching
@@ -330,3 +325,32 @@ returns prevent a stronger unconditional result. Other D3D8 methods carry no CW
 effect: generated code does not consume their preserve bits, and the optional
 call-fact check treats an absent effect as exact equality. Callback-capable or unaudited methods
 need conservative effects until their complete behavior is established.
+
+## Open work
+
+Guest state is converging on one model: register lanes, flag fields and promoted
+frame slots each have an SSA value and a guest home; boundaries demand, clobber or
+pass through each location; a guarded boundary has one route condition with a fast
+arm under its contract and a slow arm that publishes and reloads everything the
+generic path may observe. Remaining steps:
+
+- One placement pass over registers, flags and slots (anticipated demand plus
+  availability, cold arms preferred), replacing residency publication and the eager
+  slot heuristics. Reloads stay at the call unless dead on some paths.
+- Refuse promotion when a may-clobber inside a loop forces per-iteration reloads of
+  a slot the loop reads.
+- Cleanup roots behind indirect calls, such as RT3's `005193f0` and `00518de0`.
+- A shared SCC solver for the `rk-global` stack, memory and borrowed-stack analyses.
+- Address-list hook sets, so only hookable targets keep the hook route.
+- Cheaper `entry_contract_prepare_` routes: leaf callees that cannot yield need no
+  checkpoint decrement.
+- Narrow `stack-pointer-bases` with facts: a frame pointer pushed as an argument
+  of a callee whose borrowed-stack summary bounds that argument needs no premise.
+  Imports alone cover few cases (RT3: 36 of the 594 bodies the premise changes).
+- Released-stack retirement, removed because its proof rejected any read before the
+  next push or call and contract routes took precedence: it needs a proof that the
+  callee's frame does not escape, a continuation check that rejects only reads that
+  may alias released bytes, and a retired contract variant.
+- Stack arguments as contract inputs, values passed in host registers, x87 spill
+  slots as plain values, leaf functions without ESP materialization, and one
+  specialization key instead of separate contract, checked and x87-mode clones.

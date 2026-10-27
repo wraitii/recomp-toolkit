@@ -96,22 +96,6 @@ which stops explicitly on unsupported semantics. `--no-pcode` omits this fallbac
 at build time; `RECOMP_INTERP=off` disables it at runtime.
 Advertising SSE support requires auditing the remaining lowering gaps first.
 
-Memory forwarding now shares value phis across joins and loop backedges while
-retaining guest stores and unknown-write/call barriers. Across the 85 affected
-functions (93 compiled variants), ARM64 bodies have 121 fewer load instructions
-and 28 more store instructions. Total size grows from 202,176 to 202,312 bytes,
-including unique outlined helpers; 32 bodies shrink, 48 stay the same size and
-13 grow. These are static counts, not runtime speed measurements. Forwarding
-can expose loop bounds to Clang and increase unrolling and spills: `004f8770`
-loses 14 loads, seven stores and 72 body bytes, while `00454d70` gains seven
-loads, 21 stores and 320 body bytes. No profitability heuristic is applied.
-
-Validation: the existing 25 translator cases passed at 200 inputs each. Paired
-original-byte comparisons covered the 85 changed functions: 52 passed after
-two timeout rechecks, 30 had no comparable return, and three x87 discrepancies
-also reproduced without this change; no ordinary/specialized pair differed.
-The windowed app builds and was not launched for this change.
-
 Host overhead: the renderer uploads only each draw's requested vertex interval,
 including packed software-lighting output, and the guest-store watch/dirty gate
 is forced inline. Vertex/index buffers retain guest backing across locks, and
@@ -185,11 +169,12 @@ The map pins the executable SHA-256 and preserves disconnected function bodies a
 
 Unsupported vector instructions emit named traps at their original addresses; the previous 52 `skip_functions` entries are no longer needed. The kit now lowers `movups xmm3, xmmword ptr [ecx]` at the former first stop, `0x00581699`; `mulps xmm2, xmm3` at `0x005816a8` still traps. Remaining SSE/3DNow gaps still trap; CPUID feature advertisement is unchanged.
 
-`DIVERGENCE(original):` RT3 assumes `private-stack` and `stack-pointer-bases`:
-unescaped frame bytes are reached only through ESP/EBP, and escaped frame
-pointers bound access from below unless callee evidence widens that range.
-Remove a name from `[translate] assume` to drop its premise; [translator details](../../docs/translator.md)
-describe guarded calls, range exposure and conservative fallbacks.
+`DIVERGENCE(original):` RT3 assumes `private-stack` and `stack-pointer-bases`
+([premises](../../docs/translator.md)). The binary has no RTTI and one `sub ecx`
+this-adjustor, which nothing references as a pointer. Without `stack-pointer-bases`,
+594 bodies change, mostly in callers of guest functions; the loader `0x0042c1b0`
+goes from 44 to 67 static guest reads. Remove a name from `[translate] assume` to
+drop its premise.
 
 The checked-return pilot selects `0x005a10d0` (through `0x005a1144`), the x87
 integer-conversion helper. Original bytes show a single-entry leaf with aligned
