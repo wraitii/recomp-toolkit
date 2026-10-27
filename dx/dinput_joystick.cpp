@@ -257,8 +257,24 @@ int find_object(const ComObj *d, uint32_t obj, uint32_t how) {
     return -1;
 }
 
+uint32_t feedback_axis_mask() {
+    HostHapticRequest r{};
+    r.operation = HOST_HAPTIC_CAPS;
+    if (host_haptic_request(&r) <= 0)
+        return 0;
+    if (!r.features)
+        return (r.flags & 1) ? 1 : 0;
+    uint32_t mask = 0;
+    NativeOrder order = native_order();
+    for (unsigned i = 0; i < JOY_AXES; ++i)
+        if ((r.flags & (1u << (8 + i))) && order.axis_slot[i] >= 0)
+            mask |= 1u << order.axis_slot[i];
+    return mask;
+}
+
 // One DIDEVICEOBJECTINSTANCE{A,W} of `size` bytes for object `index`.
-void write_object_instance(uint32_t at, uint32_t size, bool wide, const ComObj *d, uint32_t index) {
+void write_object_instance(uint32_t at, uint32_t size, bool wide, const ComObj *d, uint32_t index,
+                           uint32_t ff_axes) {
     const JoyObject &o = joy_objects()[index];
     gm_zero(at, size);
     wr32(at, size);
@@ -266,7 +282,7 @@ void write_object_instance(uint32_t at, uint32_t size, bool wide, const ComObj *
     uint32_t ofs = guest_ofs(d, index);
     wr32(at + DIDOI_OFF_dwOfs, ofs == 0xFFFFFFFFu ? o.ofs : ofs);
     wr32(at + DIDOI_OFF_dwType, o.type);
-    if (index == 0)
+    if (index < JOY_AXES && (ff_axes & (1u << index)))
         wr32(at + DIDOI_OFF_dwFlags, 1);
     uint32_t tail = DIDOI_OFF_tszName + DIDOI_NAME_CHARS * (wide ? 2u : 1u);
     if (wide)
@@ -435,9 +451,16 @@ void joy_write_device_instance(uint32_t at, uint32_t size, bool wide, uint32_t d
     }
 }
 
+bool joy_has_feedback() {
+    HostHapticRequest r{};
+    r.operation = HOST_HAPTIC_CAPS;
+    return host_haptic_request(&r) > 0 && (r.features || (r.flags & 1));
+}
 uint32_t joy_get_capabilities(ComObj *d, uint32_t out, uint32_t size) {
-    wr32(out + DIDC_OFF_dwFlags, DIDC_ATTACHED | 0x100u);
-    wr32(out + DIDC_OFF_dwDevType, joy_devtype(d->di_version));
+    uint32_t version = d->di_version;
+    bool feedback = joy_has_feedback();
+    wr32(out + DIDC_OFF_dwFlags, DIDC_ATTACHED | (feedback ? 0x100u : 0u));
+    wr32(out + DIDC_OFF_dwDevType, joy_devtype(version));
     if (size >= DIDEVCAPS_DX3_SIZE) {
         wr32(out + DIDC_OFF_dwAxes, JOY_AXES);
         wr32(out + DIDC_OFF_dwButtons, JOY_BUTTONS);
@@ -504,15 +527,16 @@ uint32_t joy_enum_objects(X86 *c, ComObj *d, uint32_t cb, uint32_t ref, uint32_t
     uint32_t size = d->di_wide ? DIDEVICEOBJECTINSTANCEW_SIZE : DIDEVICEOBJECTINSTANCEA_SIZE;
     uint32_t bits = flags & DIDFT_TYPEMASK;
     const std::vector<JoyObject> &objs = joy_objects();
+    uint32_t ff_axes = feedback_axis_mask();
     for (uint32_t i = 0; i < objs.size(); ++i) {
-        if ((flags & 0x01000000u) && i != 0)
+        if ((flags & 0x01000000u) && (i >= JOY_AXES || !(ff_axes & (1u << i))))
             continue;
         if (bits && !(objs[i].type & bits))
             continue;
         uint32_t a = di_scratch(size);
         if (!a)
             return E_OUTOFMEMORY;
-        write_object_instance(a, size, d->di_wide, d, i);
+        write_object_instance(a, size, d->di_wide, d, i, ff_axes);
         if (guest_call(c, cb, a, ref) != 1 /* DIENUM_CONTINUE */)
             break;
     }
@@ -530,7 +554,7 @@ uint32_t joy_get_object_info(ComObj *d, uint32_t out, uint32_t obj, uint32_t how
     int idx = find_object(d, obj, how);
     if (idx < 0)
         return DIERR_OBJECTNOTFOUND;
-    write_object_instance(out, size, d->di_wide, d, (uint32_t)idx);
+    write_object_instance(out, size, d->di_wide, d, (uint32_t)idx, feedback_axis_mask());
     return DI_OK;
 }
 
@@ -721,4 +745,22 @@ void joy_acquired(ComObj *d) {
     for (int i = 0; i < 65536 && host_pad_next_event(seq, &e); ++i)
         seq = e.sequence;
     d->last_sequence = seq;
+}
+
+int joy_haptic_axis(const ComObj *device, uint32_t object, uint32_t how) {
+    int slot = find_object(device, object, how);
+    if (slot < 0 || slot >= JOY_AXES)
+        return -1;
+    NativeOrder order = native_order();
+    for (int i = 0; i < JOY_AXES; ++i)
+        if (order.axis_slot[i] == slot)
+            return i;
+    return -1;
+}
+
+int joy_haptic_button(const ComObj *device, uint32_t object, uint32_t how) {
+    int index = find_object(device, object, how);
+    if (index < int(kObjButton0) || index >= int(kObjButton0 + JOY_BUTTONS))
+        return -1;
+    return native_order().button_bit[index - int(kObjButton0)];
 }

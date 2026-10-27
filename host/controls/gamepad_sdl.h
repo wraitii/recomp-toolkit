@@ -22,6 +22,9 @@ void gamepad_handle_event(const SDL_Event &e);
 // Once per pump, after the events: re-reads the open pad's whole raw state
 // (a no-op when nothing changed).
 void gamepad_poll();
+void gamepad_haptic_service();
+void gamepad_haptic_shutdown();
+void gamepad_haptic_focus(bool focused);
 bool gamepad_connected();
 bool gamepad_rumble_supported();
 std::string gamepad_name();

@@ -15,7 +15,7 @@ else()
   # Subsystems the host does not use stay out of the binary.
   set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
   set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
-  set(SDL_HAPTIC OFF CACHE BOOL "" FORCE)
+  set(SDL_HAPTIC ON CACHE BOOL "" FORCE)
   set(SDL_RENDER ON CACHE BOOL "" FORCE)
   set(SDL_GPU OFF CACHE BOOL "" FORCE)
   if(EMSCRIPTEN)

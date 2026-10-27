@@ -38,6 +38,7 @@ struct ButtonBinding {
 
 struct PadMapperProfile {
     uint32_t version = 1;
+    bool directinput_rumble = true;
     float stick_deadzone = 0.08f;
     std::array<AxisCalibration, kSdlAxisCount> axes{};
     std::array<AxisBinding, kSdlAxisCount> axis_bindings{};

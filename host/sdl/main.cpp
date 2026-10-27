@@ -1523,6 +1523,8 @@ void handle_event(const SDL_Event &event) {
                     event.type == SDL_EVENT_QUIT ? "quit requested" : "window close requested");
         g_close_requested = true;
         host_message_box_cancel_all();
+        controls::host_set_focused(false);
+        controls::gamepad_haptic_shutdown();
         break;
     default:
         break;
@@ -1609,8 +1611,9 @@ void after_events() {
         const HostGameRect game = game_rect_for(screen.dw, screen.dh);
         controls::host_set_screen(screen, controls::Rect{game.x, game.y, game.w, game.h},
                                   screen.dh - (screen.safe.y + screen.safe.h));
-        controls::host_set_focused(window_focused());
+        controls::host_set_focused(window_focused() && !g_close_requested);
         controls::gamepad_poll();
+        controls::gamepad_haptic_service();
         controls::host_set_wanted(absent, controls::gamepad_connected());
         controls::host_pump(SDL_GetTicksNS());
         update_editor_text_input();
@@ -2575,6 +2578,7 @@ int main(int argc, char **argv) {
     // handlers after it: there its stream is destroyed through a freed mutex.
     host_audio_queue_report(stdout);
     host_audio_shutdown();
+    controls::gamepad_haptic_shutdown();
     SDL_Quit();
     platform_ui_process_exit(0);
     return 0;
