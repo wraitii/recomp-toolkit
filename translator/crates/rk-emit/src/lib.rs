@@ -1876,6 +1876,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn returned(&mut self, value: ValueId, target: Addr) -> Result<()> {
+        if self.ctx.proven_returns.contains(&target) {
+            return Ok(());
+        }
         let expected = self.plan.return_addr.get(&value).copied().ok_or_else(|| {
             self.error(
                 self.s.value_addr[value as usize],
@@ -1889,7 +1892,7 @@ impl<'a> Emitter<'a> {
                 self.out,
                 "if (RECOMP_UNLIKELY(c->eip != {expected})) {{ recomp_return_resume(c, {site}, {expected}, c->eip); return; }}"
             );
-        } else if !self.ctx.proven_returns.contains(&target) {
+        } else {
             let expected = self.guest_addr(expected);
             let _ = writeln!(
                 self.out,

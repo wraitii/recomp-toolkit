@@ -350,15 +350,24 @@ need conservative effects until their complete behavior is established.
 `[translate] direct_variants = true` selects closed, returning leaves with at least
 two direct call sites and at most 64 original instructions per site. Opaque
 observers, native replacements and unsupported contracts exclude targets.
+After SSA planning, it selects up to two GPR arguments per leaf, excluding ESP.
+Selection requires full-register stores at two or more call sites and a positive
+static estimate after charging for other call sites and added return stores.
+Affected callers are replanned for publication and liveness without rebuilding SSA.
 `direct_arguments = { "ADDR" = ["ECX", "ST0"] }` explicitly selects a function
-and passes its listed GPR inputs and optional ST0 as C arguments; unused GPRs are
-removed by the callee's read contract. Auxiliary modules use ordinary bodies.
+and overrides automatic selection with its listed GPR inputs and optional ST0;
+unused GPRs are removed by the callee's read contract. Auxiliary modules use ordinary bodies.
+The translation report's `direct_arguments` records the resolved selections.
 
 Each selected function has one `direct_ADDR` body, determined by its C arguments
-and x87 mode. It publishes the full return state, with the same SSA publication
-and residency reductions as the ordinary body. Callers retain their own live
-reloads. No output masks or per-mask entry thunks remain. The inline
-`recomp_direct_` guard calls the body directly; native replacement edits change
+and x87 mode. Its return publications use the same SSA publication and residency
+reductions as the ordinary body. Callers retain their own live
+reloads. A proved direct return omits EIP publication and its return-slot load
+when otherwise unused; generic bodies and unproved returns retain both.
+Other observer snapshots carry the current instruction address as a relocatable
+constant instead of reloading EIP left by a prior call. No output masks or
+per-mask entry thunks remain. The inline `recomp_direct_` guard calls the body directly;
+native replacement edits change
 only the stable entries and their `call_ready_` bytes. Hooks, profiling, exhausted
 checkpoint credit and incompatible ST0/x87 modes use `call_ADDR` instead. Both
 arms share the caller's return policy. `RK_NO_DIRECT=1` disables variant selection;

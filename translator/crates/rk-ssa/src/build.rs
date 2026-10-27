@@ -970,9 +970,22 @@ impl<'a> Builder<'a> {
         indices: &[usize],
     ) -> Result<(), Diagnostic> {
         let mut resolved = Vec::with_capacity(indices.len());
+        let eip = Registers::get().require("EIP").offset as u32;
+        let mut instruction_eip = None;
         for &index in indices {
             let key = self.keys[index];
-            resolved.push((key, self.state_slot(state, index, block)?));
+            let value = match key {
+                StateKey::Register(offset)
+                    if (eip..eip + 4).contains(&offset)
+                        && self.values[at as usize].op != Op::Return =>
+                {
+                    let target = *instruction_eip
+                        .get_or_insert_with(|| self.value(Op::Target(self.current_addr), 4, &[]));
+                    self.value(Op::Byte((offset - eip) as u8), 1, &[target])
+                }
+                _ => self.state_slot(state, index, block)?,
+            };
+            resolved.push((key, value));
         }
         let state_start = self.state_arena.len() as u32;
         let state_len = resolved.len() as u32;

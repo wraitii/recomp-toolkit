@@ -15,6 +15,9 @@ use rk_ssa::{
     PrepareOptions, Ssa, ValueId,
 };
 
+mod arguments;
+pub use arguments::select_arguments;
+
 pub struct PlanOptions<'a> {
     pub call_facts: &'a dyn CallFacts,
     pub policy: Policy,
@@ -33,6 +36,7 @@ pub struct PlanOptions<'a> {
 
 pub struct PlannedFunction {
     pub ssa: Ssa,
+    base: BTreeMap<ValueId, Vec<StateKey>>,
     pub publish: BTreeMap<ValueId, Vec<StateKey>>,
     pub guard: BTreeMap<ValueId, Vec<StateKey>>,
     pub live: LookupSet<ValueId>,
@@ -54,15 +58,104 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     prepare_options.lazy_stack_writes = opts.lazy_stack_writes;
     prepare_options.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
     let (ssa, base) = prepare_with_publications(cg, &prepare_options)?;
-    let mut base = base.unwrap_or_else(|| publications(&ssa, opts.call_facts));
+    let base = base.unwrap_or_else(|| publications(&ssa, opts.call_facts));
+    let mut return_addr = BTreeMap::new();
+    for (index, value) in ssa.values.iter().enumerate() {
+        if !matches!(value.op, rk_ir::Op::Call { .. }) {
+            continue;
+        }
+        let addr = ssa.value_addr[index];
+        if let Some(insn) = cg.index_of(addr).and_then(|n| cg.insns.get(n as usize)) {
+            return_addr.insert(index as ValueId, addr + insn.length as Addr);
+        }
+    }
+    let block_addrs = ssa
+        .blocks
+        .iter()
+        .map(|block| cg.insns[block.start as usize].addr)
+        .collect();
+    plan_prepared(ssa, base, return_addr, block_addrs, opts)
+}
+
+pub fn replan_function(
+    planned: PlannedFunction,
+    opts: &PlanOptions<'_>,
+) -> Result<PlannedFunction> {
+    plan_prepared(
+        planned.ssa,
+        planned.base,
+        planned.return_addr,
+        planned.block_addrs,
+        opts,
+    )
+}
+
+pub fn defer_return_eip(
+    mut planned: PlannedFunction,
+    opts: &PlanOptions<'_>,
+) -> Result<PlannedFunction> {
+    if planned.ssa.return_slot.is_err() {
+        return Ok(planned);
+    }
+    let eip = rk_ir::Registers::get().require("EIP").offset as u32;
+    let is_eip = |key: StateKey| matches!(key, StateKey::Register(offset) if (eip..eip + 4).contains(&offset));
+    let mut loads = BTreeSet::new();
+    for boundary in &planned.ssa.boundaries {
+        if planned.ssa.value(boundary.at).op != rk_ir::Op::Return {
+            continue;
+        }
+        for &(key, value) in planned.ssa.boundary(boundary.at).unwrap_or_default() {
+            if is_eip(key) {
+                loads.insert(planned.ssa.args(value)[0]);
+            }
+        }
+        if let Some(keys) = planned.base.get_mut(&boundary.at) {
+            keys.retain(|key| !is_eip(*key) && *key != StateKey::Memory);
+        }
+    }
+    let original: Vec<_> = planned
+        .ssa
+        .blocks
+        .iter_mut()
+        .map(|block| {
+            let ops = block.ops.clone();
+            block.ops.retain(|value| !loads.contains(value));
+            ops
+        })
+        .collect();
+    loop {
+        planned = replan_function(planned, opts)?;
+        let removed = loads.len();
+        loads.retain(|value| !planned.live.contains(value));
+        if loads.len() == removed {
+            return Ok(planned);
+        }
+        for (block, ops) in planned.ssa.blocks.iter_mut().zip(&original) {
+            block.ops = ops
+                .iter()
+                .copied()
+                .filter(|value| !loads.contains(value))
+                .collect();
+        }
+    }
+}
+
+fn plan_prepared(
+    ssa: Ssa,
+    base: BTreeMap<ValueId, Vec<StateKey>>,
+    return_addr: BTreeMap<ValueId, Addr>,
+    block_addrs: Vec<Addr>,
+    opts: &PlanOptions<'_>,
+) -> Result<PlannedFunction> {
+    let mut passed = base.clone();
     let arguments = direct_arguments(&ssa, opts);
     for (value, keys) in &arguments {
-        if let Some(published) = base.get_mut(value) {
+        if let Some(published) = passed.get_mut(value) {
             published.retain(|key| !keys.contains(key));
         }
     }
     let (publish, guard) =
-        reduce_publications(&ssa, &base, &arguments, opts.call_facts, opts.call_hooks);
+        reduce_publications(&ssa, &passed, &arguments, opts.call_facts, opts.call_hooks);
     let flag_plan = ssa.flag_plan();
     let mut flag_publish = BTreeMap::new();
     let mut descriptor_roots = Vec::new();
@@ -120,21 +213,6 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
         live.contains(&id)
             && matches!(ssa.value(id).op, rk_ir::Op::Input(key) if ssa.field(key).is_some_and(|field| Fields::FLAGS.contains(field)))
     });
-    let mut return_addr = BTreeMap::new();
-    for (index, value) in ssa.values.iter().enumerate() {
-        if !matches!(value.op, rk_ir::Op::Call { .. }) {
-            continue;
-        }
-        let addr = ssa.value_addr[index];
-        if let Some(insn) = cg.index_of(addr).and_then(|n| cg.insns.get(n as usize)) {
-            return_addr.insert(index as ValueId, addr + insn.length as Addr);
-        }
-    }
-    let block_addrs = ssa
-        .blocks
-        .iter()
-        .map(|block| cg.insns[block.start as usize].addr)
-        .collect();
     let mut settle_sites = BTreeSet::new();
     for (index, value) in ssa.values.iter().enumerate() {
         if !live.contains(&(index as ValueId)) {
@@ -156,6 +234,7 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     let x87 = x87.used.then_some(x87);
     Ok(PlannedFunction {
         ssa,
+        base,
         publish,
         guard,
         live,
