@@ -1,4 +1,4 @@
-"""Stack bytes each runtime import shim pops, read from the ImportShim tables in the kit sources.
+"""Stack cleanup and memory facts read from the runtime ImportShim tables.
 
 Every table entry must parse, either as a braced initializer or as a call to a function-like
 macro defined earlier in the same file; anything else stops the build with its location.
@@ -116,18 +116,25 @@ def entries(path):
                 macros = macros_at(text, at)
                 if not entry.startswith("{") and call and call.group(1) in macros:
                     entry = expand(macros[call.group(1)], split(call.group(2))).strip()
-                if not (entry.startswith("{") and entry.endswith("}")):
-                    raise ValueError("unrecognised entry %r" % entry)
-                fields = split(entry[1:-1])
-                if len(fields) < 3:
-                    raise ValueError("entry %r has fewer than three fields" % entry)
-                if fields[0] in ("nullptr", "NULL", "0"):
-                    continue
-                name, count = literal(fields[1]), argc(fields[2])
-                decorated = re.fullmatch(r"_\w+@(\d+)", name)
-                if decorated and count != "ARGC_UNKNOWN" and int(decorated.group(1)) != (0 if count == "ARGC_CDECL" else 4 * count):
-                    raise ValueError("%s pops %r, not its decorated byte count" % (name, count))
-                yield literal(fields[0]), name, count
+                for row in split(entry):
+                    if not (row.startswith("{") and row.endswith("}")):
+                        raise ValueError("unrecognised entry %r" % row)
+                    fields = split(row[1:-1])
+                    if not 3 <= len(fields) <= 5:
+                        raise ValueError("entry %r must have three to five fields" % row)
+                    if fields[0] in ("nullptr", "NULL", "0"):
+                        continue
+                    name, count = literal(fields[1]), argc(fields[2])
+                    decorated = re.fullmatch(r"_\w+@(\d+)", name)
+                    if decorated and count != "ARGC_UNKNOWN" and int(decorated.group(1)) != (0 if count == "ARGC_CDECL" else 4 * count):
+                        raise ValueError("%s pops %r, not its decorated byte count" % (name, count))
+                    memory = fields[4] if len(fields) == 5 else "ImportMemory::Unknown"
+                    effects = {"ImportMemory::Unknown": "unknown",
+                               "ImportMemory::CallerStackPreserved": "caller_stack_preserved",
+                               "ImportMemory::NoGuestWrites": "no_guest_writes"}
+                    if memory not in effects:
+                        raise ValueError("unsupported import memory effect %r" % memory)
+                    yield literal(fields[0]), name, count, effects[memory]
             except ValueError as error:
                 raise ValueError("%s:%d: %s" % (path, line, error)) from None
 
@@ -136,7 +143,7 @@ def import_pops(root=ROOT):
     seen = {}
     for directory in SOURCES:
         for path in sorted((root / directory).glob("*.cpp")):
-            for dll, name, count in entries(path):
+            for dll, name, count, _ in entries(path):
                 seen.setdefault("%s!%s" % (dll.lower(), name), set()).add(count)
     pops = {}
     for key, counts in seen.items():
@@ -145,3 +152,13 @@ def import_pops(root=ROOT):
         count = counts.pop()
         pops[key] = 0 if count == "ARGC_CDECL" else 4 * count
     return dict(sorted(pops.items()))
+
+
+def import_memory(root=ROOT):
+    seen = {}
+    for directory in SOURCES:
+        for path in sorted((root / directory).glob("*.cpp")):
+            for dll, name, _, memory in entries(path):
+                seen.setdefault("%s!%s" % (dll.lower(), name), set()).add(memory)
+    return {key: next(iter(effects)) for key, effects in sorted(seen.items())
+            if len(effects) == 1 and "unknown" not in effects}

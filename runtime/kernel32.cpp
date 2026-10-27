@@ -6138,7 +6138,7 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "FormatMessageA", 7, k_FormatMessageA},
     {"KERNEL32.dll", "IsProcessorFeaturePresent", 1, k_IsProcessorFeaturePresent},
     // time
-    {"KERNEL32.dll", "GetTickCount", 0, k_GetTickCount},
+    {"KERNEL32.dll", "GetTickCount", 0, k_GetTickCount, ImportMemory::NoGuestWrites},
     {"KERNEL32.dll", "QueryPerformanceCounter", 1, k_QueryPerformanceCounter},
     {"KERNEL32.dll", "QueryPerformanceFrequency", 1, k_QueryPerformanceFrequency},
     {"KERNEL32.dll", "Sleep", 1, k_Sleep},

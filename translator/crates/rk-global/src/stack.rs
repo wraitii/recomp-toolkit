@@ -4,7 +4,7 @@ use rk_core::contract::{Field, Fields};
 use rk_core::ir::{FunctionIr, Insn, OpCode, PcodeOp, Space, Varnode};
 use rk_core::memory::{Address, Base, Effects, Footprint, Range};
 use rk_core::program::{Import, Program};
-use rk_core::settings::Settings;
+use rk_core::settings::{ImportMemory, Settings};
 use rk_core::Addr;
 use rk_ir::Registers;
 use std::borrow::Cow;
@@ -71,6 +71,7 @@ pub struct Analysis {
     pub rejected_functions: BTreeMap<Addr, String>,
     pub cleanups: BTreeMap<Addr, i32>,
     pub site_cleanups: BTreeMap<Addr, i32>,
+    pub site_memory: BTreeMap<Addr, ImportMemory>,
     pub rejected_cleanups: BTreeMap<Addr, String>,
     pub argument_writes: BTreeMap<Addr, Vec<(i32, u32)>>,
     pub stack_helpers: BTreeMap<Addr, &'static str>,
@@ -444,13 +445,14 @@ fn compose(
     Ok(())
 }
 
-fn import_pop(pops: &BTreeMap<String, i32>, import: &Import) -> Option<i32> {
-    pops.get(&format!(
-        "{}!{}",
-        import.dll.to_ascii_lowercase(),
-        import.name
-    ))
-    .copied()
+fn import_fact<T: Copy>(facts: &BTreeMap<String, T>, import: &Import) -> Option<T> {
+    facts
+        .get(&format!(
+            "{}!{}",
+            import.dll.to_ascii_lowercase(),
+            import.name
+        ))
+        .copied()
 }
 
 fn import_call(state: &mut State, pop: i32, private: bool) -> Checked<()> {
@@ -617,7 +619,7 @@ impl Walk<'_> {
                     self.pass_registers(state);
                     if mode == Mode::Cleanup && !self.known.contains_key(&target) {
                         if let Some(pop) = program.import_thunk(target).and_then(|import| {
-                            import_pop(&self.context.settings.import_pops, import)
+                            import_fact(&self.context.settings.import_pops, import)
                         }) {
                             import_call(state, pop, self.private())?;
                             self.reads_other = true;
@@ -658,7 +660,7 @@ impl Walk<'_> {
                     {
                         Some(Value::Import(slot)) => {
                             program.image.imports.get(&slot).and_then(|import| {
-                                import_pop(&self.context.settings.import_pops, import)
+                                import_fact(&self.context.settings.import_pops, import)
                             })
                         }
                         _ => self.context.settings.call_pops.get(&insn.addr).copied(),
@@ -1037,8 +1039,13 @@ pub fn analyze(
             let import = program
                 .iat_call(insn)
                 .or_else(|| target(insn).and_then(|target| program.import_thunk(target)));
+            if let Some(memory) =
+                import.and_then(|import| import_fact(&settings.import_memory, import))
+            {
+                output.site_memory.insert(insn.addr, memory);
+            }
             let cleanup = if let Some(import) = import {
-                import_pop(&settings.import_pops, import)
+                import_fact(&settings.import_pops, import)
             } else if insn.ops.iter().any(|op| op.opcode == OpCode::CallInd) {
                 settings.call_pops.get(&insn.addr).copied()
             } else {

@@ -75,6 +75,7 @@ struct ImportShim {
     const char* name;
     uint8_t     argc_stdcall;   // dwords the shim pops; ARGC_CDECL, ARGC_UNKNOWN
     void      (*fn)(X86*);      // nullptr => logging-only, returns EAX = 0
+    ImportMemory memory = ImportMemory::Unknown;
 };
 ```
 
@@ -83,6 +84,13 @@ On entry to `fn`, ESP points at the guest return address and argument `i` is
 `set_eax` (or `set_eax64` for a 64-bit result in EDX:EAX) and returns. It never
 touches ESP: `imports_dispatch` pops the return address plus `4*argc_stdcall`
 bytes and sets EIP, exactly as the real `ret n` would.
+
+Optional memory facts describe the shim: `CallerStackPreserved` forbids writes
+above its entry ESP, including writes through output pointers or callbacks;
+`NoGuestWrites` forbids all guest-memory writes. Both default to `Unknown` and
+are extracted with stack cleanup by `tools/import_abi.py`. Dispatch can schedule
+other guest threads, so these facts preserve only unexposed caller stack slots;
+they do not make the whole import call free of shared-memory effects.
 
 `ARGC_CDECL` pops only the return address. `ARGC_UNKNOWN` pops only the return
 address too, but logs loudly the first time, because leaving a stdcall callee's

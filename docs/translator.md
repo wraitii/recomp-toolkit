@@ -263,8 +263,12 @@ trusted as ordinary calls preserving EBX/ESI/EDI/EBP. `evidence` records the bin
 evidence and `--dump global` prints it.
 SSA call summaries also consume declared cleanup at direct IAT calls, calls to IAT
 thunks and configured indirect sites; `--dump global` lists these as `cleanup-site`.
-These facts establish only cleanup, without memory, return-address or checkpoint
-guarantees. Proved functions are summarised again against their callees' summaries
+Shim-table `ImportMemory` facts also reach these static import sites (`import-memory`
+in the dump). `CallerStackPreserved` and `NoGuestWrites` protect unexposed caller
+slots above the import's return address. Dispatch checkpoints retain unknown
+shared-memory effects, even for shims marked `NoGuestWrites`.
+Cleanup facts alone give no memory, return-address or checkpoint guarantees.
+Proved functions are summarised again against their callees' summaries
 to record constant writes at or above entry ESP (`argument-writes`). A function has
 none when an address at or above its entry ESP is stored, passed in a register,
 returned, or indexed for a store, or when it has SEH or interior entries.

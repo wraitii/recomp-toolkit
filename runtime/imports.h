@@ -18,11 +18,14 @@
 static const uint8_t ARGC_CDECL = 0xff;   // caller cleans the stack: pop only the return address
 static const uint8_t ARGC_UNKNOWN = 0xfe; // signature unknown: pop nothing and log loudly
 
+enum class ImportMemory : uint8_t { Unknown, CallerStackPreserved, NoGuestWrites };
+
 struct ImportShim {
     const char *dll;
     const char *name;
     uint8_t argc_stdcall;
     void (*fn)(X86 *); // nullptr => logging-only stub returning EAX = 0
+    ImportMemory memory = ImportMemory::Unknown;
 };
 
 // Explicit unsupported handler: dispatch logs the import name and aborts.

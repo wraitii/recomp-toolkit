@@ -344,6 +344,7 @@ impl Frame {
             }
         }
         let stored_frame = !stored_frame_ranges.is_empty();
+        let mut independent = Lookup::default();
         let mut calls = Lookup::default();
         let mut checkpoints = Lookup::default();
         for &id in s.blocks.iter().flat_map(|block| &block.ops) {
@@ -361,6 +362,18 @@ impl Frame {
             let frame = addresses
                 .relations
                 .bounds(esp.get(&id).copied().unwrap_or(Address::Unknown));
+            if summary.caller_stack_preserved {
+                if let Address::Known {
+                    base: Base::Frame,
+                    offset,
+                    span: 0,
+                } = frame
+                {
+                    if let Some(top) = (offset as i32).checked_add(4) {
+                        independent.insert(id, top);
+                    }
+                }
+            }
             if let Some(borrowed) = summary
                 .borrowed
                 .filter(|borrowed| !borrowed.unknown_captures.is_empty())
@@ -520,7 +533,6 @@ impl Frame {
                 checkpoints.insert(id, cost);
             }
         }
-        let mut independent = Lookup::default();
         for (&id, access) in &accesses {
             if access.location.is_none() || derived[s.args(id)[1] as usize] {
                 continue;
@@ -807,9 +819,9 @@ pub(crate) fn dump_stack(
                     origins.insert(root);
                 }
                 let summary = facts.summary(site, target);
-                writeln!(out, "call {} v{id} {:?} esp={:?} cleanup={:?} checkpoints={:?} borrowed={} readonly={} guard={}",
+                writeln!(out, "call {} v{id} {:?} esp={:?} cleanup={:?} checkpoints={:?} borrowed={} readonly={} caller-stack-preserved={} guard={}",
                     rk_core::Hex(site), value.op, addresses.state(id, Field::Esp), summary.cleanup, summary.checkpoints,
-                    summary.borrowed.is_some(), summary.readonly, s.stack_guards.contains_key(&id))?;
+                    summary.borrowed.is_some(), summary.readonly, summary.caller_stack_preserved, s.stack_guards.contains_key(&id))?;
             }
             if value.op == Op::P(OpCode::IntAnd) && value.size == 4 {
                 let local = addresses.get(id);

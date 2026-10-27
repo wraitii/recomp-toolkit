@@ -32,6 +32,8 @@ struct Input {
     aux_modules: Vec<Module>,
     #[serde(default)]
     import_pops: BTreeMap<String, i32>,
+    #[serde(default)]
+    import_memory: BTreeMap<String, ImportMemory>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -109,6 +111,15 @@ pub struct CallEffect {
     pub import: Option<String>,
     pub regs: Option<RegsEffect>,
     pub x87: Option<X87Effect>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportMemory {
+    #[default]
+    Unknown,
+    CallerStackPreserved,
+    NoGuestWrites,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,6 +301,7 @@ pub struct Settings {
     pub native_header: Option<PathBuf>,
     pub call_effects: CallEffects,
     pub import_pops: BTreeMap<String, i32>,
+    pub import_memory: BTreeMap<String, ImportMemory>,
     pub call_contracts: bool,
     pub stack_memory: bool,
     pub assume_private_stack: bool,
@@ -491,6 +503,7 @@ impl Settings {
             native_header: resolve(&t.native.header),
             call_effects: CallEffects { sites, imports },
             import_pops: input.import_pops,
+            import_memory: input.import_memory,
             dispatch: t.dispatch.clone(),
             call_contracts: t.call_contracts,
             stack_memory: t.stack_memory,

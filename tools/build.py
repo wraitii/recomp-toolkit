@@ -362,7 +362,7 @@ def translation_input(cfg):
             "translate": stable(cfg["translate"]), "globals": stable(cfg["globals"]),
             "curated": stable(cfg["curated"]), "aux_modules": stable(cfg["aux_modules"]),
             "reloc": str(reloc["manifest_path"]) if reloc else None,
-            "import_pops": import_abi.import_pops()}
+            "import_pops": import_abi.import_pops(), "import_memory": import_abi.import_memory()}
 
 
 def rust_pcode_library(build_root):

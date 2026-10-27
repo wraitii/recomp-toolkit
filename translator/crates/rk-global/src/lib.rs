@@ -79,6 +79,10 @@ impl CallFacts for ContractCallFacts<'_> {
             argument_writes: target
                 .and_then(|target| self.returns?.argument_writes.get(&target))
                 .map(Vec::as_slice),
+            caller_stack_preserved: self
+                .returns
+                .and_then(|returns| returns.site_memory.get(&site))
+                .is_some_and(|memory| *memory != rk_core::settings::ImportMemory::Unknown),
         }
     }
     fn call(&self, site: Addr, target: Option<Addr>) -> CallEffect {
@@ -334,6 +338,9 @@ impl GlobalFacts {
         }
         for (&site, cleanup) in &self.returns.site_cleanups {
             writeln!(out, "cleanup-site {site:08x} pop={cleanup}")?;
+        }
+        for (&site, memory) in &self.returns.site_memory {
+            writeln!(out, "import-memory {site:08x} {memory:?}")?;
         }
         for (&addr, reason) in &self.returns.rejected_cleanups {
             writeln!(out, "cleanup-rejected {addr:08x} {reason}")?;
