@@ -1166,8 +1166,8 @@ const ImportShim g_dinput_exports[] = {
 
 } // namespace
 
-extern "C" void dinput_feedback_tick(uint64_t now) {
-    feedback_tick(now);
+extern "C" void dinput_feedback_tick() {
+    feedback_tick();
 }
 
 extern "C" int dinput_host_mouse_acquired() {

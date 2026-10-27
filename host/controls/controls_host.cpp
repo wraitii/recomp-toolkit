@@ -25,7 +25,7 @@
 #include <utility>
 #include <vector>
 
-extern "C" void dinput_feedback_tick(uint64_t now);
+extern "C" void dinput_feedback_tick();
 
 namespace controls {
 
@@ -606,7 +606,7 @@ void host_release_all() {
 }
 
 void host_pump(uint64_t now) {
-    dinput_feedback_tick(os_monotonic_ns());
+    dinput_feedback_tick();
     // The layout row means nothing until the settings are loaded (the first
     // presented frame runs mods_page_init); draw nothing before then.
     if (!mods_controls_initialized()) {

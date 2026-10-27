@@ -32,6 +32,12 @@ bool requested(int argc, char **argv) {
 
 namespace {
 
+std::string controller_description() {
+    return controls::gamepad_name() + (controls::gamepad_rumble_supported()
+                                           ? " | Rumble supported"
+                                           : " | Rumble not reported");
+}
+
 void draw_controller_page(Canvas &canvas, const controls::ControlsView &view) {
     const Color background{11, 21, 48, 255}, panel{20, 37, 68, 255};
     const Color button{24, 46, 80, 255}, selected{21, 85, 195, 255};
@@ -267,11 +273,7 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
         if (SDL_WaitEventTimeout(&event, controller.is_open() ? 16 : 250)) {
             do {
                 controls::gamepad_handle_event(event);
-                controller.set_device(controls::gamepad_name() +
-                                          (controls::gamepad_rumble_supported()
-                                               ? " | Rumble supported"
-                                               : " | Rumble not reported"),
-                                      controls::gamepad_connected());
+                controller.set_device(controller_description(), controls::gamepad_connected());
                 controller.observe_input(controls::host_mapper_raw_state());
                 if (controller.is_open()) {
                     controller.set_screen(screen());
@@ -410,10 +412,7 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
             } while (SDL_PollEvent(&event));
         }
         controls::gamepad_poll();
-        controller.set_device(controls::gamepad_name() + (controls::gamepad_rumble_supported()
-                                                              ? " | Rumble supported"
-                                                              : " | Rumble not reported"),
-                              controls::gamepad_connected());
+        controller.set_device(controller_description(), controls::gamepad_connected());
         const controls::Screen controller_screen = screen();
         if (controller.is_open()) {
             const auto action = controller.take_action();

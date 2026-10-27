@@ -5,6 +5,17 @@ struct DiEffect {
     bool playing = false;
 };
 
+constexpr uint32_t kConstantForce = 0x13541c20u;
+constexpr uint32_t kRampForce = 0x13541c21u;
+constexpr uint32_t kSquare = 0x13541c22u;
+constexpr uint32_t kSine = 0x13541c23u;
+constexpr uint32_t kTriangle = 0x13541c24u;
+constexpr uint32_t kSawUp = 0x13541c25u;
+constexpr uint32_t kSawDown = 0x13541c26u;
+constexpr uint32_t kEffectDuration = 0x001u;
+constexpr uint32_t kEffectGain = 0x004u;
+constexpr uint32_t kEffectTypeParameters = 0x100u;
+
 std::mutex g_effect_mutex;
 std::map<uint32_t, DiEffect> g_effects;
 uint16_t g_effect_level = 0;
@@ -12,13 +23,13 @@ uint16_t g_effect_level = 0;
 bool effect_parameters(DiEffect &effect, uint32_t at, uint32_t flags) {
     if (!at || !gm_valid(at, 52) || rd32(at) < 52)
         return false;
-    if (flags & 1)
+    if (flags & kEffectDuration)
         effect.duration = rd32(at + 8);
-    if (flags & 4)
+    if (flags & kEffectGain)
         effect.gain = std::min(rd32(at + 16), 10000u);
-    if (flags & 0x100) {
+    if (flags & kEffectTypeParameters) {
         uint32_t size = rd32(at + 44), data = rd32(at + 48);
-        if (effect.type == 0x13541c20u) {
+        if (effect.type == kConstantForce) {
             if (size < 4 || !gm_valid(data, 4))
                 return false;
             effect.magnitude = (int32_t)rd32(data);
@@ -95,7 +106,7 @@ void Effect_GetEffectStatus(X86 *c) {
     uint32_t out = arg(c, 1);
     std::lock_guard<std::mutex> lock(g_effect_mutex);
     auto it = obj ? g_effects.find(obj->id) : g_effects.end();
-    if (it == g_effects.end() || !gm_valid(out, 4)) {
+    if (it == g_effects.end() || !out || !gm_valid(out, 4)) {
         com_ret(c, DIERR_INVALIDPARAM);
         return;
     }
@@ -142,8 +153,8 @@ void Device_CreateEffect(X86 *c) {
     static const uint8_t suffix[12] = {0x33, 0x8e, 0xd0, 0x11, 0x9a, 0xd0,
                                        0x00, 0xa0, 0xc9, 0xa0, 0x6e, 0x35};
     uint32_t type = rd32(guid);
-    if (memcmp(gm_ptr(guid + 4), suffix, 12) || type < 0x13541c20u || type > 0x13541c26u ||
-        type == 0x13541c21u) {
+    if (memcmp(gm_ptr(guid + 4), suffix, 12) || type < kConstantForce || type > kSawDown ||
+        type == kRampForce) {
         LOGW("dinput: unsupported force feedback effect %08x", type);
         com_ret(c, DIERR_UNSUPPORTED);
         return;
@@ -151,7 +162,7 @@ void Device_CreateEffect(X86 *c) {
     DiEffect effect;
     effect.device = device->id;
     effect.type = type;
-    if (!effect_parameters(effect, params, 0x105)) {
+    if (!effect_parameters(effect, params, kEffectDuration | kEffectGain | kEffectTypeParameters)) {
         com_ret(c, DIERR_INVALIDPARAM);
         return;
     }
@@ -192,10 +203,11 @@ void Device_SendForceFeedbackCommand(X86 *c) {
     }
 }
 
-void feedback_tick(uint64_t now) {
+void feedback_tick() {
     uint16_t level = 0;
     {
         std::lock_guard<std::mutex> lock(g_effect_mutex);
+        const uint64_t now = os_monotonic_ns();
         for (auto &entry : g_effects) {
             DiEffect &e = entry.second;
             if (!e.playing)
@@ -206,25 +218,25 @@ void feedback_tick(uint64_t now) {
             }
             // DIVERGENCE(original): directional wheel forces are approximated by gamepad motors.
             double value = std::abs(double(e.magnitude)) / 10000.0;
-            if (e.type != 0x13541c20u) {
+            if (e.type != kConstantForce) {
                 double phase =
                     e.period ? double((now - e.started) / 1000 % e.period) / e.period : 0;
                 double wave = 0.5;
                 if (e.period >= 50000) {
                     switch (e.type) {
-                    case 0x13541c22u:
+                    case kSquare:
                         wave = phase < 0.5 ? 1 : 0;
                         break;
-                    case 0x13541c23u:
+                    case kSine:
                         wave = 0.5 + 0.5 * std::sin(phase * 6.283185307179586);
                         break;
-                    case 0x13541c24u:
+                    case kTriangle:
                         wave = 1 - std::abs(phase * 2 - 1);
                         break;
-                    case 0x13541c25u:
+                    case kSawUp:
                         wave = phase;
                         break;
-                    case 0x13541c26u:
+                    case kSawDown:
                         wave = 1 - phase;
                         break;
                     }
