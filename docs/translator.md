@@ -188,6 +188,11 @@ Forwarding retains guest stores, and original-code analysis summaries do not use
 this premise.
 With relaxed fault state, eligible x87 accesses split into rounded value and memory
 effects independently of lazy writes, preserving pop, status and ESP provenance.
+DIV/IDIV preserve memory, ESP and unaffected registers on success; memory operands
+remain explicit loads. Zero divisors and quotient overflow publish the fault state,
+including promoted frame slots, only on the cold arm. An out-of-line helper raises
+guest SEH and aborts if dispatch returns unhandled, so faults never fall through
+into the successful path. Conditional publication does not establish residency.
 Forwarding, region partitioning and dead-store elimination share one frame model
 and one clobber query per effect: a contained value, transparent, or may-write.
 Calls are transparent only to private-frame ranges. Loads forward contained slices
@@ -386,5 +391,4 @@ generic path may observe. Remaining steps:
   may alias released bytes, and a variant for retired frames.
 - Stack arguments and x87 spill slots as plain values, leaf functions without ESP
   materialization, and direct return values passed by value.
-- Return-slot coverage: preserve ESP provenance across unproven call cleanup and
-  model DIV/IDIV memory effects precisely.
+- Return-slot coverage: preserve ESP provenance across unproven call cleanup.

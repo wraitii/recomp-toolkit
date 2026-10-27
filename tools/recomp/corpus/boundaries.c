@@ -37,3 +37,8 @@ void recomp_div_error(X86 *c, uint32_t address) {
     (void)c;
     unexpected("integer division fault", address);
 }
+
+void recomp_div_fault(X86 *c, uint32_t address) {
+    recomp_div_error(c, address);
+    abort();
+}

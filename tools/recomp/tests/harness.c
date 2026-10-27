@@ -107,6 +107,11 @@ void recomp_div_error(X86 *c, uint32_t addr) {
     last_div_error_count++;
 }
 
+void recomp_div_fault(X86 *c, uint32_t addr) {
+    recomp_div_error(c, addr);
+    abort();
+}
+
 void recomp_rdtsc(X86 *c) {
     fake_tsc += 1000;
     c->r[R_EAX] = (uint32_t)fake_tsc;

@@ -267,7 +267,10 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts) -> Option<FramePlan> {
     }
     for &id in s.blocks.iter().flat_map(|block| &block.ops) {
         let op = s.value(id).op;
-        if !matches!(op, Op::Call { .. } | Op::CallInd | Op::Return) {
+        if !matches!(
+            op,
+            Op::Call { .. } | Op::CallInd | Op::Return | Op::Div { .. } | Op::Idiv { .. }
+        ) {
             continue;
         }
         let Some(&origin) = s.origins.get(&id) else {
@@ -277,7 +280,7 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts) -> Option<FramePlan> {
         let mut site = Site::default();
         for (index, &slot) in slots.iter().enumerate() {
             let start = (slot.aligned, slot.offset);
-            if op == Op::Return {
+            if matches!(op, Op::Return | Op::Div { .. } | Op::Idiv { .. }) {
                 site.publish.push(index);
                 continue;
             }

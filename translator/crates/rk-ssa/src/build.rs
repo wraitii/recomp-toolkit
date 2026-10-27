@@ -1134,12 +1134,10 @@ impl<'a> Builder<'a> {
                 let size = cg_op.output.map_or(8, |v| v.size as u8);
                 let value = self.value(cg_op.op, size, &args);
                 self.boundary(value, state, block, false)?;
-                let token = self.value(Op::Memory, 0, &[value]);
-                state[memory_index] = Some(token);
+                self.frame_site(value);
                 if let Some(output) = cg_op.output {
                     self.write(&output, value, state, temps)?;
                 }
-                self.reload_all(value, state);
                 ops.push(value);
             }
             Op::Seh(_) => {

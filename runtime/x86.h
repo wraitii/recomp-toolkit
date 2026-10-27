@@ -868,6 +868,10 @@ void recomp_callback_truncate(uint32_t depth);
 void recomp_callback_reset(X86 *c);
 /* DIV/IDIV with a zero divisor or a quotient that does not fit. */
 void recomp_div_error(X86 *c, uint32_t addr);
+#if defined(__GNUC__)
+__attribute__((noreturn, cold, noinline))
+#endif
+void recomp_div_fault(X86 *c, uint32_t addr);
 
 void recomp_rdtsc(X86 *c); /* -> EDX:EAX */
 void recomp_cpuid(X86 *c); /* EAX in -> EAX EBX ECX EDX */
@@ -1540,6 +1544,25 @@ static inline uint16_t imul2_16_f(X86 *c, uint16_t a, uint16_t b) {
     int32_t p = (int32_t)(int16_t)a * (int16_t)b;
     c->eflags_cf = c->eflags_of = (p != (int16_t)p);
     return (uint16_t)p;
+}
+
+static inline int x86_divmod_u(uint64_t n, uint64_t d, unsigned bits, uint64_t *result) {
+    if (!d || (n >> bits) >= d)
+        return 0;
+    *result = (n / d) | ((n % d) << (bits == 8 ? 8 : 32));
+    return 1;
+}
+
+static inline int x86_divmod_s(int64_t n, int64_t d, unsigned bits, uint64_t *result) {
+    if (!d || (n == INT64_MIN && d == -1))
+        return 0;
+    int64_t q = n / d;
+    int64_t bound = (int64_t)1 << (bits - 1);
+    if (q < -bound || q >= bound)
+        return 0;
+    uint64_t mask = ((uint64_t)1 << bits) - 1;
+    *result = ((uint64_t)q & mask) | (((uint64_t)(n % d) & mask) << (bits == 8 ? 8 : 32));
+    return 1;
 }
 
 static inline void div8(X86 *c, uint8_t s, uint32_t at) {

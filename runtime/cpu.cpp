@@ -444,6 +444,14 @@ void recomp_div_error(X86 *c, uint32_t addr) {
     recomp_seh_raise_fault(c, 0xc0000094u, addr);
 }
 
+void recomp_div_fault(X86 *c, uint32_t addr) {
+    recomp_div_error(c, addr);
+    LOGW("unhandled divide fault at %08x", addr);
+    fflush(stdout);
+    fflush(stderr);
+    abort();
+}
+
 // A read or a write through a pointer in the first 64 KB. Windows maps
 // nothing there, so the program's own handlers see an access violation and a
 // try/except around the dereference carries on; a flat arena hands back a

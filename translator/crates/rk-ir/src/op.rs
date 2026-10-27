@@ -244,7 +244,13 @@ pub fn properties(op: Op) -> Properties {
             ..Properties::new()
         },
         Op::Call { .. } | Op::CallInd => Properties::effect(),
-        Op::Div { .. } | Op::Idiv { .. } | Op::String(_) => Properties::effect(),
+        Op::Div { .. } | Op::Idiv { .. } => Properties {
+            ordered: true,
+            observes: true,
+            faults: true,
+            ..Properties::new()
+        },
+        Op::String(_) => Properties::effect(),
         Op::Slow(_) | Op::CallOther(_) => Properties::effect(),
         Op::Tail { .. } | Op::ImportTail { .. } | Op::BranchInd | Op::Return => Properties {
             observes: true,

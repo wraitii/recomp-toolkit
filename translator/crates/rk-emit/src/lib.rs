@@ -1945,28 +1945,30 @@ impl<'a> Emitter<'a> {
     }
 
     fn divide(&mut self, value: ValueId, addr: Addr) -> Result<()> {
-        self.publish(value)?;
         let args = self.s.args(value);
+        let numerator = args
+            .get(1)
+            .copied()
+            .ok_or_else(|| self.error(addr, "division without numerator"))?;
         let divisor = args
             .get(2)
             .copied()
             .ok_or_else(|| self.error(addr, "division without divisor"))?;
+        let numerator = self.expr(numerator)?;
         let divisor = self.expr(divisor)?;
-        let helper = match self.s.value(value).op {
-            Op::Div { size: 1, .. } => "div8",
-            Op::Div { size: 2, .. } => "div16",
-            Op::Div { .. } => "div32",
-            Op::Idiv { size: 1, .. } => "idiv8",
-            Op::Idiv { size: 2, .. } => "idiv16",
-            _ => "idiv32",
+        let (helper, kind, size) = match self.s.value(value).op {
+            Op::Div { size, .. } => ("x86_divmod_u", "uint", size),
+            Op::Idiv { size, .. } => ("x86_divmod_s", "int", size),
+            _ => return Err(self.error(addr, "expected division")),
         };
+        let bits = u32::from(size) * 8;
+        let wide = bits * 2;
         let at = self.guest_addr(addr);
-        let _ = writeln!(self.out, "{helper}(c, (uint32_t)({divisor}), {at});");
-        let _ = writeln!(
-            self.out,
-            "{}",
-            self.assignment(value, "c->r[0] | ((uint64_t)c->r[2] << 32)")
-        );
+        let _ = writeln!(self.out, "{{ uint64_t div_result_; if (RECOMP_UNLIKELY(!{helper}(({kind}{wide}_t)({numerator}), ({kind}{bits}_t)({divisor}), {bits}, &div_result_))) {{");
+        self.publish(value)?;
+        let _ = writeln!(self.out, "recomp_div_fault(c, {at});\n}}");
+        let _ = writeln!(self.out, "{}", self.assignment(value, "div_result_"));
+        self.out.push_str("}\n");
         Ok(())
     }
 
