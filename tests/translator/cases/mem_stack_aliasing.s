@@ -1,5 +1,6 @@
 # mem_stack_aliasing -- ESP/EBP aliases of argument slots after SUB/PUSH,
 # including push/pop forms whose value or address uses the changed ESP.
+# translate: assume = ["private-stack", "stack-pointer-bases"]
 # input: arg0=0x11111111 arg1=0x22222222 arg2=0x33333333
 
 .section .data

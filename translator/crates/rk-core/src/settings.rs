@@ -50,9 +50,8 @@ pub struct Translate {
     pub msvc_x87_convention: bool,
     pub call_contracts: bool,
     pub stack_memory: bool,
-    pub assume_private_stack: Option<bool>,
+    pub assume: BTreeSet<Assumption>,
     pub lazy_stack_writes: Option<bool>,
-    pub assume_stack_pointer_bases: bool,
     pub exposed_stack_functions: Vec<Addr>,
     pub stack_helpers: Vec<Addr>,
     pub stack_probes: Vec<Addr>,
@@ -97,6 +96,13 @@ pub enum FaultState {
     #[default]
     Relaxed,
     Exact,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Assumption {
+    PrivateStack,
+    StackPointerBases,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -438,7 +444,7 @@ impl Settings {
                 BTreeSet::new()
             }
         };
-        let assume_private_stack = t.assume_private_stack.unwrap_or(true);
+        let assume_private_stack = t.assume.contains(&Assumption::PrivateStack);
         let lazy_stack_writes = t.lazy_stack_writes.unwrap_or(true)
             && assume_private_stack
             && t.fault_state == FaultState::Relaxed
@@ -471,7 +477,7 @@ impl Settings {
             stack_memory: t.stack_memory,
             assume_private_stack,
             lazy_stack_writes,
-            assume_stack_pointer_bases: t.assume_stack_pointer_bases,
+            assume_stack_pointer_bases: t.assume.contains(&Assumption::StackPointerBases),
             exposed_stack_functions: only_main(&t.exposed_stack_functions),
             stack_helpers: only_main(&t.stack_helpers),
             stack_probes: only_main(&t.stack_probes),

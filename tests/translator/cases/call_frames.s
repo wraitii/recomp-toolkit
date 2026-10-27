@@ -1,6 +1,7 @@
 # call_frames -- callees writing their own argument slots and a thiscall stack object the
 # caller rereads, a callee-saved register live across a call, EBP-chain reads of the
 # caller's locals, and one helper reached from two stack depths.
+# translate: assume = ["private-stack", "stack-pointer-bases"]
 # input: arg0=0 arg1=0
 # input: arg0=0xffffffff arg1=1
 # input: arg0=0x80000000 arg1=0x7fffffff

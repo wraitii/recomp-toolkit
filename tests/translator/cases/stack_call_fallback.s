@@ -1,5 +1,4 @@
-# translate: assume_private_stack = true
-# translate: lazy_stack_writes = true
+# translate: assume = ["private-stack"]
 # input: arg0=0x12345678 esi=0x87654321
 # input: arg0=0 esi=0xffffffff
 

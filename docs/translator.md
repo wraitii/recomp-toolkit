@@ -157,8 +157,8 @@ Unknown targets, captures and unbounded parameter accesses remain conservative. 
 indirect target sets combine every target's effects; cross-call deferral currently requires
 a direct call. General original-code summaries feed the offline inference below.
 
-`[translate] assume_private_stack` defaults to true in Rust production translation;
-false restores conservative frame aliasing. `exposed_stack_functions = [0x00401000]`
+`[translate] assume = ["private-stack"]` opts into the private-stack premise; without
+it frame aliasing stays conservative. `exposed_stack_functions = [0x00401000]`
 disables the assumption for the listed function owners in the main image, including
 their compiled variants. `DIVERGENCE(original):` newly allocated, unescaped frame
 storage is assumed inaccessible through pointers independent of entry ESP, including
@@ -174,8 +174,8 @@ write unescaped caller frame bytes.
 Computed return values retain proved access footprints while recording their input
 capture sources; passed frame pointers remain exposed conservatively when their
 returned offsets are unknown. Unknown ESP-derived returns remain unsupported.
-`[translate] assume_stack_pointer_bases` defaults to false.
-`DIVERGENCE(original):` when enabled, an escaped frame pointer is assumed to identify
+`assume = ["stack-pointer-bases"]` is also opt-in.
+`DIVERGENCE(original):` when listed, an escaped frame pointer is assumed to identify
 the beginning of its accessible region. Unknown upward extents expose the remainder
 of the frame; proved callee ranges can narrow exposure and include negative accesses.
 Likewise a frame address plus an unknown index addresses only the frame from that
@@ -244,7 +244,7 @@ tables are followed. Calls through IAT slots, IAT thunks or registers loaded fro
 an IAT slot pop the runtime shim's declared arguments (`import_abi.py` reads the
 shim tables into `import_pops`), keep EBX/ESI/EDI/EBP and write any memory; imports
 with unknown or conflicting argument counts stay unresolved. FS-relative stores
-leave stack slots intact. With `assume_private_stack`, other non-stack stores and
+leave stack slots intact. Under the private-stack premise, other non-stack stores and
 opaque callees keep slots below entry ESP. Interior entries and SEH do not block
 cleanup proofs: only paths from the entry are checked, assuming MSVC `__except`
 resumption restores the frame's ESP and leaves through the same returns.
@@ -259,7 +259,7 @@ guarantees. Proved functions are summarised again against their callees' summari
 to record constant writes at or above entry ESP (`argument-writes`). A function has
 none when an address at or above its entry ESP is stored, passed in a register,
 returned, or indexed for a store, or when it has SEH or interior entries.
-`DIVERGENCE(original):` with `assume_private_stack`, a callee reaches its caller's
+`DIVERGENCE(original):` under the private-stack premise, a callee reaches its caller's
 frame only through those writes, its own argument area and escaped addresses, so a
 call clobbers only the slots its argument writes cover. `--dump global` lists
 per-function rejections, unresolved call edges, cleanup-only proofs and argument

@@ -61,14 +61,14 @@ TRANSLATE_DEFAULTS = {
     "fault_state": "relaxed",
     "msvc_x87_convention": True,
     "call_contracts": True,
-    "assume_private_stack": True,
+    "assume": [],
     "lazy_stack_writes": True,
-    "assume_stack_pointer_bases": False,
     "private_leaf_contracts": False,
     "private_input_arguments": False,
     "private_input_registers": {},
     "x87_cw_clone": True,
 }
+ASSUMPTIONS = frozenset(("private-stack", "stack-pointer-bases"))
 PRIVATE_INPUT_REGISTERS = frozenset(("EAX", "ECX", "EDX", "EBX", "ESI", "EDI"))
 
 def add_game_args(parser):
@@ -506,12 +506,13 @@ def load(game_dir, build_root=None):
     # ssa-call-contracts). False publishes every field at every call.
     if not isinstance(translate.setdefault("call_contracts", TRANSLATE_DEFAULTS["call_contracts"]), bool):
         raise ValueError("%s: [translate] call_contracts must be a boolean" % source)
-    if type(translate.setdefault("assume_private_stack", TRANSLATE_DEFAULTS["assume_private_stack"])) is not bool:
-        raise ValueError("%s: [translate] assume_private_stack must be a boolean" % source)
+    # Opt-in premises about original code; docs/translator.md lists what each assumes.
+    assume = translate.setdefault("assume", list(TRANSLATE_DEFAULTS["assume"]))
+    if (not isinstance(assume, list) or not set(assume) <= ASSUMPTIONS
+            or len(set(assume)) != len(assume)):
+        raise ValueError("%s: [translate] assume must list unique names from %s" % (source, ", ".join(sorted(ASSUMPTIONS))))
     if type(translate.setdefault("lazy_stack_writes", TRANSLATE_DEFAULTS["lazy_stack_writes"])) is not bool:
         raise ValueError("%s: [translate] lazy_stack_writes must be a boolean" % source)
-    if type(translate.setdefault("assume_stack_pointer_bases", TRANSLATE_DEFAULTS["assume_stack_pointer_bases"])) is not bool:
-        raise ValueError("%s: [translate] assume_stack_pointer_bases must be a boolean" % source)
     for key in ("exposed_stack_functions", "stack_helpers", "stack_probes"):
         listed = translate.setdefault(key, [])
         if (not isinstance(listed, list)
