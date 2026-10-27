@@ -360,8 +360,11 @@ only when its generation is current. The bridge keys storage by level-surface
 identity so releasing a parent texture cannot invalidate a still-bound surface.
 Standalone depth storage uses the guest surface identity, dimensions and format;
 it persists across bindings and is released with the surface. GPU allocation is
-deferred until its first binding. Mip levels remain unsupported; read/write
-texture feedback fails by name.
+deferred until its first binding. Mip levels remain unsupported. A draw that
+samples its own color target flushes the batch and samples a copy taken before
+the draw (a divergence for overlapping primitives within that draw); sampling
+the bound depth target fails by name. Stale bindings in stages the draw does not
+sample are ignored.
 
 The headless probe's `render texture/depth/restoration/readback` check covers
 rendering, same-scene restoration, shared-depth preservation, sampling after

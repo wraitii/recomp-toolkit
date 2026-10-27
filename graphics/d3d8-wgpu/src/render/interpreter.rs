@@ -2,6 +2,7 @@ use super::bindings::uniform_entry;
 use super::interface::{InterfaceKey, LayoutAttribute};
 use super::pipeline::{PipelineDescriptor, PreparedPipeline};
 use crate::RenderError;
+use crate::fast_map::FastMap;
 use crate::shader::interface::*;
 use crate::shader::uber::*;
 use std::hash::{Hash, Hasher};
@@ -29,6 +30,7 @@ pub(crate) enum Manifest {
 pub(crate) struct PreparedInterpreter {
     pub(crate) source: Arc<str>,
     pub(crate) families: Vec<PreparedFamily>,
+    index: FastMap<PipelineDescriptor, usize>,
     pub(crate) module: wgpu::ShaderModule,
     pub(crate) layout: wgpu::BindGroupLayout,
     pub(crate) unused_texture: wgpu::TextureView,
@@ -291,9 +293,7 @@ impl FamilyKey {
 
 impl PreparedInterpreter {
     pub(crate) fn find(&self, descriptor: &PipelineDescriptor) -> Option<&PreparedFamily> {
-        self.families
-            .iter()
-            .find(|family| family.key.descriptor == *descriptor)
+        self.index.get(descriptor).map(|&index| &self.families[index])
     }
 
     pub(crate) fn for_pipeline(&self, pipeline: &wgpu::RenderPipeline) -> Option<&PreparedFamily> {
@@ -326,7 +326,7 @@ impl PreparedInterpreter {
                 SOURCE.len()
             );
         }
-        let families = keys
+        let families: Vec<PreparedFamily> = keys
             .into_iter()
             .enumerate()
             .map(|(index, key)| {
@@ -394,7 +394,12 @@ impl PreparedInterpreter {
                 ..Default::default()
             });
         let unused_sampler = device.create_sampler(&Default::default());
+        let mut index = FastMap::default();
+        for (position, family) in families.iter().enumerate() {
+            index.entry(family.key.descriptor.clone()).or_insert(position);
+        }
         Ok(Self {
+            index,
             unused_texture,
             unused_cube,
             unused_sampler,

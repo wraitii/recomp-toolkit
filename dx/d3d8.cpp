@@ -209,10 +209,14 @@ uint32_t bridge_result(X86 *c, const recomp::d3d::Status &status) {
     if (d3d_bridge_ok(status))
         return D8_OK;
     std::string message(status.message.data(), status.message.size());
-    fprintf(stderr, "d3d8: %s\n", message.c_str());
+    const bool fatal = status.code == recomp::d3d::StatusCode::Unsupported ||
+                       status.code == recomp::d3d::StatusCode::NotImplemented;
+    if (fatal)
+        fprintf(stderr, "d3d8: aborting on unsupported renderer result: %s\n", message.c_str());
+    else
+        fprintf(stderr, "d3d8: %s\n", message.c_str());
     fflush(stderr);
-    if (status.code == recomp::d3d::StatusCode::Unsupported ||
-        status.code == recomp::d3d::StatusCode::NotImplemented)
+    if (fatal)
         imports_unsupported(c);
     if (status.code == recomp::d3d::StatusCode::InvalidArgument)
         return D8_ERR_INVALIDCALL;

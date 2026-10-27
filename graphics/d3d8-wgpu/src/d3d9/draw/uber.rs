@@ -164,6 +164,7 @@ impl SelectionKey {
 struct CachedSelection {
     key: SelectionKey,
     selection: Selection,
+    residual: Option<String>,
     recipe: Option<Arc<CachedRecipe>>,
 }
 
@@ -192,20 +193,26 @@ pub(super) fn select(
         .as_ref()
         .filter(|cached| key.as_ref().is_some_and(|key| *key == cached.key))
     {
+        let selection = cached.selection;
+        if let Some(reason) = cached.residual.clone() {
+            *draw.residual_reasons.entry(reason).or_default() += 1;
+        }
         draw.specialization.selection_hits += 1;
-        return Ok(cached.selection);
+        return Ok(selection);
     }
     draw.specialization.selection = None;
     let coverage = coverage(gpu, state, snapshot, vs, ps);
     let eligible = coverage.as_ref().is_ok_and(|eligible| *eligible);
-    let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
-    let family = gpu
-        .interpreter
-        .get()
-        .ok_or_else(|| unsupported("InterpreterDraw", "interpreter not prepared"))?
-        .find(&descriptor)
-        .filter(|_| eligible)
-        .map(|family| family.fingerprint);
+    let family = if eligible {
+        let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
+        gpu.interpreter
+            .get()
+            .ok_or_else(|| unsupported("InterpreterDraw", "interpreter not prepared"))?
+            .find(&descriptor)
+            .map(|family| family.fingerprint)
+    } else {
+        None
+    };
     let result = coverage.and_then(|eligible| {
         if eligible && family.is_none() && mode != Mode::CompareFamily11 {
             Err(unsupported("InterpreterDraw", "unprepared-pipeline-state"))
@@ -213,15 +220,16 @@ pub(super) fn select(
             Ok(eligible)
         }
     });
+    let mut residual = None;
     if mode == Mode::Hybrid {
-        let reason = match &result {
-            Ok(true) => None,
-            Ok(false) => Some("unsupported-instruction-or-interface".to_string()),
-            Err(error) => Some(error.cause.clone()),
-        };
-        if let Some(reason) = reason {
-            if trace_compilation() {
-                *draw.residual_reasons.entry(reason).or_default() += 1;
+        if trace_compilation() {
+            residual = match &result {
+                Ok(true) => None,
+                Ok(false) => Some("unsupported-instruction-or-interface".to_string()),
+                Err(error) => Some(error.cause.clone()),
+            };
+            if let Some(reason) = &residual {
+                *draw.residual_reasons.entry(reason.clone()).or_default() += 1;
             }
         }
     } else {
@@ -231,10 +239,11 @@ pub(super) fn select(
         eligible: Some(eligible),
         family,
     };
-    if let Some(key) = key.filter(|_| family.is_some()) {
+    if let Some(key) = key {
         draw.specialization.selection = Some(CachedSelection {
             key,
             selection,
+            residual,
             recipe: None,
         });
     }

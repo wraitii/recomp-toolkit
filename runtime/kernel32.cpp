@@ -3806,6 +3806,9 @@ void thread_run_exit_cleanup(GuestThread *t) {
 }
 
 void *thread_host_main(void *arg) {
+    // A worker holding the baton stalls the run thread, so it needs the same
+    // scheduling class; only the baton holder runs, so this adds no load.
+    os_thread_prefer_performance();
     GuestThread *t = (GuestThread *)arg;
     t_self = t->index;
     t_is_guest = true;

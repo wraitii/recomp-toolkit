@@ -4662,8 +4662,6 @@ fn resolve_binding(device: &D3d9Device, id: u32, stage: u32) -> Result<CachedBin
 fn bound_textures_cached(
     device: &D3d9Device,
     cache: &mut [Option<CachedBinding>; state::MAX_SAMPLERS],
-    target: &SurfaceView,
-    depth: Option<&SurfaceView>,
 ) -> Result<draw::BoundTextures, RenderError> {
     let mut out = draw::BoundTextures::new();
     for stage in 0..state::MAX_SAMPLERS as u32 {
@@ -4681,14 +4679,6 @@ fn bound_textures_cached(
             }
             _ => resolve_binding(device, id, stage)?,
         };
-        if cached.texture == target.texture
-            || depth.is_some_and(|depth| cached.texture == depth.texture)
-        {
-            return Err(unsupported(
-                "Draw",
-                "the current render target is bound as a sampler",
-            ));
-        }
         out.push(cached.binding.clone());
         cache[stage as usize] = Some(cached);
     }
@@ -4824,12 +4814,7 @@ fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<
             bindings: Default::default(),
         }),
     };
-    let bindings = bound_textures_cached(
-        device,
-        &mut textures.bindings,
-        &views.target,
-        views.depth.as_ref(),
-    )?;
+    let bindings = bound_textures_cached(device, &mut textures.bindings)?;
     let snapshot = draw::DrawSnapshot {
         command,
         target: views.target.clone(),

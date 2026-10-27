@@ -1884,6 +1884,7 @@ pub(crate) struct D3d9DrawState {
     native_geometry_pool: Vec<Box<NativeGeometry>>,
     pipeline_memo: Option<(PipelineKey, wgpu::RenderPipeline)>,
     memos: Vec<Box<DrawMemo>>,
+    feedback_copies: FastMap<FeedbackShape, (wgpu::Texture, wgpu::TextureView)>,
 }
 impl D3d9DrawState {
     fn log_cache_clear(&self, reason: &str) {
@@ -1900,6 +1901,7 @@ impl D3d9DrawState {
     fn clear(&mut self, reason: &str) {
         self.log_cache_clear(reason);
         self.memos.clear();
+        self.feedback_copies.clear();
         self.specialization = uber::RecipeCache::default();
         self.pipeline_memo = None;
         self.pipelines.clear();
@@ -3156,6 +3158,7 @@ pub(crate) fn execute(
             raw_inputs,
         )?,
     };
+    let bindings = feedback_bindings(gpu, draw, queries, snapshot, &memo.bindings)?;
     if snapshot.command.primitive == 1
         && (rs(state, 156) != 0 || rs(state, 157) != 0 || f32::from_bits(rs(state, 154)) != 1.0)
     {
@@ -3597,7 +3600,7 @@ pub(crate) fn execute(
         uniform_offsets,
         uniform_sizes,
         programs: memo.programs.clone(),
-        textures: memo.bindings.clone(),
+        textures: bindings,
         vertex_offset: vertex_offset as u64,
         vertex_size: vertex_size as u64,
         has_attributes,
@@ -3655,6 +3658,102 @@ pub(crate) fn execute(
         }
     }
     Ok(())
+}
+
+type FeedbackShape = (wgpu::Extent3d, u32, wgpu::TextureFormat, wgpu::TextureDimension);
+
+/// D3D9 lets a draw sample its own color target; wgpu rejects that usage conflict, so the
+/// bound target is replaced by a copy taken after every earlier draw has been flushed.
+/// DIVERGENCE(original): the draw reads the target as it was before the draw. D3D9 leaves
+/// reads of pixels written earlier in the same draw undefined and hardware-dependent.
+fn feedback_bindings(
+    gpu: &D3d9Gpu,
+    draw: &mut D3d9DrawState,
+    queries: &mut D3d9Queries,
+    snapshot: &DrawSnapshot,
+    bindings: &Arc<[PendingTexture]>,
+) -> Result<Arc<[PendingTexture]>, RenderError> {
+    let bound = |target: &wgpu::Texture| {
+        bindings
+            .iter()
+            .any(|binding| binding.texture.as_ref() == Some(target))
+    };
+    if let Some(depth) = snapshot.depth.as_ref().filter(|d| bound(&d.texture)) {
+        return Err(unsupported(
+            "Draw",
+            format!(
+                "the current depth target (format {}) is sampled by the draw",
+                depth.format
+            ),
+        ));
+    }
+    let source = &snapshot.target.texture;
+    if !bound(source) {
+        return Ok(Arc::clone(bindings));
+    }
+    if !source.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+        return Err(unsupported(
+            "Draw",
+            "the sampled render target lacks copy usage",
+        ));
+    }
+    flush(gpu, draw, queries)?;
+    let size = source.size();
+    let levels = source.mip_level_count();
+    let dimension = source.dimension();
+    let shape = (size, levels, source.format(), dimension);
+    let (copy, view) = match draw.feedback_copies.get(&shape) {
+        Some(entry) => entry.clone(),
+        None => {
+            let entry = gpu.validate("DrawFeedbackCopy", || {
+                let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("d3d9-feedback-copy"),
+                    size,
+                    mip_level_count: levels,
+                    sample_count: 1,
+                    dimension,
+                    format: source.format(),
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: (dimension == wgpu::TextureDimension::D2
+                        && size.depth_or_array_layers == 6)
+                        .then_some(wgpu::TextureViewDimension::Cube),
+                    ..Default::default()
+                });
+                Ok((texture, view))
+            })?;
+            draw.feedback_copies.insert(shape, entry.clone());
+            entry
+        }
+    };
+    gpu.record(|encoder, _| {
+        for level in 0..levels {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    mip_level: level,
+                    ..source.as_image_copy()
+                },
+                wgpu::TexelCopyTextureInfo {
+                    mip_level: level,
+                    ..copy.as_image_copy()
+                },
+                size.mip_level_size(level, dimension),
+            );
+        }
+    });
+    Ok(bindings
+        .iter()
+        .map(|binding| match &binding.texture {
+            Some(texture) if texture == source => PendingTexture {
+                texture: Some(copy.clone()),
+                view: view.clone(),
+                ..binding.clone()
+            },
+            _ => binding.clone(),
+        })
+        .collect())
 }
 
 pub(crate) fn flush(
