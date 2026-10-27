@@ -589,14 +589,11 @@ impl Walk<'_> {
                 }
                 OpCode::Call => {
                     let target = target(insn).ok_or("unknown direct call")?;
-                    if mode == Mode::Cleanup
-                        && self.context.helpers.contains(&target)
-                    {
+                    if mode == Mode::Cleanup && self.context.helpers.contains(&target) {
                         self.inline(target, state, depth)?;
                         continue;
                     }
-                    if mode == Mode::Cleanup && self.context.probes.contains(&target)
-                    {
+                    if mode == Mode::Cleanup && self.context.probes.contains(&target) {
                         let (esp, eax) = (
                             Registers::get().require("ESP"),
                             Registers::get().require("EAX"),

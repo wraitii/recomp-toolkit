@@ -420,7 +420,11 @@ impl Settings {
                 })?;
                 let st0 = registers.iter().filter(|name| *name == "ST0").count();
                 let fields = fields(
-                    registers.iter().filter(|name| *name != "ST0").cloned().collect(),
+                    registers
+                        .iter()
+                        .filter(|name| *name != "ST0")
+                        .cloned()
+                        .collect(),
                     "private_input_registers",
                 )
                 .map_err(Error::input)?;
