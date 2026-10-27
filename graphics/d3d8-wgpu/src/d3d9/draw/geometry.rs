@@ -517,19 +517,27 @@ impl D3d9DrawState {
             min = min.min(raw);
             max = max.max(raw);
         }
-        if !self.index_bounds.contains_key(&key) && self.index_bounds.len() >= 256 {
-            let before = self.index_bounds.len();
-            self.index_bounds
-                .retain(|_, cached| cached.bytes.strong_count() != 0);
-            stats::record(|s| {
-                s.index_cleanup_scans += 1;
-                s.index_cleanup_entries += before as u64;
-                s.index_cleanup_removed += (before - self.index_bounds.len()) as u64;
-            });
-            if self.index_bounds.len() >= 256 {
-                stats::record(|s| s.index_buffer_evictions += 1);
-                evict_one(&mut self.index_bounds);
+        if !self.index_bounds.contains_key(&key) {
+            if self.index_bounds.len() >= 4096 {
+                let mut removed = 0;
+                let mut evicted = 0;
+                for _ in 0..256 {
+                    let oldest = self.index_bounds_order.pop_front().unwrap();
+                    let cached = self.index_bounds.remove(&oldest).unwrap();
+                    if cached.bytes.strong_count() == 0 {
+                        removed += 1;
+                    } else {
+                        evicted += 1;
+                    }
+                }
+                stats::record(|s| {
+                    s.index_cleanup_scans += 1;
+                    s.index_cleanup_entries += 256;
+                    s.index_cleanup_removed += removed;
+                    s.index_buffer_evictions += evicted;
+                });
             }
+            self.index_bounds_order.push_back(key);
         }
         let cached = self
             .index_bounds

@@ -145,7 +145,9 @@ constant-register fills/temporary bytes, and buffer uploads that copy snapshots
 or detach weak references. `frame` is the thread's cumulative rendered-frame
 count; `frames` and `elapsed_ms` describe the bucket. Counts include attempted
 operations; memo matches/rejects count candidates examined, not draws. Constant
-fill counters exclude preshader writes. This mode adds no per-draw clock reads
+fill counters exclude preshader writes; saved CTAB parses count actual cache fills.
+Index cleanup counts FIFO entries visited, with dead removals and live evictions
+reported separately. This mode adds no per-draw clock reads
 or logs; use sampling separately for CPU costs and leave pipeline tracing off.
 `RECOMP_D3D9_TRACE_PIPELINES=1` also logs every pipeline miss before and after
 compilation, every module creation, and shader variants. Records include frame

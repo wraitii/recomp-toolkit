@@ -1851,6 +1851,7 @@ pub(crate) struct D3d9DrawState {
     geometry: FastMap<usize, CachedGeometry>,
     geometry_seen: FastMap<usize, (Weak<Vec<u8>>, u64)>,
     index_bounds: FastMap<usize, CachedIndexBounds>,
+    index_bounds_order: std::collections::VecDeque<usize>,
     frame: u64,
     trace_frame_draw: u32,
     trace_total_draw: u64,
@@ -1915,6 +1916,7 @@ impl D3d9DrawState {
         self.geometry.clear();
         self.geometry_seen.clear();
         self.index_bounds.clear();
+        self.index_bounds_order.clear();
     }
 
     pub(crate) fn end_frame(&mut self, gpu: &D3d9Gpu) {

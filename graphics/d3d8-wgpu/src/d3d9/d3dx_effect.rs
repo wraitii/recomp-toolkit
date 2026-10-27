@@ -259,6 +259,7 @@ struct EfxObject {
     data: Vec<u8>,
     param: Vec<u8>,
     ctab: OnceLock<Result<Vec<CtabConst>, RenderError>>,
+    saved_outputs: OnceLock<Result<Vec<u32>, RenderError>>,
     ctab_params: OnceLock<Result<Vec<usize>, RenderError>>,
     preshader: OnceLock<Result<Option<Arc<CompiledPreshader>>, RenderError>>,
     const_version: Cell<u64>,
@@ -796,6 +797,7 @@ fn parse_effect(blob: &[u8]) -> Result<D3dxEffect, RenderError> {
                 data: body[at..end].to_vec(),
                 param: Vec::new(),
                 ctab: OnceLock::new(),
+                saved_outputs: OnceLock::new(),
                 ctab_params: OnceLock::new(),
                 preshader: OnceLock::new(),
                 const_version: Cell::new(0),
@@ -910,6 +912,7 @@ fn parse_effect(blob: &[u8]) -> Result<D3dxEffect, RenderError> {
             data: Vec::new(),
             param: Vec::new(),
             ctab: OnceLock::new(),
+            saved_outputs: OnceLock::new(),
             ctab_params: OnceLock::new(),
             preshader: OnceLock::new(),
             const_version: Cell::new(0),
@@ -972,10 +975,15 @@ fn parse_ctab(code: &[u8]) -> Result<Vec<CtabConst>, RenderError> {
         .collect())
 }
 
-fn object_ctab(object: &EfxObject) -> Result<&[CtabConst], RenderError> {
+fn object_ctab(object: &EfxObject, saved: bool) -> Result<&[CtabConst], RenderError> {
     object
         .ctab
-        .get_or_init(|| parse_ctab(&object.data))
+        .get_or_init(|| {
+            if saved {
+                stats::record(|s| s.saved_ctab_parses += 1);
+            }
+            parse_ctab(&object.data)
+        })
         .as_ref()
         .map(Vec::as_slice)
         .map_err(Clone::clone)
@@ -3508,7 +3516,7 @@ fn apply_shader_constants(
     ctx: Apply,
     changed: Option<u64>,
 ) -> Result<(), RenderError> {
-    let ctab = object_ctab(object)?;
+    let ctab = object_ctab(object, false)?;
     let params = object
         .ctab_params
         .get_or_init(|| ctab_params(effect, ctab, "shader constant"))
@@ -3746,22 +3754,27 @@ fn shader_constant_keys(
     effect: &D3dxEffect,
     keys: &mut EffectKeys,
     pixel: bool,
-    code: &[u8],
+    object: &EfxObject,
     save_shader: bool,
 ) -> Result<(), RenderError> {
     if save_shader {
-        if let Some(code) = preshader::shader_preshader(code)? {
-            for register in preshader::parse(code)?.output_registers() {
-                if pixel {
-                    keys.ps_const_f.push((register, 1));
-                } else {
-                    keys.vs_const_f.push((register, 1));
-                }
+        let outputs = object
+            .saved_outputs
+            .get_or_init(|| match preshader::shader_preshader(&object.data)? {
+                Some(code) => Ok(preshader::parse(code)?.output_registers()),
+                None => Ok(Vec::new()),
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
+        for &register in outputs {
+            if pixel {
+                keys.ps_const_f.push((register, 1));
+            } else {
+                keys.vs_const_f.push((register, 1));
             }
         }
     }
-    stats::record(|s| s.saved_ctab_parses += 1);
-    for constant in parse_ctab(code)? {
+    for constant in object_ctab(object, true)? {
         match constant.set {
             D3DXRS_FLOAT4 => {
                 if !save_shader {
@@ -3808,7 +3821,7 @@ fn shader_state_keys(
                 .get(id)
                 .ok_or_else(|| invalid_data("array selector shader object is missing"))?;
             if !object.data.is_empty() {
-                shader_constant_keys(effect, keys, pixel, &object.data, save_shader)?;
+                shader_constant_keys(effect, keys, pixel, object, save_shader)?;
             }
         }
         return Ok(());
@@ -3816,7 +3829,7 @@ fn shader_state_keys(
     if let Some(id) = D3dxEffect::state_shader_object(effect, state) {
         if let Some(object) = effect.objects.get(&id) {
             if !object.data.is_empty() {
-                shader_constant_keys(effect, keys, pixel, &object.data, save_shader)?;
+                shader_constant_keys(effect, keys, pixel, object, save_shader)?;
             }
         }
     }
