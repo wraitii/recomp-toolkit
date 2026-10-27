@@ -84,8 +84,15 @@ These dumps run outside `rk-plan`.
 `tools/build.py --stack-return-report FILE` runs production planning and writes a
 read-only JSON report without emitting C or building the app. It follows the original,
 unpromoted SSA from each direct caller past the callee's promoted return slots,
-including aligned slots, partial overwrites and one nested call. Each query records
+retaining all original stores while existing forwarding removes reads proved initialized.
+It retains symbolic alignment roots and caller register bindings across one nested call.
+Each query records
 all terminal reasons, instruction addresses, remaining bytes and overwrite witnesses.
+Alias blockers include their class, address dependencies, register reloads, pointer-load
+sites and address-work usage; class counts distinguish queries from distinct call sites.
+Separate conditional results require the actual omitted slot to lie outside the image;
+they skip fixed image reads under that explicit guard, without installing it or changing
+the baseline. Bypassing one current blocker need not resolve later reads.
 Unknown aliases, opaque/native code, loops, caller returns and search limits stay
 unresolved. Counts distinguish return publications from distinct call sites/slots;
 indirect callers and unavailable functions are explicit coverage gaps. The translator's

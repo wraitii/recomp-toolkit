@@ -153,9 +153,20 @@ impl<'a> Addresses<'a> {
         }
     }
 
+    pub fn local_with_parameters(ssa: &'a Ssa) -> Self {
+        Self {
+            local: true,
+            ..Self::with_parameters(ssa)
+        }
+    }
+
     pub fn get(&mut self, id: ValueId) -> Address {
         let address = self.infer(id);
         self.project(address)
+    }
+
+    pub fn work_usage(&self) -> (usize, bool) {
+        (self.steps, self.steps > 50_000)
     }
 
     fn project(&self, address: Address) -> Address {

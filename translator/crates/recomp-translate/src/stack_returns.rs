@@ -8,8 +8,8 @@ use rk_core::ir::Policy;
 use rk_core::memory::{Address, Base, Range};
 use rk_core::Addr;
 use rk_ir::{Op, StateKey};
-use rk_ssa::address::Addresses;
-use rk_ssa::{BuildOptions, Ssa};
+use rk_ssa::address::{Addresses, Relations};
+use rk_ssa::{BuildOptions, CallFacts, Ssa, ValueId};
 use serde_json::{json, Value};
 
 use super::{BodyContext, Prepared};
@@ -31,6 +31,7 @@ enum Effect {
     Call {
         target: Option<Addr>,
         frame: Address,
+        registers: [Address; 8],
     },
     Return,
     Barrier(String),
@@ -40,6 +41,7 @@ struct Event {
     site: Addr,
     effect: Effect,
     esp: Address,
+    address_origin: Value,
 }
 
 struct Block {
@@ -53,6 +55,9 @@ struct Body {
     stores: Vec<Store>,
     instructions: BTreeMap<Addr, String>,
     return_slot_proven: bool,
+    address_work: (usize, bool),
+    forwarded_reads: Vec<Value>,
+    relations: Relations,
 }
 
 #[derive(Clone, Copy)]
@@ -62,6 +67,7 @@ struct Cursor {
     index: usize,
     frame: Address,
     original: bool,
+    registers: [Address; 8],
 }
 
 #[derive(Clone)]
@@ -70,7 +76,7 @@ struct Search {
     resumes: Vec<Cursor>,
     remaining: BTreeSet<u32>,
     trace: Vec<Value>,
-    visited: BTreeSet<(Addr, usize, usize, Address, Vec<u32>, usize)>,
+    visited: BTreeSet<(Addr, usize, usize, Address, [Address; 8], Vec<u32>, usize)>,
     calls: usize,
 }
 
@@ -94,9 +100,172 @@ fn mapped(address: Address, cursor: Cursor) -> Address {
             base: Base::Absolute,
             ..
         } => address,
+        Address::Known {
+            base: Base::Parameter(index),
+            offset,
+            span,
+        } => cursor
+            .registers
+            .get(index as usize)
+            .copied()
+            .unwrap_or(Address::Unknown)
+            .offset(offset)
+            .bounded(0, span),
         _ if cursor.original => address,
         _ => Address::Unknown,
     }
+}
+
+fn mapped_in(address: Address, cursor: Cursor, body: &Body) -> Address {
+    let address = if cursor.original {
+        address
+    } else {
+        body.relations.bounds(address)
+    };
+    mapped(address, cursor)
+}
+
+fn address_origin(s: &Ssa, root: ValueId, facts: &dyn CallFacts) -> Value {
+    let mut pending = vec![root];
+    let mut seen = BTreeSet::new();
+    let mut inputs = BTreeSet::new();
+    let mut reloads = BTreeMap::new();
+    let mut loads = BTreeSet::new();
+    let mut limited = false;
+    while let Some(id) = pending.pop() {
+        if seen.len() >= 256 {
+            limited = true;
+            break;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        match s.value(id).op {
+            Op::Input(key) => {
+                if let Some(field) = s.field(key) {
+                    inputs.insert(field.name());
+                }
+            }
+            Op::StateKeep(_) => pending.extend(s.args(id).get(1).copied()),
+            Op::StateReload(key) => {
+                if let Some(field) = s.field(key) {
+                    let call = s.args(id)[0];
+                    let site = s.value_addr[call as usize];
+                    let target = match s.value(call).op {
+                        Op::Call { target } => Some(target),
+                        _ => None,
+                    };
+                    reloads.insert((field, site), json!({"field": field.name(), "site": format!("{site:08x}"),
+                        "target": target.map(|target| format!("{target:08x}")), "cleanup": facts.summary(site, target).cleanup}));
+                }
+            }
+            Op::P(rk_core::ir::OpCode::Load) => {
+                loads.insert(format!("{:08x}", s.value_addr[id as usize]));
+            }
+            op if rk_ir::properties(op).pure => pending.extend(s.args(id)),
+            _ => {}
+        }
+    }
+    json!({"value": root, "operation": format!("{:?}", s.value(root).op),
+        "inputs": inputs, "reloads": reloads.into_values().collect::<Vec<_>>(),
+        "pointer_loads": loads, "walk_limited": limited})
+}
+
+fn alias_class(
+    raw: Range,
+    read: Range,
+    target: Range,
+    cursor: Cursor,
+    origin: &Value,
+) -> &'static str {
+    if !cursor.original
+        && matches!(
+            raw.address,
+            Address::Known {
+                base: Base::Parameter(_),
+                ..
+            }
+        )
+    {
+        return if read.address == Address::Unknown {
+            "callee-register-binding-unresolved"
+        } else {
+            "callee-register-binding-may-alias"
+        };
+    }
+    if !cursor.original
+        && matches!(
+            raw.address,
+            Address::Known {
+                base: Base::Argument(_),
+                ..
+            }
+        )
+    {
+        return "callee-stack-argument-not-substituted";
+    }
+    if !cursor.original && raw.address != Address::Unknown && read.address == Address::Unknown {
+        return "callee-local-root-not-mapped";
+    }
+    if matches!(
+        read.address,
+        Address::Known {
+            base: Base::Absolute,
+            ..
+        }
+    ) {
+        return "absolute-versus-symbolic-stack";
+    }
+    if let (
+        Address::Known { base, span, .. },
+        Address::Known {
+            base: own,
+            span: own_span,
+            ..
+        },
+    ) = (read.address, target.address)
+    {
+        if base == own && (span != 0 || own_span != 0) {
+            return "bounded-stack-ranges-overlap";
+        }
+    }
+    if origin["reloads"]
+        .as_array()
+        .is_some_and(|reloads| reloads.iter().any(|reload| reload["field"] == "ESP"))
+    {
+        return "stack-state-reloaded-after-call";
+    }
+    if origin["reloads"]
+        .as_array()
+        .is_some_and(|reloads| !reloads.is_empty())
+    {
+        return "call-returned-register-origin";
+    }
+    if matches!(
+        read.address,
+        Address::Known {
+            base: Base::Parameter(_) | Base::Argument(_),
+            ..
+        }
+    ) {
+        return "incoming-pointer-versus-stack";
+    }
+    if origin["inputs"]
+        .as_array()
+        .is_some_and(|inputs| inputs.iter().any(|input| input == "ESP"))
+        && origin["pointer_loads"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    {
+        return "unresolved-stack-expression";
+    }
+    if origin["pointer_loads"]
+        .as_array()
+        .is_some_and(|loads| !loads.is_empty())
+    {
+        return "loaded-pointer-origin";
+    }
+    "unresolved-symbolic-address"
 }
 
 fn stores(planned: &rk_plan::PlannedFunction) -> Vec<Store> {
@@ -139,12 +308,13 @@ fn stores(planned: &rk_plan::PlannedFunction) -> Vec<Store> {
     result
 }
 
-fn body(s: &Ssa, mut stores: Vec<Store>) -> Result<Body> {
+fn body(s: &Ssa, mut stores: Vec<Store>, facts: &dyn CallFacts) -> Result<Body> {
     anyhow::ensure!(
         s.entries.len() == 1 && s.entries[0].addr == s.addr,
         "multiple-or-interior-entries"
     );
-    let mut addresses = Addresses::with_parameters(s);
+    let mut addresses = Addresses::local_with_parameters(s);
+    let mut call_addresses = Addresses::local_with_parameters(s);
     for boundary in &s.boundaries {
         if s.value(boundary.at).op != Op::Return {
             continue;
@@ -154,7 +324,8 @@ fn body(s: &Ssa, mut stores: Vec<Store>) -> Result<Body> {
             .take(8)
             .filter(|&field| field != Field::Esp)
             .any(|field| {
-                matches!(addresses.state(boundary.at, field), Address::Known {
+                let address = addresses.state(boundary.at, field);
+                matches!(addresses.relations.bounds(address), Address::Known {
                 base: Base::Frame, offset, ..
             } if (offset as i32) < 0)
             });
@@ -187,10 +358,16 @@ fn body(s: &Ssa, mut stores: Vec<Store>) -> Result<Body> {
                 Op::Call { target } => Some(Effect::Call {
                     target: Some(target),
                     frame: addresses.call_frame(id),
+                    registers: std::array::from_fn(|index| {
+                        call_addresses.state(id, Field::ALL[index])
+                    }),
                 }),
                 Op::CallInd => Some(Effect::Call {
                     target: None,
                     frame: addresses.call_frame(id),
+                    registers: std::array::from_fn(|index| {
+                        call_addresses.state(id, Field::ALL[index])
+                    }),
                 }),
                 Op::Return => Some(Effect::Return),
                 Op::Branch { .. } | Op::CBranch { .. } if s.boundary(id).is_some() => {
@@ -214,10 +391,16 @@ fn body(s: &Ssa, mut stores: Vec<Store>) -> Result<Body> {
                 }),
             };
             if let Some(effect) = effect {
+                let origin = if matches!(effect, Effect::Read(_)) {
+                    address_origin(s, s.args(id)[1], facts)
+                } else {
+                    Value::Null
+                };
                 blocks[index].events.push(Event {
                     site: s.value_addr[id as usize],
                     effect,
                     esp: addresses.state(id, Field::Esp),
+                    address_origin: origin,
                 });
             }
         }
@@ -230,6 +413,9 @@ fn body(s: &Ssa, mut stores: Vec<Store>) -> Result<Body> {
         stores,
         instructions: BTreeMap::new(),
         return_slot_proven: false,
+        address_work: addresses.work_usage(),
+        forwarded_reads: Vec::new(),
+        relations: addresses.relations,
     })
 }
 
@@ -241,7 +427,20 @@ fn terminal(reason: &str, search: &Search, site: Addr, detail: Value) -> Value {
     })
 }
 
-fn investigate(bodies: &BTreeMap<Addr, Body>, start: Cursor, range: Range) -> Vec<Value> {
+fn in_image(range: Range, image: (u32, u32)) -> bool {
+    matches!(range.address, Address::Known { base: Base::Absolute, offset, span }
+        if offset >= image.0 && u64::from(offset) + u64::from(span) + u64::from(range.size) <= u64::from(image.1))
+}
+
+fn investigate(
+    bodies: &BTreeMap<Addr, Body>,
+    start: Cursor,
+    range: Range,
+    image_guard: Option<(u32, u32)>,
+) -> Vec<Value> {
+    if image_guard.is_some_and(|image| in_image(range, image)) {
+        return vec![json!({"reason": "image-guard-impossible"})];
+    }
     let Address::Known { span, .. } = range.address else {
         return vec![json!({"reason": "unknown-call-frame"})];
     };
@@ -261,6 +460,7 @@ fn investigate(bodies: &BTreeMap<Addr, Body>, start: Cursor, range: Range) -> Ve
     }];
     let mut terminals = Vec::new();
     let mut steps = 0;
+    let relations = &bodies[&start.function].relations;
     while let Some(mut search) = pending.pop() {
         steps += 1;
         if steps > STEP_LIMIT {
@@ -278,6 +478,7 @@ fn investigate(bodies: &BTreeMap<Addr, Body>, start: Cursor, range: Range) -> Ve
             cursor.block,
             cursor.index,
             cursor.frame,
+            cursor.registers,
             search.remaining.iter().copied().collect(),
             search.resumes.len(),
         );
@@ -309,17 +510,26 @@ fn investigate(bodies: &BTreeMap<Addr, Body>, start: Cursor, range: Range) -> Ve
         };
         match &event.effect {
             Effect::Read(read) => {
-                let read = Range::new(mapped(read.address, cursor), read.size);
+                let raw = *read;
+                let read = Range::new(mapped_in(read.address, cursor, current), read.size);
+                if image_guard.is_some_and(|image| in_image(read, image)) {
+                    search.trace.push(json!({"guard": "omitted-slot-outside-image", "function": format!("{:08x}", cursor.function),
+                        "site": format!("{:08x}", event.site), "read": describe(read)}));
+                    pending.push(search);
+                    continue;
+                }
                 let touched: Vec<_> = search
                     .remaining
                     .iter()
                     .copied()
-                    .filter(|&i| !read.disjoint(byte(i)))
+                    .filter(|&i| !relations.disjoint(read, byte(i)))
                     .collect();
                 if !touched.is_empty() {
-                    let definite = touched.iter().any(|&i| read.offset_of(byte(i)).is_some());
+                    let definite = touched
+                        .iter()
+                        .any(|&i| relations.offset_of(read, byte(i)).is_some());
                     let below_esp = touched.iter().any(|&i| {
-                        match (mapped(event.esp, cursor), byte(i).address) {
+                        match (mapped_in(event.esp, cursor, current), byte(i).address) {
                             (
                                 Address::Known {
                                     base,
@@ -336,13 +546,17 @@ fn investigate(bodies: &BTreeMap<Addr, Body>, start: Cursor, range: Range) -> Ve
                         }
                     });
                     terminals.push(terminal(if definite { "read-before-overwrite" } else { "read-may-alias" }, &search, event.site,
-                        json!({"read": describe(read), "touched_bytes": touched, "below_esp": below_esp,
+                        json!({"read": describe(read), "raw_read": describe(raw),
+                               "blocker_class": alias_class(raw, read, range, cursor, &event.address_origin),
+                               "address_origin": event.address_origin,
+                               "address_work": {"steps": current.address_work.0, "limit_exceeded": current.address_work.1},
+                               "touched_bytes": touched, "below_esp": below_esp,
                                "partially_overwritten": search.remaining.len() < width as usize})));
                     continue;
                 }
             }
             Effect::Write(write) => {
-                let write = Range::new(mapped(write.address, cursor), write.size);
+                let write = Range::new(mapped_in(write.address, cursor, current), write.size);
                 let guaranteed = match write.address {
                     Address::Known { base, offset, span } if write.size > span => Some(Range::new(
                         Address::exact(base, offset.wrapping_add(span)),
@@ -354,7 +568,7 @@ fn investigate(bodies: &BTreeMap<Addr, Body>, start: Cursor, range: Range) -> Ve
                     let before = search.remaining.len();
                     search
                         .remaining
-                        .retain(|&i| guaranteed.offset_of(byte(i)).is_none());
+                        .retain(|&i| relations.offset_of(guaranteed, byte(i)).is_none());
                     if before != search.remaining.len() {
                         search.trace.push(json!({"function": format!("{:08x}", cursor.function), "site": format!("{:08x}", event.site),
                             "write": describe(write), "bytes_killed": before - search.remaining.len()}));
@@ -370,7 +584,11 @@ fn investigate(bodies: &BTreeMap<Addr, Body>, start: Cursor, range: Range) -> Ve
                     }
                 }
             }
-            Effect::Call { target, frame } => {
+            Effect::Call {
+                target,
+                frame,
+                registers,
+            } => {
                 let next = target.and_then(|target| bodies.get(&target).map(|body| (target, body)));
                 let uses_stack = next.is_some_and(|(_, body)| {
                     body.blocks.iter().flat_map(|b| &b.events).any(|event| {
@@ -416,8 +634,9 @@ fn investigate(bodies: &BTreeMap<Addr, Body>, start: Cursor, range: Range) -> Ve
                     function: target,
                     block: callee.entry,
                     index: 0,
-                    frame: mapped(*frame, cursor),
+                    frame: mapped_in(*frame, cursor, current),
                     original: false,
+                    registers: registers.map(|address| mapped_in(address, cursor, current)),
                 };
             }
             Effect::Return => {
@@ -480,7 +699,28 @@ pub(super) fn write(
                 )
                 .map_err(rk_core::Error::Diagnostic)?;
                 rk_ssa::canonicalize(&mut original, true);
-                let mut result = body(&original, candidates)?;
+                let reads = |s: &Ssa| -> BTreeSet<ValueId> {
+                    s.blocks.iter().flat_map(|block| &block.ops).copied().filter(|&id| {
+                        matches!(s.value(id).op, Op::P(rk_core::ir::OpCode::Load))
+                            || matches!(s.value(id).op, Op::X87(op) if op.memory() == Some(rk_ir::x87::MemoryEffect::Read))
+                    }).collect()
+                };
+                let writes = |s: &Ssa| -> BTreeSet<ValueId> {
+                    s.blocks.iter().flat_map(|block| &block.ops).copied().filter(|&id| {
+                        matches!(s.value(id).op, Op::P(rk_core::ir::OpCode::Store))
+                            || matches!(s.value(id).op, Op::X87(op) if op.memory() == Some(rk_ir::x87::MemoryEffect::Write))
+                    }).collect()
+                };
+                let before_reads = reads(&original);
+                let before_writes = writes(&original);
+                rk_ssa::forward(&mut original, Some(&ctx.facts));
+                anyhow::ensure!(before_writes.is_subset(&writes(&original)), "report forwarding removed a guest store");
+                let remaining_reads = reads(&original);
+                let forwarded: Vec<_> = before_reads.difference(&remaining_reads).map(|&id| json!({
+                    "site": format!("{:08x}", original.value_addr[id as usize]), "value": id,
+                })).collect();
+                let mut result = body(&original, candidates, &ctx.facts)?;
+                result.forwarded_reads = forwarded;
                 result.return_slot_proven = planned.ssa.return_slot.is_ok();
                 result.instructions = ir
                     .insns
@@ -513,6 +753,10 @@ pub(super) fn write(
     let mut candidate_slots = BTreeSet::new();
     let mut queried_stores = BTreeSet::new();
     let mut indirect_calls = 0;
+    let mut guarded_calls = BTreeSet::new();
+    let mut guarded_slots = BTreeSet::new();
+    let mut guarded_queries = 0;
+    let image = (ctx.program.image.base, ctx.program.image.end());
     for (&caller, body) in &bodies {
         for (block, item) in body.blocks.iter().enumerate() {
             for (index, event) in item.events.iter().enumerate() {
@@ -521,6 +765,7 @@ pub(super) fn write(
                 let Effect::Call {
                     target: Some(target),
                     frame,
+                    ..
                 } = event.effect
                 else {
                     continue;
@@ -543,6 +788,9 @@ pub(super) fn write(
                         index: index + 1,
                         frame: Address::exact(Base::Frame, 0),
                         original: true,
+                        registers: std::array::from_fn(|index| {
+                            Address::exact(Base::Parameter(index as u8), 0)
+                        }),
                     };
                     let range = Range::new(
                         mapped(
@@ -560,7 +808,7 @@ pub(super) fn write(
                             json!({"reason": "returned-frame-pointer", "function": format!("{target:08x}"), "site": format!("{:08x}", store.site)}),
                         ]
                     } else {
-                        investigate(&bodies, cursor, range)
+                        investigate(&bodies, cursor, range, None)
                     };
                     for diagnostic in &mut terminals {
                         let function = diagnostic["function"].as_str().and_then(rk_core::parse_hex);
@@ -585,6 +833,26 @@ pub(super) fn write(
                         candidate_calls.insert(event.site);
                         candidate_slots.insert((event.site, target, store.key));
                     }
+                    let guarded = if outcome == "unresolved"
+                        && terminals.iter().any(|terminal| {
+                            terminal["reason"] == "read-may-alias"
+                                && terminal["detail"]["read"]["base"] == "Absolute"
+                        }) {
+                        let terminals = investigate(&bodies, cursor, range, Some(image));
+                        let candidate = terminals
+                            .iter()
+                            .all(|terminal| terminal["reason"] == "overwritten");
+                        if candidate {
+                            guarded_queries += 1;
+                            guarded_calls.insert(event.site);
+                            guarded_slots.insert((event.site, target, store.key));
+                        }
+                        json!({"outcome": if candidate { "guarded-overwrite-candidate" } else { "unresolved" },
+                            "required_guard": "actual omitted slot lies completely outside the loaded image",
+                            "image_start": format!("{:08x}", image.0), "image_end": format!("{:08x}", image.1), "terminals": terminals})
+                    } else {
+                        Value::Null
+                    };
                     *counts.entry(outcome.into()).or_default() += 1;
                     for reason in terminals
                         .iter()
@@ -598,7 +866,7 @@ pub(super) fn write(
                         "slot": format!("{:?}", store.key), "callee_range": describe(store.range),
                         "caller_range": describe(range), "existing_direct_variant": ctx.direct_targets.contains(&target),
                         "origin_return_slot_proven": callee.return_slot_proven,
-                        "outcome": outcome, "terminals": terminals}));
+                        "outcome": outcome, "terminals": terminals, "slot_outside_image": guarded}));
                 }
             }
         }
@@ -642,17 +910,45 @@ pub(super) fn write(
         (name, count)
     })
     .collect();
+    let classes: BTreeSet<_> = rows
+        .iter()
+        .flat_map(|row| row["terminals"].as_array().into_iter().flatten())
+        .filter(|terminal| terminal["reason"] == "read-may-alias")
+        .filter_map(|terminal| terminal["detail"]["blocker_class"].as_str())
+        .collect();
+    let blockers: BTreeMap<_, _> = classes.into_iter().map(|class| {
+        let matching = |terminal: &&Value| terminal["reason"] == "read-may-alias" && terminal["detail"]["blocker_class"] == class;
+        let queries: Vec<_> = rows.iter().filter(|row| row["terminals"].as_array().unwrap().iter().any(|terminal| matching(&terminal))).collect();
+        let instructions: BTreeSet<_> = queries.iter().flat_map(|row| row["terminals"].as_array().unwrap().iter().filter(matching))
+            .map(|terminal| (terminal["function"].as_str(), terminal["site"].as_str())).collect();
+        let calls: BTreeSet<_> = queries.iter().map(|row| row["call"].as_str()).collect();
+        let sole: Vec<_> = queries.iter().filter(|row| row["terminals"].as_array().unwrap().iter()
+            .all(|terminal| terminal["reason"] == "overwritten" || matching(&terminal))).collect();
+        let examples: Vec<_> = queries.iter().take(3).map(|row| json!({"caller": row["caller"], "call": row["call"],
+            "callee": row["callee"], "return": row["return"], "slot": row["slot"]})).collect();
+        (class, json!({"queries": queries.len(), "call_sites": calls.len(), "blocking_instructions": instructions.len(),
+            "sole_blocker_queries": sole.len(), "examples": examples}))
+    }).collect();
+    let forwarded: BTreeMap<_, _> = bodies
+        .iter()
+        .filter(|(_, body)| !body.forwarded_reads.is_empty())
+        .map(|(&function, body)| (format!("{function:08x}"), &body.forwarded_reads))
+        .collect();
     let report = json!({"format": "recomp-stack-return-report-v1", "read_only": true,
-        "executable_sha256": ctx.program.sha256, "image_base": format!("{:08x}", ctx.program.image.base),
-        "scope": "Normal continuations of ordinary planned return publications; original unpromoted SSA supplies effects. Candidates require runtime observer guards and return/entry contracts before optimization. Indirect and external callers prevent global elimination from these counts alone.",
+        "executable_sha256": ctx.program.sha256, "image_base": format!("{:08x}", ctx.program.image.base), "image_size": ctx.program.image.size,
+        "scope": "Normal continuations of ordinary planned return publications; unpromoted SSA retains every original store. Existing forwarding removes reads proven to consume prior writes. Candidates require runtime observer guards and return/entry contracts before optimization. Indirect and external callers prevent global elimination from these counts alone.",
         "limits": {"steps_per_query": STEP_LIMIT, "nested_calls": CALL_LIMIT, "caller_unwinds": 0, "bytes_per_query": BYTE_LIMIT},
         "assumptions": {"private_stack": ctx.assume_private_stack, "stack_pointer_bases": ctx.assume_stack_pointer_bases,
             "dead_after_stack_call": false, "dead_after_caller_returns": false},
         "coverage": {"functions": bodies.len(), "return_publications": publications, "sites": site_coverage,
             "indirect_call_sites_not_queried": indirect_calls, "unavailable_functions": unavailable},
         "candidate_call_sites": candidate_calls.len(), "candidate_call_slots": candidate_slots.len(),
+        "additional_candidates_with_slot_outside_image_guard": {"queries": guarded_queries, "call_sites": guarded_calls.len(), "call_slots": guarded_slots.len()},
         "assumption_only_upper_bounds": assumption_bounds,
         "assumption_scope": "Stack-call bounds use syntactic stack writes, not proof that every path writes. First-caller-return is more aggressive than a two- or three-caller cutoff; those are not measured.",
+        "blocker_classes": blockers,
+        "initialized_reads_forwarded": forwarded,
+        "blocker_counting": "Queries can contain several classes. Sole-blocker counts describe current terminal frontiers, not proofs that bypassing one class would finish a query.",
         "publications": inventory, "counts": counts, "rows": rows});
     std::fs::write(path, serde_json::to_string_pretty(&report)? + "\n")?;
     eprintln!("stack-return report: {} functions, {publications} publications, {} call/publication queries; {:?}", bodies.len(), report["rows"].as_array().unwrap().len(), report["counts"]);
