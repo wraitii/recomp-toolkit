@@ -410,7 +410,7 @@ impl D3d9StateBlock {
             entry.1 = state.transform[entry.0 as usize];
         }
         if self.viewport.is_some() {
-            self.viewport = Some(state.viewport());
+            self.viewport = Some(*state.viewport());
         }
         if self.scissor.is_some() {
             self.scissor = Some(state.scissor());
@@ -584,8 +584,7 @@ pub struct D3d9State {
     ps_const_f: [[f32; 4]; PS_CONST_F],
     ps_const_i: [[i32; 4]; PS_CONST_I],
     ps_const_b: [u32; PS_CONST_B],
-    target_width: u32,
-    target_height: u32,
+    target_viewport: Viewport,
     blocks: BTreeMap<u32, D3d9StateBlock>,
     next_block: u32,
     recording: Option<D3d9StateBlock>,
@@ -663,8 +662,14 @@ impl Default for D3d9State {
             ps_const_f: [[0.0; 4]; PS_CONST_F],
             ps_const_i: [[0; 4]; PS_CONST_I],
             ps_const_b: [0; PS_CONST_B],
-            target_width: 0,
-            target_height: 0,
+            target_viewport: Viewport {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                min_z: 0.0,
+                max_z: 1.0,
+            },
             blocks: BTreeMap::new(),
             next_block: 1,
             recording: None,
@@ -689,27 +694,20 @@ impl Default for StreamSource {
 
 impl D3d9State {
     pub fn set_target_size(&mut self, width: u32, height: u32) {
-        self.target_width = width;
-        self.target_height = height;
+        self.target_viewport.width = width;
+        self.target_viewport.height = height;
     }
 
-    pub fn viewport(&self) -> Viewport {
-        self.viewport.unwrap_or(Viewport {
-            x: 0,
-            y: 0,
-            width: self.target_width,
-            height: self.target_height,
-            min_z: 0.0,
-            max_z: 1.0,
-        })
+    pub fn viewport(&self) -> &Viewport {
+        self.viewport.as_ref().unwrap_or(&self.target_viewport)
     }
 
     pub fn scissor(&self) -> Scissor {
         self.scissor.unwrap_or(Scissor {
             left: 0,
             top: 0,
-            right: self.target_width as i32,
-            bottom: self.target_height as i32,
+            right: self.target_viewport.width as i32,
+            bottom: self.target_viewport.height as i32,
         })
     }
 
@@ -1687,7 +1685,7 @@ impl D3d9State {
             }
         }
         if all {
-            block.viewport = Some(self.viewport());
+            block.viewport = Some(*self.viewport());
             block.scissor = Some(self.scissor());
             block.material = Some(self.material);
             for index in 0..MAX_CLIP_PLANES {
@@ -1810,15 +1808,13 @@ impl D3d9State {
     }
 
     pub fn clear_pipeline(&mut self) {
-        let target_width = self.target_width;
-        let target_height = self.target_height;
+        let target_viewport = self.target_viewport;
         let blocks = std::mem::take(&mut self.blocks);
         let next_block = self.next_block;
         let recording_handle = self.recording_handle;
         drop(blocks);
         *self = Self::default();
-        self.target_width = target_width;
-        self.target_height = target_height;
+        self.target_viewport = target_viewport;
         self.next_block = next_block;
         self.recording_handle = recording_handle;
     }

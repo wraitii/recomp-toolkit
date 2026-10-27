@@ -1226,19 +1226,16 @@ void dinput_register() {
     done = true;
     com_set_destructor(K_DIDEVICE, device_destroy);
     com_set_destructor(K_DINPUTEFFECT, effect_destroy);
-    com_define(IF_DINPUTEFFECT, "DINPUT.dll", "IDirectInputEffect", g_effect_methods,
-               std::size(g_effect_methods));
+    com_define_checked<IF_DINPUTEFFECT, g_effect_methods>("DINPUT.dll", "IDirectInputEffect");
     com_bind(IF_DINPUTEFFECT, K_DINPUTEFFECT);
 
-    com_define(IF_DINPUT, "DINPUT.dll", "IDirectInputA", g_dinput, std::size(g_dinput));
-    com_define(IF_DINPUTDEVICE, "DINPUT.dll", "IDirectInputDeviceA", g_didevice,
-               std::size(g_didevice));
+    com_define_checked<IF_DINPUT, g_dinput>("DINPUT.dll", "IDirectInputA");
+    com_define_checked<IF_DINPUTDEVICE, g_didevice>("DINPUT.dll", "IDirectInputDeviceA");
 
     com_bind(IF_DINPUT, K_DINPUT);
     com_bind(IF_DINPUTDEVICE, K_DIDEVICE);
-    com_define(IF_DINPUT8, "DINPUT8.dll", "IDirectInput8A", g_dinput8, std::size(g_dinput8));
-    com_define(IF_DINPUTDEVICE8, "DINPUT8.dll", "IDirectInputDevice8A", g_didevice8,
-               std::size(g_didevice8));
+    com_define_checked<IF_DINPUT8, g_dinput8>("DINPUT8.dll", "IDirectInput8A");
+    com_define_checked<IF_DINPUTDEVICE8, g_didevice8>("DINPUT8.dll", "IDirectInputDevice8A");
     com_bind(IF_DINPUT8, K_DINPUT);
     com_bind(IF_DINPUTDEVICE8, K_DIDEVICE);
     // {BF798030-483A-4DA2-AA99-5D64ED369700}, {54D41080-DC15-4833-A41B-748F73A38179}

@@ -3352,14 +3352,12 @@ void d3d8_register() {
         return;
     done = true;
 
-    com_define(IF_D3D8, "d3d8.dll", "IDirect3D8", g_d3d8, std::size(g_d3d8));
-    com_define(IF_D3D8DEVICE, "d3d8.dll", "IDirect3DDevice8", g_device8, std::size(g_device8));
-    com_define(IF_D3D8SURFACE8, "d3d8.dll", "IDirect3DSurface8", g_surface8, std::size(g_surface8));
-    com_define(IF_D3D8TEXTURE8, "d3d8.dll", "IDirect3DTexture8", g_texture8, std::size(g_texture8));
-    com_define(IF_D3D8VERTEXBUFFER8, "d3d8.dll", "IDirect3DVertexBuffer8", g_vertexbuffer8,
-               std::size(g_vertexbuffer8));
-    com_define(IF_D3D8INDEXBUFFER8, "d3d8.dll", "IDirect3DIndexBuffer8", g_indexbuffer8,
-               std::size(g_indexbuffer8));
+    com_define_checked<IF_D3D8, g_d3d8>("d3d8.dll", "IDirect3D8");
+    com_define_checked<IF_D3D8DEVICE, g_device8>("d3d8.dll", "IDirect3DDevice8");
+    com_define_checked<IF_D3D8SURFACE8, g_surface8>("d3d8.dll", "IDirect3DSurface8");
+    com_define_checked<IF_D3D8TEXTURE8, g_texture8>("d3d8.dll", "IDirect3DTexture8");
+    com_define_checked<IF_D3D8VERTEXBUFFER8, g_vertexbuffer8>("d3d8.dll", "IDirect3DVertexBuffer8");
+    com_define_checked<IF_D3D8INDEXBUFFER8, g_indexbuffer8>("d3d8.dll", "IDirect3DIndexBuffer8");
     com_bind(IF_D3D8, K_D3D8);
     com_bind(IF_D3D8DEVICE, K_D3D8DEVICE);
     com_bind(IF_D3D8SURFACE8, K_D3D8SURFACE);

@@ -6866,10 +6866,9 @@ void d3d9_register() {
         return;
     done = true;
 
-    com_define(IF_D3D9, "d3d9.dll", "IDirect3D9", g_d3d9, std::size(g_d3d9));
-    com_define(IF_D3DDEVICE9, "d3d9.dll", "IDirect3DDevice9", g_device9, std::size(g_device9));
-    com_define(IF_D3DRESOURCE9, "d3d9.dll", "IDirect3DResource9", g_resource9,
-               std::size(g_resource9));
+    com_define_checked<IF_D3D9, g_d3d9>("d3d9.dll", "IDirect3D9");
+    com_define_checked<IF_D3DDEVICE9, g_device9>("d3d9.dll", "IDirect3DDevice9");
+    com_define_checked<IF_D3DRESOURCE9, g_resource9>("d3d9.dll", "IDirect3DResource9");
     com_bind(IF_D3D9, K_D3D9);
     com_bind(IF_D3DDEVICE9, K_D3D9DEVICE);
     com_bind(IF_D3DRESOURCE9, K_D3D9VB);
@@ -6877,26 +6876,20 @@ void d3d9_register() {
     com_register_iid(IF_D3D9, IID_IDirect3D9_);
     com_register_iid(IF_D3DDEVICE9, IID_IDirect3DDevice9_);
     com_register_iid(IF_D3DRESOURCE9, IID_IDirect3DResource9_);
-    com_define(IF_D3DTEXTURE9, "d3d9.dll", "IDirect3DTexture9", g_texture9, std::size(g_texture9));
-    com_define(IF_D3DCUBETEXTURE9, "d3d9.dll", "IDirect3DCubeTexture9", g_cubetexture9,
-               std::size(g_cubetexture9));
-    com_define(IF_D3DSURFACE9, "d3d9.dll", "IDirect3DSurface9", g_surface9, std::size(g_surface9));
-    com_define(IF_D3DVERTEXBUFFER9, "d3d9.dll", "IDirect3DVertexBuffer9", g_vb9, std::size(g_vb9));
-    com_define(IF_D3DINDEXBUFFER9, "d3d9.dll", "IDirect3DIndexBuffer9", g_ib9, std::size(g_ib9));
-    com_define(IF_D3DVERTEXDECL9, "d3d9.dll", "IDirect3DVertexDeclaration9", g_decl9,
-               std::size(g_decl9));
-    com_define(IF_D3DQUERY9, "d3d9.dll", "IDirect3DQuery9", g_query9, std::size(g_query9));
-    com_define(IF_D3DBASETEXTURE9, "d3d9.dll", "IDirect3DBaseTexture9", g_basetexture9,
-               std::size(g_basetexture9));
-    com_define(IF_D3DVOLUME9, "d3d9.dll", "IDirect3DVolume9", g_volume9, std::size(g_volume9));
-    com_define(IF_D3DVOLUMETEXTURE9, "d3d9.dll", "IDirect3DVolumeTexture9", g_volumetexture9,
-               std::size(g_volumetexture9));
-    com_define(IF_D3DVERTEXSHADER9, "d3d9.dll", "IDirect3DVertexShader9", g_vertexshader9,
-               std::size(g_vertexshader9));
-    com_define(IF_D3DPIXELSHADER9, "d3d9.dll", "IDirect3DPixelShader9", g_pixelshader9,
-               std::size(g_pixelshader9));
-    com_define(IF_D3DSTATEBLOCK9, "d3d9.dll", "IDirect3DStateBlock9", g_stateblock9,
-               std::size(g_stateblock9));
+    com_define_checked<IF_D3DTEXTURE9, g_texture9>("d3d9.dll", "IDirect3DTexture9");
+    com_define_checked<IF_D3DCUBETEXTURE9, g_cubetexture9>("d3d9.dll", "IDirect3DCubeTexture9");
+    com_define_checked<IF_D3DSURFACE9, g_surface9>("d3d9.dll", "IDirect3DSurface9");
+    com_define_checked<IF_D3DVERTEXBUFFER9, g_vb9>("d3d9.dll", "IDirect3DVertexBuffer9");
+    com_define_checked<IF_D3DINDEXBUFFER9, g_ib9>("d3d9.dll", "IDirect3DIndexBuffer9");
+    com_define_checked<IF_D3DVERTEXDECL9, g_decl9>("d3d9.dll", "IDirect3DVertexDeclaration9");
+    com_define_checked<IF_D3DQUERY9, g_query9>("d3d9.dll", "IDirect3DQuery9");
+    com_define_checked<IF_D3DBASETEXTURE9, g_basetexture9>("d3d9.dll", "IDirect3DBaseTexture9");
+    com_define_checked<IF_D3DVOLUME9, g_volume9>("d3d9.dll", "IDirect3DVolume9");
+    com_define_checked<IF_D3DVOLUMETEXTURE9, g_volumetexture9>("d3d9.dll",
+                                                               "IDirect3DVolumeTexture9");
+    com_define_checked<IF_D3DVERTEXSHADER9, g_vertexshader9>("d3d9.dll", "IDirect3DVertexShader9");
+    com_define_checked<IF_D3DPIXELSHADER9, g_pixelshader9>("d3d9.dll", "IDirect3DPixelShader9");
+    com_define_checked<IF_D3DSTATEBLOCK9, g_stateblock9>("d3d9.dll", "IDirect3DStateBlock9");
     com_register_iid(IF_D3DTEXTURE9, IID_IDirect3DTexture9_);
     com_register_iid(IF_D3DCUBETEXTURE9, IID_IDirect3DCubeTexture9_);
     com_register_iid(IF_D3DSURFACE9, IID_IDirect3DSurface9_);

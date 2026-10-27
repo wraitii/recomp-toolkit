@@ -5479,23 +5479,18 @@ void ddraw_register() {
         return;
     done = true;
 
-    com_define(IF_DIRECTDRAW, "DDRAW.dll", "IDirectDraw", g_ddraw1, std::size(g_ddraw1));
-    com_define(IF_DIRECTDRAW2, "DDRAW.dll", "IDirectDraw2", g_ddraw2, std::size(g_ddraw2));
-    com_define(IF_DIRECTDRAW4, "DDRAW.dll", "IDirectDraw4", g_ddraw4, std::size(g_ddraw4));
-    com_define(IF_DIRECTDRAW7, "DDRAW.dll", "IDirectDraw7", g_ddraw7, std::size(g_ddraw7));
-    com_define(IF_DDSURFACE, "DDRAW.dll", "IDirectDrawSurface", g_surface1, std::size(g_surface1));
-    com_define(IF_DDSURFACE2, "DDRAW.dll", "IDirectDrawSurface2", g_surface2,
-               std::size(g_surface2));
-    com_define(IF_DDSURFACE3, "DDRAW.dll", "IDirectDrawSurface3", g_surface3,
-               std::size(g_surface3));
-    com_define(IF_DDSURFACE4, "DDRAW.dll", "IDirectDrawSurface4", g_surface4,
-               std::size(g_surface4));
-    com_define(IF_DDSURFACE7, "DDRAW.dll", "IDirectDrawSurface7", g_surface7,
-               std::size(g_surface7));
-    com_define(IF_DDPALETTE, "DDRAW.dll", "IDirectDrawPalette", g_palette, std::size(g_palette));
-    com_define(IF_DDCLIPPER, "DDRAW.dll", "IDirectDrawClipper", g_clipper, std::size(g_clipper));
-    com_define(IF_DDCOLORCONTROL, "DDRAW.dll", "IDirectDrawColorControl", g_colorcontrol,
-               std::size(g_colorcontrol));
+    com_define_checked<IF_DIRECTDRAW, g_ddraw1>("DDRAW.dll", "IDirectDraw");
+    com_define_checked<IF_DIRECTDRAW2, g_ddraw2>("DDRAW.dll", "IDirectDraw2");
+    com_define_checked<IF_DIRECTDRAW4, g_ddraw4>("DDRAW.dll", "IDirectDraw4");
+    com_define_checked<IF_DIRECTDRAW7, g_ddraw7>("DDRAW.dll", "IDirectDraw7");
+    com_define_checked<IF_DDSURFACE, g_surface1>("DDRAW.dll", "IDirectDrawSurface");
+    com_define_checked<IF_DDSURFACE2, g_surface2>("DDRAW.dll", "IDirectDrawSurface2");
+    com_define_checked<IF_DDSURFACE3, g_surface3>("DDRAW.dll", "IDirectDrawSurface3");
+    com_define_checked<IF_DDSURFACE4, g_surface4>("DDRAW.dll", "IDirectDrawSurface4");
+    com_define_checked<IF_DDSURFACE7, g_surface7>("DDRAW.dll", "IDirectDrawSurface7");
+    com_define_checked<IF_DDPALETTE, g_palette>("DDRAW.dll", "IDirectDrawPalette");
+    com_define_checked<IF_DDCLIPPER, g_clipper>("DDRAW.dll", "IDirectDrawClipper");
+    com_define_checked<IF_DDCOLORCONTROL, g_colorcontrol>("DDRAW.dll", "IDirectDrawColorControl");
 
     com_bind(IF_DIRECTDRAW, K_DDRAW);
     com_bind(IF_DIRECTDRAW2, K_DDRAW);

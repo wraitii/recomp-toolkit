@@ -3133,50 +3133,15 @@ pub(crate) fn execute(
             ),
         )
     });
-    let count_stats = stats::enabled();
-    let mut memo_examined = 0;
-    let mut memo_fingerprint_matches = 0;
-    let mut memo_texture_rejects = 0;
-    let memo = draw
-        .memos
-        .take(fingerprint, |memo| {
-            let fingerprint_matches = memo.fingerprint == fingerprint;
-            if count_stats {
-                memo_examined += 1;
-                memo_fingerprint_matches += u64::from(fingerprint_matches);
-            }
-            let matches = fingerprint_matches
-                && memo.programs.is_some() == interpreted
-                && (!interpreted
-                    || memo
-                        .pipeline
-                        .as_ref()
-                        .is_some_and(|(shape, _)| shape.1 == topology))
-                && ready.as_ref().is_none_or(|(compiled, _)| {
-                    memo.pipeline
-                        .as_ref()
-                        .is_some_and(|(_, pipeline)| *pipeline == compiled.pipeline)
-                })
-                && memo.ff_key == ff_key
-                && memo.raw_inputs == raw_inputs
-                && memo.target == target_key
-                && memo.depth == depth_key;
-            if !matches {
-                return false;
-            }
-            let textures_match = memo.textures == snapshot.textures;
-            if count_stats && !textures_match {
-                memo_texture_rejects += 1;
-            }
-            textures_match
-        });
-    stats::record(|s| {
-        s.memo_lookups += 1;
-        s.memo_hits += u64::from(memo.is_some());
-        s.memo_misses += u64::from(memo.is_none());
-        s.memo_examined += memo_examined;
-        s.memo_fingerprint_matches += memo_fingerprint_matches;
-        s.memo_texture_rejects += memo_texture_rejects;
+    let memo = draw.memos.take(&memo::Key {
+        fingerprint,
+        interpreted_topology: interpreted.then_some(topology),
+        pipeline: ready.as_ref().map(|(compiled, _)| &compiled.pipeline),
+        ff_key,
+        raw_inputs,
+        target: target_key,
+        depth: depth_key,
+        textures: &snapshot.textures,
     });
     let memo_hit = memo.is_some();
     let mut memo = match memo {
@@ -3654,7 +3619,7 @@ pub(crate) fn execute(
         native_geometry,
         index_range,
         vertex_count,
-        viewport: vp,
+        viewport: *vp,
         stencil_reference: rs(state, 57),
         blend_constant: blend,
         scissor,

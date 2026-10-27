@@ -2444,16 +2444,13 @@ void dsound_register() {
         return;
     done = true;
 
-    com_define(IF_DSOUND, "DSOUND.dll", "IDirectSound", g_dsound, std::size(g_dsound));
-    com_define(IF_DSOUND8, "DSOUND.dll", "IDirectSound8", g_dsound8, std::size(g_dsound8));
-    com_define(IF_DSBUFFER, "DSOUND.dll", "IDirectSoundBuffer", g_dsbuffer, std::size(g_dsbuffer));
-    com_define(IF_DSBUFFER8, "DSOUND.dll", "IDirectSoundBuffer8", g_dsbuffer8,
-               std::size(g_dsbuffer8));
-    com_define(IF_DS3DBUFFER, "DSOUND.dll", "IDirectSound3DBuffer", g_ds3dbuffer,
-               std::size(g_ds3dbuffer));
-    com_define(IF_DS3DLISTENER, "DSOUND.dll", "IDirectSound3DListener", g_ds3dlistener,
-               std::size(g_ds3dlistener));
-    com_define(IF_DSNOTIFY, "DSOUND.dll", "IDirectSoundNotify", g_dsnotify, std::size(g_dsnotify));
+    com_define_checked<IF_DSOUND, g_dsound>("DSOUND.dll", "IDirectSound");
+    com_define_checked<IF_DSOUND8, g_dsound8>("DSOUND.dll", "IDirectSound8");
+    com_define_checked<IF_DSBUFFER, g_dsbuffer>("DSOUND.dll", "IDirectSoundBuffer");
+    com_define_checked<IF_DSBUFFER8, g_dsbuffer8>("DSOUND.dll", "IDirectSoundBuffer8");
+    com_define_checked<IF_DS3DBUFFER, g_ds3dbuffer>("DSOUND.dll", "IDirectSound3DBuffer");
+    com_define_checked<IF_DS3DLISTENER, g_ds3dlistener>("DSOUND.dll", "IDirectSound3DListener");
+    com_define_checked<IF_DSNOTIFY, g_dsnotify>("DSOUND.dll", "IDirectSoundNotify");
 
     com_bind(IF_DSOUND, K_DSOUND);
     com_bind(IF_DSOUND8, K_DSOUND);

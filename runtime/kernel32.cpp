@@ -1889,7 +1889,7 @@ void k_SetHandleCount(X86 *c) {
 }
 
 void k_OutputDebugStringA(X86 *c) {
-    LOGW("OutputDebugString: %s", gm_str(arg(c, 0)).c_str());
+    LOGV("OutputDebugString: %s", gm_str(arg(c, 0)).c_str());
     set_eax(c, 0);
 }
 

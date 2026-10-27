@@ -2516,9 +2516,9 @@ void d3d7_register() {
     if (done)
         return;
     done = true;
-    com_define(IF_D3D7, "DDRAW.dll", "IDirect3D7", g_d3d7, std::size(g_d3d7));
-    com_define(IF_D3DDEVICE7, "DDRAW.dll", "IDirect3DDevice7", g_device7, std::size(g_device7));
-    com_define(IF_D3DVERTEXBUFFER7, "DDRAW.dll", "IDirect3DVertexBuffer7", g_vb7, std::size(g_vb7));
+    com_define_checked<IF_D3D7, g_d3d7>("DDRAW.dll", "IDirect3D7");
+    com_define_checked<IF_D3DDEVICE7, g_device7>("DDRAW.dll", "IDirect3DDevice7");
+    com_define_checked<IF_D3DVERTEXBUFFER7, g_vb7>("DDRAW.dll", "IDirect3DVertexBuffer7");
     // IDirect3D7 is an interface on the DirectDraw object: one refcount and
     // one controlling IUnknown, exactly like IDirect3D3.
     com_bind(IF_D3D7, K_DDRAW);

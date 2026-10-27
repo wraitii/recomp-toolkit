@@ -1,5 +1,6 @@
 // com.cpp - guest COM objects, vtables and the three IUnknown slots.
 #include "com.h"
+#include "dx.h"
 #include "../runtime/loader.h"
 #include "../runtime/memory.h"
 
@@ -417,6 +418,11 @@ uint32_t com_define(ComIface iface, const char *dll, const char *iface_name,
 
 uint32_t com_vtable_of(ComIface iface) {
     return iface < IF_COUNT ? g_vtable[iface] : 0;
+}
+
+void com_report_failure(X86 *c, ComIface iface, size_t slot) {
+    const uint32_t target = rd32(com_vtable_of(iface) + uint32_t(slot) * 4);
+    dx_report_failure(imports_describe(target), c->r[R_EAX], rd32(c->r[R_ESP]));
 }
 
 void com_bind(ComIface iface, ComKind kind) {

@@ -5107,7 +5107,7 @@ pub fn d3d9_clear(
     let viewport = device.state.viewport();
     let mut regions = Vec::new();
     if rects.is_empty() {
-        if let Some(region) = clear_region(None, &viewport, target.width, target.height) {
+        if let Some(region) = clear_region(None, viewport, target.width, target.height) {
             regions.push(region);
         }
     } else {
@@ -5118,7 +5118,7 @@ pub fn d3d9_clear(
                 right: rect.right,
                 bottom: rect.bottom,
             };
-            if let Some(region) = clear_region(Some(rect), &viewport, target.width, target.height) {
+            if let Some(region) = clear_region(Some(rect), viewport, target.width, target.height) {
                 regions.push(region);
             }
         }

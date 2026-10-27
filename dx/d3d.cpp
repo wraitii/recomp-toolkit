@@ -2660,22 +2660,18 @@ void d3d_register() {
         return;
     done = true;
 
-    com_define(IF_D3D, "DDRAW.dll", "IDirect3D", g_d3d1, std::size(g_d3d1));
-    com_define(IF_D3D2, "DDRAW.dll", "IDirect3D2", g_d3d2, std::size(g_d3d2));
-    com_define(IF_D3DDEVICE2, "DDRAW.dll", "IDirect3DDevice2", g_device2, std::size(g_device2));
-    com_define(IF_D3DVIEWPORT2, "DDRAW.dll", "IDirect3DViewport2", g_viewport2,
-               std::size(g_viewport2));
-    com_define(IF_D3DMATERIAL2, "DDRAW.dll", "IDirect3DMaterial2", g_material2,
-               std::size(g_material2));
-    com_define(IF_D3DLIGHT, "DDRAW.dll", "IDirect3DLight", g_light, std::size(g_light));
-    com_define(IF_D3DTEXTURE2, "DDRAW.dll", "IDirect3DTexture2", g_texture2, std::size(g_texture2));
+    com_define_checked<IF_D3D, g_d3d1>("DDRAW.dll", "IDirect3D");
+    com_define_checked<IF_D3D2, g_d3d2>("DDRAW.dll", "IDirect3D2");
+    com_define_checked<IF_D3DDEVICE2, g_device2>("DDRAW.dll", "IDirect3DDevice2");
+    com_define_checked<IF_D3DVIEWPORT2, g_viewport2>("DDRAW.dll", "IDirect3DViewport2");
+    com_define_checked<IF_D3DMATERIAL2, g_material2>("DDRAW.dll", "IDirect3DMaterial2");
+    com_define_checked<IF_D3DLIGHT, g_light>("DDRAW.dll", "IDirect3DLight");
+    com_define_checked<IF_D3DTEXTURE2, g_texture2>("DDRAW.dll", "IDirect3DTexture2");
 
-    com_define(IF_D3D3, "DDRAW.dll", "IDirect3D3", g_d3d3.data(), g_d3d3.size());
-    com_define(IF_D3DDEVICE3, "DDRAW.dll", "IDirect3DDevice3", g_device3.data(), g_device3.size());
-    com_define(IF_D3DVIEWPORT3, "DDRAW.dll", "IDirect3DViewport3", g_viewport3.data(),
-               g_viewport3.size());
-    com_define(IF_D3DMATERIAL3, "DDRAW.dll", "IDirect3DMaterial3", g_material2,
-               std::size(g_material2));
+    com_define_checked<IF_D3D3, g_d3d3>("DDRAW.dll", "IDirect3D3");
+    com_define_checked<IF_D3DDEVICE3, g_device3>("DDRAW.dll", "IDirect3DDevice3");
+    com_define_checked<IF_D3DVIEWPORT3, g_viewport3>("DDRAW.dll", "IDirect3DViewport3");
+    com_define_checked<IF_D3DMATERIAL3, g_material2>("DDRAW.dll", "IDirect3DMaterial3");
     com_bind(IF_D3D3, K_DDRAW);
     com_bind(IF_D3DDEVICE3, K_D3DDEVICE);
     com_bind(IF_D3DVIEWPORT3, K_VIEWPORT);
