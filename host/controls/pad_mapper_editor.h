@@ -9,7 +9,7 @@
 
 namespace controls {
 
-enum class PadMapperEditorAction { None, Apply, Cancel, CloseWindow };
+enum class PadMapperEditorAction { None, Apply, Cancel, CloseWindow, TestRumble };
 
 class PadMapperEditor {
   public:
@@ -17,6 +17,7 @@ class PadMapperEditor {
     void close();
     void set_screen(const Screen &screen);
     void set_device(const std::string &name, bool connected);
+    void set_message(const std::string &message);
     void suspend();
     void observe_input(const PadState &raw);
     bool is_open() const;

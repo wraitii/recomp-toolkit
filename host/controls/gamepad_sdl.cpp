@@ -134,6 +134,11 @@ bool gamepad_connected() {
     return g_pad != nullptr;
 }
 
+bool gamepad_rumble_supported() {
+    return g_pad && SDL_GetBooleanProperty(SDL_GetGamepadProperties(g_pad),
+                                           SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
+}
+
 bool gamepad_rumble(uint16_t low, uint16_t high, uint32_t ms) {
     return g_pad && SDL_RumbleGamepad(g_pad, low, high, ms);
 }

@@ -22,7 +22,6 @@ struct ConfigureActions {
     std::function<bool(std::vector<ConfigureSetting> *, std::string *)> read;
     std::function<bool(const std::string &, int, std::string *)> set;
     std::function<bool(std::string *)> restore_recommended;
-    std::function<bool(std::string *)> test_rumble;
 };
 
 class ConfigureUi {

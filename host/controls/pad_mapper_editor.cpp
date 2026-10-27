@@ -113,6 +113,10 @@ void PadMapperEditor::set_device(const std::string &name, bool connected) {
         changed();
     }
 }
+void PadMapperEditor::set_message(const std::string &message) {
+    validation_error_ = message;
+    changed();
+}
 void PadMapperEditor::suspend() {
     capture_ = Capture::None;
     pressed_ = -1;
@@ -251,6 +255,7 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
         text(m, top + px(30), col, px(46),
              "Change controller outputs and add keyboard keys in Mapping.");
         add_key(m, top + px(148), px(148), row, "Presets...", false, 12);
+        add_key(m, top + px(188), px(148), row, "Test rumble", false, 14);
         text(right, top, col, px(22), "Test controller", false);
         for (int i = 0; i < 6; ++i)
             add_meter(right, top + px(26) + i * px(28), col, px(22), axes[i], axis(raw, i), i < 4);
@@ -523,6 +528,8 @@ void PadMapperEditor::activate(int id) {
     } else if (id == 13) {
         advanced_ = !advanced_;
         detail_scroll_ = 0;
+    } else if (id == 14) {
+        action_ = PadMapperEditorAction::TestRumble;
     } else if (id == 16) {
         if (!connected_)
             validation_error_ = "Connect a controller before identifying an input.";

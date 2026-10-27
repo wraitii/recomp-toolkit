@@ -23,6 +23,7 @@ void gamepad_handle_event(const SDL_Event &e);
 // (a no-op when nothing changed).
 void gamepad_poll();
 bool gamepad_connected();
+bool gamepad_rumble_supported();
 std::string gamepad_name();
 // SDL_RumbleGamepad on the open pad; false when there is none or SDL refused.
 bool gamepad_rumble(uint16_t low, uint16_t high, uint32_t ms);

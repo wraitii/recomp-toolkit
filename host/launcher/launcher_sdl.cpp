@@ -5,13 +5,13 @@
 #include "../gpu/gpu.h"
 #include "../controls/controls_host.h"
 #include "../controls/gamepad_sdl.h"
-#include "../controls/overlay_paint.h"
 #include "../controls/pad_mapper_editor.h"
 #include "../input_touch.h"
 #include "../preferences.h"
 #include "../sdl/keymap.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -31,6 +31,63 @@ bool requested(int argc, char **argv) {
 }
 
 namespace {
+
+void draw_controller_page(Canvas &canvas, const controls::ControlsView &view) {
+    const Color background{11, 21, 48, 255}, panel{20, 37, 68, 255};
+    const Color button{24, 46, 80, 255}, selected{21, 85, 195, 255};
+    const Color border{48, 73, 108, 255}, focus{140, 232, 255, 255};
+    const Color text{237, 249, 255, 255}, dim{173, 190, 214, 255};
+    auto rect = [](const controls::Rect &r) { return Rect{r.x, r.y, r.w, r.h}; };
+    auto draw_text = [&](const controls::DrawText &t) {
+        const auto lines = Canvas::wrap(t.text, t.rect.w, t.scale);
+        int y = t.rect.y;
+        for (const auto &line : lines) {
+            if (y + Canvas::text_height(t.scale) > t.rect.y + t.rect.h)
+                break;
+            canvas.text(t.rect.x, y, line, t.scale, t.muted ? dim : text);
+            y += 11 * t.scale;
+        }
+    };
+    auto draw_key = [&](const controls::DrawControl &d) {
+        const Rect r = rect(d.rect);
+        canvas.fill(r, d.lit ? selected : button);
+        canvas.frame(r, 1, d.focused ? focus : border);
+        int scale = std::max(1, d.text_scale);
+        std::string label = d.label;
+        while (!label.empty() && Canvas::text_width(label, scale) > r.w - 8)
+            label.pop_back();
+        canvas.text(r.x + (r.w - Canvas::text_width(label, scale)) / 2,
+                    r.y + (r.h - Canvas::text_height(scale)) / 2, label, scale, text);
+    };
+    canvas.clear(background);
+    for (const auto &m : view.meters) {
+        const Rect r = rect(m.rect);
+        canvas.fill(r, panel);
+        canvas.frame(r, 1, border);
+        const double v = std::clamp(m.value, m.bipolar ? -1.0 : 0.0, 1.0);
+        if (m.bipolar) {
+            const int centre = r.x + r.w / 2;
+            const int length = int((r.w / 2 - 2) * std::abs(v));
+            canvas.fill({v < 0 ? centre - length : centre, r.y + 2, length, r.h - 4}, selected);
+        } else {
+            canvas.fill({r.x + 2, r.y + 2, int((r.w - 4) * v), r.h - 4}, selected);
+        }
+        canvas.text(r.x + 5, r.y + (r.h - Canvas::text_height(m.text_scale)) / 2, m.label,
+                    m.text_scale, text);
+    }
+    for (const auto &t : view.text)
+        draw_text(t);
+    for (const auto &d : view.toolbar)
+        draw_key(d);
+    if (!view.picker.empty()) {
+        canvas.fill(rect(view.picker), panel);
+        canvas.frame(rect(view.picker), 1, border);
+    }
+    for (const auto &d : view.picker_rows)
+        draw_key(d);
+    for (const auto &t : view.popup_text)
+        draw_text(t);
+}
 
 struct Presenter {
     gpu::Device *device = nullptr;
@@ -168,18 +225,6 @@ ConfigureActions preferences_actions() {
         return false;
     };
     actions.restore_recommended = [](std::string *error) { return host_preferences::reset(error); };
-    actions.test_rumble = [](std::string *error) {
-        controls::gamepad_poll();
-        if (!controls::gamepad_connected()) {
-            *error = "Could not test rumble: no controller connected.";
-            return false;
-        }
-        if (!controls::gamepad_rumble(0xffff, 0xffff, 1000)) {
-            *error = "Could not test rumble: " + std::string(SDL_GetError());
-            return false;
-        }
-        return true;
-    };
     return actions;
 }
 
@@ -207,7 +252,6 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
     controls::PadMapperEditor controller;
     controls::host_set_focused(false);
     controls::host_mapper_load();
-    std::vector<uint8_t> controller_pixels;
     auto screen = [&] {
         SDL_GetWindowSizeInPixels(window, &dw, &dh);
         SDL_GetWindowSize(window, &bw, &bh);
@@ -223,7 +267,11 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
         if (SDL_WaitEventTimeout(&event, controller.is_open() ? 16 : 250)) {
             do {
                 controls::gamepad_handle_event(event);
-                controller.set_device(controls::gamepad_name(), controls::gamepad_connected());
+                controller.set_device(controls::gamepad_name() +
+                                          (controls::gamepad_rumble_supported()
+                                               ? " | Rumble supported"
+                                               : " | Rumble not reported"),
+                                      controls::gamepad_connected());
                 controller.observe_input(controls::host_mapper_raw_state());
                 if (controller.is_open()) {
                     controller.set_screen(screen());
@@ -362,10 +410,23 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
             } while (SDL_PollEvent(&event));
         }
         controls::gamepad_poll();
-        controller.set_device(controls::gamepad_name(), controls::gamepad_connected());
+        controller.set_device(controls::gamepad_name() + (controls::gamepad_rumble_supported()
+                                                              ? " | Rumble supported"
+                                                              : " | Rumble not reported"),
+                              controls::gamepad_connected());
         const controls::Screen controller_screen = screen();
         if (controller.is_open()) {
             const auto action = controller.take_action();
+            if (action == controls::PadMapperEditorAction::TestRumble) {
+                if (!controls::gamepad_connected())
+                    controller.set_message("No controller connected.");
+                else if (!controls::gamepad_rumble_supported())
+                    controller.set_message("This controller reports no rumble support to SDL.");
+                else if (!controls::gamepad_rumble(0xffff, 0xffff, 1000))
+                    controller.set_message("Rumble failed: " + std::string(SDL_GetError()));
+                else
+                    controller.set_message("Rumble sent for one second. Did you feel it?");
+            }
             if (action == controls::PadMapperEditorAction::CloseWindow)
                 ui.key(Key::Back);
             if (action == controls::PadMapperEditorAction::CloseWindow ||
@@ -398,11 +459,7 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
                 controller.set_screen(controller_screen);
                 const auto view =
                     controller.view(controller_screen, raw, calibrated, guest, status);
-                controller_pixels.assign(size_t(dw) * size_t(dh) * 4, 0);
-                controls::Canvas raster(controller_pixels, dw, dh);
-                controls::paint_editor(raster, view, {0, 0, dw, dh});
-                canvas.clear({16, 18, 24, 255});
-                canvas.composite_rgba(controller_pixels);
+                draw_controller_page(canvas, view);
             } else {
                 ui.draw(canvas, scale);
             }
