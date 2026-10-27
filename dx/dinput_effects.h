@@ -155,7 +155,10 @@ void Device_CreateEffect(X86 *c) {
     uint32_t type = rd32(guid);
     if (memcmp(gm_ptr(guid + 4), suffix, 12) || type < kConstantForce || type > kSawDown ||
         type == kRampForce) {
-        LOGW("dinput: unsupported force feedback effect %08x", type);
+        char key[80];
+        snprintf(key, sizeof(key), "dinput.effect.%08x.%08x.%08x.%08x", type, rd32(guid + 4),
+                 rd32(guid + 8), rd32(guid + 12));
+        log_once(key, "dinput: unsupported force feedback effect %08x", type);
         com_ret(c, DIERR_UNSUPPORTED);
         return;
     }
