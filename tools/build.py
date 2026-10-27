@@ -846,6 +846,8 @@ def parse_args(argv, system=None):
                         help="observation file for --produce-analysis-facts (repeatable; defaults to [analysis] observations)")
     parser.add_argument("--analysis-report", type=Path, help="producer report for --produce-analysis-facts")
     parser.add_argument("--analysis-compare", type=Path, help="old facts for a separate comparison report")
+    parser.add_argument("--stack-return-report", type=Path,
+                        help="Build/run the Rust translator's read-only stack return report and exit")
     parser.add_argument("--diff-harness", action="store_true",
                         help="Compile the Unicorn diff harness for the translated archive and exit")
     parser.add_argument("--translator-harness", action="store_true",
@@ -862,6 +864,10 @@ def parse_args(argv, system=None):
                         help="Android: push the configured game install minus [bundle].exclude before launch")
     parser.add_argument("--console", action="store_true", help="After launching on the device, stream its console")
     args = parser.parse_args(argv)
+    if args.stack_return_report and any((args.regenerate, args.regen_function, args.diff_harness,
+                                         args.translator_harness, args.function_corpus, args.stub,
+                                         args.produce_analysis_facts, args.target != "app")):
+        parser.error("--stack-return-report is an isolated offline mode")
     if args.translator_harness:
         if not args.translator_gen or not args.harness_out:
             parser.error("--translator-harness requires --translator-gen and --harness-out")
@@ -963,6 +969,13 @@ def main():
     cfg["translate_engine"] = args.engine or cfg["translate"].get("engine", "rust")
     if cfg.get("reloc") and cfg["translate_engine"] != "rust":
         parser.error("[reloc] requires the Rust translator; --engine python is unsupported")
+    if args.stack_return_report:
+        with buildlock.BuildLock(args.build_root.parent, "tools/build.py --stack-return-report"):
+            subprocess.run([str(rust_translator(args.build_root)),
+                            "--input", str(write_translation_input(cfg, args.build_root)),
+                            "--jobs", str(args.jobs),
+                            "--stack-return-report", str(args.stack_return_report.resolve())], check=True)
+        return
     if args.produce_analysis_facts:
         with buildlock.BuildLock(args.build_root.parent, "tools/build.py --produce-analysis-facts"):
             run_analysis(args, cfg, args.build_root)

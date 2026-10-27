@@ -6,6 +6,7 @@
 
 mod facts;
 mod reloc;
+mod stack_returns;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -56,6 +57,11 @@ struct Args {
         help = "write the discovered code map, instruction lengths and discovery report as JSON"
     )]
     discovery_report: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "write a read-only report of stack publications at returns"
+    )]
+    stack_return_report: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -534,6 +540,7 @@ fn build_bodies(
     switches: Switches,
     only: &[Addr],
     reloc: Option<rk_emit::RelocEmit>,
+    stack_return_report: Option<&std::path::Path>,
 ) -> Result<(Vec<Body>, EmitStats, BTreeSet<Addr>)> {
     let known_entries: BTreeSet<Addr> = program
         .functions
@@ -607,7 +614,9 @@ fn build_bodies(
     };
     let ctx = make_ctx(BTreeSet::new(), direct_arguments.clone());
     let selected: BTreeSet<Addr> = only.iter().copied().collect();
-    let wanted = |addr: Addr| selected.is_empty() || selected.contains(&addr);
+    let wanted = |addr: Addr| {
+        stack_return_report.is_some() || selected.is_empty() || selected.contains(&addr)
+    };
     let sources: Vec<(Addr, Option<FunctionIr>)> = match owned {
         Some(irs) => irs
             .into_iter()
@@ -640,6 +649,16 @@ fn build_bodies(
             }
         })
         .collect();
+    if let Some(path) = stack_return_report {
+        stack_returns::write(
+            &ctx,
+            prepared,
+            &selected,
+            &settings.native_replaced()?,
+            path,
+        )?;
+        return Ok((Vec::new(), EmitStats::default(), BTreeSet::new()));
+    }
     let mut proven_returns = BTreeSet::new();
     let mut retained = Vec::new();
     for item in prepared {
@@ -1162,6 +1181,11 @@ fn write_discovery_report(
 
 fn main() -> Result<()> {
     let mut args = Args::parse();
+    if args.stack_return_report.is_some()
+        && (args.out.is_some() || args.reloc_only || !args.dump.is_empty())
+    {
+        bail!("--stack-return-report is an isolated read-only mode");
+    }
     if let Some(path) = &args.selection {
         let selection: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
         for row in selection["functions"]
@@ -1238,8 +1262,12 @@ fn main() -> Result<()> {
     } else {
         BTreeMap::new()
     };
-    let only = if whole { &[][..] } else { &args.only[..] };
-    let wants_bodies = whole || args.wants(Stage::Bodies);
+    let only = if whole && args.stack_return_report.is_none() {
+        &[][..]
+    } else {
+        &args.only[..]
+    };
+    let wants_bodies = whole || args.wants(Stage::Bodies) || args.stack_return_report.is_some();
     let owned = (wants_bodies && args.dump.is_empty()).then(|| std::mem::take(&mut analysis.ir));
     let (bodies, emit_stats, direct_variants) = if wants_bodies {
         build_bodies(
@@ -1258,11 +1286,15 @@ fn main() -> Result<()> {
             switches,
             only,
             None,
+            args.stack_return_report.as_deref(),
         )?
     } else {
         (Vec::new(), EmitStats::default(), BTreeSet::new())
     };
     phases.mark("emit");
+    if args.stack_return_report.is_some() {
+        return Ok(());
+    }
     for (addr, owner) in extra_entries {
         program.entries.entry(addr).or_insert(EntryKind::Discovered);
         let entries = program.interior_by_function.entry(owner).or_default();

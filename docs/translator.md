@@ -81,6 +81,18 @@ reports frame rejection reasons, aligned/local versus entry-frame addresses,
 exposure, retained accesses, call guards and possible writes blocking local loads.
 These dumps run outside `rk-plan`.
 
+`tools/build.py --stack-return-report FILE` runs production planning and writes a
+read-only JSON report without emitting C or building the app. It follows the original,
+unpromoted SSA from each direct caller past the callee's promoted return slots,
+including aligned slots, partial overwrites and one nested call. Each query records
+all terminal reasons, instruction addresses, remaining bytes and overwrite witnesses.
+Unknown aliases, opaque/native code, loops, caller returns and search limits stay
+unresolved. Counts distinguish return publications from distinct call sites/slots;
+indirect callers and unavailable functions are explicit coverage gaps. The translator's
+`--only`/`--selection` filters callees while retaining their callers for this report.
+Assumption-only upper bounds separately count stopping at a stack-using call or the
+first caller return; neither assumption changes the baseline or generated code.
+
 There is no emission cache or `--regen-function`. `build.py` fingerprints each
 image from the input JSON, the translator binary, the code-map files and
 executable, the fact, evidence and native-header files, and these environment

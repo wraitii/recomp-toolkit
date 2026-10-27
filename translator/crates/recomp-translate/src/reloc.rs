@@ -244,6 +244,7 @@ pub fn translate(
                 image_base: program.image.base,
                 local_size: program.image.size,
             }),
+            None,
         )?;
         let (bodies, stats, _) = built;
 

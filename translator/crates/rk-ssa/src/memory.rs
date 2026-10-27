@@ -92,10 +92,18 @@ fn access(
 
 pub fn accesses(s: &Ssa, facts: Option<&dyn CallFacts>) -> BTreeMap<ValueId, Access> {
     let mut addresses = Addresses::new(s);
+    accesses_with_addresses(s, &mut addresses, facts)
+}
+
+pub fn accesses_with_addresses(
+    s: &Ssa,
+    addresses: &mut Addresses,
+    facts: Option<&dyn CallFacts>,
+) -> BTreeMap<ValueId, Access> {
     s.blocks
         .iter()
         .flat_map(|block| &block.ops)
-        .filter_map(|&id| Some((id, access(s, &mut addresses, facts, id, false)?)))
+        .filter_map(|&id| Some((id, access(s, addresses, facts, id, false)?)))
         .collect()
 }
 
