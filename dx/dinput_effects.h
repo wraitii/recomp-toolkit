@@ -400,7 +400,8 @@ void Effect_SetParameters(X86 *c) {
         if (e.native)
             result = effect_host(next, HOST_HAPTIC_START, 1);
         if (result > 0) {
-            next.started = os_monotonic_ns();
+            next.started = os_monotonic_ns() +
+                           (next.native ? 0 : uint64_t(next.loaded.start_delay) * 1000);
             next.ends = next.params.duration == 0xffffffffu
                             ? UINT64_MAX
                             : next.started + uint64_t(next.params.duration) * 1000;
@@ -460,7 +461,7 @@ void Effect_Start(X86 *c) {
     if (result > 0 && e.native)
         result = effect_host(e, HOST_HAPTIC_START, count);
     if (result > 0) {
-        e.started = os_monotonic_ns();
+        e.started = os_monotonic_ns() + (e.native ? 0 : uint64_t(e.loaded.start_delay) * 1000);
         uint64_t span = uint64_t(e.loaded.duration) * 1000;
         e.ends = e.loaded.duration == 0xffffffffu || count == 0xffffffffu ||
                          span > (UINT64_MAX - e.started) / count
@@ -780,7 +781,7 @@ void feedback_tick() {
                 e.playing = false;
                 continue;
             }
-            if (!enabled || g_muted_devices.count(e.device))
+            if (now < e.started || !enabled || g_muted_devices.count(e.device))
                 continue;
             // DIVERGENCE(original): directional wheel forces are approximated by gamepad motors.
             double value = std::abs(double(e.loaded.magnitude)) / 10000.0;
