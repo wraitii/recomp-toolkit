@@ -70,6 +70,7 @@ pub struct Analysis {
     pub unbalanced_returns: BTreeSet<Addr>,
     pub rejected_functions: BTreeMap<Addr, String>,
     pub cleanups: BTreeMap<Addr, i32>,
+    pub site_cleanups: BTreeMap<Addr, i32>,
     pub rejected_cleanups: BTreeMap<Addr, String>,
     pub argument_writes: BTreeMap<Addr, Vec<(i32, u32)>>,
     pub stack_helpers: BTreeMap<Addr, &'static str>,
@@ -1023,6 +1024,28 @@ pub fn analyze(
             }
             Err(reason) => {
                 *output.rejected_sites.entry(reason.into()).or_default() += 1;
+            }
+        }
+    }
+    if returns_only {
+        for insn in analysis
+            .ir
+            .values()
+            .filter_map(|result| result.as_ref().ok())
+            .flat_map(|fir| &fir.insns)
+        {
+            let import = program
+                .iat_call(insn)
+                .or_else(|| target(insn).and_then(|target| program.import_thunk(target)));
+            let cleanup = if let Some(import) = import {
+                import_pop(&settings.import_pops, import)
+            } else if insn.ops.iter().any(|op| op.opcode == OpCode::CallInd) {
+                settings.call_pops.get(&insn.addr).copied()
+            } else {
+                None
+            };
+            if let Some(cleanup) = cleanup {
+                output.site_cleanups.insert(insn.addr, cleanup);
             }
         }
     }

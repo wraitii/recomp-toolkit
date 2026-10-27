@@ -261,6 +261,8 @@ on the caller's state, and probes lower the caller's ESP by a constant EAX. MSVC
 states the bytes an indirect call site or a function pops; function entries are
 trusted as ordinary calls preserving EBX/ESI/EDI/EBP. `evidence` records the binary
 evidence and `--dump global` prints it.
+SSA call summaries also consume declared cleanup at direct IAT calls, calls to IAT
+thunks and configured indirect sites; `--dump global` lists these as `cleanup-site`.
 These facts establish only cleanup, without memory, return-address or checkpoint
 guarantees. Proved functions are summarised again against their callees' summaries
 to record constant writes at or above entry ESP (`argument-writes`). A function has

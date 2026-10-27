@@ -59,7 +59,8 @@ impl CallFacts for ContractCallFacts<'_> {
         CallSummary {
             cleanup: returns
                 .map(|summary| summary.effect.cleanup)
-                .or_else(|| target.and_then(|target| self.returns?.cleanups.get(&target).copied())),
+                .or_else(|| target.and_then(|target| self.returns?.cleanups.get(&target).copied()))
+                .or_else(|| self.returns?.site_cleanups.get(&site).copied()),
             effects: None,
             borrowed: borrows.and_then(|borrows| match target {
                 Some(target) => borrows.functions.get(&target),
@@ -330,6 +331,9 @@ impl GlobalFacts {
         }
         for (&addr, cleanup) in &self.returns.cleanups {
             writeln!(out, "cleanup-only {addr:08x} pop={cleanup}")?;
+        }
+        for (&site, cleanup) in &self.returns.site_cleanups {
+            writeln!(out, "cleanup-site {site:08x} pop={cleanup}")?;
         }
         for (&addr, reason) in &self.returns.rejected_cleanups {
             writeln!(out, "cleanup-rejected {addr:08x} {reason}")?;
