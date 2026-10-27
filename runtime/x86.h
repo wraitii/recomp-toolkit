@@ -914,7 +914,8 @@ extern RecompHookFn recomp_hook_ptrs[];
 extern uint8_t recomp_hooked[];
 /* What each entry stub reads, unordered, before jumping straight to its body:
  * recomp_hooked or a process-wide observer (profiling, frame watch). The slow
- * path rereads recomp_hooked with acquire, so writers update this after it. */
+ * path rereads recomp_hooked with acquire, so writers update this after it.
+ * Builds without call hooks read recomp_slow_routes instead. */
 extern uint8_t recomp_slow[];
 static inline void recomp_slow_update(uint32_t i) {
     uint8_t slow = __atomic_load_n(&recomp_hooked[i], __ATOMIC_RELAXED) |

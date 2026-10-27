@@ -45,7 +45,11 @@ const ENTRY_STUB_INCLUDES: &str = r#"#include "x86.h"
 "#;
 
 const ENTRY_STUB_PRELUDE: &str = r#"void recomp_enter(X86 *c, uint32_t index);
+#if RECOMP_CALL_HOOKS
 #define RECOMP_SLOW_(i) RECOMP_UNLIKELY(__atomic_load_n(&recomp_slow[i], __ATOMIC_RELAXED))
+#else
+#define RECOMP_SLOW_(i) RECOMP_UNLIKELY(__atomic_load_n(&recomp_slow_routes, __ATOMIC_RELAXED))
+#endif
 #define RECOMP_ENTER(i, base) \
     do { recomp_execution_checkpoint(c); if (RECOMP_SLOW_(i)) recomp_enter(c, i); else base; } while (0)
 #define RECOMP_ENTER_CHECKED(i, body, base) \
@@ -57,6 +61,7 @@ const MODULE_ENTRY_STUB_PRELUDE: &str = r#"
 extern uint8_t recomp_{key}_hooked[];
 void recomp_enter_{key}(X86 *c, uint32_t index);
 void recomp_hook_{key}(X86 *c, uint32_t index);
+#if RECOMP_CALL_HOOKS
 #define RECOMP_ENTER(i, base) \
     do { \
         if (RECOMP_UNLIKELY(recomp_profile_enabled || recomp_frame_watch)) \
@@ -68,6 +73,14 @@ void recomp_hook_{key}(X86 *c, uint32_t index);
             else base; \
         } \
     } while (0)
+#else
+#define RECOMP_ENTER(i, base) \
+    do { \
+        if (RECOMP_UNLIKELY(__atomic_load_n(&recomp_slow_routes, __ATOMIC_RELAXED))) \
+            recomp_enter_{key}(c, i); \
+        else { recomp_execution_checkpoint(c); base; } \
+    } while (0)
+#endif
 "#;
 
 pub struct Translation<'a> {

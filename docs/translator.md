@@ -210,7 +210,8 @@ even without checkpoint credit; credit only lets the call skip publication. A gu
 call has one route condition, `recomp_slow_routes`, raised by hooks, profiling and frame watch; its unlikely generic arm publishes the register
 fields hooks observe and the slots the call does not otherwise demand, and nothing is
 reloaded afterwards. `[game] call_hooks = false` removes hook publications and
-kept-field rereads everywhere. Slots below a call's ESP are published before it and
+kept-field rereads everywhere, and entry stubs test `recomp_slow_routes` instead of
+per-function slow flags. Slots below a call's ESP are published before it and
 reloaded after it. Unknown effects, alternate entries and exposed ranges keep frame
 stores in memory. `DIVERGENCE(original):` eligible private-frame writes are delayed;
 ordinary entry paths preserve final bytes.
