@@ -1,8 +1,7 @@
 //! Driver that `tools/build.py` runs once per image. It reads the `recomp-translate-input-v1` JSON,
 //! loads the image and code map, discovers uncovered code, lifts every function, validates analysis
 //! facts against the lifted code (`facts`), runs whole-program analysis, then plans every function
-//! and emits them in a second parallel pass, once return-slot proofs are known and
-//! `rk_global::specialize` has merged private-contract requests. A function that fails planning or emission
+//! and emits them in a second parallel pass, once return-slot proofs are known. A function that fails planning or emission
 //! becomes a named trap body. See `docs/translator.md`.
 
 mod facts;
@@ -15,7 +14,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
-use rk_core::contract::{Fields, PrivateArguments};
+use rk_core::contract::{DirectArguments, Field, Fields};
 use rk_core::ir::{FunctionIr, OpCode, Space};
 use rk_core::program::{EntryKind, Program};
 use rk_core::settings::Settings;
@@ -242,7 +241,7 @@ impl IrSummary {
 
 #[derive(Clone, Copy)]
 struct Switches {
-    private: bool,
+    direct: bool,
     descriptors: bool,
     coalesce_roots: bool,
     x87_dynamic: bool,
@@ -252,7 +251,7 @@ impl Switches {
     fn from_env() -> Self {
         let unset = |name| std::env::var_os(name).is_none();
         Self {
-            private: unset("RK_NO_PRIVATE"),
+            direct: unset("RK_NO_DIRECT"),
             descriptors: unset("RK_NO_DESCRIPTORS"),
             coalesce_roots: unset("RK_NO_ROOTS"),
             x87_dynamic: !unset("RK_X87_DYNAMIC"),
@@ -278,9 +277,8 @@ struct BodyContext<'a> {
     setjmp_targets: &'a BTreeSet<Addr>,
     guest_calls: &'a BTreeSet<Addr>,
     host_calls: &'a BTreeSet<Addr>,
-    private_targets: &'a BTreeSet<Addr>,
-    private_masks: BTreeMap<Addr, BTreeSet<Fields>>,
-    private_input_arguments: BTreeMap<Addr, PrivateArguments>,
+    direct_targets: &'a BTreeSet<Addr>,
+    direct_arguments: BTreeMap<Addr, DirectArguments>,
     switches: Switches,
     reloc: Option<rk_emit::RelocEmit>,
 }
@@ -289,21 +287,21 @@ impl<'a> BodyContext<'a> {
     fn emit_context<'b>(
         &'b self,
         ir: &'b FunctionIr,
-        private: Option<&'b rk_emit::PrivateEmit>,
+        direct: Option<&'b rk_emit::DirectEmit>,
     ) -> rk_emit::EmitContext<'b> {
         rk_emit::EmitContext {
             ir,
             effect_returns: self.effect_returns,
             proven_returns: &self.proven_returns,
             known_modes: self.known_modes,
-            private_masks: &self.private_masks,
-            private_input_arguments: &self.private_input_arguments,
+            direct_targets: self.direct_targets,
+            direct_arguments: &self.direct_arguments,
             known_entries: self.known_entries,
             region_entries: &self.program.region_entries,
             setjmp_targets: self.setjmp_targets,
             guest_calls: self.guest_calls,
             host_calls: self.host_calls,
-            private,
+            direct,
             reloc: self.reloc,
             call_hooks: self.call_hooks,
         }
@@ -325,8 +323,8 @@ fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::
             x87_modes: &ctx.x87_modes,
             x87_options: ctx.x87_options.clone(),
             fault_state: ctx.fault_state,
-            private_targets: ctx.private_targets,
-            private_arguments: &ctx.private_input_arguments,
+            direct_targets: ctx.direct_targets,
+            direct_arguments: &ctx.direct_arguments,
             descriptors: ctx.switches.descriptors,
             coalesce_roots: ctx.switches.coalesce_roots,
             lazy_stack_writes: ctx.lazy_stack_writes,
@@ -534,12 +532,7 @@ fn build_bodies(
     switches: Switches,
     only: &[Addr],
     reloc: Option<rk_emit::RelocEmit>,
-) -> Result<(
-    Vec<Body>,
-    EmitStats,
-    BTreeMap<Addr, BTreeSet<Fields>>,
-    BTreeMap<Addr, PrivateArguments>,
-)> {
+) -> Result<(Vec<Body>, EmitStats, BTreeSet<Addr>)> {
     let known_entries: BTreeSet<Addr> = program
         .functions
         .keys()
@@ -553,30 +546,30 @@ fn build_bodies(
         .copied()
         .filter(|&addr| program.is_setjmp_thunk(addr))
         .collect();
-    let private_targets: BTreeSet<Addr> = if switches.private {
-        global.private.targets.keys().copied().collect()
+    let direct_targets: BTreeSet<Addr> = if switches.direct {
+        global.direct.targets.keys().copied().collect()
     } else {
         BTreeSet::new()
     };
     let effect_returns = effect_returns(&global.returns);
-    let private_arguments: BTreeMap<Addr, PrivateArguments> = global
-        .private
+    let direct_arguments: BTreeMap<Addr, DirectArguments> = global
+        .direct
         .input_arguments
         .iter()
-        .filter(|(addr, _)| private_targets.contains(addr))
+        .filter(|(addr, _)| direct_targets.contains(addr))
         .map(|(&addr, &arguments)| (addr, arguments))
         .collect();
-    let st0_targets: BTreeSet<Addr> = private_arguments
+    let st0_targets: BTreeSet<Addr> = direct_arguments
         .iter()
         .filter(|(_, arguments)| arguments.st0)
         .map(|(&addr, _)| addr)
         .collect();
-    let make_ctx = |private_masks, proven_returns| BodyContext {
+    let make_ctx = |proven_returns| BodyContext {
         program,
         facts: global.call_facts(),
         effect_returns: &effect_returns,
         proven_returns,
-        known_modes: &global.private.known_modes,
+        known_modes: &global.direct.known_modes,
         x87_modes: rk_x87::ModeInput::from(&global.x87),
         x87_options: rk_x87::Options {
             strict: settings.fault_state == rk_core::settings::FaultState::Exact,
@@ -596,13 +589,12 @@ fn build_bodies(
         setjmp_targets: &setjmp_targets,
         guest_calls,
         host_calls,
-        private_targets: &private_targets,
-        private_masks,
-        private_input_arguments: private_arguments.clone(),
+        direct_targets: &direct_targets,
+        direct_arguments: direct_arguments.clone(),
         switches,
         reloc,
     };
-    let ctx = make_ctx(BTreeMap::new(), BTreeSet::new());
+    let ctx = make_ctx(BTreeSet::new());
     let selected: BTreeSet<Addr> = only.iter().copied().collect();
     let wanted = |addr: Addr| selected.is_empty() || selected.contains(&addr);
     let sources: Vec<(Addr, Option<FunctionIr>)> = match owned {
@@ -637,7 +629,6 @@ fn build_bodies(
             }
         })
         .collect();
-    let mut requests = rk_plan::ContractRequests::default();
     let mut proven_returns = BTreeSet::new();
     let mut retained = Vec::new();
     for item in prepared {
@@ -647,23 +638,11 @@ fn build_bodies(
                 if planned.ssa.return_slot.is_ok() {
                     proven_returns.insert(addr);
                 }
-                for (caller, wanted) in &planned.requests.by_caller {
-                    requests
-                        .by_caller
-                        .entry(*caller)
-                        .or_default()
-                        .extend(wanted.iter().copied());
-                }
                 retained.push(Ok((addr, ir, planned)));
             }
         }
     }
-    let specialized = rk_global::specialize(
-        &requests.by_caller,
-        &global.contracts,
-        &global.private.input_arguments,
-    );
-    let ctx2 = make_ctx(specialized.masks.clone(), proven_returns);
+    let ctx2 = make_ctx(proven_returns);
     let phase2: Vec<(Vec<BodyRow>, Vec<Body>)> = retained
         .into_par_iter()
         .map(|item| -> Result<(Vec<BodyRow>, Vec<Body>)> {
@@ -671,12 +650,12 @@ fn build_bodies(
                 Err(row) => Ok((vec![row], Vec::new())),
                 Ok((addr, ir, mut planned)) => {
                     let rows = vec![emit_row(&ctx2, addr, &ir, &planned)];
-                    let mut private_bodies = Vec::new();
-                    if let Some(layouts) = specialized.layouts.get(&addr) {
-                        let fast = global.private.known_modes.contains(&addr)
+                    let mut direct_bodies = Vec::new();
+                    if direct_targets.contains(&addr) {
+                        let fast = global.direct.known_modes.contains(&addr)
                             && ctx2.x87_options.cw_clone
                             && ctx2.x87_options.force == rk_x87::ModeForce::Auto;
-                        let st0 = private_arguments
+                        let st0 = direct_arguments
                             .get(&addr)
                             .is_some_and(|arguments| arguments.st0);
                         if fast || st0 {
@@ -690,42 +669,38 @@ fn build_bodies(
                                     .map_err(|reason| Diagnostic::error(addr, reason))?,
                             );
                         }
-                        for layout in layouts {
-                            let private = rk_emit::PrivateEmit {
-                                mask: layout.outputs,
-                                inputs: layout.inputs,
-                                input_arguments: layout.input_arguments,
-                            };
-                            let emit_ctx = ctx2.emit_context(&ir, Some(&private));
-                            match rk_emit::emit_body(&planned, &emit_ctx) {
-                                Ok((body, _)) => private_bodies.push(body),
-                                Err(error) => {
-                                    bail!(
-                                        "private body {addr:08x}/{:04x} emission failed: {error}",
-                                        layout.outputs.0
-                                    );
-                                }
-                            }
+                        let arguments = direct_arguments.get(&addr).copied().unwrap_or_default();
+                        let direct = rk_emit::DirectEmit {
+                            inputs: (global.contracts[&addr].reads
+                                | Fields(Field::Esp.bit())
+                                | Fields(Field::Ebp.bit()))
+                            .difference(arguments.registers),
+                            input_arguments: arguments,
+                        };
+                        let emit_ctx = ctx2.emit_context(&ir, Some(&direct));
+                        match rk_emit::emit_body(&planned, &emit_ctx) {
+                            Ok((body, _)) => direct_bodies.push(body),
+                            Err(error) => bail!("direct body {addr:08x} emission failed: {error}"),
                         }
                     }
-                    Ok((rows, private_bodies))
+                    Ok((rows, direct_bodies))
                 }
             }
         })
         .collect::<Result<_>>()?;
     let mut stats = EmitStats::default();
     let mut bodies = Vec::new();
-    let mut private_bodies = Vec::new();
-    for (rows, private) in phase2 {
+    let mut direct_bodies = Vec::new();
+    for (rows, direct) in phase2 {
         for row in rows {
             account(&mut stats, row, &mut bodies);
         }
-        private_bodies.extend(private);
+        direct_bodies.extend(direct);
     }
     bodies.sort_by_key(|body| body.addr);
-    private_bodies.sort_by_key(|body| (body.addr, body.private_mask.unwrap_or_default()));
-    bodies.extend(private_bodies);
-    Ok((bodies, stats, specialized.masks, private_arguments))
+    direct_bodies.sort_by_key(|body| body.addr);
+    bodies.extend(direct_bodies);
+    Ok((bodies, stats, direct_targets))
 }
 
 fn trap_body(program: &Program, addr: Addr, ir: Option<&FunctionIr>) -> Body {
@@ -761,7 +736,6 @@ fn trap_body(program: &Program, addr: Addr, ir: Option<&FunctionIr>) -> Body {
         text,
         requires: Requires::default(),
         declarations: Default::default(),
-        private_mask: None,
     }
 }
 
@@ -1018,9 +992,8 @@ fn report(input: &ReportInputs<'_>) -> Result<String> {
             "import_effects": global.import_effects,
             "fact_evidence": global.fact_evidence,
             "sccs": global.sccs,
-            "private_targets": global.private_targets,
-            "private_variants": global.private_variants,
-            "selected_callers": global.selected_callers,
+            "direct_targets": global.direct_targets,
+            "direct_variants": global.direct_variants,
             "known_modes": global.known_modes,
             "instruction_checks": global.instruction_checks,
             "instruction_mismatches": global.instruction_mismatches.len(),
@@ -1229,7 +1202,7 @@ fn main() -> Result<()> {
     let only = if whole { &[][..] } else { &args.only[..] };
     let wants_bodies = whole || args.wants(Stage::Bodies);
     let owned = (wants_bodies && args.dump.is_empty()).then(|| std::mem::take(&mut analysis.ir));
-    let (bodies, emit_stats, private_masks, private_input_arguments) = if wants_bodies {
+    let (bodies, emit_stats, direct_variants) = if wants_bodies {
         build_bodies(
             &program,
             &analysis,
@@ -1248,12 +1221,7 @@ fn main() -> Result<()> {
             None,
         )?
     } else {
-        (
-            Vec::new(),
-            EmitStats::default(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-        )
+        (Vec::new(), EmitStats::default(), BTreeSet::new())
     };
     phases.mark("emit");
     for (addr, owner) in extra_entries {
@@ -1273,8 +1241,7 @@ fn main() -> Result<()> {
         call_returns,
         call_facts: facts.runtime_call_facts,
         cw_effects: facts.cw_effects,
-        private_masks,
-        private_input_arguments,
+        direct_variants,
     };
 
     if !args.dump.is_empty() {
@@ -1362,8 +1329,7 @@ fn main() -> Result<()> {
     }
     if let Some(path) = &args.report {
         let mut global_report = global.report.clone();
-        global_report.private_variants =
-            translation.private_masks.values().map(BTreeSet::len).sum();
+        global_report.direct_variants = translation.direct_variants.len();
         std::fs::write(
             path,
             report(&ReportInputs {

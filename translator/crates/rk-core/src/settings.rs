@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::de::{self, Deserializer};
 use serde::Deserialize;
 
-use crate::contract::{Contract, Field, Fields, PrivateArguments};
+use crate::contract::{Contract, DirectArguments, Field, Fields};
 use crate::{parse_hex, Addr, Error, Result};
 
 pub const INPUT_FORMAT: &str = "recomp-translate-input-v1";
@@ -58,9 +58,8 @@ pub struct Translate {
     pub stack_probes: Vec<Addr>,
     pub stack_cleanup: Vec<StackCleanup>,
     pub x87_cw_clone: bool,
-    pub private_leaf_contracts: bool,
-    pub private_input_arguments: bool,
-    pub private_input_registers: BTreeMap<String, Vec<String>>,
+    pub direct_variants: bool,
+    pub direct_arguments: BTreeMap<String, Vec<String>>,
     pub x87_imports_preserve_pc_rc: bool,
     pub x87_facts: Option<String>,
     pub x87_mode_metadata: Option<String>,
@@ -70,7 +69,6 @@ pub struct Translate {
     pub call_effects: Vec<CallEffect>,
     pub x87_entry_contracts: Vec<de::IgnoredAny>,
     pub allocators: Vec<de::IgnoredAny>,
-    pub state_contract_callers: Vec<Addr>,
     pub alternate_entries: Vec<Addr>,
     pub entry_points: Vec<Addr>,
     pub discover: Option<bool>,
@@ -304,10 +302,8 @@ pub struct Settings {
     pub call_pops: BTreeMap<Addr, i32>,
     pub function_pops: BTreeMap<Addr, i32>,
     pub call_hooks: bool,
-    pub private_leaf_contracts: bool,
-    pub private_input_arguments: bool,
-    pub private_input_registers: BTreeMap<Addr, PrivateArguments>,
-    pub state_contract_callers: BTreeSet<Addr>,
+    pub direct_variants: bool,
+    pub direct_arguments: BTreeMap<Addr, DirectArguments>,
     pub discover: bool,
     pub dispatch: Option<Dispatch>,
     pub fault_state: FaultState,
@@ -408,13 +404,11 @@ impl Settings {
                 }
             }
         }
-        let mut private_input_registers = BTreeMap::new();
+        let mut direct_arguments = BTreeMap::new();
         if main {
-            for (addr, registers) in &t.private_input_registers {
+            for (addr, registers) in &t.direct_arguments {
                 let addr = parse_hex(addr).ok_or_else(|| {
-                    Error::input(format!(
-                        "private_input_registers key {addr} is not an address"
-                    ))
+                    Error::input(format!("direct_arguments key {addr} is not an address"))
                 })?;
                 let st0 = registers.iter().filter(|name| *name == "ST0").count();
                 let fields = fields(
@@ -423,7 +417,7 @@ impl Settings {
                         .filter(|name| *name != "ST0")
                         .cloned()
                         .collect(),
-                    "private_input_registers",
+                    "direct_arguments",
                 )
                 .map_err(Error::input)?;
                 if registers.is_empty()
@@ -432,12 +426,12 @@ impl Settings {
                     || !fields.difference(Fields::GPRS).is_empty()
                 {
                     return Err(Error::input(format!(
-                        "private_input_registers {addr:08x} must list distinct general registers other than ESP, or ST0"
+                        "direct_arguments {addr:08x} must list distinct general registers other than ESP, or ST0"
                     )));
                 }
-                private_input_registers.insert(
+                direct_arguments.insert(
                     addr,
-                    PrivateArguments {
+                    DirectArguments {
                         registers: fields,
                         st0: st0 == 1,
                     },
@@ -528,10 +522,8 @@ impl Settings {
                 BTreeMap::new()
             },
             call_hooks: input.call_hooks.unwrap_or(true),
-            private_leaf_contracts: t.private_leaf_contracts && main,
-            private_input_arguments: t.private_input_arguments && main,
-            private_input_registers,
-            state_contract_callers: only_main(&t.state_contract_callers),
+            direct_variants: t.direct_variants && main,
+            direct_arguments,
             discover: t.discover.unwrap_or(true),
             fault_state: t.fault_state,
             msvc_x87_convention: t.msvc_x87_convention,

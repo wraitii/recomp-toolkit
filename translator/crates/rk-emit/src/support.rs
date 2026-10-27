@@ -1,11 +1,9 @@
-use std::collections::BTreeSet;
-
 use rk_core::contract::{Field, Fields};
 use rk_core::ir::OpCode;
 use rk_ir::{field_lane, Op, Registers, StateKey};
 use rk_ssa::ValueId;
 
-use crate::PrivateEmit;
+use crate::DirectEmit;
 
 pub(crate) fn const_expr(data: u64, size: u8) -> String {
     if size > 4 {
@@ -27,7 +25,7 @@ pub(crate) fn reads_c_field(
     s: &rk_ssa::Ssa,
     value: ValueId,
     materialized: &[bool],
-    private: Option<&PrivateEmit>,
+    direct: Option<&DirectEmit>,
 ) -> bool {
     if materialized[value as usize] {
         return false;
@@ -36,19 +34,19 @@ pub(crate) fn reads_c_field(
         Op::Input(StateKey::Memory)
         | Op::StateReload(StateKey::Memory)
         | Op::StateKeep(StateKey::Memory) => false,
-        Op::Input(key) | Op::StateReload(key) | Op::StateKeep(key) => private_loads(private, key),
+        Op::Input(key) | Op::StateReload(key) | Op::StateKeep(key) => direct_loads(direct, key),
         Op::Byte(_) => s
             .args(value)
             .first()
-            .is_some_and(|arg| reads_c_field(s, *arg, materialized, private)),
+            .is_some_and(|arg| reads_c_field(s, *arg, materialized, direct)),
         Op::Pack => s
             .args(value)
             .iter()
-            .any(|arg| reads_c_field(s, *arg, materialized, private)),
+            .any(|arg| reads_c_field(s, *arg, materialized, direct)),
         Op::P(OpCode::Copy | OpCode::IntZExt) => s
             .args(value)
             .first()
-            .is_some_and(|arg| reads_c_field(s, *arg, materialized, private)),
+            .is_some_and(|arg| reads_c_field(s, *arg, materialized, direct)),
         _ => false,
     }
 }
@@ -124,22 +122,14 @@ pub(crate) fn location(key: StateKey) -> Option<Location> {
     }
 }
 
-pub(crate) fn private_loads(private: Option<&PrivateEmit>, key: StateKey) -> bool {
-    let Some(private) = private else { return true };
+pub(crate) fn direct_loads(direct: Option<&DirectEmit>, key: StateKey) -> bool {
+    let Some(direct) = direct else { return true };
     match field_lane(key) {
         Some((field, _)) => {
-            private.inputs.contains(field) || private.input_arguments.registers.contains(field)
+            direct.inputs.contains(field) || direct.input_arguments.registers.contains(field)
         }
         None => true,
     }
-}
-
-pub(crate) fn select_mask(masks: &BTreeSet<Fields>, wanted: Fields) -> Option<Fields> {
-    masks
-        .iter()
-        .copied()
-        .filter(|mask| wanted & !*mask == Fields::NONE)
-        .min_by_key(|mask| (mask.0.count_ones(), *mask))
 }
 
 pub(crate) fn ends_block(op: Op) -> bool {

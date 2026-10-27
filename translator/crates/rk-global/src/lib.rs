@@ -1,17 +1,16 @@
 //! Whole-program analysis between lifting and planning. `contracts` builds SSA for every function
 //! and solves register and flag call contracts over call-graph SCCs, using indirect call and jump
 //! bounds and configured site effects. Functions it cannot prove stay conservative, with a reason.
-//! `modes` propagates x87 control-word facts. `private` selects private-contract targets, and
-//! `specialize` merges the planner's call-site requests into variant layouts.
+//! `modes` propagates x87 control-word facts. `direct` selects direct-variant targets.
 //! `GlobalFacts::call_facts` feeds the contracts back into SSA.
 
 mod borrows;
 mod callgraph;
 mod cfg;
 mod contracts;
+mod direct;
 pub mod memory;
 mod modes;
-mod private;
 pub mod stack;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,8 +25,8 @@ use rk_core::{Addr, Result};
 use rk_frontend::Analysis;
 use rk_ssa::{CallEffect, CallFacts, CallSummary};
 
+pub use direct::DirectAnalysis;
 pub use modes::{ModeCondition, ReturnSummary, X87ModeFacts, CW_MASK, CW_PC_RC};
-pub use private::{specialize, PrivateAnalysis, PrivateLayout};
 
 pub struct ContractCallFacts<'a> {
     contracts: &'a BTreeMap<Addr, Contract>,
@@ -134,9 +133,8 @@ pub struct GlobalReport {
     pub import_effects: usize,
     pub fact_evidence: usize,
     pub sccs: usize,
-    pub private_targets: usize,
-    pub private_variants: usize,
-    pub selected_callers: usize,
+    pub direct_targets: usize,
+    pub direct_variants: usize,
     pub known_modes: usize,
     pub instruction_checks: usize,
     pub instruction_mismatches: BTreeMap<Addr, (usize, usize)>,
@@ -153,7 +151,7 @@ pub struct GlobalFacts {
     pub indirect_contracts: BTreeMap<Addr, Contract>,
     pub site_effects: BTreeMap<Addr, ConfiguredEffect>,
     stack_cleanup: Vec<StackCleanup>,
-    pub private: PrivateAnalysis,
+    pub direct: DirectAnalysis,
     pub x87: X87ModeFacts,
     pub report: GlobalReport,
 }
@@ -220,7 +218,7 @@ impl GlobalFacts {
         let borrows = borrows::analyze(input, &mode_opaque, &calls, &returns);
         let mut opaque = opaque_helpers;
         opaque.extend(contracts.rejected.keys().copied());
-        let private = private::analyze(&private::PrivateInput {
+        let direct = direct::analyze(&direct::DirectInput {
             settings: input.settings,
             analysis: input.analysis,
             contracts: &contracts,
@@ -255,10 +253,9 @@ impl GlobalFacts {
             site_effects: input.fact_summary.site_effects,
             import_effects: input.fact_summary.import_effects,
             fact_evidence: input.fact_summary.evidence,
-            private_targets: private.targets.len(),
-            private_variants: private.masks.values().map(BTreeSet::len).sum(),
-            selected_callers: private.callers.len(),
-            known_modes: private.known_modes.len(),
+            direct_targets: direct.targets.len(),
+            direct_variants: direct.targets.len(),
+            known_modes: direct.known_modes.len(),
             sccs: modes.sccs,
             instruction_checks: contracts.instruction_checks,
             instruction_mismatches: contracts.instruction_mismatches,
@@ -281,7 +278,7 @@ impl GlobalFacts {
             indirect_contracts: contracts.indirect,
             site_effects: input.site_effects.clone(),
             stack_cleanup: input.settings.stack_cleanup.clone(),
-            private,
+            direct,
             x87: modes.facts,
             report,
         })
@@ -417,11 +414,11 @@ impl GlobalFacts {
                 x87.unwrap_or_else(|| "-".to_string()),
             )?;
         }
-        writeln!(out, "private")?;
-        for (&addr, contract) in &self.private.targets {
+        writeln!(out, "direct")?;
+        for (&addr, contract) in &self.direct.targets {
             writeln!(
                 out,
-                "private {:08x} reads={} kills={} writes={} preserves={}",
+                "direct {:08x} reads={} kills={} writes={} preserves={}",
                 addr,
                 fields(contract.reads),
                 fields(contract.kills),
@@ -429,25 +426,10 @@ impl GlobalFacts {
                 fields(contract.preserves),
             )?;
         }
-        for addr in &self.private.callers {
-            writeln!(out, "caller {:08x}", addr)?;
-        }
-        for (&addr, layouts) in &self.private.layouts {
-            for layout in layouts {
-                writeln!(
-                    out,
-                    "layout {:08x} mask={:04x} inputs={} arguments={}",
-                    addr,
-                    layout.outputs.0,
-                    fields(layout.inputs),
-                    arguments(layout.input_arguments),
-                )?;
-            }
-        }
-        for (&addr, input) in &self.private.input_arguments {
+        for (&addr, input) in &self.direct.input_arguments {
             writeln!(out, "input-arguments {:08x} {}", addr, arguments(*input))?;
         }
-        for addr in &self.private.known_modes {
+        for addr in &self.direct.known_modes {
             writeln!(out, "known-mode {:08x}", addr)?;
         }
         writeln!(out, "x87")?;
@@ -471,7 +453,7 @@ fn fields(fields: rk_core::contract::Fields) -> String {
     }
 }
 
-fn arguments(arguments: rk_core::contract::PrivateArguments) -> String {
+fn arguments(arguments: rk_core::contract::DirectArguments) -> String {
     if arguments.st0 {
         format!("{}+ST0", fields(arguments.registers))
     } else {
@@ -486,7 +468,7 @@ fn format_report(report: &GlobalReport) -> String {
         .map(|(reason, count)| format!("{reason}={count}"))
         .collect();
     format!(
-        "functions={} contracts={} indirect={} bounds={}/{} jumps_consumed={} jumps_unsupported={} effects={}/{} evidence={} excluded=[{}] private={} variants={} callers={} known_modes={} instruction_checks={} instruction_mismatches={}",
+        "functions={} contracts={} indirect={} bounds={}/{} jumps_consumed={} jumps_unsupported={} effects={}/{} evidence={} excluded=[{}] direct={} variants={} known_modes={} instruction_checks={} instruction_mismatches={}",
         report.functions,
         report.contracts,
         report.indirect_contracts,
@@ -498,9 +480,8 @@ fn format_report(report: &GlobalReport) -> String {
         report.import_effects,
         report.fact_evidence,
         excluded.join(","),
-        report.private_targets,
-        report.private_variants,
-        report.selected_callers,
+        report.direct_targets,
+        report.direct_variants,
         report.known_modes,
         report.instruction_checks,
         report.instruction_mismatches.len(),

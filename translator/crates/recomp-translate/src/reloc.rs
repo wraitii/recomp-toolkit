@@ -182,11 +182,9 @@ fn reloc_settings(settings: &Settings) -> Settings {
     reloc.curated = Curated::default();
     reloc.alternate_entries.clear();
     reloc.configured_entries.clear();
-    reloc.state_contract_callers.clear();
-    reloc.private_input_registers.clear();
+    reloc.direct_arguments.clear();
     reloc.call_effects.sites.clear();
-    reloc.private_input_arguments = false;
-    reloc.private_leaf_contracts = false;
+    reloc.direct_variants = false;
     reloc.call_contracts = false;
     reloc
 }
@@ -230,7 +228,7 @@ pub fn translate(
             fact_summary: &facts.summary,
         })?;
         let mut reloc_switches = switches;
-        reloc_switches.private = false;
+        reloc_switches.direct = false;
         let built = build_bodies(
             &program,
             &analysis,
@@ -247,7 +245,7 @@ pub fn translate(
                 local_size: program.image.size,
             }),
         )?;
-        let (bodies, stats, _, _) = built;
+        let (bodies, stats, _) = built;
 
         let mut refusal = refuse(&program, &analysis, template, &targets);
         if refusal.is_none() && stats.trapping != 0 {

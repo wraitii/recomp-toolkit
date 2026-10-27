@@ -535,7 +535,7 @@ def rust_translation_dependencies(cfg, key):
             digest.update((manifest.read_bytes() if manifest.is_file() else b"<missing>") + b"\0")
 
     digest.update(b"rust-generation-env\0")
-    for name in ("RK_NO_DESCRIPTORS", "RK_NO_PRIVATE", "RK_X87_DYNAMIC", "RK_NO_ROOTS"):
+    for name in ("RK_NO_DESCRIPTORS", "RK_NO_DIRECT", "RK_X87_DYNAMIC", "RK_NO_ROOTS"):
         digest.update(name.encode() + b"=" + (b"1" if os.environ.get(name) is not None else b"0") + b"\0")
     return digest.digest()
 

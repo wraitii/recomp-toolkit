@@ -32,10 +32,9 @@ dispatch = { shift = 3, max_probe = 31 }
 code_map = "metadata"
 # Structural vtable-prefix bounds plus observed edges from typeinf.nominal.
 indirect_targets = "metadata/indirect-targets.tsv"
-private_leaf_contracts = true
+direct_variants = true
 assume = ["private-stack", "stack-pointer-bases"]
-private_input_registers = { "005a10d0" = ["ECX", "EBP", "ST0"] }
-state_contract_callers = [0x0042ce00, 0x0042c1b0]
+direct_arguments = { "005a10d0" = ["ECX", "EBP", "ST0"] }
 stack_cleanup = [
   { call = 0x005acf52, bytes = 0, evidence = "__FF_MSGBANNER calls the hook at 00dba1e0, zero in the image and never written" },
   { call = 0x005a717d, bytes = 0, evidence = "__callnewh calls the new handler at 00dba1c8, zero in the image and never written" },

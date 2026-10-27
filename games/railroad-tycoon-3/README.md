@@ -175,57 +175,34 @@ this-adjustor, which nothing references as a pointer. Without `stack-pointer-bas
 goes from 44 to 67 static guest reads. Remove a name from `[translate] assume` to
 drop its premise.
 
-The private-argument pilot selects `0x005a10d0` (through `0x005a1144`), the x87
-integer-conversion helper. Original bytes show a single-entry leaf with aligned
-stack scratch, path-dependent ECX/flags and one RET; callers include `0x0042c1b0`
-and `0x0042ce00`. Stack writes, x87 effects and all existing state publication
-remain translated. Savings across the conversion call's state transfer are
-piloted separately below; scratch memory remains translated.
+The direct-argument pilot selects `0x005a10d0` (through `0x005a1144`), the x87
+integer-conversion helper, with `direct_arguments`. Original bytes show a
+single-entry leaf with aligned stack scratch, path-dependent ECX/flags and one
+RET; callers include `0x0042c1b0` and `0x0042ce00`. The helper takes its read GPRs
+and ST0 as C arguments. Stack scratch, x87 effects and full return-state
+publication remain translated. Static control-word analysis proves it preserves
+its incoming mode. The direct body requires `(CW & 0x0f00) == 0`; other modes use
+the ordinary body. `x87_cw_clone = false` retains general arithmetic.
 
-The experimental integer-state pilot selects the reviewed callers
-`0x0042c1b0` and `0x0042ce00` through
-`state_contract_callers`. Their conversion edges require EAX, ESP and EBP on
-normal continuation, with AF retained at sites where it remains
-observable; EIP and all existing x87 state remain published. Private
-entries omit other integer return stores and use byte-derived leaf input
-contracts. Full changed state is recovered on an unexpected RET, and observation
-boundaries retain the ordinary path. Set `state_contract_callers = []` and
-disable `private_leaf_contracts` and regenerate to return to ordinary calls.
-Automatic discovery extends these contracts to returning leaves with at least
-two direct call sites and at most 64 original instructions per site, subject to
-closed single-entry, replacement/SEH and emitter checks. One shared output layout
-is emitted per callee; the report records automatic selections and rejections.
-Non-leaf specialization and x87 value-transfer contracts remain future work.
+`direct_variants = true` also selects returning leaves with at least two direct
+call sites and at most 64 original instructions per site, subject to closed
+single-entry, replacement/SEH and emitter checks. Each selected function has one
+`direct_ADDR` body; output masks and private entry thunks are gone. Callers use
+one `recomp_direct_` guard for replacement, observation, checkpoint and x87
+conditions, then call the direct body. The fallback uses `call_ADDR`, and both
+arms retain the same return check. Disable `direct_variants` and clear
+`direct_arguments` to use ordinary bodies throughout. See
+[direct variants](../../docs/translator.md#direct-variants).
 
-Validation compared both private output sets and their unexpected-return
-paths against the ordinary entry over 1,860 rounding cases each, with no new
-differences. The ordinary entry still has the baseline's 96 original-byte
-rounding discrepancies. Random-input diff coverage reached valid returns in
-`0x005a10d0` and `0x0042c1b0`, including hook-enabled ordinary fallback, but not
-`0x0042ce00`. Cleanup removes fallback parity reductions in the private leaf
-assembly and reduces caller stack frames. Eligibility and checkpoint preparation
-share one policy call; private entry thunks tail-call their bodies. Workload
-measurement uses host sampling with `RECOMP_PROFILE` unset or `0`, since the
-built-in guest profiler selects ordinary fallback. No workload gain is established.
-
-Static control-word analysis proves the conversion leaf preserves its incoming
-mode. Private preparation now requires `(CW & 0x0f00) == 0`, and each private
-body emits only the fast arithmetic; other modes reuse the ordinary entry. `x87_cw_clone = false` keeps x87 calls on general ordinary entries. In the linked
-ARM64 diff harness, the two private bodies shrink from 4,680 to 1,120 bytes;
-preparation grows by 12 bytes. The existing rounding fixture, routed through
-preparation for private calls, matches the captured ordinary implementation in
-9,300 cases across both output masks, fallback modes and unexpected returns,
-including full x87 state and scratch memory. The ordinary original-byte fixture
-retains its 96 inherited discrepancies; the random-input diff comparison passes
-200 valid returns without discarded inputs.
-
-The selected callers now share one private body with their union output mask
-`0431` (`EAX`, `ESP`, `EBP`, `AF`), while keeping per-edge liveness and reloads.
-Its linked ARM64 size is 564 bytes, removing the redundant 556-byte copy.
-The shared layout passes 9,300 comparisons against the captured ordinary body,
-including fallback modes, full x87 state, scratch memory and unexpected RETs.
-Original-byte checks pass for the helper and one caller; the other caller is
-unreached under random inputs. Ordinary entry and preparation policies are kept.
+Validation passes all 26 translator cases. A paired sample of 300 functions gives
+152 passing, 136 unreached and 12 original-byte divergences, with no differences
+between direct and ordinary routes. Its findings match the saved pre-change
+harness exactly. The eight-function call-state suite likewise matches the saved
+harness: three passing, three unreached and two inherited x87 divergences, with
+no route differences. Earlier conversion fixtures retained 96 inherited
+original-byte rounding discrepancies; this change does not resolve those.
+Workload measurement uses host sampling with `RECOMP_PROFILE` unset or `0`, since
+the built-in guest profiler selects ordinary fallback. No workload gain is established.
 
 The code-map inventory has 58 functions containing 78 control-word writer sites.
 Their direct-call descendants include 81 of 1,565 x87-using functions. This
@@ -242,9 +219,9 @@ reach no comparable returns in those functions; instruction checks cover tag
 clearing and control-word preservation. TOP follows AMD's documented reset,
 where Unicorn's Athlon model differs; see [historical IR notes](../../tools/recomp/Deprecated.md#scalar-x87).
 
-Private continuation layouts retain modified registers absent from the caller's
-SSA and values observed by later calls, even when no additional publication is
-needed. The original-byte regression suite exercises eight cases, including
+Direct variants publish modified registers absent from the caller's SSA and
+values observed by later calls, even when the caller needs no additional
+publication. The original-byte regression suite exercises eight cases, including
 `005a76d8`'s EAX exponent result before CRT math calls and `0052ecd0`'s EDX
 constructor result escaping through its caller. Run after rebuilding:
 
@@ -260,7 +237,7 @@ neither is implicit. Before a translator change: `--all --save-baseline
 before.json`; after the change and `--regenerate`: `--changed --baseline
 before.json`. Run the pair check on callers with specialized edges, such
 as `0x0042c1b0` and `0x0042ce00`. The harness cannot observe whether one call
-site took a private route, and compares only the active ST0/TOP, so pair equality
+site took a direct route, and compares only the active ST0/TOP, so pair equality
 is necessary but not per-call-site coverage.
 
 The tag-aware checker also reports empty/active ST0 disagreements at
@@ -274,7 +251,7 @@ Selected production facts use import PC/RC preservation and the explicit,
 verified cargo-entry premise in `game.toml`. `x87-boundaries.json` records the
 byte-backed native/import boundaries; `x87-facts.json` covers 479 instruction
 sites in 10 functions. It removes five ordinary arithmetic copies and six
-private call-site CW checks while retaining other preparation and fallback
+direct call-site CW checks while retaining other preparation and fallback
 conditions. Exploratory roots and allocator/math assumptions remain offline.
 Re-export facts with `tools/recomp/x87_audit.py propagation --facts-out` after
 changing an analysis input or bumping the analysis producer version. Specialized calls transfer state through `X86`

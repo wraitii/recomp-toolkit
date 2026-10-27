@@ -98,12 +98,12 @@ impl Fields {
 #[derive(
     Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
-pub struct PrivateArguments {
+pub struct DirectArguments {
     pub registers: Fields,
     pub st0: bool,
 }
 
-impl PrivateArguments {
+impl DirectArguments {
     pub fn is_empty(self) -> bool {
         self.registers.is_empty() && !self.st0
     }

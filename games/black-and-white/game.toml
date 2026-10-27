@@ -19,7 +19,7 @@ source_notes = "Apply Fan Patch 1.42 before selecting the game folder. Include i
 
 [translate]
 code_map = "metadata"
-private_leaf_contracts = true
+direct_variants = true
 entry_points = [
     0x00545b42,
     0x0057f810,

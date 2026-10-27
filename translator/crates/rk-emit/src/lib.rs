@@ -1,5 +1,5 @@
 //! Prints a `PlannedFunction` as C: the body (blocks, phi moves, publications, flag descriptors,
-//! calls, dynamic dispatch, x87 clones) plus its entry, alternate-entry and private-contract
+//! calls, dynamic dispatch, x87 clones) plus its entry, alternate-entry and direct-variant
 //! wrappers. Bodies return without checking the guest return; `fn_` wrappers check it for generic
 //! callers, and direct call sites check it themselves unless the target's return slot is proved.
 //! Unrepresentable forms return a diagnostic, and the driver then emits a trap body. Individual
@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 use crate::slow::*;
 use crate::support::*;
 use crate::x87::{External, PlanLines, St0Text};
-use rk_core::contract::{Field, Fields, PrivateArguments};
+use rk_core::contract::{DirectArguments, Field, Fields};
 use rk_core::ir::{FunctionIr, Insn, OpCode, SehEffect};
 use rk_core::{Addr, Diagnostic, Reason, Result};
 use rk_ir::{field_lane, Op, Registers, SlowFamily, StateKey};
@@ -30,10 +30,9 @@ use rk_plan::PlannedFunction;
 use rk_ssa::{FlagDescriptor, ValueId, DISPATCH_BLOCK};
 
 #[derive(Clone, Copy)]
-pub struct PrivateEmit {
-    pub mask: Fields,
+pub struct DirectEmit {
     pub inputs: Fields,
-    pub input_arguments: PrivateArguments,
+    pub input_arguments: DirectArguments,
 }
 
 #[derive(Clone, Copy)]
@@ -47,14 +46,14 @@ pub struct EmitContext<'a> {
     pub effect_returns: &'a BTreeSet<Addr>,
     pub proven_returns: &'a BTreeSet<Addr>,
     pub known_modes: &'a BTreeSet<Addr>,
-    pub private_masks: &'a BTreeMap<Addr, BTreeSet<Fields>>,
-    pub private_input_arguments: &'a BTreeMap<Addr, PrivateArguments>,
+    pub direct_targets: &'a BTreeSet<Addr>,
+    pub direct_arguments: &'a BTreeMap<Addr, DirectArguments>,
     pub known_entries: &'a BTreeSet<Addr>,
     pub region_entries: &'a BTreeMap<Addr, Addr>,
     pub setjmp_targets: &'a BTreeSet<Addr>,
     pub guest_calls: &'a BTreeSet<Addr>,
     pub host_calls: &'a BTreeSet<Addr>,
-    pub private: Option<&'a PrivateEmit>,
+    pub direct: Option<&'a DirectEmit>,
     pub reloc: Option<RelocEmit>,
     pub call_hooks: bool,
 }
@@ -67,7 +66,7 @@ pub struct EmitReport {
     pub return_slot: std::result::Result<(), &'static str>,
 }
 
-pub fn argument_parameters(arguments: PrivateArguments) -> Vec<(String, String)> {
+pub fn argument_parameters(arguments: DirectArguments) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = arguments
         .registers
         .iter()
@@ -104,7 +103,6 @@ pub fn emit_body(planned: &PlannedFunction, ctx: &EmitContext<'_>) -> Result<(Bo
             text: emitter.out,
             requires: emitter.requires,
             declarations: emitter.declarations,
-            private_mask: ctx.private.map(|private| private.mask),
         },
         report,
     ))
@@ -118,7 +116,7 @@ struct Emitter<'a> {
     requires: Requires,
     declarations: BTreeSet<Declaration>,
     multi: bool,
-    private: Option<&'a PrivateEmit>,
+    direct: Option<&'a DirectEmit>,
     materialized: Vec<bool>,
     uses_arena: bool,
     value_block: Vec<u32>,
@@ -364,7 +362,7 @@ impl<'a> Emitter<'a> {
                 continue;
             }
             match value.op {
-                Op::Input(key) => materialized[index] = private_loads(ctx.private, key),
+                Op::Input(key) => materialized[index] = direct_loads(ctx.direct, key),
                 Op::StateKeep(_) => {
                     materialized[index] = true;
                     let carrier = keep_lane.get(&id).map_or(id, |(carrier, _)| *carrier);
@@ -384,7 +382,7 @@ impl<'a> Emitter<'a> {
                 let id = *index as ValueId;
                 plan.live.contains(&id)
                     && !materialized[*index]
-                    && reads_c_field(s, id, &materialized, ctx.private)
+                    && reads_c_field(s, id, &materialized, ctx.direct)
             })
             .count();
         Self {
@@ -395,7 +393,7 @@ impl<'a> Emitter<'a> {
             requires: Requires::default(),
             declarations: BTreeSet::new(),
             multi: s.entries.len() > 1,
-            private: ctx.private,
+            direct: ctx.direct,
             materialized,
             uses_arena,
             value_block,
@@ -420,8 +418,8 @@ impl<'a> Emitter<'a> {
 
     fn run(&mut self) -> Result<()> {
         let addr = self.s.addr;
-        let body_name = if let Some(private) = self.private {
-            format!("fn_contract_{addr:08x}_{:04x}", private.mask.0)
+        let body_name = if self.direct.is_some() {
+            format!("direct_{addr:08x}")
         } else if self.multi {
             format!("body_{addr:08x}")
         } else {
@@ -503,8 +501,8 @@ impl<'a> Emitter<'a> {
         if self.ctx.reloc.is_some() {
             params.push("uint32_t base_".to_string());
         }
-        if let Some(private) = self.private {
-            for (ty, name) in argument_parameters(private.input_arguments) {
+        if let Some(direct) = self.direct {
+            for (ty, name) in argument_parameters(direct.input_arguments) {
                 params.push(format!("{ty} {name}"));
             }
         } else if self.multi {
@@ -527,7 +525,7 @@ impl<'a> Emitter<'a> {
 
     fn wrappers(&mut self, body: &str) {
         let addr = self.s.addr;
-        if self.private.is_some() {
+        if self.direct.is_some() {
             return;
         }
         let (base_param, base_arg) = if self.ctx.reloc.is_some() {
@@ -648,10 +646,10 @@ impl<'a> Emitter<'a> {
             if !self.plan.live.contains(&id) || !self.materialized[index] {
                 continue;
             }
-            if let Some(private) = self.private {
+            if let Some(direct) = self.direct {
                 if let Some((field, _)) = field_lane(key) {
-                    if !private.inputs.contains(field)
-                        && !private.input_arguments.registers.contains(field)
+                    if !direct.inputs.contains(field)
+                        && !direct.input_arguments.registers.contains(field)
                     {
                         continue;
                     }
@@ -1762,30 +1760,18 @@ impl<'a> Emitter<'a> {
         Ok(true)
     }
 
-    fn private_call(&mut self, value: ValueId, target: Addr) -> Result<Option<String>> {
-        let Some((private_target, wanted)) = self.plan.call_masks.get(&value).copied() else {
-            return Ok(None);
-        };
-        if private_target != target {
+    fn variant_call(&mut self, value: ValueId, target: Addr) -> Result<Option<String>> {
+        if !self.ctx.direct_targets.contains(&target) {
             return Ok(None);
         }
-        let Some(mask) = self
-            .ctx
-            .private_masks
-            .get(&target)
-            .and_then(|masks| select_mask(masks, wanted))
-        else {
-            return Ok(None);
-        };
         let arguments = self
             .ctx
-            .private_input_arguments
+            .direct_arguments
             .get(&target)
             .copied()
             .unwrap_or_default();
-        self.declarations.insert(Declaration::PrivateContract {
+        self.declarations.insert(Declaration::DirectVariant {
             addr: target,
-            mask,
             input_arguments: arguments,
         });
         let mut args = vec!["c".to_string()];
@@ -1796,16 +1782,13 @@ impl<'a> Emitter<'a> {
             let st0 = self.st0_handover(value)?.ok_or_else(|| {
                 self.error(
                     self.s.value_addr[value as usize],
-                    "x87 plan did not hand ST0 to the private call",
+                    "x87 plan did not hand ST0 to the direct call",
                 )
             })?;
             args.push(st0.value);
         }
         let args = args.join(", ");
-        Ok(Some(format!(
-            "entry_contract_{target:08x}_{:04x}({args});",
-            mask.0
-        )))
+        Ok(Some(format!("direct_{target:08x}({args});")))
     }
 
     fn call(&mut self, value: ValueId, target: Addr) -> Result<()> {
@@ -1831,25 +1814,25 @@ impl<'a> Emitter<'a> {
                 return Ok(true);
             }
         }
-        let private = self.private_call(value, target)?;
+        let direct = self.variant_call(value, target)?;
         self.declare_raw(target);
-        if checkpoints.is_none() && private.is_none() {
+        if checkpoints.is_none() && direct.is_none() {
             self.publish_arguments(value)?;
             let _ = writeln!(self.out, "CALL_RAW({target:08x});");
             self.returned(value, target)?;
             return Ok(true);
         }
-        if private.is_none() {
+        if direct.is_none() {
             self.publish_arguments(value)?;
         }
-        let guard = self.direct_guard(value, target, private.is_some(), checkpoints)?;
+        let guard = self.direct_guard(value, target, direct.is_some(), checkpoints)?;
         let _ = writeln!(self.out, "if (RECOMP_UNLIKELY(!({guard}))) {{");
         if checkpoints.is_some() {
             if let Some(keys) = self.plan.guard.get(&value).cloned() {
                 self.publish_keys(value, &keys, false)?;
             }
         }
-        if private.is_some() {
+        if direct.is_some() {
             self.publish_arguments(value)?;
         }
         let _ = writeln!(self.out, "CALL_RAW({target:08x});");
@@ -1858,7 +1841,7 @@ impl<'a> Emitter<'a> {
             self.refresh_stack_pointer(value, false)?;
         }
         self.out.push_str("} else {\n");
-        let fast = private.unwrap_or_else(|| format!("raw_{target:08x}(c);"));
+        let fast = direct.unwrap_or_else(|| format!("raw_{target:08x}(c);"));
         let _ = writeln!(self.out, "{fast}");
         self.returned(value, target)?;
         if checkpoints.is_some() {
@@ -1872,11 +1855,11 @@ impl<'a> Emitter<'a> {
         &mut self,
         value: ValueId,
         target: Addr,
-        private: bool,
+        direct: bool,
         checkpoints: Option<u32>,
     ) -> Result<String> {
         self.declarations.insert(Declaration::Direct(target));
-        let (st0, mode) = if private {
+        let (st0, mode) = if direct {
             let mode = if self.ctx.known_modes.contains(&target) {
                 "(c->fpu_cw & 0x0f00u) == 0u && "
             } else {
@@ -2176,8 +2159,8 @@ impl<'a> Emitter<'a> {
     }
 
     fn return_value(&mut self, value: ValueId) -> Result<()> {
-        if let Some(private) = self.private {
-            self.publish_private_return(value, private)?;
+        if self.direct.is_some() {
+            self.publish_direct_return(value)?;
             self.out.push_str("return;\n");
             return Ok(());
         }
@@ -2212,17 +2195,9 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
-    fn publish_private_return(&mut self, value: ValueId, private: &PrivateEmit) -> Result<()> {
+    fn publish_direct_return(&mut self, value: ValueId) -> Result<()> {
         let keys = self.plan.publish.get(&value).cloned().unwrap_or_default();
-        let keys: Vec<StateKey> = self
-            .entry_keys(value, keys)
-            .into_iter()
-            .filter(|key| {
-                self.s
-                    .field(*key)
-                    .is_none_or(|field| private.mask.contains(field))
-            })
-            .collect();
+        let keys = self.entry_keys(value, keys);
         self.publish_state(value, &keys, true)
     }
 
@@ -2294,13 +2269,13 @@ impl<'a> Emitter<'a> {
     }
 
     fn entry_argument(&self, key: StateKey, value: ValueId) -> bool {
-        let Some(private) = self.private else {
+        let Some(direct) = self.direct else {
             return false;
         };
         let Some((field, lane)) = field_lane(key) else {
             return false;
         };
-        if !private.input_arguments.registers.contains(field) {
+        if !direct.input_arguments.registers.contains(field) {
             return false;
         }
         let (input, byte) = match self.s.value(value).op {
@@ -2316,8 +2291,8 @@ impl<'a> Emitter<'a> {
 
     fn entry_keys(&self, value: ValueId, mut keys: Vec<StateKey>) -> Vec<StateKey> {
         if self
-            .private
-            .is_none_or(|private| private.input_arguments.registers.is_empty())
+            .direct
+            .is_none_or(|direct| direct.input_arguments.registers.is_empty())
         {
             return keys;
         }
@@ -3408,8 +3383,8 @@ impl<'a> Emitter<'a> {
     fn lane_origin(&self, key: StateKey) -> Option<(String, u32, u32)> {
         if let Some((field, lane)) = field_lane(key) {
             if (field as usize) < 8 {
-                if let Some(private) = self.private {
-                    if private.input_arguments.registers.contains(field) {
+                if let Some(direct) = self.direct {
+                    if direct.input_arguments.registers.contains(field) {
                         return Some((format!("{}_", field.name().to_lowercase()), lane as u32, 4));
                     }
                 }

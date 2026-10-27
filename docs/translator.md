@@ -14,7 +14,7 @@ or `--engine` overrides the default. The generated-code contract is documented i
 | Discover | `rk-discover` | Provisional functions and entries the map misses, merged into `Program` |
 | Lift | `rk-frontend` (`rk-sleigh`, `rk-decode`) | One `FunctionIr` per function: p-code, CFG, tables, SEH, noreturn |
 | Facts | `recomp-translate` (`facts.rs`) | Analysis facts checked against the lifted code: call and jump bounds, site and import effects |
-| Global | `rk-global` | Call contracts, x87 control-word modes, private-contract targets |
+| Global | `rk-global` | Call contracts, x87 control-word modes, direct-variant targets |
 | Plan | `rk-ir` → `rk-ssa` → `rk-plan` (+ `rk-x87`) | `PlannedFunction`: prepared SSA, publications, flag plan, x87 plan |
 | Emit | `rk-emit` | C bodies and wrappers, or a trap body with a reason |
 | Write | `rk-output` | The generated tree |
@@ -24,15 +24,14 @@ set that SSA, planning and emission share. `rk-analysis` is a separate offline
 binary that produces the facts the Facts stage reads (see below).
 
 Plan and emit run in parallel per function, in two passes. The first plans every
-function, collecting return-slot proofs and the field masks private-contract calls
-need; `rk_global::specialize` merges the masks into variant layouts, and the second
-pass emits every function and its private variants. Bodies are sorted by address afterwards, so output does
-not depend on scheduling. Unordered hash maps are banned by `clippy.toml`.
+function and collects return-slot proofs; the second emits each ordinary body and
+its selected direct variant. Bodies are sorted by address afterwards, so output
+does not depend on scheduling. Unordered hash maps are banned by `clippy.toml`.
 
 A function that cannot be lifted, planned or emitted becomes a
 `recomp_unmodelled` trap body, and the report records it. Inside an emitted body,
 unsupported instructions become named runtime traps. Errors in settings, inputs,
-facts, global analysis or a private variant stop the translation.
+facts, global analysis or a direct variant stop the translation.
 
 ## Inputs
 
@@ -89,7 +88,7 @@ switches:
 
 | Variable | Effect |
 | --- | --- |
-| `RK_NO_PRIVATE` | No private-contract targets |
+| `RK_NO_DIRECT` | No direct-variant targets |
 | `RK_NO_DESCRIPTORS` | Publish flags eagerly instead of through lazy descriptors |
 | `RK_NO_ROOTS` | Skip root coalescing in `rk-ssa` |
 | `RK_X87_DYNAMIC` | Force dynamic x87 control-word clones, like `--x87-mode dynamic` |
@@ -214,7 +213,7 @@ Under `private-stack`, a call whose memory summary excludes a slot does not relo
 even without checkpoint credit; credit only lets the call skip publication. A guarded
 call has one inline guard, `recomp_direct_`: `recomp_slow_routes` (raised by hooks,
 profiling and frame watch), the callee's `call_ready_` byte (clear under a native
-replacement), checkpoint credit, and the ST0 and x87-mode conditions of a private
+replacement), checkpoint credit, and the ST0 and x87-mode conditions of a direct
 variant. Its unlikely generic arm publishes the register
 fields hooks observe and the slots the call does not otherwise demand, and nothing is
 reloaded afterwards. `[game] call_hooks = false` removes hook publications and
@@ -335,6 +334,25 @@ effect: generated code does not consume their preserve bits, and the optional
 call-fact check treats an absent effect as exact equality. Callback-capable or unaudited methods
 need conservative effects until their complete behavior is established.
 
+## Direct variants
+
+`[translate] direct_variants = true` selects closed, returning leaves with at least
+two direct call sites and at most 64 original instructions per site. Opaque
+observers, native replacements and unsupported contracts exclude targets.
+`direct_arguments = { "ADDR" = ["ECX", "ST0"] }` explicitly selects a function
+and passes its listed GPR inputs and optional ST0 as C arguments; unused GPRs are
+removed by the callee's read contract. Auxiliary modules use ordinary bodies.
+
+Each selected function has one `direct_ADDR` body, determined by its C arguments
+and x87 mode. It publishes the full return state, with the same SSA publication
+and residency reductions as the ordinary body. Callers retain their own live
+reloads. No output masks or per-mask entry thunks remain. The inline
+`recomp_direct_` guard calls the body directly; native replacement edits change
+only the stable entries and their `call_ready_` bytes. Hooks, profiling, exhausted
+checkpoint credit and incompatible ST0/x87 modes use `call_ADDR` instead. Both
+arms share the caller's return policy. `RK_NO_DIRECT=1` disables variant selection;
+disable `direct_variants` and clear `direct_arguments` to do so in configuration.
+
 ## Open work
 
 Guest state is converging on one model: register lanes, flag fields and promoted
@@ -359,7 +377,8 @@ generic path may observe. Remaining steps:
 - Released-stack retirement, removed because its proof rejected any read before the
   next push or call and contract routes took precedence: it needs a proof that the
   callee's frame does not escape, a continuation check that rejects only reads that
-  may alias released bytes, and a retired contract variant.
-- Stack arguments as contract inputs, values passed in host registers, x87 spill
-  slots as plain values, leaf functions without ESP materialization, and one
-  specialization key instead of separate contract and x87-mode clones.
+  may alias released bytes, and a variant for retired frames.
+- Stack arguments and x87 spill slots as plain values, leaf functions without ESP
+  materialization, and direct return values passed by value.
+- Return-slot coverage: preserve ESP provenance across unproven call cleanup and
+  model DIV/IDIV memory effects precisely.

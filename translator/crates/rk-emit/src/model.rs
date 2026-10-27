@@ -1,16 +1,15 @@
 use std::collections::BTreeSet;
 
-use rk_core::contract::{Fields, PrivateArguments};
+use rk_core::contract::DirectArguments;
 use rk_core::Addr;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Declaration {
     Raw(Addr),
     Direct(Addr),
-    PrivateContract {
+    DirectVariant {
         addr: Addr,
-        mask: Fields,
-        input_arguments: PrivateArguments,
+        input_arguments: DirectArguments,
     },
 }
 
@@ -38,5 +37,4 @@ pub struct Body {
     pub text: String,
     pub requires: Requires,
     pub declarations: BTreeSet<Declaration>,
-    pub private_mask: Option<Fields>,
 }

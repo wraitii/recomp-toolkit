@@ -74,9 +74,9 @@ class Settings(object):
         self.x87_imports_preserve_pc_rc = translate["x87_imports_preserve_pc_rc"]
         self.x87_entry_contracts = translate.get("x87_entry_contracts", []) if not self.module else []
         self.call_contracts = translate["call_contracts"]
-        self.private_leaf_contracts = translate["private_leaf_contracts"] and not self.module
+        self.private_leaf_contracts = translate["direct_variants"] and not self.module
         self.private_input_arguments = translate["private_input_arguments"] and not self.module
-        registers = translate.get("private_input_registers", {}) if not self.module else {}
+        registers = translate.get("direct_arguments", {}) if not self.module else {}
         if any(len(names) != 1 or names[0] == "ST0" for names in registers.values()):
             raise ValueError("the Python translator passes one general private input register per function")
         self.private_input_registers = {addr: names[0] for addr, names in registers.items()}

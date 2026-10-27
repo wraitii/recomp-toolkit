@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use rayon::prelude::*;
-use rk_core::contract::{Fields, PrivateArguments};
+use rk_core::contract::DirectArguments;
 use rk_core::program::Program;
 use rk_core::settings::Settings;
 use rk_core::{Addr, Error, Result};
@@ -101,8 +101,7 @@ pub struct Translation<'a> {
     pub call_returns: Vec<Addr>,
     pub call_facts: BTreeMap<Addr, Vec<Addr>>,
     pub cw_effects: BTreeMap<Addr, (u16, u16, u16)>,
-    pub private_masks: BTreeMap<Addr, BTreeSet<Fields>>,
-    pub private_input_arguments: BTreeMap<Addr, PrivateArguments>,
+    pub direct_variants: BTreeSet<Addr>,
 }
 
 pub struct Written {
@@ -272,7 +271,7 @@ next(c);\n}\n",
     let declarations: BTreeSet<&Declaration> = group.iter().flat_map(|b| &b.declarations).collect();
     let mut raw = BTreeSet::new();
     let mut direct = BTreeSet::new();
-    let mut private = BTreeSet::new();
+    let mut variants = BTreeSet::new();
     for declaration in declarations {
         match declaration {
             Declaration::Raw(addr) => {
@@ -281,12 +280,11 @@ next(c);\n}\n",
             Declaration::Direct(addr) => {
                 direct.insert(*addr);
             }
-            Declaration::PrivateContract {
+            Declaration::DirectVariant {
                 addr,
-                mask,
                 input_arguments,
             } => {
-                private.insert((*addr, *mask, *input_arguments));
+                variants.insert((*addr, *input_arguments));
             }
         }
     }
@@ -302,13 +300,9 @@ next(c);\n}\n",
             "void raw_{addr:08x}(X86 *c);\nextern const uint8_t call_ready_{addr:08x};"
         );
     }
-    for (addr, mask, input_arguments) in private {
+    for (addr, input_arguments) in variants {
         let parameter = argument_parameters(input_arguments);
-        let _ = writeln!(
-            s,
-            "void entry_contract_{addr:08x}_{:04x}(X86 *c{parameter});",
-            mask.0
-        );
+        let _ = writeln!(s, "void direct_{addr:08x}(X86 *c{parameter});");
     }
     s.push('\n');
     for body in group {
@@ -330,7 +324,7 @@ next(c);\n}\n",
     s
 }
 
-fn argument_parameters(arguments: PrivateArguments) -> String {
+fn argument_parameters(arguments: DirectArguments) -> String {
     rk_emit::argument_parameters(arguments)
         .into_iter()
         .map(|(ty, name)| format!(", {ty} {name}"))
@@ -352,7 +346,7 @@ fn entry_chunks(
             Declaration::Direct(target) => {
                 direct.insert(target);
             }
-            Declaration::PrivateContract { .. } => {}
+            Declaration::DirectVariant { .. } => {}
         }
     }
     let mut groups: BTreeMap<Addr, Vec<(usize, Addr)>> = BTreeMap::new();
@@ -393,16 +387,7 @@ fn entry_chunks(
                         "#ifdef RECOMP_RAW_{addr:08x}\nconst uint8_t call_ready_{addr:08x} = 1;\n#else\nconst uint8_t call_ready_{addr:08x} = 0;\n#endif\n"
                     );
                 }
-                for mask in t.private_masks.get(addr).into_iter().flatten() {
-                    let inputs = t.private_input_arguments.get(addr).copied().unwrap_or_default();
-                    let parameter = argument_parameters(inputs);
-                    let argument: String = std::iter::once("c".to_string())
-                        .chain(rk_emit::argument_parameters(inputs).into_iter().map(|(_, name)| name))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let _ = writeln!(s, "void fn_contract_{addr:08x}_{:04x}(X86 *c{parameter});", mask.0);
-                    let _ = writeln!(s, "void entry_contract_{addr:08x}_{:04x}(X86 *c{parameter}) {{ fn_contract_{addr:08x}_{:04x}({argument}); }}", mask.0, mask.0);
-                }
+
             }
             (format!("chunk_entries_{:08x}.c", bucket << ENTRY_ADDRESS_BITS), s)
         })

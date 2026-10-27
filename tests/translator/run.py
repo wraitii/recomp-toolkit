@@ -10,7 +10,7 @@ functions are run; local functions are translated as helpers. Per-case lines:
   # input: eax=0x1 arg0=5
   # table: site=label targets=label,label
   # translate: key = value
-  # env: RK_NO_PRIVATE=1
+  # env: RK_NO_DIRECT=1
   # xfail: reason
 
 `argN` writes the guest stack slot at [esp+4+4N]. Each input line is used for
@@ -55,7 +55,7 @@ TEXT_RVA = 0x1000
 DATA_RVA = 0x100000
 CASE_STRIDE = 0x1000
 ESP_INIT = 0x0EFFF000
-DEFAULT_TRANSLATE = {"private_leaf_contracts": True,
+DEFAULT_TRANSLATE = {"direct_variants": True,
                      "dispatch": {"shift": 3, "max_probe": 31}}
 
 sys.path[:0] = [str(KIT / "tools"), str(KIT / "tools/recomp")]

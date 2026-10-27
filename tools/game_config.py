@@ -63,13 +63,13 @@ TRANSLATE_DEFAULTS = {
     "call_contracts": True,
     "assume": [],
     "lazy_stack_writes": True,
-    "private_leaf_contracts": False,
+    "direct_variants": False,
     "private_input_arguments": False,
-    "private_input_registers": {},
+    "direct_arguments": {},
     "x87_cw_clone": True,
 }
 ASSUMPTIONS = frozenset(("private-stack", "stack-pointer-bases"))
-PRIVATE_INPUT_REGISTERS = frozenset(("EAX", "ECX", "EDX", "EBX", "EBP", "ESI", "EDI", "ST0"))
+DIRECT_ARGUMENT_REGISTERS = frozenset(("EAX", "ECX", "EDX", "EBX", "EBP", "ESI", "EDI", "ST0"))
 
 def add_game_args(parser):
     """--game <id> for a kit game under games/, or --game-dir for any directory holding game.toml."""
@@ -533,8 +533,8 @@ def load(game_dir, build_root=None):
         raise ValueError("%s: [translate] stack_cleanup must be a list of unique {call|function, bytes, evidence} with dword bytes" % source)
     if not isinstance(translate.setdefault("x87_cw_clone", TRANSLATE_DEFAULTS["x87_cw_clone"]), bool):
         raise ValueError("%s: [translate] x87_cw_clone must be a boolean" % source)
-    if not isinstance(translate.setdefault("private_leaf_contracts", TRANSLATE_DEFAULTS["private_leaf_contracts"]), bool):
-        raise ValueError("%s: [translate] private_leaf_contracts must be a boolean" % source)
+    if not isinstance(translate.setdefault("direct_variants", TRANSLATE_DEFAULTS["direct_variants"]), bool):
+        raise ValueError("%s: [translate] direct_variants must be a boolean" % source)
     if type(translate.setdefault("private_input_arguments", TRANSLATE_DEFAULTS["private_input_arguments"])) is not bool:
         raise ValueError("%s: [translate] private_input_arguments must be a boolean" % source)
     dispatch = translate.get("dispatch")
@@ -543,22 +543,22 @@ def load(game_dir, build_root=None):
             or type(dispatch["shift"]) is not int or not 0 <= dispatch["shift"] <= 8
             or type(dispatch["max_probe"]) is not int or not 0 <= dispatch["max_probe"] <= 256):
         raise ValueError("%s: translate.dispatch requires shift (0..8) and max_probe (0..256)" % source)
-    input_registers = translate.setdefault("private_input_registers", {})
+    input_registers = translate.setdefault("direct_arguments", {})
     if not isinstance(input_registers, dict):
-        raise ValueError("%s: [translate] private_input_registers must be an address-to-register table" % source)
+        raise ValueError("%s: [translate] direct_arguments must be an address-to-register table" % source)
     parsed_input_registers = {}
     for address, register in input_registers.items():
         if not isinstance(address, str) or not re.fullmatch(r"[0-9a-fA-F]{8}", address):
-            raise ValueError("%s: [translate] private_input_registers keys must be 8-digit hexadecimal addresses" % source)
+            raise ValueError("%s: [translate] direct_arguments keys must be 8-digit hexadecimal addresses" % source)
         addr = int(address, 16)
         if addr in parsed_input_registers:
-            raise ValueError("%s: [translate] private_input_registers repeats address %08x" % (source, addr))
+            raise ValueError("%s: [translate] direct_arguments repeats address %08x" % (source, addr))
         if (not isinstance(register, list) or not register or len(set(register)) != len(register)
-                or any(not isinstance(name, str) or name not in PRIVATE_INPUT_REGISTERS for name in register)):
-            raise ValueError("%s: [translate] private_input_registers values must be lists of distinct %s"
-                             % (source, ", ".join(sorted(PRIVATE_INPUT_REGISTERS))))
+                or any(not isinstance(name, str) or name not in DIRECT_ARGUMENT_REGISTERS for name in register)):
+            raise ValueError("%s: [translate] direct_arguments values must be lists of distinct %s"
+                             % (source, ", ".join(sorted(DIRECT_ARGUMENT_REGISTERS))))
         parsed_input_registers[addr] = register
-    translate["private_input_registers"] = parsed_input_registers
+    translate["direct_arguments"] = parsed_input_registers
     if type(translate.setdefault("x87_imports_preserve_pc_rc", False)) is not bool:
         raise ValueError("%s: x87_imports_preserve_pc_rc must be a boolean" % source)
     if translate.get("x87_facts") is not None and (not isinstance(translate["x87_facts"], str) or not translate["x87_facts"]):

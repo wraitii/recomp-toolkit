@@ -1,12 +1,12 @@
 //! Per-function planning between SSA and C. For each boundary it decides which guest state lanes to
 //! publish (skipping those already resident), which values stay live and where lazy flag
-//! descriptors settle. It also chooses what hook-guarded calls republish and which output fields
-//! each direct private-contract call needs. It then attaches the x87 plan. `PlannedFunction` holds
+//! descriptors settle. It also chooses what guarded calls republish and their C arguments,
+//! then attaches the x87 plan. `PlannedFunction` holds
 //! every decision that `rk-emit` prints.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rk_core::contract::{Field, Fields, PrivateArguments};
+use rk_core::contract::{DirectArguments, Field, Fields};
 use rk_core::ir::Policy;
 use rk_core::{Addr, Diagnostic, LookupSet, Result};
 use rk_ir::{CgFunction, StateKey};
@@ -15,19 +15,14 @@ use rk_ssa::{
     PrepareOptions, Ssa, ValueId,
 };
 
-#[derive(Clone, Debug, Default)]
-pub struct ContractRequests {
-    pub by_caller: BTreeMap<Addr, std::collections::BTreeSet<(Addr, Fields)>>,
-}
-
 pub struct PlanOptions<'a> {
     pub call_facts: &'a dyn CallFacts,
     pub policy: Policy,
     pub x87_modes: &'a rk_x87::ModeInput,
     pub x87_options: rk_x87::Options,
     pub fault_state: rk_core::settings::FaultState,
-    pub private_targets: &'a BTreeSet<Addr>,
-    pub private_arguments: &'a BTreeMap<Addr, PrivateArguments>,
+    pub direct_targets: &'a BTreeSet<Addr>,
+    pub direct_arguments: &'a BTreeMap<Addr, DirectArguments>,
     pub descriptors: bool,
     pub coalesce_roots: bool,
     pub assume_private_stack: bool,
@@ -46,9 +41,7 @@ pub struct PlannedFunction {
     pub settle_sites: BTreeSet<ValueId>,
     pub flag_publish: BTreeMap<ValueId, FlagPublication>,
     pub entry_settle: bool,
-    pub call_masks: BTreeMap<ValueId, (Addr, Fields)>,
     pub arguments: BTreeMap<ValueId, Vec<StateKey>>,
-    pub requests: ContractRequests,
     pub x87: Option<rk_x87::Plan>,
 }
 
@@ -62,7 +55,7 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     prepare_options.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
     let (ssa, base) = prepare_with_publications(cg, &prepare_options)?;
     let mut base = base.unwrap_or_else(|| publications(&ssa, opts.call_facts));
-    let arguments = private_arguments(&ssa, opts);
+    let arguments = direct_arguments(&ssa, opts);
     for (value, keys) in &arguments {
         if let Some(published) = base.get_mut(value) {
             published.retain(|key| !keys.contains(key));
@@ -158,56 +151,6 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
         }
         settle_sites.insert(ssa.args(index as ValueId)[0]);
     }
-    let mut reload_masks: BTreeMap<ValueId, Fields> = BTreeMap::new();
-    for (index, value) in ssa.values.iter().enumerate() {
-        let id = index as ValueId;
-        let rk_ir::Op::StateReload(key) = value.op else {
-            continue;
-        };
-        let Some(field) = ssa.field(key) else {
-            continue;
-        };
-        let site = ssa.args(id)[0];
-        *reload_masks.entry(site).or_default() |= Fields(field.bit());
-    }
-    for (value, keys) in &base {
-        let Some(state) = ssa.boundary(*value) else {
-            continue;
-        };
-        for &(key, state_value) in state {
-            if !keys.contains(&key) {
-                continue;
-            }
-            let rk_ir::Op::StateReload(loaded) = ssa.value(state_value).op else {
-                continue;
-            };
-            let Some(field) = ssa.field(loaded) else {
-                continue;
-            };
-            let site = ssa.args(state_value)[0];
-            *reload_masks.entry(site).or_default() |= Fields(field.bit());
-        }
-    }
-    let mut call_masks = BTreeMap::new();
-    let mut requested: BTreeMap<(Addr, Fields), ()> = BTreeMap::new();
-    for (index, value) in ssa.values.iter().enumerate() {
-        let id = index as ValueId;
-        let rk_ir::Op::Call { target } = value.op else {
-            continue;
-        };
-        if !opts.private_targets.contains(&target) {
-            continue;
-        }
-        let mask = reload_masks.get(&id).copied().unwrap_or_default();
-        call_masks.insert(id, (target, mask));
-        requested.insert((target, mask), ());
-    }
-    let mut requests = ContractRequests::default();
-    if !requested.is_empty() {
-        requests
-            .by_caller
-            .insert(ssa.addr, requested.keys().copied().collect());
-    }
     let x87 = rk_x87::prepare(&ssa, opts.x87_modes, &opts.x87_options)
         .map_err(|reason| Diagnostic::error(ssa.addr, reason))?;
     let x87 = x87.used.then_some(x87);
@@ -221,23 +164,21 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
         settle_sites,
         flag_publish,
         entry_settle,
-        call_masks,
         arguments,
-        requests,
         x87,
     })
 }
 
-fn private_arguments(ssa: &Ssa, opts: &PlanOptions<'_>) -> BTreeMap<ValueId, Vec<StateKey>> {
+fn direct_arguments(ssa: &Ssa, opts: &PlanOptions<'_>) -> BTreeMap<ValueId, Vec<StateKey>> {
     let mut out = BTreeMap::new();
     for (index, value) in ssa.values.iter().enumerate() {
         let rk_ir::Op::Call { target } = value.op else {
             continue;
         };
-        if !opts.private_targets.contains(&target) {
+        if !opts.direct_targets.contains(&target) {
             continue;
         }
-        let Some(arguments) = opts.private_arguments.get(&target) else {
+        let Some(arguments) = opts.direct_arguments.get(&target) else {
             continue;
         };
         if arguments.registers.is_empty() {
