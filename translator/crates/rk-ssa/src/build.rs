@@ -635,6 +635,7 @@ impl<'a> Builder<'a> {
             frame_publish: self.frame_publish,
             aligned: self.frame.and_then(|frame| frame.aligned),
             frame_guard: self.frame_guard,
+            promotion_failure: None,
             origins: self.origins,
             stack_calls: self.lazy_stack_writes,
             memory_partitioned: false,

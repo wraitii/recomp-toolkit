@@ -440,6 +440,11 @@ impl Settings {
                 BTreeSet::new()
             }
         };
+        let assume_private_stack = t.assume_private_stack.unwrap_or(true);
+        let lazy_stack_writes = t.lazy_stack_writes.unwrap_or(true)
+            && assume_private_stack
+            && t.fault_state == FaultState::Relaxed
+            && !input.store_hooks.unwrap_or(true);
         Ok(Settings {
             exe,
             code_map,
@@ -466,10 +471,9 @@ impl Settings {
             dispatch: t.dispatch.clone(),
             call_contracts: t.call_contracts,
             stack_memory: t.stack_memory,
-            assume_private_stack: t.assume_private_stack.unwrap_or(true),
-            lazy_stack_writes: t.lazy_stack_writes.unwrap_or(true)
-                && !input.store_hooks.unwrap_or(true),
-            retire_reused_stack: t.retire_reused_stack && !input.store_hooks.unwrap_or(true),
+            assume_private_stack,
+            lazy_stack_writes,
+            retire_reused_stack: t.retire_reused_stack && lazy_stack_writes,
             assume_stack_pointer_bases: t.assume_stack_pointer_bases,
             exposed_stack_functions: only_main(&t.exposed_stack_functions),
             stack_helpers: only_main(&t.stack_helpers),

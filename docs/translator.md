@@ -69,7 +69,7 @@ staging directory (`aux-KEY/` for auxiliary images) and syncs the tree into
 buckets under a 4 MiB source budget), `chunk_entries_*.c` entry thunks,
 `funcs.h`, `body.h`, `table.c`, `call_facts.c` and `symbols.json`. The report,
 `recomp/translate[-KEY]-report.json`, gives counts, entry kinds, global-analysis
-statistics, fact bounds and effects consumed, trap and fallback reasons, slow
+statistics, fact bounds and effects consumed, trap and fallback reasons, stack slot promotion failures, slow
 operations, discovery traps, diagnostics and phase timings. `--discovery-report`
 writes the discovered code map, instruction lengths and every rejected function
 or entry with its pass and reason. `--dump program|fir|ssa|prepared|stack|global|bodies|all`

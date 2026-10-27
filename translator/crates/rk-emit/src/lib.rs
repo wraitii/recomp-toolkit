@@ -62,6 +62,7 @@ pub struct EmitReport {
     pub c_field_residency_violations: usize,
     pub fallbacks: BTreeSet<(Addr, String)>,
     pub slow_ops: BTreeSet<(Addr, String)>,
+    pub promotion_failure: Option<String>,
 }
 
 pub fn emit_body(planned: &PlannedFunction, ctx: &EmitContext<'_>) -> Result<(Body, EmitReport)> {
@@ -72,6 +73,7 @@ pub fn emit_body(planned: &PlannedFunction, ctx: &EmitContext<'_>) -> Result<(Bo
         c_field_residency_violations: emitter.residency_violations,
         fallbacks: std::mem::take(&mut emitter.fallbacks),
         slow_ops: std::mem::take(&mut emitter.slow_ops),
+        promotion_failure: planned.ssa.promotion_failure.clone(),
     };
     Ok((
         Body {
@@ -702,7 +704,7 @@ impl<'a> Emitter<'a> {
                 if fast {
                     self.pack_bytes(&group.olds, false)?
                 } else {
-                    "c->r[4]".to_string()
+                    format!("c->r[{}]", Field::Esp as usize)
                 }
             } else {
                 let Op::StateKeep(key) = self.s.value(id).op else {
@@ -1810,6 +1812,13 @@ impl<'a> Emitter<'a> {
 
     fn call(&mut self, value: ValueId, target: Addr) -> Result<()> {
         self.publish(value)?;
+        if self.direct_call(value, target)? && self.plan.settle_sites.contains(&value) {
+            self.out.push_str("x86_cc_settle(c);\n");
+        }
+        Ok(())
+    }
+
+    fn direct_call(&mut self, value: ValueId, target: Addr) -> Result<bool> {
         if let Some(&checkpoints) = self.s.stack_guards.get(&value) {
             let (prepare, fast, fallback) = if let Some(call) = self.private_call(value, target)? {
                 let expected = self.guest_addr(self.plan.return_addr[&value]);
@@ -1849,10 +1858,7 @@ impl<'a> Emitter<'a> {
             }
             self.refresh_stack_pointer(value, true)?;
             self.out.push_str("}\n");
-            if self.plan.settle_sites.contains(&value) {
-                self.out.push_str("x86_cc_settle(c);\n");
-            }
-            return Ok(());
+            return Ok(true);
         }
         self.publish_guard(value)?;
         if let Some(&(_, checkpoints)) = self
@@ -1864,28 +1870,19 @@ impl<'a> Emitter<'a> {
             self.declarations
                 .insert(Declaration::ReusedStack(target, checkpoints));
             let _ = writeln!(self.out, "entry_reuse_{target:08x}(c);");
-            if self.plan.settle_sites.contains(&value) {
-                self.out.push_str("x86_cc_settle(c);\n");
-            }
-            return Ok(());
+            return Ok(true);
         }
         if self.ctx.setjmp_targets.contains(&target) {
             self.out.push_str("RECOMP_SETJMP3(c);\n");
-            return Ok(());
+            return Ok(false);
         }
         if !self.ctx.known_entries.contains(&target) {
             self.emit_call_target(value, target)?;
-            if self.plan.settle_sites.contains(&value) {
-                self.out.push_str("x86_cc_settle(c);\n");
-            }
-            return Ok(());
+            return Ok(true);
         }
         if self.reloc_internal(target) {
             self.emit_call_target(value, target)?;
-            if self.plan.settle_sites.contains(&value) {
-                self.out.push_str("x86_cc_settle(c);\n");
-            }
-            return Ok(());
+            return Ok(true);
         }
         if let Some(call) = self.private_call(value, target)? {
             let expected_addr = self.plan.return_addr[&value];
@@ -1893,10 +1890,7 @@ impl<'a> Emitter<'a> {
             let _ = writeln!(self.out,
                 "if (entry_contract_prepare_{target:08x}(c, 0)) {{ {call} }} else {{ CALL_FN_CHECKED({target:08x}, {expected}); }}");
             self.resume_check(value, target, expected_addr);
-            if self.plan.settle_sites.contains(&value) {
-                self.out.push_str("x86_cc_settle(c);\n");
-            }
-            return Ok(());
+            return Ok(true);
         }
         let checked = self.ctx.checked_returns.contains(&target);
         if checked {
@@ -1914,10 +1908,7 @@ impl<'a> Emitter<'a> {
             self.declare_entry(target);
             let _ = writeln!(self.out, "CALL_FN({target:08x});");
         }
-        if self.plan.settle_sites.contains(&value) {
-            self.out.push_str("x86_cc_settle(c);\n");
-        }
-        Ok(())
+        Ok(true)
     }
 
     fn emit_call_target(&mut self, value: ValueId, target: Addr) -> Result<()> {

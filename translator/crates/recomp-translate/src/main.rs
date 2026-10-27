@@ -174,6 +174,7 @@ struct EmitStats {
     slow_ops: BTreeMap<String, Sites>,
     c_field_residency_violations: usize,
     c_field_residency_violation_addrs: Vec<Addr>,
+    promotion_failures: BTreeMap<Addr, String>,
 }
 
 struct IrSummary {
@@ -413,6 +414,9 @@ fn account(stats: &mut EmitStats, (addr, body, reason, report): BodyRow, bodies:
             stats.c_field_residency_violations += report.c_field_residency_violations;
             stats.c_field_residency_violation_addrs.push(addr);
         }
+        if let Some(failure) = report.promotion_failure {
+            stats.promotion_failures.insert(addr, failure);
+        }
         tally(
             &mut stats.fallback_functions,
             &mut stats.fallbacks,
@@ -539,11 +543,7 @@ fn build_bodies(
         BTreeSet::new()
     };
     let effect_returns = effect_returns(&global.returns);
-    let reuse_calls = if settings.retire_reused_stack
-        && settings.assume_private_stack
-        && settings.lazy_stack_writes
-        && settings.fault_state == rk_core::settings::FaultState::Relaxed
-    {
+    let reuse_calls = if settings.retire_reused_stack {
         reuse::calls(owned.as_ref().unwrap_or(&analysis.ir), global, settings)
     } else {
         BTreeMap::new()
@@ -1069,6 +1069,11 @@ fn report(input: &ReportInputs<'_>) -> Result<String> {
         },
         "fallbacks": sites_json(emitted.fallback_functions, &emitted.fallbacks),
         "slow_ops": sites_json(emitted.slow_op_functions, &emitted.slow_ops),
+        "stack_promotion_failures": emitted
+            .promotion_failures
+            .iter()
+            .map(|(addr, failure)| (format!("{addr:08x}"), failure))
+            .collect::<BTreeMap<_, _>>(),
         "discovery_traps": traps,
         "diagnostics": diagnostics,
         "diagnostics_histogram": histogram,

@@ -149,6 +149,7 @@ pub struct Ssa {
     pub aligned: Option<(u32, u32)>,
     pub frame_publish: BTreeMap<ValueId, Vec<StateKey>>,
     pub frame_guard: BTreeMap<ValueId, Vec<StateKey>>,
+    pub promotion_failure: Option<String>,
     pub(crate) origins: Lookup<ValueId, (u32, u16)>,
     pub(crate) stack_calls: bool,
     pub(crate) memory_partitioned: bool,

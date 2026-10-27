@@ -81,10 +81,8 @@ fn prepare_using(
         allow_slow: opts.allow_slow,
         value_budget: opts.value_budget,
     };
-    let lazy_stack_writes = opts.lazy_stack_writes
-        && opts.assume_private_stack
-        && opts.policy == Policy::Optimizing
-        && opts.fault_state == FaultState::Relaxed;
+    let lazy_stack_writes =
+        opts.lazy_stack_writes && opts.assume_private_stack && opts.policy == Policy::Optimizing;
     let build = |frame| -> rk_core::Result<Ssa> {
         let mut ssa = crate::build::build_with_faults(
             cg,
@@ -103,16 +101,17 @@ fn prepare_using(
     let mut ssa = build(None)?;
     if lazy_stack_writes {
         if let Some(frame) = crate::stack::plan(&ssa, opts.call_facts, opts.retire_reused_stack) {
-            if let Ok(promoted) = build(Some(&frame)) {
-                ssa = promoted;
+            match build(Some(&frame)) {
+                Ok(promoted) => ssa = promoted,
+                Err(error) => ssa.promotion_failure = Some(error.to_string()),
             }
         }
     }
     if let Some(out) = trace.as_mut() {
         writeln!(
             out,
-            "before memory passes retirement={}",
-            opts.retire_reused_stack
+            "before memory passes retirement={} promotion-failure={:?}",
+            opts.retire_reused_stack, ssa.promotion_failure
         )
         .and_then(|_| crate::memory::dump_stack(&ssa, opts.call_facts, *out))
         .map_err(|error| rk_core::Error::io("stack dump", error))?;

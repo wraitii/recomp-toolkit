@@ -345,11 +345,34 @@ fn contract_prepare(addr: Addr, known_mode: bool) -> String {
     )
 }
 
+fn checkpoint_route(addr: Addr, checkpoints: u32, fast: &str) -> String {
+    format!(
+        "#ifdef RECOMP_RAW_{addr:08x}\n    if (!recomp_slow_routes && c->checkpoint_countdown > {checkpoints}u) {{\n        --c->checkpoint_countdown;\n        {fast}\n    }}\n#endif\n"
+    )
+}
+
 fn entry_chunks(
     entry_names: &[Addr],
     module: Option<&str>,
     t: &Translation,
 ) -> Vec<(String, String)> {
+    let mut stack_prepare: BTreeMap<Addr, u32> = BTreeMap::new();
+    let mut reuse_checkpoints: BTreeMap<Addr, u32> = BTreeMap::new();
+    for declaration in t.bodies.iter().flat_map(|body| &body.declarations) {
+        let (map, target, cost) = match *declaration {
+            Declaration::StackPrepare(target, cost) => (&mut stack_prepare, target, cost),
+            Declaration::ReusedStack(target, cost) => (&mut reuse_checkpoints, target, cost),
+            _ => continue,
+        };
+        let entry = map.entry(target).or_insert(cost);
+        *entry = (*entry).max(cost);
+    }
+    let reused: BTreeSet<Addr> = t
+        .bodies
+        .iter()
+        .filter(|body| body.reused_stack)
+        .map(|body| body.addr)
+        .collect();
     let mut groups: BTreeMap<Addr, Vec<(usize, Addr)>> = BTreeMap::new();
     for (index, &addr) in entry_names.iter().enumerate() {
         groups
@@ -375,18 +398,14 @@ fn entry_chunks(
                 );
             }
             for (_, addr) in &entries {
-                if let Some(checkpoints) = t.bodies.iter().flat_map(|body| &body.declarations).filter_map(|decl| {
-                    match decl { Declaration::StackPrepare(target, cost) if target == addr => Some(*cost), _ => None }
-                }).max() {
-                    let _ = writeln!(s,
-                        "int entry_stack_prepare_{addr:08x}(X86 *c) {{\n#ifdef RECOMP_RAW_{addr:08x}\n    if (!recomp_slow_routes && c->checkpoint_countdown > {checkpoints}u) {{\n        --c->checkpoint_countdown;\n        return 1;\n    }}\n#else\n    (void)c;\n#endif\n    return 0;\n}}");
+                if let Some(checkpoints) = stack_prepare.get(addr) {
+                    let route = checkpoint_route(*addr, *checkpoints, "return 1;");
+                    let _ = writeln!(s, "int entry_stack_prepare_{addr:08x}(X86 *c) {{\n{route}    (void)c;\n    return 0;\n}}");
                 }
-                if t.bodies.iter().any(|body| body.addr == *addr && body.reused_stack) {
-                    let checkpoints = t.bodies.iter().flat_map(|body| &body.declarations).filter_map(|decl| {
-                        match decl { Declaration::ReusedStack(target, cost) if target == addr => Some(*cost), _ => None }
-                    }).max().unwrap_or(u32::MAX);
-                    let _ = writeln!(s,
-                        "void fn_reuse_{addr:08x}(X86 *c);\nvoid entry_reuse_{addr:08x}(X86 *c) {{\n#ifdef RECOMP_RAW_{addr:08x}\n    if (!recomp_slow_routes && c->checkpoint_countdown > {checkpoints}u) {{\n        --c->checkpoint_countdown;\n        fn_reuse_{addr:08x}(c);\n        return;\n    }}\n#endif\n    entry_{addr:08x}(c);\n}}");
+                if reused.contains(addr) {
+                    let checkpoints = reuse_checkpoints.get(addr).copied().unwrap_or(u32::MAX);
+                    let route = checkpoint_route(*addr, checkpoints, &format!("fn_reuse_{addr:08x}(c);\n        return;"));
+                    let _ = writeln!(s, "void fn_reuse_{addr:08x}(X86 *c);\nvoid entry_reuse_{addr:08x}(X86 *c) {{\n{route}    entry_{addr:08x}(c);\n}}");
                 }
                 for mask in t.private_masks.get(addr).into_iter().flatten() {
                     let input = t.private_input_arguments.get(addr);
