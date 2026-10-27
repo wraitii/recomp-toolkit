@@ -401,7 +401,7 @@ def run_cases(cases, gen, harness, out, args):
     run_args = SimpleNamespace(mode="specialized", iterations=args.iterations, max_insns=20000,
                                timeout=args.timeout, jobs=args.jobs, seed=args.seed,
                                fpu_cw=list(diff.FPU_CWS), replay_inputs=None, record_inputs=None,
-                               fail_on="any", fixed_inputs=fixed)
+                               fail_on="any", fixed_inputs=fixed, structured_inputs=0)
     results = diff.run_all(addrs, run_args, harness, image)
     xfail = {addr: case["xfail"].group(1) for case in cases if case["xfail"] for addr in case["entries"]}
     failures = []
