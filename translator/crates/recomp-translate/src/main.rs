@@ -7,7 +7,6 @@
 
 mod facts;
 mod reloc;
-mod reuse;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -251,7 +250,6 @@ struct BodyContext<'a> {
     lazy_stack_writes: bool,
     assume_stack_pointer_bases: bool,
     call_hooks: bool,
-    reuse_calls: &'a BTreeMap<Addr, (Addr, u32)>,
     exposed_stack_functions: &'a BTreeSet<Addr>,
     known_entries: &'a BTreeSet<Addr>,
     setjmp_targets: &'a BTreeSet<Addr>,
@@ -283,18 +281,12 @@ impl<'a> BodyContext<'a> {
             host_calls: self.host_calls,
             private,
             reloc: self.reloc,
-            reused_stack: false,
-            reuse_calls: self.reuse_calls,
             call_hooks: self.call_hooks,
         }
     }
 }
 
-fn plan_one(
-    ctx: &BodyContext<'_>,
-    ir: &FunctionIr,
-    retire_reused_stack: bool,
-) -> rk_core::Result<rk_plan::PlannedFunction> {
+fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::PlannedFunction> {
     let cg = rk_ir::lower_with(
         ir,
         &ctx.program.image,
@@ -313,7 +305,6 @@ fn plan_one(
             descriptors: ctx.switches.descriptors,
             coalesce_roots: ctx.switches.coalesce_roots,
             lazy_stack_writes: ctx.lazy_stack_writes,
-            retire_reused_stack,
             assume_stack_pointer_bases: ctx.assume_stack_pointer_bases,
             call_hooks: ctx.call_hooks,
             assume_private_stack: ctx.assume_private_stack
@@ -543,12 +534,6 @@ fn build_bodies(
         BTreeSet::new()
     };
     let effect_returns = effect_returns(&global.returns);
-    let reuse_calls = if settings.retire_reused_stack {
-        reuse::calls(owned.as_ref().unwrap_or(&analysis.ir), global, settings)
-    } else {
-        BTreeMap::new()
-    };
-    let reuse_targets: BTreeSet<_> = reuse_calls.values().map(|&(target, _)| target).collect();
     let make_ctx = |private_masks, private_input_arguments| BodyContext {
         program,
         facts: global.call_facts(),
@@ -566,7 +551,6 @@ fn build_bodies(
         lazy_stack_writes: settings.lazy_stack_writes,
         assume_stack_pointer_bases: settings.assume_stack_pointer_bases,
         call_hooks: settings.call_hooks,
-        reuse_calls: &reuse_calls,
         exposed_stack_functions: &settings.exposed_stack_functions,
         known_entries: &known_entries,
         setjmp_targets: &setjmp_targets,
@@ -607,16 +591,9 @@ fn build_bodies(
             let Some(ir) = ir else {
                 return Prepared::Emitted((addr, trap_body(program, addr, None), None, None));
             };
-            match plan_one(&ctx, &ir, false) {
+            match plan_one(&ctx, &ir) {
                 Ok(planned) => {
-                    let retain = !planned.requests.by_caller.is_empty()
-                        || private_targets.contains(&addr)
-                        || reuse_targets.contains(&addr)
-                        || ir
-                            .insns
-                            .iter()
-                            .any(|insn| reuse_calls.contains_key(&insn.addr));
-                    if retain {
+                    if !planned.requests.by_caller.is_empty() || private_targets.contains(&addr) {
                         Prepared::Retained { addr, ir, planned }
                     } else {
                         Prepared::Emitted(emit_row(&ctx, addr, &ir, &planned))
@@ -654,38 +631,6 @@ fn build_bodies(
         .map(|(&addr, &field)| (addr, field.name().to_string()))
         .collect();
     let ctx2 = make_ctx(specialized.masks.clone(), private_arguments);
-    let retired: BTreeMap<Addr, rk_plan::PlannedFunction> = retained
-        .par_iter()
-        .filter_map(|item| {
-            let Ok((addr, ir, planned)) = item else {
-                return None;
-            };
-            reuse_targets.contains(addr).then_some((*addr, ir, planned))
-        })
-        .map(|(addr, ir, planned)| -> Result<Option<_>> {
-            let retired = plan_one(&ctx2, ir, true)?;
-            let mut emit_ctx = ctx2.emit_context(ir, None);
-            emit_ctx.reused_stack = true;
-            let (ordinary, _) = rk_emit::emit_body(planned, &emit_ctx)?;
-            let (candidate, _) = rk_emit::emit_body(&retired, &emit_ctx)?;
-            Ok((ordinary.text != candidate.text).then_some((addr, retired)))
-        })
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    let reuse_calls: BTreeMap<_, _> = reuse_calls
-        .iter()
-        .filter_map(|(&site, &(target, cost))| {
-            retired
-                .contains_key(&target)
-                .then_some((site, (target, cost)))
-        })
-        .collect();
-    let ctx2 = BodyContext {
-        reuse_calls: &reuse_calls,
-        ..ctx2
-    };
     let phase2: Vec<(Vec<BodyRow>, Vec<Body>)> = retained
         .into_par_iter()
         .map(|item| -> Result<(Vec<BodyRow>, Vec<Body>)> {
@@ -694,12 +639,6 @@ fn build_bodies(
                 Ok((addr, ir, mut planned)) => {
                     let rows = vec![emit_row(&ctx2, addr, &ir, &planned)];
                     let mut private_bodies = Vec::new();
-                    if let Some(retired) = retired.get(&addr) {
-                        let mut emit_ctx = ctx2.emit_context(&ir, None);
-                        emit_ctx.reused_stack = true;
-                        let (body, _) = rk_emit::emit_body(retired, &emit_ctx)?;
-                        private_bodies.push(body);
-                    }
                     if let Some(layouts) = specialized.layouts.get(&addr) {
                         if global.private.known_modes.contains(&addr)
                             && ctx2.x87_options.cw_clone
@@ -793,7 +732,6 @@ fn trap_body(program: &Program, addr: Addr, ir: Option<&FunctionIr>) -> Body {
         requires: Requires::default(),
         declarations: Default::default(),
         private_mask: None,
-        reused_stack: false,
     }
 }
 

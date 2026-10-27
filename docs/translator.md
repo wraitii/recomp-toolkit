@@ -77,7 +77,7 @@ prints intermediate stages to stdout, and `--only` restricts the dump to a set
 of functions; `--selection FILE` also accepts a JSON `functions` array with hex
 `addr` fields. `ssa` uses conservative facts without x87 recipes. `prepared` and
 `stack` use production call facts, x87 recipes and preparation settings for the
-ordinary body; stack retirement remains restricted to reuse variants. `stack`
+ordinary body. `stack`
 reports frame rejection reasons, aligned/local versus entry-frame addresses,
 exposure, retained accesses, call guards and possible writes blocking local loads.
 These dumps run outside `rk-plan`.
@@ -215,14 +215,7 @@ reloaded afterwards. `[game] call_hooks = false` removes hook publications and
 kept-field rereads everywhere. Slots below a call's ESP are published before it and
 reloaded after it. Unknown effects, alternate entries and exposed ranges keep frame
 stores in memory. `DIVERGENCE(original):` eligible private-frame writes are delayed;
-ordinary entry paths preserve final bytes. `[translate] retire_reused_stack` defaults
-to false. `DIVERGENCE(original):` normal reuse of released stack storage invalidates
-old contents at and below the new write, including bytes not overwritten. A bounded
-caller-continuation proof selects a distinct variant only when retirement changes
-the emitted body;
-return alone is insufficient. Retirement uses the same nested-checkpoint bound,
-independently of memory-summary precision. Hooks, replacements, observers and
-insufficient checkpoint credit use the ordinary entry. Unknown continuations retain final bytes. Set `lazy_stack_writes = false` to retain forwarding with eager
+ordinary entry paths preserve final bytes. Set `lazy_stack_writes = false` to retain forwarding with eager
 stores; `exposed_stack_functions` disables both optimizations for an owner.
 
 `[translate] stack_memory` enables additional original-code summaries for offline

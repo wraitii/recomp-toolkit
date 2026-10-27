@@ -53,8 +53,6 @@ pub struct EmitContext<'a> {
     pub host_calls: &'a BTreeSet<Addr>,
     pub private: Option<&'a PrivateEmit>,
     pub reloc: Option<RelocEmit>,
-    pub reused_stack: bool,
-    pub reuse_calls: &'a BTreeMap<Addr, (Addr, u32)>,
     pub call_hooks: bool,
 }
 
@@ -85,7 +83,6 @@ pub fn emit_body(planned: &PlannedFunction, ctx: &EmitContext<'_>) -> Result<(Bo
             requires: emitter.requires,
             declarations: emitter.declarations,
             private_mask: ctx.private.map(|private| private.mask),
-            reused_stack: ctx.reused_stack,
         },
         report,
     ))
@@ -377,8 +374,7 @@ impl<'a> Emitter<'a> {
             requires: Requires::default(),
             declarations: BTreeSet::new(),
             multi: s.entries.len() > 1,
-            checked: !ctx.reused_stack
-                && (ctx.checked_returns.contains(&s.addr) || ctx.private.is_some()),
+            checked: ctx.checked_returns.contains(&s.addr) || ctx.private.is_some(),
             private: ctx.private,
             materialized,
             uses_arena,
@@ -404,9 +400,7 @@ impl<'a> Emitter<'a> {
 
     fn run(&mut self) -> Result<()> {
         let addr = self.s.addr;
-        let body_name = if self.ctx.reused_stack {
-            format!("fn_reuse_{addr:08x}")
-        } else if let Some(private) = self.private {
+        let body_name = if let Some(private) = self.private {
             format!("fn_contract_{addr:08x}_{:04x}", private.mask.0)
         } else if self.checked {
             format!("body_checked_{addr:08x}")
@@ -526,7 +520,7 @@ impl<'a> Emitter<'a> {
 
     fn wrappers(&mut self, body: &str) {
         let addr = self.s.addr;
-        if self.private.is_some() || self.ctx.reused_stack {
+        if self.private.is_some() {
             return;
         }
         let base_param = if self.ctx.reloc.is_some() {
@@ -1861,17 +1855,6 @@ impl<'a> Emitter<'a> {
             return Ok(true);
         }
         self.publish_guard(value)?;
-        if let Some(&(_, checkpoints)) = self
-            .ctx
-            .reuse_calls
-            .get(&self.s.value_addr[value as usize])
-            .filter(|&&(callee, _)| callee == target)
-        {
-            self.declarations
-                .insert(Declaration::ReusedStack(target, checkpoints));
-            let _ = writeln!(self.out, "entry_reuse_{target:08x}(c);");
-            return Ok(true);
-        }
         if self.ctx.setjmp_targets.contains(&target) {
             self.out.push_str("RECOMP_SETJMP3(c);\n");
             return Ok(false);

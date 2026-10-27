@@ -265,9 +265,6 @@ next(c);\n}\n",
             Declaration::PrivatePrepare(addr) => {
                 prepare.insert(*addr);
             }
-            Declaration::ReusedStack(addr, _) => {
-                let _ = writeln!(s, "void entry_reuse_{addr:08x}(X86 *c);");
-            }
             Declaration::StackPrepare(addr, _) => {
                 let _ = writeln!(
                     s,
@@ -357,22 +354,12 @@ fn entry_chunks(
     t: &Translation,
 ) -> Vec<(String, String)> {
     let mut stack_prepare: BTreeMap<Addr, u32> = BTreeMap::new();
-    let mut reuse_checkpoints: BTreeMap<Addr, u32> = BTreeMap::new();
     for declaration in t.bodies.iter().flat_map(|body| &body.declarations) {
-        let (map, target, cost) = match *declaration {
-            Declaration::StackPrepare(target, cost) => (&mut stack_prepare, target, cost),
-            Declaration::ReusedStack(target, cost) => (&mut reuse_checkpoints, target, cost),
-            _ => continue,
-        };
-        let entry = map.entry(target).or_insert(cost);
-        *entry = (*entry).max(cost);
+        if let Declaration::StackPrepare(target, cost) = *declaration {
+            let entry = stack_prepare.entry(target).or_insert(cost);
+            *entry = (*entry).max(cost);
+        }
     }
-    let reused: BTreeSet<Addr> = t
-        .bodies
-        .iter()
-        .filter(|body| body.reused_stack)
-        .map(|body| body.addr)
-        .collect();
     let mut groups: BTreeMap<Addr, Vec<(usize, Addr)>> = BTreeMap::new();
     for (index, &addr) in entry_names.iter().enumerate() {
         groups
@@ -401,11 +388,6 @@ fn entry_chunks(
                 if let Some(checkpoints) = stack_prepare.get(addr) {
                     let route = checkpoint_route(*addr, *checkpoints, "return 1;");
                     let _ = writeln!(s, "int entry_stack_prepare_{addr:08x}(X86 *c) {{\n{route}    (void)c;\n    return 0;\n}}");
-                }
-                if reused.contains(addr) {
-                    let checkpoints = reuse_checkpoints.get(addr).copied().unwrap_or(u32::MAX);
-                    let route = checkpoint_route(*addr, checkpoints, &format!("fn_reuse_{addr:08x}(c);\n        return;"));
-                    let _ = writeln!(s, "void fn_reuse_{addr:08x}(X86 *c);\nvoid entry_reuse_{addr:08x}(X86 *c) {{\n{route}    entry_{addr:08x}(c);\n}}");
                 }
                 for mask in t.private_masks.get(addr).into_iter().flatten() {
                     let input = t.private_input_arguments.get(addr);

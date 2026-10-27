@@ -31,7 +31,6 @@ pub struct PlanOptions<'a> {
     pub coalesce_roots: bool,
     pub assume_private_stack: bool,
     pub lazy_stack_writes: bool,
-    pub retire_reused_stack: bool,
     pub assume_stack_pointer_bases: bool,
     pub call_hooks: bool,
 }
@@ -58,7 +57,6 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     prepare_options.coalesce_roots = opts.coalesce_roots;
     prepare_options.assume_private_stack = opts.assume_private_stack;
     prepare_options.lazy_stack_writes = opts.lazy_stack_writes;
-    prepare_options.retire_reused_stack = opts.retire_reused_stack;
     prepare_options.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
     let (ssa, base) = prepare_with_publications(cg, &prepare_options)?;
     let base = base.unwrap_or_else(|| publications(&ssa, opts.call_facts));

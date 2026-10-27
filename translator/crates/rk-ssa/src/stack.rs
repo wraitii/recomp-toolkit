@@ -72,7 +72,7 @@ fn writes(op: Op) -> bool {
     matches!(op, Op::P(OpCode::Store) | Op::X87(X87Op::Store { .. }))
 }
 
-pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts, retire: bool) -> Option<FramePlan> {
+pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts) -> Option<FramePlan> {
     let frame = Frame::new(s, Some(facts));
     if !frame.eligible() {
         return None;
@@ -149,13 +149,6 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts, retire: bool) -> Optio
             a.1 <= b.1
         } else {
             interval(a).1 <= interval(b).0
-        }
-    };
-    let lt = |a: (bool, i32), b: (bool, i32)| {
-        if a.0 == b.0 {
-            a.1 < b.1
-        } else {
-            interval(a).1 < interval(b).0
         }
     };
     let local = |range: Range| {
@@ -285,9 +278,7 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts, retire: bool) -> Optio
         for (index, &slot) in slots.iter().enumerate() {
             let start = (slot.aligned, slot.offset);
             if op == Op::Return {
-                if !retire || !top.is_some_and(|top| lt(start, top)) {
-                    site.publish.push(index);
-                }
+                site.publish.push(index);
                 continue;
             }
             let below = !top.is_some_and(|top| le(top, start));

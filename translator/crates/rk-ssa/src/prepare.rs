@@ -22,7 +22,6 @@ pub struct PrepareOptions<'a> {
     pub coalesce_roots: bool,
     pub assume_private_stack: bool,
     pub lazy_stack_writes: bool,
-    pub retire_reused_stack: bool,
     pub assume_stack_pointer_bases: bool,
 }
 
@@ -45,7 +44,6 @@ impl<'a> PrepareOptions<'a> {
             coalesce_roots: true,
             assume_private_stack: false,
             lazy_stack_writes: false,
-            retire_reused_stack: false,
             assume_stack_pointer_bases: false,
         }
     }
@@ -100,7 +98,7 @@ fn prepare_using(
     };
     let mut ssa = build(None)?;
     if lazy_stack_writes {
-        if let Some(frame) = crate::stack::plan(&ssa, opts.call_facts, opts.retire_reused_stack) {
+        if let Some(frame) = crate::stack::plan(&ssa, opts.call_facts) {
             match build(Some(&frame)) {
                 Ok(promoted) => ssa = promoted,
                 Err(error) => ssa.promotion_failure = Some(error.to_string()),
@@ -110,8 +108,8 @@ fn prepare_using(
     if let Some(out) = trace.as_mut() {
         writeln!(
             out,
-            "before memory passes retirement={} promotion-failure={:?}",
-            opts.retire_reused_stack, ssa.promotion_failure
+            "before memory passes promotion-failure={:?}",
+            ssa.promotion_failure
         )
         .and_then(|_| crate::memory::dump_stack(&ssa, opts.call_facts, *out))
         .map_err(|error| rk_core::Error::io("stack dump", error))?;
@@ -124,11 +122,7 @@ fn prepare_using(
         crate::memory::eliminate_dead_stores(&mut ssa, Some(opts.call_facts));
     }
     if let Some(out) = trace.as_mut() {
-        writeln!(
-            out,
-            "after memory passes retirement={}",
-            opts.retire_reused_stack
-        )
+        writeln!(out, "after memory passes")
         .and_then(|_| crate::memory::dump_stack(&ssa, opts.call_facts, *out))
         .map_err(|error| rk_core::Error::io("stack dump", error))?;
     }
