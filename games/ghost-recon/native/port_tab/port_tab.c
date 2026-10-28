@@ -103,12 +103,9 @@ static void fxaa_init(void) {
  * complete guest context across this extra __thiscall (one stack argument). */
 static void hide_panel(X86 *c, uint32_t panel) {
     X86 saved = *c;
-    uint32_t sp = c->r[R_ESP] - 8;
-    wr32(sp + 4, 0);
-    wr32(sp, 0); /* return address */
-    c->r[R_ESP] = sp;
+    const uint32_t hidden = 0;
     c->r[R_ECX] = panel;
-    recomp_call(c, rd32(rd32(panel) + 0xd8));
+    recomp_guest_call(c, rd32(rd32(panel) + 0xd8), &hidden, 1);
     *c = saved;
 }
 

@@ -31,7 +31,7 @@ dispatch = { shift = 3, max_probe = 6 }
 code_map = "metadata"
 analysis_facts = "metadata/analysis-facts.json"
 direct_variants = true
-stack_memory = true
+stack_memory = false
 private_input_arguments = false
 direct_arguments = { "00755990" = ["ECX"], "007b80e0" = ["ECX"], "0052f200" = ["ECX"], "00569150" = ["ECX"], "00538240" = ["ECX"] }
 # MOV EAX,label; RET in Catch@ funclets hand these continuations to the C++ EH runtime.

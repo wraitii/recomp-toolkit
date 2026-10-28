@@ -120,11 +120,10 @@ extern "C" void gr_localized_key_label(X86 *c) {
         fprintf(stderr, "keyboard labels: invalid guest string scratch or output\n");
         std::abort();
     }
-    gm_put_wstr(sp + 8, name, uint32_t(name.size() + 1));
-    wr32(sp, 0);
-    wr32(sp + 4, sp + 8);
-    c->r[R_ESP] = sp;
+    const uint32_t text = sp + 8;
+    gm_put_wstr(text, name, uint32_t(name.size() + 1));
+    c->r[R_ESP] = text;
     c->r[R_ECX] = saved.r[R_EAX];
-    recomp_call(c, 0x0056c050);
+    recomp_guest_call(c, 0x0056c050, &text, 1);
     *c = saved;
 }
