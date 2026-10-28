@@ -78,8 +78,25 @@ if(RECOMP_VIDEO)
   else()
     set(RECOMP_FFMPEG_PREFIX "${CMAKE_BINARY_DIR}/ffmpeg")
   endif()
+  set(RECOMP_FFMPEG_ROOT "${CMAKE_BINARY_DIR}")
+  set(RECOMP_FFMPEG_INSTALL "${RECOMP_FFMPEG_PREFIX}")
+  if(NOT RECOMP_DEPENDENCIES AND RECOMP_FFMPEG_ROOT MATCHES "[ \t]")
+    # FFmpeg's configure and Makefiles reject whitespace in any path they see.
+    string(MD5 RECOMP_FFMPEG_ROOT_HASH "${CMAKE_BINARY_DIR}")
+    set(RECOMP_FFMPEG_ROOT "$ENV{TMPDIR}/recomp-ffmpeg-${RECOMP_FFMPEG_ROOT_HASH}")
+    if(NOT RECOMP_FFMPEG_ROOT MATCHES "^/" OR RECOMP_FFMPEG_ROOT MATCHES "[ \t]")
+      set(RECOMP_FFMPEG_ROOT "/tmp/recomp-ffmpeg-${RECOMP_FFMPEG_ROOT_HASH}")
+    endif()
+    cmake_path(NORMAL_PATH RECOMP_FFMPEG_ROOT)
+    file(REMOVE "${RECOMP_FFMPEG_ROOT}")
+    file(CREATE_LINK "${CMAKE_BINARY_DIR}" "${RECOMP_FFMPEG_ROOT}" SYMBOLIC RESULT RECOMP_FFMPEG_LINK_RESULT)
+    if(NOT RECOMP_FFMPEG_LINK_RESULT STREQUAL "0")
+      message(FATAL_ERROR "FFmpeg cannot build under a path with whitespace: ${CMAKE_BINARY_DIR} (${RECOMP_FFMPEG_LINK_RESULT})")
+    endif()
+    set(RECOMP_FFMPEG_INSTALL "${RECOMP_FFMPEG_ROOT}/ffmpeg")
+  endif()
   set(RECOMP_FFMPEG_CONFIGURE
-    --prefix=${RECOMP_FFMPEG_PREFIX}
+    --prefix=${RECOMP_FFMPEG_INSTALL}
     --enable-shared --disable-static --disable-programs --disable-doc
     --disable-everything --disable-avdevice --disable-avfilter
     --disable-swscale --disable-swresample --disable-postproc --disable-network
@@ -211,6 +228,7 @@ if(RECOMP_VIDEO)
   endif()
   if(NOT RECOMP_DEPENDENCIES)
     ExternalProject_Add(ffmpeg
+      PREFIX ${RECOMP_FFMPEG_ROOT}/ffmpeg-prefix
       URL https://ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz
       URL_HASH SHA256=733984395e0dbbe5c046abda2dc49a5544e7e0e1e2366bba849222ae9e3a03b1
       DOWNLOAD_EXTRACT_TIMESTAMP TRUE
