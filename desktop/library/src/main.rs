@@ -137,7 +137,7 @@ async fn pick(kind: String, app: tauri::AppHandle) -> Option<String> {
 #[tauri::command]
 async fn query(mut request: Value, app: tauri::AppHandle) -> Result<Value, String> {
     if !matches!(request["action"].as_str(),
-                  Some("catalog" | "check" | "inspect" | "discover" | "preflight" | "adopt" | "job_log")) {
+                  Some("catalog" | "check" | "inspect" | "discover" | "preflight" | "adopt" | "job_log" | "delete_job")) {
         return Err("Unsupported query".into());
     }
     tauri::async_runtime::spawn_blocking(move || {
@@ -334,6 +334,18 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("Unable to create Recomp Toolkit")
         .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+                if app.state::<Library>().job.lock().unwrap().is_some()
+                    && !rfd::MessageDialog::new()
+                        .set_title("Installation in progress")
+                        .set_description("Quit and cancel the current operation?")
+                        .set_buttons(rfd::MessageButtons::YesNo)
+                        .show()
+                        .eq(&rfd::MessageDialogResult::Yes)
+                {
+                    api.prevent_exit();
+                }
+            }
             if matches!(event, tauri::RunEvent::Exit) {
                 if let Err(error) = stop(&app.state::<Library>()) {
                     eprintln!("{error}");

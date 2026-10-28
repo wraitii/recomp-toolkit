@@ -92,55 +92,29 @@ function renderRecovery() {
     row.className = "recovery-job";
     const heading = document.createElement("strong");
     heading.textContent = "Installation interrupted";
-    const status = document.createElement("p");
-    const latestError = job.error || job.errors?.at(-1);
-    row.classList.toggle("current-failure", Boolean(latestError));
-    status.textContent = latestError?.message || (job.canResume
-      ? "Continue from the saved files."
-      : "This installation needs attention before it can continue.");
+    row.classList.toggle("current-failure", Boolean(job.error || job.errors?.at(-1)));
     const destinationPath = document.createElement("p");
-    destinationPath.textContent = job.destination || "";
-    row.append(heading, status, destinationPath);
-    if (latestError) {
-      const details = document.createElement("details");
-      const summary = document.createElement("summary");
-      summary.textContent = "Error details";
-      const technical = document.createElement("pre");
-      technical.textContent = `${latestError.code || "Error"} · ${latestError.stage || job.stage}\n${latestError.path ? `Path: ${latestError.path}\n` : ""}${JSON.stringify(latestError.details || {}, null, 2)}`;
-      details.append(summary, technical);
-      row.append(details);
-    }
+    destinationPath.textContent = `Build files are in ${job.destination.replace(/[\\/]+$/, "")}/.recomp-toolkit`;
+    row.append(heading, destinationPath);
     const actions = document.createElement("div");
     actions.className = "buttons recovery-actions";
-    const more = document.createElement("details");
-    const moreLabel = document.createElement("summary");
-    moreLabel.textContent = "More options";
-    const secondary = document.createElement("div");
-    secondary.className = "buttons recovery-actions";
-    const savedSource = document.createElement("p");
-    savedSource.textContent = `Source: ${job.source?.path || "Not selected"}`;
-    more.append(moreLabel, savedSource, secondary);
     const available = new Set(job.actions || []);
     const choices = [
-      ["retry_failed_stage", "Try again", () => retrySavedJob(job)],
-      ["locate_missing_file", "Locate game files", () => locateSource(job)],
-      ["choose_another_copy", "Choose other files", chooseAnotherCopy],
-      ["change_destination", "Change install location", () => changeDestination(job)],
       ["open_log", "View log", () => openJobLog(job)],
+      ["delete_job", "Delete files", async () => {
+        await backend.query({ action: "delete_job", game: selected.id, jobId: job.jobId });
+        await refresh();
+      }],
+      ["retry_failed_stage", "Try again", () => retrySavedJob(job)],
     ];
-    let hasPrimary = false;
     for (const [action, label, handler] of choices) {
       if (!available.has(action)) continue;
       const button = document.createElement("button");
       button.textContent = label;
       button.onclick = () => attempt(handler);
-      if (!hasPrimary) {
-        button.className = "primary";
-        actions.append(button);
-        hasPrimary = true;
-      } else secondary.append(button);
+      if (action === "retry_failed_stage") button.className = "primary";
+      actions.append(button);
     }
-    if (secondary.childElementCount) row.append(more);
     row.append(actions);
     list.append(row);
   }

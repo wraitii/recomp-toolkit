@@ -813,6 +813,8 @@ def catalog(storage, repair=False):
                             actions = ["locate_missing_file", "choose_another_copy", "change_destination",
                                        "open_log"]
                             if can_resume:
+                                actions.append("delete_job")
+                            if can_resume:
                                 actions.insert(0, "retry_failed_stage")
                             recoverable_jobs.append({"jobId": identifier, "stage": journal.get("stage"),
                                                      "destination": str(Path(job_destination).resolve()),
@@ -1351,7 +1353,6 @@ def install(request, storage, prepared=None):
     archive_bytes = adapter.archive_uncompressed_size(source_path, check_cancel) if source_kind in ("zip", "inno", "installshield") else 0
     installer_bytes = adapter.source_size(source_path) if source_kind in ("inno", "installshield") else 0
     copy_estimate = source_identity.get("bytes", archive_bytes)
-    resumed = bool(job_identifier)
     if job_identifier:
         job_paths, journal = install_jobs.load_job(root, job_identifier)
         if (journal.get("gameId") != game_id or journal.get("candidateId") != selected["id"]
@@ -1435,37 +1436,22 @@ def install(request, storage, prepared=None):
         staging = job_paths["staging"]
         build_root = staging / "build"
         staged_data = build_root / "original"
-        reusable_copy = False
-        if resumed and staged_data.is_dir() and journal.get("validatedInputs", {}).get("stagedOriginal"):
-            current_copy = install_jobs.payload_identity(staged_data, check_cancel, progress=file_progress())
-            reusable_copy = current_copy == journal["validatedInputs"]["stagedOriginal"]
-            if reusable_copy:
-                validate_game(staged_data, executable_relative, cfg["game"]["sha256"],
-                              cfg.get("setup", {}).get("required_dirs", []))
-                for module in cfg["aux_modules"]:
-                    image = staged_data / selected["auxiliaryPaths"][module["name"]]
-                    if not image.is_file() or hashlib.sha256(image.read_bytes()).hexdigest() != module["sha256"]:
-                        reusable_copy = False
-                        break
-        if not reusable_copy:
-            if staging.exists():
-                install_jobs.remove_owned(staging, job_paths["meta"], job_identifier,
-                                          journal.get("ownedTokens", {}).get("staging"))
-            journal.setdefault("ownedTokens", {})["staging"] = None
-            install_jobs.update_job(job_paths, journal, journal.get("stage", "copying"),
-                                    ownedTokens=journal["ownedTokens"])
-            staging.mkdir()
-            info = staging.stat()
-            install_jobs.write_json(staging / "owner.json", {"schema": install_jobs.SCHEMA,
-                                     "jobId": job_identifier, "device": info.st_dev, "inode": info.st_ino})
-            journal.setdefault("ownedTokens", {})["staging"] = install_jobs.directory_token(staging)
-            install_jobs.update_job(job_paths, journal, journal.get("stage", "copying"),
-                                    ownedTokens=journal["ownedTokens"])
-            build_root.mkdir()
-        else:
-            stage = "validating"
-            install_jobs.update_job(job_paths, journal, stage)
-        if source_kind in ("zip", "inno", "installshield") and not reusable_copy:
+        install_jobs.update_job(job_paths, journal, "failed")
+        if staging.exists():
+            install_jobs.remove_owned(staging, job_paths["meta"], job_identifier,
+                                      journal.get("ownedTokens", {}).get("staging"))
+        journal.setdefault("ownedTokens", {})["staging"] = None
+        install_jobs.update_job(job_paths, journal, journal.get("stage", "copying"),
+                                ownedTokens=journal["ownedTokens"])
+        staging.mkdir()
+        info = staging.stat()
+        install_jobs.write_json(staging / "owner.json", {"schema": install_jobs.SCHEMA,
+                                 "jobId": job_identifier, "device": info.st_dev, "inode": info.st_ino})
+        journal.setdefault("ownedTokens", {})["staging"] = install_jobs.directory_token(staging)
+        install_jobs.update_job(job_paths, journal, journal.get("stage", "copying"),
+                                ownedTokens=journal["ownedTokens"])
+        build_root.mkdir()
+        if source_kind in ("zip", "inno", "installshield"):
             stage = "extracting"
             emit("stage", stage=stage, message="Extracting the game archive")
             install_jobs.update_job(job_paths, journal, stage)
@@ -1498,8 +1484,6 @@ def install(request, storage, prepared=None):
             if selected_now["executable"].get("sha256") != selected["executable"].get("sha256"):
                 raise SourceError("source_changed", "The selected executable changed after source inspection.",
                                   ["Inspect the source again and retry the import."], str(source_path))
-        if reusable_copy:
-            source = staged_data
         emit("stage", stage="validating", message="Verifying the supported game version")
         stage = "validating"
         install_jobs.update_job(job_paths, journal, stage)
@@ -1512,29 +1496,25 @@ def install(request, storage, prepared=None):
         check_cancel()
         stage = "copying"
         install_jobs.update_job(job_paths, journal, stage)
-        if reusable_copy:
-            source_facts = journal["validatedInputs"]["source"]
-            copied = journal["validatedInputs"]["stagedOriginal"]
-        else:
-            emit("stage", stage="fingerprinting", message="Checking the game files before copying")
-            source_facts = install_jobs.payload_identity(source, check_cancel, exclude_paths=exclude_paths,
-                                                         progress=file_progress(copy_estimate))
-            space_plan["sourceCopyBytesEstimate"] = source_facts["bytes"]
-            check_space(job_paths, journal, root, "copying",
-                        source_facts["bytes"] + install_jobs.MAX_BUILD_BYTES,
-                        log_path, space_plan)
-            log_event(log_path, "copying", "validated source copy started",
-                      {"files": source_facts["files"], "bytes": source_facts["bytes"]})
-            emit("stage", stage="copying", message="Copying your game files")
-            install_jobs.copy_payload(source, staged_data, check_cancel, source_facts["bytes"],
-                                      exclude_paths=exclude_paths, progress=file_progress(source_facts["bytes"]))
-            emit("stage", stage="fingerprinting", message="Checking the copied files")
-            copied = install_jobs.payload_identity(staged_data, check_cancel,
-                                                   progress=file_progress(source_facts["bytes"]))
-        if not reusable_copy and copied["sha256"] != source_facts["sha256"]:
+        emit("stage", stage="fingerprinting", message="Checking the game files before copying")
+        source_facts = install_jobs.payload_identity(source, check_cancel, exclude_paths=exclude_paths,
+                                                     progress=file_progress(copy_estimate))
+        space_plan["sourceCopyBytesEstimate"] = source_facts["bytes"]
+        check_space(job_paths, journal, root, "copying",
+                    source_facts["bytes"] + install_jobs.MAX_BUILD_BYTES,
+                    log_path, space_plan)
+        log_event(log_path, "copying", "validated source copy started",
+                  {"files": source_facts["files"], "bytes": source_facts["bytes"]})
+        emit("stage", stage="copying", message="Copying your game files")
+        install_jobs.copy_payload(source, staged_data, check_cancel, source_facts["bytes"],
+                                  exclude_paths=exclude_paths, progress=file_progress(source_facts["bytes"]))
+        emit("stage", stage="fingerprinting", message="Checking the copied files")
+        copied = install_jobs.payload_identity(staged_data, check_cancel,
+                                               progress=file_progress(source_facts["bytes"]))
+        if copied["sha256"] != source_facts["sha256"]:
             raise SourceError("copy_validation_failed", "The staged game copy differs from its source.",
                               ["Check storage space and source permissions."], str(source))
-        if source_kind in ("zip", "inno", "installshield") and not reusable_copy:
+        if source_kind in ("zip", "inno", "installshield"):
             shutil.rmtree(staging / "extracted")
         validate_game(staged_data, executable_relative, cfg["game"]["sha256"], required)
         for module in cfg["aux_modules"]:
@@ -1947,6 +1927,41 @@ def validate_inspection_request(request):
                           details={"received": schema, "supportedMajor": 1})
 
 
+def delete_job(request, storage):
+    game_id = request.get("game")
+    identifier = install_jobs.job_id(request.get("jobId"))
+    registry_dir = install_jobs.registry_game_dir(storage, game_id)
+    with install_jobs.DestinationLock(storage, lock_name="registry.lock"):
+        activity_path = registry_dir / "activity.json"
+        activity = install_jobs.read_versioned(activity_path, "activity")
+        locator = next((item for item in activity.get("activeJobs", [])
+                        if isinstance(item, dict) and item.get("jobId") == identifier), None)
+        if not locator:
+            raise install_jobs.JobError("unknown_job", "The requested job is not registered.")
+        destination_input = Path(locator["destination"])
+        destination = destination_input.resolve(strict=True)
+        if destination_input != destination or not destination.is_dir():
+            raise install_jobs.JobError("unsafe_job_destination", "The saved job destination is not canonical.")
+        with install_jobs.DestinationLock(destination):
+            job_paths, journal = install_jobs.load_job(destination, identifier)
+            if journal.get("gameId") != game_id or journal.get("publication") or journal.get("stage") in ("publishing", "cleaning", "complete"):
+                raise install_jobs.JobError("job_requires_recovery", "This job cannot be deleted before publication recovery.")
+            install_jobs.update_job(job_paths, journal, "cancelled")
+            for key in ("staging", "backup"):
+                if job_paths[key].exists():
+                    install_jobs.remove_owned(job_paths[key], job_paths["meta"], identifier,
+                                              journal.get("ownedTokens", {}).get(key))
+            install_jobs.update_job(job_paths, journal, "cancelled")
+            activity["activeJobs"] = [item for item in activity["activeJobs"] if item != locator]
+            install_jobs.write_json(activity_path, activity)
+        for directory in (job_paths["jobs"], job_paths["logs"], job_paths["meta"], destination):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+    return {"deleted": identifier}
+
+
 def resume_install(request, storage):
     validate_inspection_request(request)
     game_id = request["game"]
@@ -2038,6 +2053,8 @@ def main():
             result = adopt_request(request, storage)
         elif action == "job_log":
             result = job_log(request, storage)
+        elif action == "delete_job":
+            result = delete_job(request, storage)
         elif action == "check":
             result = prerequisites(request.get("needsRust", True), request.get("needsInnoextract", False), request.get("needsUnshield", False))
         elif action == "install":
