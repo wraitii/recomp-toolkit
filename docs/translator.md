@@ -82,9 +82,11 @@ exposure, retained accesses, call guards and possible writes blocking local load
 These dumps run outside `rk-plan`.
 
 `tools/build.py --stack-return-report FILE` runs production planning and writes a
-read-only JSON report without emitting C or building the app. It follows the original,
-unpromoted SSA from each direct caller past the callee's promoted return slots,
-retaining all original stores while existing forwarding removes reads proved initialized.
+read-only JSON report without emitting C or building the app. It captures an unpromoted SSA view during production preparation, with the same
+per-function stack assumptions, then follows each direct caller past the callee's
+promoted return slots. It retains all original stores while production forwarding
+removes reads proved initialized. The cross-return search uses general address
+relations; it does not apply the private-frame exposure model to returned slots.
 It retains symbolic alignment roots and caller register bindings across one nested call.
 Each query records
 all terminal reasons, instruction addresses, remaining bytes and overwrite witnesses.

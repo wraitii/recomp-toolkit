@@ -50,6 +50,14 @@ pub struct PlannedFunction {
 }
 
 pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedFunction> {
+    plan_function_with_view(cg, opts, None)
+}
+
+pub fn plan_function_with_view(
+    cg: &CgFunction,
+    opts: &PlanOptions<'_>,
+    view: Option<&mut dyn FnMut(&mut Ssa)>,
+) -> Result<PlannedFunction> {
     let mut prepare_options = PrepareOptions::new(opts.call_facts);
     prepare_options.policy = opts.policy;
     prepare_options.fault_state = opts.fault_state;
@@ -57,7 +65,10 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     prepare_options.assume_private_stack = opts.assume_private_stack;
     prepare_options.lazy_stack_writes = opts.lazy_stack_writes;
     prepare_options.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
-    let (ssa, base) = prepare_with_publications(cg, &prepare_options)?;
+    let (ssa, base) = match view {
+        Some(view) => rk_ssa::prepare_with_publications_and_view(cg, &prepare_options, view)?,
+        None => prepare_with_publications(cg, &prepare_options)?,
+    };
     let base = base.unwrap_or_else(|| publications(&ssa, opts.call_facts));
     let mut return_addr = BTreeMap::new();
     for (index, value) in ssa.values.iter().enumerate() {

@@ -427,6 +427,7 @@ enum Prepared {
         addr: Addr,
         ir: FunctionIr,
         planned: rk_plan::PlannedFunction,
+        view: Option<anyhow::Result<stack_returns::Body>>,
     },
 }
 
@@ -643,8 +644,31 @@ fn build_bodies(
             let Some(ir) = ir else {
                 return Prepared::Emitted((addr, trap_body(program, addr, None), None, None));
             };
-            match plan_one(&ctx, &ir) {
-                Ok(planned) => Prepared::Retained { addr, ir, planned },
+            let mut view = None;
+            let planned = if stack_return_report.is_some() {
+                rk_ir::lower_with(
+                    &ir,
+                    &ctx.program.image,
+                    &rk_x87::Recipes,
+                    ctx.reloc.is_some(),
+                )
+                .and_then(|cg| {
+                    rk_plan::plan_function_with_view(
+                        &cg,
+                        &ctx.plan_options(ir.addr),
+                        Some(&mut |ssa| view = Some(stack_returns::capture(ssa, &ctx.facts))),
+                    )
+                })
+            } else {
+                plan_one(&ctx, &ir)
+            };
+            match planned {
+                Ok(planned) => Prepared::Retained {
+                    addr,
+                    ir,
+                    planned,
+                    view,
+                },
                 Err(error) => Prepared::Emitted(error_row(&ctx, addr, &ir, &error)),
             }
         })
@@ -664,7 +688,9 @@ fn build_bodies(
     for item in prepared {
         match item {
             Prepared::Emitted(row) => retained.push(Err(row)),
-            Prepared::Retained { addr, ir, planned } => {
+            Prepared::Retained {
+                addr, ir, planned, ..
+            } => {
                 if planned.ssa.return_slot.is_ok() {
                     proven_returns.insert(addr);
                 }

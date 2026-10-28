@@ -1,15 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rayon::prelude::*;
 use rk_core::contract::Field;
-use rk_core::ir::Policy;
 use rk_core::memory::{Address, Base, Range};
 use rk_core::Addr;
 use rk_ir::{Op, StateKey};
 use rk_ssa::address::{Addresses, Relations};
-use rk_ssa::{BuildOptions, CallFacts, Ssa, ValueId};
+use rk_ssa::{CallFacts, Ssa, ValueId};
 use serde_json::{json, Value};
 
 use super::{BodyContext, Prepared};
@@ -49,7 +48,7 @@ struct Block {
     next: Vec<usize>,
 }
 
-struct Body {
+pub(super) struct Body {
     entry: usize,
     blocks: Vec<Block>,
     stores: Vec<Store>,
@@ -58,6 +57,7 @@ struct Body {
     address_work: (usize, bool),
     forwarded_reads: Vec<Value>,
     relations: Relations,
+    returned_pointer_sites: BTreeSet<Addr>,
 }
 
 #[derive(Clone, Copy)]
@@ -308,13 +308,14 @@ fn stores(planned: &rk_plan::PlannedFunction) -> Vec<Store> {
     result
 }
 
-fn body(s: &Ssa, mut stores: Vec<Store>, facts: &dyn CallFacts) -> Result<Body> {
+fn body(s: &Ssa, facts: &dyn CallFacts) -> Result<Body> {
     anyhow::ensure!(
         s.entries.len() == 1 && s.entries[0].addr == s.addr,
         "multiple-or-interior-entries"
     );
     let mut addresses = Addresses::local_with_parameters(s);
     let mut call_addresses = Addresses::local_with_parameters(s);
+    let mut returned_pointer_sites = BTreeSet::new();
     for boundary in &s.boundaries {
         if s.value(boundary.at).op != Op::Return {
             continue;
@@ -330,11 +331,7 @@ fn body(s: &Ssa, mut stores: Vec<Store>, facts: &dyn CallFacts) -> Result<Body> 
             } if (offset as i32) < 0)
             });
         if returned_pointer {
-            for store in &mut stores {
-                if store.site == s.value_addr[boundary.at as usize] {
-                    store.returned_pointer = true;
-                }
-            }
+            returned_pointer_sites.insert(s.value_addr[boundary.at as usize]);
         }
     }
     let accesses = rk_ssa::memory::accesses_with_addresses(s, &mut addresses, None);
@@ -410,12 +407,13 @@ fn body(s: &Ssa, mut stores: Vec<Store>, facts: &dyn CallFacts) -> Result<Body> 
     Ok(Body {
         entry,
         blocks,
-        stores,
+        stores: Vec::new(),
         instructions: BTreeMap::new(),
         return_slot_proven: false,
         address_work: addresses.work_usage(),
         forwarded_reads: Vec::new(),
         relations: addresses.relations,
+        returned_pointer_sites,
     })
 }
 
@@ -667,6 +665,40 @@ fn investigate(
     terminals
 }
 
+pub(super) fn capture(s: &mut Ssa, facts: &dyn CallFacts) -> Result<Body> {
+    let reads = |s: &Ssa| -> BTreeSet<ValueId> {
+        s.blocks.iter().flat_map(|block| &block.ops).copied().filter(|&id| {
+            matches!(s.value(id).op, Op::P(rk_core::ir::OpCode::Load))
+                || matches!(s.value(id).op, Op::X87(op) if op.memory() == Some(rk_ir::x87::MemoryEffect::Read))
+        }).collect()
+    };
+    let writes = |s: &Ssa| -> BTreeSet<ValueId> {
+        s.blocks.iter().flat_map(|block| &block.ops).copied().filter(|&id| {
+            matches!(s.value(id).op, Op::P(rk_core::ir::OpCode::Store))
+                || matches!(s.value(id).op, Op::X87(op) if op.memory() == Some(rk_ir::x87::MemoryEffect::Write))
+        }).collect()
+    };
+    let before_reads = reads(s);
+    let before_writes = writes(s);
+    rk_ssa::forward(s, Some(facts));
+    anyhow::ensure!(
+        before_writes.is_subset(&writes(s)),
+        "report forwarding removed a guest store"
+    );
+    let remaining_reads = reads(s);
+    let forwarded = before_reads
+        .difference(&remaining_reads)
+        .map(|&id| {
+            json!({
+                "site": format!("{:08x}", s.value_addr[id as usize]), "value": id,
+            })
+        })
+        .collect();
+    let mut result = body(s, facts)?;
+    result.forwarded_reads = forwarded;
+    Ok(result)
+}
+
 pub(super) fn write(
     ctx: &BodyContext<'_>,
     prepared: Vec<Prepared>,
@@ -677,8 +709,13 @@ pub(super) fn write(
     let results: Vec<_> = prepared
         .into_par_iter()
         .map(|prepared| {
-            let (addr, ir, planned) = match prepared {
-                Prepared::Retained { addr, ir, planned } => (addr, ir, planned),
+            let (addr, ir, planned, view) = match prepared {
+                Prepared::Retained {
+                    addr,
+                    ir,
+                    planned,
+                    view,
+                } => (addr, ir, planned, view),
                 Prepared::Emitted((addr, _, reason, _)) => {
                     return Err((addr, format!("planning-unavailable:{reason:?}")))
                 }
@@ -688,39 +725,15 @@ pub(super) fn write(
             }
             let result = (|| -> Result<Body> {
                 let candidates = stores(&planned);
-                let cg = rk_ir::lower(&ir, &ctx.program.image, &rk_x87::Recipes)?;
-                let mut original = rk_ssa::build(
-                    &cg,
-                    &BuildOptions {
-                        policy: Policy::Optimizing,
-                        call_facts: &ctx.facts,
-                        ..Default::default()
-                    },
-                )
-                .map_err(rk_core::Error::Diagnostic)?;
-                rk_ssa::canonicalize(&mut original, true);
-                let reads = |s: &Ssa| -> BTreeSet<ValueId> {
-                    s.blocks.iter().flat_map(|block| &block.ops).copied().filter(|&id| {
-                        matches!(s.value(id).op, Op::P(rk_core::ir::OpCode::Load))
-                            || matches!(s.value(id).op, Op::X87(op) if op.memory() == Some(rk_ir::x87::MemoryEffect::Read))
-                    }).collect()
-                };
-                let writes = |s: &Ssa| -> BTreeSet<ValueId> {
-                    s.blocks.iter().flat_map(|block| &block.ops).copied().filter(|&id| {
-                        matches!(s.value(id).op, Op::P(rk_core::ir::OpCode::Store))
-                            || matches!(s.value(id).op, Op::X87(op) if op.memory() == Some(rk_ir::x87::MemoryEffect::Write))
-                    }).collect()
-                };
-                let before_reads = reads(&original);
-                let before_writes = writes(&original);
-                rk_ssa::forward(&mut original, Some(&ctx.facts));
-                anyhow::ensure!(before_writes.is_subset(&writes(&original)), "report forwarding removed a guest store");
-                let remaining_reads = reads(&original);
-                let forwarded: Vec<_> = before_reads.difference(&remaining_reads).map(|&id| json!({
-                    "site": format!("{:08x}", original.value_addr[id as usize]), "value": id,
-                })).collect();
-                let mut result = body(&original, candidates, &ctx.facts)?;
-                result.forwarded_reads = forwarded;
+                let mut result = view.context("pre-promotion stack view unavailable")??;
+                result.stores = candidates
+                    .into_iter()
+                    .map(|mut store| {
+                        store.returned_pointer =
+                            result.returned_pointer_sites.contains(&store.site);
+                        store
+                    })
+                    .collect();
                 result.return_slot_proven = planned.ssa.return_slot.is_ok();
                 result.instructions = ir
                     .insns
@@ -936,7 +949,7 @@ pub(super) fn write(
         .collect();
     let report = json!({"format": "recomp-stack-return-report-v1", "read_only": true,
         "executable_sha256": ctx.program.sha256, "image_base": format!("{:08x}", ctx.program.image.base), "image_size": ctx.program.image.size,
-        "scope": "Normal continuations of ordinary planned return publications; unpromoted SSA retains every original store. Existing forwarding removes reads proven to consume prior writes. Candidates require runtime observer guards and return/entry contracts before optimization. Indirect and external callers prevent global elimination from these counts alone.",
+        "scope": "Normal continuations of ordinary planned return publications; pre-promotion SSA uses per-function production assumptions and retains every original store. Production forwarding removes reads proven to consume prior writes. Cross-return alias checks use general address relations, not private-frame exposure. Candidates require runtime observer guards and return/entry contracts before optimization. Indirect and external callers prevent global elimination from these counts alone.",
         "limits": {"steps_per_query": STEP_LIMIT, "nested_calls": CALL_LIMIT, "caller_unwinds": 0, "bytes_per_query": BYTE_LIMIT},
         "assumptions": {"private_stack": ctx.assume_private_stack, "stack_pointer_bases": ctx.assume_stack_pointer_bases,
             "dead_after_stack_call": false, "dead_after_caller_returns": false},

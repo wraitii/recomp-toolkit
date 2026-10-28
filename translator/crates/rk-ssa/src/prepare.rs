@@ -57,7 +57,7 @@ pub fn prepare_with_publications(
     cg: &rk_ir::CgFunction,
     opts: &PrepareOptions,
 ) -> rk_core::Result<(Ssa, Option<BTreeMap<ValueId, Vec<StateKey>>>)> {
-    prepare_using(cg, opts, None)
+    prepare_using(cg, opts, None, None)
 }
 
 pub fn prepare_with_stack_dump(
@@ -65,13 +65,22 @@ pub fn prepare_with_stack_dump(
     opts: &PrepareOptions,
     out: &mut impl std::io::Write,
 ) -> rk_core::Result<Ssa> {
-    prepare_using(cg, opts, Some(out)).map(|(ssa, _)| ssa)
+    prepare_using(cg, opts, Some(out), None).map(|(ssa, _)| ssa)
+}
+
+pub fn prepare_with_publications_and_view(
+    cg: &rk_ir::CgFunction,
+    opts: &PrepareOptions,
+    view: &mut dyn FnMut(&mut Ssa),
+) -> rk_core::Result<(Ssa, Option<BTreeMap<ValueId, Vec<StateKey>>>)> {
+    prepare_using(cg, opts, None, Some(view))
 }
 
 fn prepare_using(
     cg: &rk_ir::CgFunction,
     opts: &PrepareOptions,
     mut trace: Option<&mut dyn std::io::Write>,
+    view: Option<&mut dyn FnMut(&mut Ssa)>,
 ) -> rk_core::Result<(Ssa, Option<BTreeMap<ValueId, Vec<StateKey>>>)> {
     let build_options = BuildOptions {
         policy: opts.policy,
@@ -97,6 +106,10 @@ fn prepare_using(
         Ok(ssa)
     };
     let mut ssa = build(None)?;
+    if let Some(view) = view {
+        let mut original = build(None)?;
+        view(&mut original);
+    }
     if lazy_stack_writes {
         if let Some(frame) = crate::stack::plan(&ssa, opts.call_facts) {
             match build(Some(&frame)) {
