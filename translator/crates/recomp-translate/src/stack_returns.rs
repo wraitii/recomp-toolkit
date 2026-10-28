@@ -69,6 +69,11 @@ struct Block {
     next: Vec<usize>,
 }
 
+struct Initialization {
+    writes: Vec<Addr>,
+    entry_return_address: bool,
+}
+
 pub(super) struct Body {
     entry: usize,
     blocks: Vec<Block>,
@@ -77,6 +82,8 @@ pub(super) struct Body {
     return_slot_proven: bool,
     address_work: (usize, bool),
     forwarded_reads: Vec<Value>,
+    initialized_reads: BTreeMap<(usize, usize), Initialization>,
+    return_origins: BTreeMap<Field, Value>,
     relations: Relations,
     returned_pointer_sites: BTreeSet<Addr>,
     frame: rk_ssa::memory::Frame,
@@ -98,8 +105,18 @@ struct Search {
     resumes: Vec<Cursor>,
     remaining: BTreeSet<u32>,
     trace: Vec<Value>,
-    visited: BTreeSet<(Addr, usize, usize, Address, [Address; 8], Vec<u32>, usize)>,
+    visited: BTreeSet<(
+        Addr,
+        usize,
+        usize,
+        Address,
+        [Address; 8],
+        Vec<u32>,
+        usize,
+        usize,
+    )>,
     calls: usize,
+    completed_calls: usize,
 }
 
 fn describe(range: Range) -> Value {
@@ -147,12 +164,13 @@ fn mapped_in(address: Address, cursor: Cursor, body: &Body) -> Address {
     mapped(address, cursor)
 }
 
-fn address_origin(s: &Ssa, root: ValueId, facts: &dyn CallFacts) -> Value {
-    let mut pending = vec![root];
+fn address_origins(s: &Ssa, roots: &[ValueId], facts: &dyn CallFacts) -> Value {
+    let mut pending = roots.to_vec();
     let mut seen = BTreeSet::new();
     let mut inputs = BTreeSet::new();
     let mut reloads = BTreeMap::new();
     let mut loads = BTreeSet::new();
+    let mut unresolved = BTreeSet::new();
     let mut limited = false;
     while let Some(id) = pending.pop() {
         if seen.len() >= 256 {
@@ -166,6 +184,8 @@ fn address_origin(s: &Ssa, root: ValueId, facts: &dyn CallFacts) -> Value {
             Op::Input(key) => {
                 if let Some(field) = s.field(key) {
                     inputs.insert(field.name());
+                } else {
+                    unresolved.insert(format!("{:?}", s.value(id).op));
                 }
             }
             Op::StateKeep(_) => pending.extend(s.args(id).get(1).copied()),
@@ -184,13 +204,67 @@ fn address_origin(s: &Ssa, root: ValueId, facts: &dyn CallFacts) -> Value {
             Op::P(rk_core::ir::OpCode::Load) => {
                 loads.insert(format!("{:08x}", s.value_addr[id as usize]));
             }
-            op if rk_ir::properties(op).pure => pending.extend(s.args(id)),
-            _ => {}
+            Op::Const(_) | Op::Target(_) | Op::CcKind(_) => {}
+            op if rk_ir::properties(op).pure && !s.args(id).is_empty() => {
+                pending.extend(s.args(id))
+            }
+            op => {
+                unresolved.insert(format!("{op:?}"));
+            }
         }
     }
-    json!({"value": root, "operation": format!("{:?}", s.value(root).op),
+    json!({"value": roots.first(), "operation": roots.first().map(|&root| format!("{:?}", s.value(root).op)),
         "inputs": inputs, "reloads": reloads.into_values().collect::<Vec<_>>(),
-        "pointer_loads": loads, "walk_limited": limited})
+        "pointer_loads": loads, "walk_limited": limited, "unresolved_operations": unresolved})
+}
+
+fn address_origin(s: &Ssa, root: ValueId, facts: &dyn CallFacts) -> Value {
+    address_origins(s, &[root], facts)
+}
+
+fn return_origins(
+    s: &Ssa,
+    facts: &dyn CallFacts,
+    addresses: &mut Addresses<'_>,
+    complete: bool,
+) -> BTreeMap<Field, Value> {
+    Field::ALL.into_iter().take(8).filter(|&field| field != Field::Esp).map(|field| {
+        let mut returns = Vec::new();
+        let mut independent = complete;
+        for boundary in &s.boundaries {
+            if s.value(boundary.at).op != Op::Return {
+                continue;
+            }
+            let state = s.boundary(boundary.at).unwrap_or_default();
+            let roots: Vec<_> = rk_ir::lanes(field).iter().filter_map(|key| state.iter().find(|(candidate, _)| candidate == key).map(|&(_, value)| value)).collect();
+            let origin = address_origins(s, &roots, facts);
+            let address = addresses.state(boundary.at, field);
+            let stack_address = matches!(address, Address::Known { base: Base::Frame | Base::Stack(_) | Base::Argument(_), .. });
+            let mut local_load = false;
+            for &id in s.blocks.iter().flat_map(|block| &block.ops) {
+                if !matches!(s.value(id).op, Op::P(rk_core::ir::OpCode::Load))
+                    || !origin["pointer_loads"].as_array().is_some_and(|loads| loads.contains(&json!(format!("{:08x}", s.value_addr[id as usize])))) {
+                    continue;
+                }
+                let source = addresses.get(s.args(id)[1]);
+                let source_origin = address_origin(s, s.args(id)[1], facts);
+                let argument = matches!(addresses.relations.bounds(source), Address::Known { base: Base::Frame, offset, span: 0 } if (offset as i32) >= 4);
+                let stack_source = matches!(source, Address::Known { base: Base::Frame | Base::Stack(_), .. })
+                    || source_origin["inputs"].as_array().is_none_or(|inputs| inputs.contains(&json!("ESP")));
+                local_load |= !argument && (stack_source || source_origin["walk_limited"] != false
+                    || source_origin["unresolved_operations"].as_array().is_none_or(|operations| !operations.is_empty())
+                    || source_origin["reloads"].as_array().is_none_or(|reloads| !reloads.is_empty()));
+            }
+            let proved = roots.len() == 4 && !stack_address && !local_load && origin["walk_limited"] == false
+                && origin["unresolved_operations"].as_array().is_some_and(Vec::is_empty)
+                && origin["inputs"].as_array().is_some_and(|inputs| !inputs.contains(&json!("ESP")))
+                && origin["reloads"].as_array().is_some_and(Vec::is_empty);
+            independent &= proved;
+            returns.push(json!({"site": format!("{:08x}", s.value_addr[boundary.at as usize]), "address": describe(Range::new(address, 4)),
+                "origin": origin, "local_or_unresolved_pointer_load": local_load, "stack_independent": proved}));
+        }
+        (field, json!({"stack_independent": independent && !returns.is_empty(), "complete_control_flow": complete, "returns": returns}))
+    }).collect()
 }
 
 fn alias_class(
@@ -428,6 +502,18 @@ fn body(s: &Ssa, facts: &dyn CallFacts) -> Result<Body> {
     }
     let entry = s.entries[0].target as usize;
     anyhow::ensure!(entry < blocks.len(), "no-entry-block");
+    let complete = blocks.iter().all(|block| {
+        !block
+            .events
+            .iter()
+            .any(|event| matches!(event.effect, Effect::Barrier(_)))
+            && (!block.next.is_empty()
+                || block
+                    .events
+                    .last()
+                    .is_some_and(|event| matches!(event.effect, Effect::Return)))
+    });
+    let return_origins = return_origins(s, facts, &mut addresses, complete);
     Ok(Body {
         entry,
         blocks,
@@ -436,9 +522,198 @@ fn body(s: &Ssa, facts: &dyn CallFacts) -> Result<Body> {
         return_slot_proven: false,
         address_work: addresses.work_usage(),
         forwarded_reads: Vec::new(),
+        initialized_reads: BTreeMap::new(),
+        return_origins,
         relations: addresses.relations,
         returned_pointer_sites,
         frame: rk_ssa::memory::Frame::new(s, Some(facts)),
+    })
+}
+
+fn initialized_reads(body: &Body) -> BTreeMap<(usize, usize), Initialization> {
+    let mut predecessors = vec![Vec::new(); body.blocks.len()];
+    for (index, block) in body.blocks.iter().enumerate() {
+        for &next in &block.next {
+            predecessors[next].push(index);
+        }
+    }
+    let prove = |block: usize, index: usize, read: Range| -> Option<Initialization> {
+        if !matches!(
+            read.address,
+            Address::Known {
+                base: Base::Frame | Base::Stack(_),
+                span: 0,
+                ..
+            }
+        ) || read.size == 0
+            || read.size > BYTE_LIMIT
+        {
+            return None;
+        }
+        let mut pending = vec![(block, index, (0..read.size).collect::<BTreeSet<_>>(), false)];
+        let mut seen = BTreeSet::new();
+        let mut active = BTreeSet::new();
+        let mut writes = BTreeSet::new();
+        let mut entry_return_address = false;
+        while let Some((block, index, mut remaining, finished)) = pending.pop() {
+            let key = (block, index, remaining.clone());
+            if finished {
+                active.remove(&key);
+                seen.insert(key);
+                continue;
+            }
+            if seen.contains(&key) {
+                continue;
+            }
+            if seen.len() + active.len() >= STEP_LIMIT || !active.insert(key) {
+                return None;
+            }
+            pending.push((block, index, remaining.clone(), true));
+            if index == 0 {
+                if block == body.entry {
+                    if body.return_slot_proven {
+                        let slot = Range::new(Address::exact(Base::Frame, 0), 4);
+                        let before = remaining.len();
+                        remaining.retain(|&byte| {
+                            body.relations
+                                .offset_of(slot, Range::new(read.address.offset(byte), 1))
+                                .is_none()
+                        });
+                        entry_return_address |= remaining.len() != before;
+                        if remaining.is_empty() {
+                            continue;
+                        }
+                    }
+                    return None;
+                }
+                if predecessors[block].is_empty() {
+                    return None;
+                }
+                pending.extend(predecessors[block].iter().map(|&pred| {
+                    (
+                        pred,
+                        body.blocks[pred].events.len(),
+                        remaining.clone(),
+                        false,
+                    )
+                }));
+                continue;
+            }
+            let event = &body.blocks[block].events[index - 1];
+            match event.effect {
+                Effect::Write(write) => {
+                    let before = remaining.len();
+                    remaining.retain(|&byte| {
+                        body.relations
+                            .offset_of(write, Range::new(read.address.offset(byte), 1))
+                            .is_none()
+                    });
+                    if remaining.len() != before {
+                        writes.insert(event.site);
+                    }
+                }
+                Effect::Call { .. } | Effect::Barrier(_) | Effect::Return => return None,
+                Effect::Read(_) => {}
+            }
+            if !remaining.is_empty() {
+                pending.push((block, index - 1, remaining, false));
+            }
+        }
+        Some(Initialization {
+            writes: writes.into_iter().collect(),
+            entry_return_address,
+        })
+    };
+    body.blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(block, body)| {
+            body.events
+                .iter()
+                .enumerate()
+                .filter_map(move |(index, event)| {
+                    let Effect::Read(read) = event.effect else {
+                        return None;
+                    };
+                    Some(((block, index), read))
+                })
+        })
+        .filter_map(|(location, read)| {
+            prove(location.0, location.1, read).map(|writes| (location, writes))
+        })
+        .collect()
+}
+
+fn nonstack_reload(
+    reload: &Value,
+    cursor: Cursor,
+    current: &Body,
+    bodies: &BTreeMap<Addr, Body>,
+) -> bool {
+    let Some(field) = reload["field"].as_str().and_then(Field::from_name) else {
+        return false;
+    };
+    let Some(target) = reload["target"].as_str().and_then(rk_core::parse_hex) else {
+        return false;
+    };
+    let Some(summary) = bodies
+        .get(&target)
+        .filter(|body| body.return_slot_proven)
+        .and_then(|body| body.return_origins.get(&field))
+    else {
+        return false;
+    };
+    if summary["stack_independent"] != true {
+        return false;
+    }
+    let Some(site) = reload["site"].as_str().and_then(rk_core::parse_hex) else {
+        return false;
+    };
+    let Some(registers) = current
+        .blocks
+        .iter()
+        .flat_map(|block| &block.events)
+        .find_map(|event| {
+            if event.site != site {
+                return None;
+            }
+            match &event.effect {
+                Effect::Call {
+                    target: Some(callee),
+                    registers,
+                    ..
+                } if *callee == target => Some(registers),
+                _ => None,
+            }
+        })
+    else {
+        return false;
+    };
+    summary["returns"].as_array().is_some_and(|returns| {
+        returns.iter().all(|result| {
+            result["origin"]["inputs"].as_array().is_some_and(|inputs| {
+                inputs.iter().all(|input| {
+                    let Some(field) = input.as_str().and_then(Field::from_name) else {
+                        return false;
+                    };
+                    let Some(index) = Field::ALL
+                        .iter()
+                        .take(8)
+                        .position(|&candidate| candidate == field)
+                    else {
+                        return true;
+                    };
+                    !matches!(
+                        mapped_in(registers[index], cursor, current),
+                        Address::Unknown
+                            | Address::Known {
+                                base: Base::Frame | Base::Stack(_),
+                                ..
+                            }
+                    )
+                })
+            })
+        })
     })
 }
 
@@ -543,6 +818,7 @@ fn terminal(reason: &str, search: &Search, site: Addr, detail: Value) -> Value {
         "reason": reason, "function": format!("{:08x}", search.cursor.function),
         "site": format!("{site:08x}"), "remaining_bytes": search.remaining,
         "call_depth": search.resumes.len(), "trace": search.trace, "detail": detail,
+        "completed_analyzed_calls": search.completed_calls,
     })
 }
 
@@ -667,8 +943,57 @@ fn unresolved_progress(rows: &[&Value]) -> BTreeMap<&'static str, Value> {
     .collect()
 }
 
+fn cutoff_evidence(frontier: &[Value], caller_return: bool, contradicted: bool) -> Value {
+    let overwritten = !frontier.is_empty()
+        && frontier
+            .iter()
+            .all(|terminal| terminal["reason"] == "overwritten");
+    let cutoff = !frontier.is_empty()
+        && frontier.iter().all(|terminal| {
+            terminal["reason"] == "overwritten"
+                || terminal["reason"] == "assumed-dead-after-unread-call"
+                || (caller_return && terminal["reason"] == "caller-return")
+        });
+    json!({"outcome": if overwritten { "overwritten-before-read" } else if cutoff && !contradicted { "candidate-under-assumption" } else { "unresolved" },
+        "cutoff_reached_on_every_path": cutoff, "contradicted_by_continued_evidence": contradicted})
+}
+
+fn hypothesis_counts(rows: &[&Value], scenario: Option<&str>) -> Value {
+    let result = |row: &Value| {
+        let evidence = &row["stack_evidence"];
+        scenario.map_or(&evidence["after_one_unread_call"], |name| {
+            &evidence["assumption_scenarios"][name]
+        })["outcome"]
+            .as_str()
+            .unwrap_or("outside-scope")
+            .to_owned()
+    };
+    let mut outcomes: BTreeMap<String, Vec<&Value>> = BTreeMap::new();
+    let mut calls: BTreeMap<&str, bool> = BTreeMap::new();
+    for &row in rows {
+        let outcome = result(row);
+        let eligible =
+            outcome == "candidate-under-assumption" || outcome == "overwritten-before-read";
+        calls
+            .entry(row["call"].as_str().unwrap())
+            .and_modify(|all| *all &= eligible)
+            .or_insert(eligible);
+        outcomes.entry(outcome).or_default().push(row);
+    }
+    json!({"call_sites_all_covered_queries_qualify": calls.values().filter(|&&all| all).count(),
+        "outcomes": outcomes.into_iter().map(|(name, rows)| {
+            let mut counts = query_counts(&rows);
+            counts["continued_evidence_outcomes"] = json!(["overwritten-before-read", "unread-at-caller-return", "unresolved", "definite-read-before-overwrite"].into_iter().map(|outcome| {
+                let matching: Vec<_> = rows.iter().copied().filter(|row| row["stack_evidence"]["outcome"] == outcome).collect();
+                (outcome, query_counts(&matching))
+            }).collect::<BTreeMap<_, _>>());
+            (name, counts)
+        }).collect::<BTreeMap<_, _>>()})
+}
+
 fn evidence_breakdown(rows: &[&Value]) -> Value {
     let mut outcomes: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    let mut scenarios = BTreeSet::new();
     let mut categories: BTreeMap<&str, Vec<(&Value, &Value)>> = BTreeMap::new();
     for &row in rows {
         let evidence = &row["stack_evidence"];
@@ -676,6 +1001,12 @@ fn evidence_breakdown(rows: &[&Value]) -> Value {
             .entry(evidence["outcome"].as_str().unwrap())
             .or_default()
             .push(row);
+        scenarios.extend(
+            evidence["assumption_scenarios"]
+                .as_object()
+                .into_iter()
+                .flat_map(|scenarios| scenarios.keys().map(String::as_str)),
+        );
         if evidence["outcome"] != "unresolved" {
             continue;
         }
@@ -712,7 +1043,8 @@ fn evidence_breakdown(rows: &[&Value]) -> Value {
                 (name, query_counts(&rows))
             }).collect();
         let mut counts = query_counts(&matching);
-        counts["terminal_paths"] = json!(entries.len());
+        counts["terminal_paths"] = json!(entries.iter().map(|(_, terminal)| terminal["equivalent_paths"].as_u64().unwrap_or(1)).sum::<u64>());
+        counts["terminal_states"] = json!(entries.len());
         counts["blocking_instructions"] = json!(instructions.len());
         counts["sole_frontier_queries"] = json!(sole);
         counts["stack_positions"] = json!(positions);
@@ -721,6 +1053,8 @@ fn evidence_breakdown(rows: &[&Value]) -> Value {
         (category, counts)
     }).collect();
     json!({"outcomes": outcomes.into_iter().map(|(name, rows)| (name, query_counts(&rows))).collect::<BTreeMap<_, _>>(),
+        "after_one_unread_call": hypothesis_counts(rows, None),
+        "assumption_scenarios": scenarios.into_iter().map(|name| (name, hypothesis_counts(rows, Some(name)))).collect::<BTreeMap<_, _>>(),
         "unresolved_progress": unresolved_progress(rows),
         "frontiers": frontiers})
 }
@@ -731,6 +1065,7 @@ fn investigate(
     range: Range,
     image_guard: Option<(u32, u32)>,
     private_evidence: bool,
+    stop_after_unread_calls: usize,
 ) -> Vec<Value> {
     if image_guard.is_some_and(|image| in_image(range, image)) {
         return vec![json!({"reason": "image-guard-impossible"})];
@@ -751,6 +1086,7 @@ fn investigate(
         trace: Vec::new(),
         visited: BTreeSet::new(),
         calls: 0,
+        completed_calls: 0,
     }];
     let mut terminals = Vec::new();
     let mut steps = 0;
@@ -775,6 +1111,7 @@ fn investigate(
             cursor.registers,
             search.remaining.iter().copied().collect(),
             search.resumes.len(),
+            search.completed_calls.min(stop_after_unread_calls),
         );
         if !search.visited.insert(key) {
             terminals.push(terminal("loop", &search, 0, Value::Null));
@@ -820,6 +1157,17 @@ fn investigate(
         match &event.effect {
             Effect::Read(read) => {
                 let raw = *read;
+                if private_evidence && !cursor.original {
+                    if let Some(initialization) =
+                        current.initialized_reads.get(&(cursor.block, cursor.index))
+                    {
+                        search.trace.push(json!({"proof": "callee-read-initialized", "function": format!("{:08x}", cursor.function),
+                            "site": format!("{:08x}", event.site), "read": describe(raw), "entry_return_address_written_by_call": initialization.entry_return_address,
+                            "writes": initialization.writes.iter().map(|site| format!("{site:08x}")).collect::<Vec<_>>()}));
+                        pending.push(search);
+                        continue;
+                    }
+                }
                 let read = Range::new(mapped_in(read.address, cursor, current), read.size);
                 if image_guard.is_some_and(|image| in_image(read, image)) {
                     search.trace.push(json!({"guard": "omitted-slot-outside-image", "function": format!("{:08x}", cursor.function),
@@ -869,9 +1217,23 @@ fn investigate(
                         |reloads| reloads.iter().any(|reload| reload["field"] == "ESP"),
                     );
                     let walk_limited = event.address_origin["walk_limited"] != false;
-                    let register_reloaded = event.address_origin["reloads"]
+                    let resolved_reloads: Vec<_> = event.address_origin["reloads"]
                         .as_array()
-                        .is_none_or(|reloads| !reloads.is_empty());
+                        .into_iter()
+                        .flatten()
+                        .filter(|reload| {
+                            private_evidence && nonstack_reload(reload, cursor, current, bodies)
+                        })
+                        .cloned()
+                        .collect();
+                    let register_reloaded =
+                        event.address_origin["reloads"]
+                            .as_array()
+                            .is_none_or(|reloads| {
+                                reloads
+                                    .iter()
+                                    .any(|reload| !resolved_reloads.contains(reload))
+                            });
                     let unknown_binding = !cursor.original
                         && event.address_origin["inputs"]
                             .as_array()
@@ -920,7 +1282,7 @@ fn investigate(
                         && !unknown_origin
                         && stack_position(mapped_in(event.esp, cursor, current)) == Some(true)
                     {
-                        search.trace.push(json!({"assumption": "unrelated-pointer-does-not-read-returned-private-frame-below-esp", "function": format!("{:08x}", cursor.function), "site": format!("{:08x}", event.site), "read": describe(read)}));
+                        search.trace.push(json!({"assumption": "unrelated-pointer-does-not-read-returned-private-frame-below-esp", "function": format!("{:08x}", cursor.function), "site": format!("{:08x}", event.site), "read": describe(read), "resolved_return_origins": resolved_reloads}));
                         pending.push(search);
                         continue;
                     }
@@ -964,6 +1326,7 @@ fn investigate(
                         json!({"read": describe(read), "raw_read": describe(raw),
                                "blocker_class": alias_class(raw, read, range, cursor, &event.address_origin),
                                "address_origin": event.address_origin,
+                               "resolved_return_origins": resolved_reloads,
                                "address_work": {"steps": current.address_work.0, "limit_exceeded": current.address_work.1},
                                "whole_slot_below_esp": stack_position(mapped_in(event.esp, cursor, current)),
                                "touched_bytes": touched, "below_esp": below_esp,
@@ -1066,12 +1429,20 @@ fn investigate(
                     continue;
                 }
                 if let Some(resume) = search.resumes.pop() {
+                    search.completed_calls += 1;
                     if private_evidence {
                         let call = bodies[&resume.function].blocks[resume.block]
                             .events
                             .get(resume.index - 1)
                             .map(|event| format!("{:08x}", event.site));
                         search.trace.push(json!({"completed_call": call, "caller": format!("{:08x}", resume.function), "callee": format!("{:08x}", cursor.function), "return": format!("{:08x}", event.site), "remaining_bytes": search.remaining}));
+                        if stop_after_unread_calls != 0
+                            && search.completed_calls >= stop_after_unread_calls
+                        {
+                            terminals.push(terminal("assumed-dead-after-unread-call", &search, event.site,
+                                json!({"assumption": "dead-after-additional-unread-calls", "minimum_completed_calls": stop_after_unread_calls, "proved_overwritten": false})));
+                            continue;
+                        }
                     }
                     search.cursor = resume;
                 } else {
@@ -1087,7 +1458,22 @@ fn investigate(
         }
         pending.push(search);
     }
-    terminals
+    if !private_evidence {
+        return terminals;
+    }
+    let mut grouped = BTreeMap::<String, Value>::new();
+    for mut terminal in terminals {
+        let key = json!({"reason": terminal["reason"], "function": terminal["function"], "site": terminal["site"],
+            "remaining_bytes": terminal["remaining_bytes"], "call_depth": terminal["call_depth"],
+            "detail": terminal["detail"], "completed_analyzed_calls": terminal["completed_analyzed_calls"]}).to_string();
+        if let Some(prior) = grouped.get_mut(&key) {
+            prior["equivalent_paths"] = json!(prior["equivalent_paths"].as_u64().unwrap() + 1);
+        } else {
+            terminal["equivalent_paths"] = json!(1);
+            grouped.insert(key, terminal);
+        }
+    }
+    grouped.into_values().collect()
 }
 
 pub(super) fn capture(s: &mut Ssa, facts: &dyn CallFacts) -> Result<Body> {
@@ -1270,7 +1656,10 @@ pub(super) fn write(
         .count();
     let bodies: BTreeMap<_, _> = refreshed
         .into_iter()
-        .map(|(addr, body, _)| (addr, body))
+        .map(|(addr, mut body, _)| {
+            body.initialized_reads = initialized_reads(&body);
+            (addr, body)
+        })
         .collect();
     let mut rows = Vec::new();
     let mut counts = BTreeMap::<String, usize>::new();
@@ -1334,7 +1723,7 @@ pub(super) fn write(
                             json!({"reason": "returned-frame-pointer", "function": format!("{target:08x}"), "site": format!("{:08x}", store.site)}),
                         ]
                     } else {
-                        investigate(&bodies, cursor, range, None, false)
+                        investigate(&bodies, cursor, range, None, false, 0)
                     };
                     for diagnostic in &mut terminals {
                         let function = diagnostic["function"].as_str().and_then(rk_core::parse_hex);
@@ -1364,7 +1753,7 @@ pub(super) fn write(
                             terminal["reason"] == "read-may-alias"
                                 && terminal["detail"]["read"]["base"] == "Absolute"
                         }) {
-                        let terminals = investigate(&bodies, cursor, range, Some(image), false);
+                        let terminals = investigate(&bodies, cursor, range, Some(image), false, 0);
                         let candidate = terminals
                             .iter()
                             .all(|terminal| terminal["reason"] == "overwritten");
@@ -1386,7 +1775,7 @@ pub(super) fn write(
                     } else if store.returned_pointer {
                         json!({"outcome": "unresolved", "terminals": [{"reason": "returned-frame-pointer"}]})
                     } else {
-                        let mut frontier = investigate(&bodies, cursor, range, None, true);
+                        let mut frontier = investigate(&bodies, cursor, range, None, true, 0);
                         for terminal in &mut frontier {
                             let function =
                                 terminal["function"].as_str().and_then(rk_core::parse_hex);
@@ -1489,6 +1878,54 @@ pub(super) fn write(
                         json!({"outcome": outcome, "unread_through_analyzed_call": unread_through_call,
                             "partial_overwrite": {"some_paths": some_partial, "every_path_at_least_one_byte": all_touched, "minimum_bytes_every_path": min_all_paths}, "terminals": frontier})
                     };
+                    let eligible = store.return_position == "below-esp"
+                        && store.private_frame
+                        && !store.returned_pointer;
+                    let contradicted = evidence["outcome"] == "definite-read-before-overwrite";
+                    let mut scenarios = BTreeMap::new();
+                    for (name, calls) in [
+                        ("after-one-unread-call", 1),
+                        ("after-two-unread-calls", 2),
+                        ("after-three-unread-calls", 3),
+                    ] {
+                        let mut result = if eligible {
+                            let frontier = investigate(&bodies, cursor, range, None, true, calls);
+                            let mut result = cutoff_evidence(&frontier, false, contradicted);
+                            result["terminals"] = json!(frontier);
+                            result
+                        } else {
+                            json!({"outcome": "outside-scope"})
+                        };
+                        if calls == 1 {
+                            let combined = if let Some(frontier) = result["terminals"].as_array() {
+                                cutoff_evidence(frontier, true, contradicted)
+                            } else {
+                                json!({"outcome": "outside-scope"})
+                            };
+                            scenarios.insert("after-one-unread-call-or-caller-return", combined);
+                            evidence["after_one_unread_call"] = result.clone();
+                            result.as_object_mut().unwrap().remove("terminals");
+                            result["witness_source"] =
+                                json!("stack_evidence.after_one_unread_call.terminals");
+                        }
+                        scenarios.insert(name, result);
+                    }
+                    let mut caller_return = if eligible {
+                        cutoff_evidence(
+                            evidence["terminals"].as_array().unwrap(),
+                            true,
+                            contradicted,
+                        )
+                    } else {
+                        json!({"outcome": "outside-scope"})
+                    };
+                    caller_return["witness_source"] = json!("stack_evidence.terminals");
+                    scenarios.insert("at-caller-return", caller_return);
+                    scenarios
+                        .get_mut("after-one-unread-call-or-caller-return")
+                        .unwrap()["witness_source"] =
+                        json!("stack_evidence.after_one_unread_call.terminals");
+                    evidence["assumption_scenarios"] = json!(scenarios);
                     if evidence["outcome"] == "unresolved" {
                         if let Some(terminals) = evidence["terminals"].as_array_mut() {
                             for terminal in terminals {
@@ -1685,6 +2122,65 @@ pub(super) fn write(
         .into_iter()
         .map(|(callee, rows)| (callee, evidence_breakdown(&rows)))
         .collect();
+    let mut used_origins = BTreeSet::new();
+    for row in &rows {
+        for terminal in row["stack_evidence"]["terminals"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .chain(
+                row["stack_evidence"]["after_one_unread_call"]["terminals"]
+                    .as_array()
+                    .into_iter()
+                    .flatten(),
+            )
+            .chain(
+                row["stack_evidence"]["assumption_scenarios"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|scenarios| scenarios.values())
+                    .flat_map(|scenario| scenario["terminals"].as_array().into_iter().flatten()),
+            )
+        {
+            let reloads = terminal["detail"]["address_origin"]["reloads"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .chain(
+                    terminal["trace"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|step| {
+                            step["resolved_return_origins"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                        }),
+                );
+            for reload in reloads {
+                if let Some(key) = reload["target"]
+                    .as_str()
+                    .and_then(rk_core::parse_hex)
+                    .zip(reload["field"].as_str().and_then(Field::from_name))
+                {
+                    used_origins.insert(key);
+                }
+            }
+        }
+    }
+    let mut origins: BTreeMap<String, BTreeMap<&str, &Value>> = BTreeMap::new();
+    for (target, field) in used_origins {
+        if let Some(summary) = bodies
+            .get(&target)
+            .and_then(|body| body.return_origins.get(&field))
+        {
+            origins
+                .entry(format!("{target:08x}"))
+                .or_default()
+                .insert(field.name(), summary);
+        }
+    }
     let report = json!({"format": "recomp-stack-return-report-v1", "read_only": true,
         "executable_sha256": ctx.program.sha256, "image_base": format!("{:08x}", ctx.program.image.base), "image_size": ctx.program.image.size,
         "scope": "Normal continuations of ordinary planned return publications; pre-promotion SSA uses per-function production assumptions and retains every original store. Production forwarding removes reads proven to consume prior writes. Stack evidence uses private-frame exposure and general address relations. Candidates require runtime observer guards and return/entry contracts before optimization. Indirect and external callers prevent global elimination from these counts alone.",
@@ -1699,12 +2195,25 @@ pub(super) fn write(
             "cleanup": recovered_cleanup.iter().map(|(addr, cleanup)| (format!("{addr:08x}"), *cleanup)).collect::<BTreeMap<_, _>>(),
             "scope": "Report-only fallback when production call cleanup is unavailable. Each callee has a proven return slot, no opaque/external exits, and a single exact entry-ESP-relative restored ESP on every return. Existing per-site cleanup takes precedence; native replacements are excluded."},
         "stack_evidence_counts": evidence_outcomes,
+        "report_local_initialization": {"functions": bodies.values().filter(|body| !body.initialized_reads.is_empty()).count(),
+            "proved_reads": bodies.values().map(|body| body.initialized_reads.len()).sum::<usize>(),
+            "scope": "Read-specific byte coverage before mapping callee addresses. Every predecessor path must write every read byte in the same invocation. Calls, opaque effects, entry without full coverage, cycles and budgets block a proof. A proved return-slot contract supplies the four entry return-address bytes written by CALL. Applied only inside subsequent analyzed callees, never to the original caller prefix. Stored values need not be recoverable; x87 stores count. Writes and local read coordinates remain correlated even when their mapped bounds overlap old slots. Skipping an initialized read does not prove the entire old slot overwritten. Trace witnesses list covering writes."},
+        "report_return_origins": {"functions": origins,
+            "scope": "Report-only return-register provenance under private-stack and stack-pointer-bases. Every recorded return must avoid direct stack-address construction, unresolved register reloads and local/unresolved pointer loads. Incoming argument values and ordinary memory loads retain private-stack unrelated-pointer semantics. Direct incoming register dependencies are checked against the producing call's bindings; known stack or unknown bindings block exclusion. This is pointer-origin evidence under the existing assumptions, not a numeric-address disjointness proof. Native/unavailable bodies and unresolved origins stay conservative. Witnesses cover summaries referenced by retained query frontiers and representative traces."},
+        "after_one_unread_call_hypothesis": {"name": "dead-after-one-additional-unread-call", "enabled_for_emission": false,
+            "scope": "DIVERGENCE(original): Assume an initially unexposed, unreturned slot wholly below restored ESP dead once one subsequent analyzed call returns without reading any surviving old bytes. Callee reads proved initialized by same-invocation writes cannot consume old bytes. Every path must fully overwrite the slot or complete that additional call unread; syntactic stack writes, a caller return alone, opaque calls and analysis cutoffs do not qualify. Evaluated in a separate search stopping at the first qualifying return; ordinary stack evidence continues afterward. Any definite read found by continued evidence rejects the candidate. Candidate-under-assumption is not proof of overwrite or permanent death. Per-query witnesses and global/per-callee counts live under after_one_unread_call."},
+        "stack_lifetime_assumption_scenarios": {"enabled_for_emission": false,
+            "scenarios": {"after-one-unread-call": {"completed_calls": 1}, "after-two-unread-calls": {"completed_calls": 2},
+                "after-three-unread-calls": {"completed_calls": 3}, "at-caller-return": {"caller_returns": 1},
+                "after-one-unread-call-or-caller-return": {"completed_calls": 1, "caller_returns": 1, "combine": "either cutoff on each path"}},
+            "scope": "DIVERGENCE(original): Independent, overlapping hypothetical death cutoffs; a query or call site can qualify under several scenarios. One/two/three count completed sequential analyzed calls after the origin returns, not nested depth or entered calls. Every path must fully overwrite surviving bytes or reach that scenario's cutoff unread. The combined scenario permits different cutoffs on different paths. Caller-return scenarios reuse the continued evidence search; one-call/combined share witnesses; two/three-call scenarios search independently with the same nesting and step limits. Continued evidence remains separate and any definite read rejects candidates in every scenario. Counts distinguish proof from assumption and show continued outcomes, including additional unresolved candidates. call_sites_all_covered_queries_qualify requires every queried return/slot at that site to be proven overwritten or qualify under that assumption; ordinary call_sites counts need only one matching query. No claim about unqueried returns, indirect callers or permanent death is added."},
         "partial_overwrite_evidence": {"counts": partial_summary, "scope": "Some paths proves at least one actual slot byte overwritten while bytes might survive; every path requires at least one actual slot byte overwritten on all paths, allowing complete overwrites. Aligned slots use the minimum overlap over every possible slot position. Queries with a definite read before complete overwrite are excluded. Possible reads and later effects remain unresolved. Counts overlap other categories."},
-        "unread_through_analyzed_call": {"queries": through_call.len(), "call_sites": through_call_sites.len(), "call_slots": through_call_slots.len(), "later_outcomes": through_call_outcomes, "scope": "Every explored path overwrites all tracked bytes or completes a subsequent analyzed call with bytes surviving and no stack read; at least one path completes such a call. Later reads or unresolved behavior remain possible. Query counts overlap the main outcome categories."},
+        "unread_through_analyzed_call": {"queries": through_call.len(), "call_sites": through_call_sites.len(), "call_slots": through_call_slots.len(), "later_outcomes": through_call_outcomes, "scope": "Every explored path overwrites all tracked bytes or completes a subsequent analyzed call with bytes surviving and no read of surviving old values; at least one path completes such a call. Later reads or unresolved behavior remain possible. Query counts overlap the main outcome categories."},
         "stack_evidence_unresolved_frontiers": evidence_frontiers,
         "stack_evidence_breakdown": breakdown,
         "stack_evidence_by_callee": by_callee,
-        "stack_evidence_breakdown_scope": "Frontier categories refine terminal reasons without changing the search or outcomes. Query/call counts overlap across categories and stack positions; call-site counts mean at least one query, not every return/slot. Sole-frontier queries may also overwrite or return unread. Examples use distinct blocking instructions. Missing stack positions are unknown. Unresolved progress signals overlap: completing an analyzed call unread or overwriting some actual bytes on every path is bounded evidence only; surviving bytes and later reads remain unresolved. No-additional-progress-evidence is absence of those signals, not proof of a live slot. Register reloads, lost frame relationships, loops, opaque operations and search limits alone provide no additional evidence of death. A bounded slot/read overlap is a possible read, not a definite read. Syntactic stack writes in a depth-limited target are not proof of overwrite. All findings retain the report assumptions; no new death assumption or emission change.",
+        "stack_evidence_breakdown_scope": "Frontier categories refine terminal reasons without changing the search or outcomes. Query/call counts overlap across categories and stack positions; call-site counts mean at least one query, not every return/slot. Sole-frontier queries may also overwrite or return unread. Examples use distinct blocking instructions. Missing stack positions are unknown. Unresolved progress signals overlap: completing an analyzed call unread or overwriting some actual bytes on every path is bounded evidence only; surviving bytes and later reads remain unresolved. No-additional-progress-evidence is absence of those signals, not proof of a live slot. Register reloads, lost frame relationships, loops, opaque operations and search limits alone provide no additional evidence of death. A bounded slot/read overlap is a possible read, not a definite read. Syntactic stack writes in a depth-limited target are not proof of overwrite. Ordinary evidence retains the report assumptions. The separate after_one_unread_call result explicitly evaluates an additional death assumption; no emission changes.",
+        "stack_evidence_path_counting": "Equivalent stack-evidence endpoints are grouped by reason, function, site, call depth, remaining bytes, detail and the completed analyzed-call count. Each retains one representative trace and an equivalent_paths count. Category terminal_paths sums those counts; terminal_states counts retained representatives. Query outcomes and all-path progress use all endpoint groups. Ordinary overwrite analysis is not grouped.",
         "stack_evidence_frontier_counting": "Each unresolved query is counted once per terminal reason; queries can have multiple reasons; overwritten and caller-return paths are not counted as unresolved frontiers.",
         "stack_evidence_scope": "Only publications proved wholly below restored ESP. Production private-stack excludes unrelated pointer reads of unexposed returned slots while below current ESP. Definite reads take precedence over unresolved paths. Unread-at-caller-return requires all paths to overwrite or reach the first caller return unread; it does not prove the bytes dead afterward. No emission changes.",
         "assumption_only_upper_bounds": assumption_bounds,

@@ -88,6 +88,14 @@ initialized reads. For return publications wholly below restored ESP, the report
 tracks remaining bytes across each direct caller and one nested call. Under
 `private-stack`, it discounts fixed-address and incoming-pointer reads of an
 unexposed returned slot, and other unrelated pointer reads while it is below ESP.
+Report-only return-register provenance preserves those exclusions across direct
+calls when every return has an independent origin; unresolved origins and known
+stack-derived input bindings remain blockers. Before mapping a subsequent callee's
+addresses, byte coverage proves individual local reads initialized on every path,
+including by x87 stores whose values cannot be forwarded. Calls, opaque effects,
+cycles and budgets block this proof; a proved return-slot contract supplies the
+return-address bytes written by CALL. Initialized reads cannot consume old slot
+values; this does not prove the whole old slot overwritten.
 It recovers missing call cleanup for the report from callees with proved return
 slots and a consistent exact restored ESP, and records the gap below restored ESP.
 It reports definite reads before overwrite, complete overwrites,
@@ -99,15 +107,26 @@ expanded into ranges when mapping callees), lost callee frames,
 pointer origins and search boundaries. Each category counts queries, call sites,
 distinct blocking instructions and sole-frontier queries, with stack positions,
 examples and overlapping unread-through-call/partial-overwrite progress counts.
+Equivalent evidence endpoints retain a representative trace and path count.
 Call-site counts mean at least one query, not every return/slot at that call.
 Lost tracking alone adds no evidence of death; completed unread calls and partial
 overwrites support only the explored prefix and leave later reads unresolved.
 A definite read or partial overwrite must cover an actual surviving slot
 byte at every possible aligned position; definite reads exclude partial candidates. The call measure
 requires every explored path to overwrite the bytes or complete such a call unread;
-it does not rule out a later read. A caller return is not proof the bytes are dead; assuming
-below-ESP bytes are dead can change behavior for dangling or uninitialized reads
-(`DIVERGENCE(original):`). Indirect callers, unavailable code, unknown addresses,
+it does not rule out a later read. Separately, `after_one_unread_call` evaluates
+`DIVERGENCE(original):` assume an unexposed returned slot below restored ESP dead
+after one additional analyzed call returns without consuming surviving old bytes.
+Every path must overwrite the slot or complete such a call; caller return alone
+does not qualify. Continued evidence still searches for later reads, and any
+definite read rejects the assumption candidate. The hypothesis has separate
+counts and witnesses and never changes ordinary evidence or emission. A caller
+return is not proof the bytes are dead. Overlapping `assumption_scenarios` also
+measure two or three completed unread calls, caller return, and the combination
+of one unread call or caller return on each path. Summaries show continued
+outcomes and sites where every covered return/slot qualifies, so a site can
+belong to several categories without treating one matching query as site-wide
+coverage. Indirect callers, unavailable code, unknown addresses,
 loops and search limits restrict coverage. `--only`/`--selection` filters callees
 while retaining their callers. The report never changes generated code.
 
