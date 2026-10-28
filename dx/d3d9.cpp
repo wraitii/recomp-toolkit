@@ -293,6 +293,25 @@ static void d3d9_bind_slot(ComObj *dev, size_t slot, uint32_t id) {
         d3d9_ref_del(current);
     current = id;
 }
+// Retail D3D9 does not refuse draws from a locked buffer; the device reads
+// whatever the guest has written so far, as with a managed buffer's dirty upload.
+static bool d3d9_sync_locked_buffers(X86 *c, ComObj *dev) {
+    for (size_t slot = 16; slot <= 32; ++slot) {
+        ComObj *o = com_get(dev->d3d9_device->live_bindings[slot]);
+        if (!o || !o->d3d9_resource)
+            continue;
+        auto it = o->d3d9_resource->staging.find(0);
+        if (it == o->d3d9_resource->staging.end() || !it->second.active || !it->second.writable)
+            continue;
+        recomp::d3d::Status status = o->d3d9_resource->sync_locked(
+            rust::Slice<const uint8_t>(gm_ptr(it->second.addr), it->second.size));
+        if (status.code != recomp::d3d::StatusCode::Ok) {
+            com_ret(c, bridge_result(c, status));
+            return false;
+        }
+    }
+    return true;
+}
 static void d3d9_refresh_block_bindings(ComObj *dev, uint32_t handle) {
     if (!dev || !dev->d3d9_device)
         return;
@@ -4827,6 +4846,8 @@ void Dev_DrawPrimitive(X86 *c) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
+    if (!d3d9_sync_locked_buffers(c, dev))
+        return;
     recomp::d3d::Status status = dev->d3d9_device->draw_primitive(arg(c, 1), arg(c, 2), prim_count);
     if (status.code == recomp::d3d::StatusCode::Ok)
         d3d9_refresh_bindings(dev);
@@ -4848,6 +4869,8 @@ void Dev_DrawIndexedPrimitive(X86 *c) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
+    if (!d3d9_sync_locked_buffers(c, dev))
+        return;
     recomp::d3d::Status status = dev->d3d9_device->draw_indexed_primitive(
         arg(c, 1), (int32_t)arg(c, 2), arg(c, 3), arg(c, 4), arg(c, 5), prim_count);
     com_ret(c, bridge_result(c, status));

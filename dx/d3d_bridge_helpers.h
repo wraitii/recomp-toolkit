@@ -504,6 +504,10 @@ struct D3d9HostResource {
         return recomp::d3d::d3d9_buffer_unlock(*value, bytes);
     }
 
+    recomp::d3d::Status sync_locked(rust::Slice<const uint8_t> bytes) {
+        return recomp::d3d::d3d9_buffer_sync_locked(*value, bytes);
+    }
+
     recomp::d3d::ValueResult resource_type() const {
         return recomp::d3d::d3d9_resource_type(*value);
     }

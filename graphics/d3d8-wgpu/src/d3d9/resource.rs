@@ -1284,6 +1284,10 @@ pub fn upload_buffer(resource: &mut D3d9Resource) -> Result<(), RenderError> {
     if b.lock_count.load(Ordering::Acquire) != 0 {
         return Err(invalid("PreLoad", "buffer is locked"));
     }
+    upload_dirty_buffer(b)
+}
+
+pub fn upload_dirty_buffer(b: &mut BufferState) -> Result<(), RenderError> {
     if b.dirty_hi <= b.dirty_lo {
         return Ok(());
     }

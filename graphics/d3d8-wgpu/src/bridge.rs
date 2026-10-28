@@ -936,6 +936,7 @@ pub mod ffi {
         ) -> D3d9BufferLockResult;
         fn d3d9_buffer_bytes(resource: &D3d9Resource) -> &[u8];
         fn d3d9_buffer_unlock(resource: &mut D3d9Resource, bytes: &[u8]) -> D3d9BufferUnlockResult;
+        fn d3d9_buffer_sync_locked(resource: &mut D3d9Resource, bytes: &[u8]) -> Status;
         fn d3d9_create_texture(
             device: &D3d9Device,
             resource: &mut D3d9Resource,
@@ -1797,7 +1798,7 @@ use crate::d3d9::{
     d3d9_adapter_identifier, d3d9_add_dirty_box, d3d9_add_dirty_rect, d3d9_apply_state_block,
     d3d9_autogen_capable, d3d9_available_texture_mem, d3d9_backbuffer_descriptor,
     d3d9_begin_state_block, d3d9_buffer_bytes, d3d9_buffer_descriptor, d3d9_buffer_lock_commit,
-    d3d9_buffer_lock_prepare, d3d9_buffer_unlock, d3d9_capture_state_block,
+    d3d9_buffer_lock_prepare, d3d9_buffer_sync_locked, d3d9_buffer_unlock, d3d9_capture_state_block,
     d3d9_check_depth_stencil_match, d3d9_check_device_format, d3d9_check_device_format_conversion,
     d3d9_check_device_multisample_type, d3d9_check_device_type, d3d9_commit_present,
     d3d9_commit_resource_reset, d3d9_create_buffer, d3d9_create_device,

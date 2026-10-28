@@ -629,6 +629,72 @@ pub fn d3d9_buffer_bytes(resource: &D3d9Resource) -> &[u8] {
     }
 }
 
+fn merge_staged_writes(b: &mut resource::BufferState, bytes: &[u8], default_pool: bool) {
+    let (lo, hi) = b
+        .writable
+        .iter()
+        .fold((u32::MAX, 0u32), |(lo, hi), &(a, c)| (lo.min(a), hi.max(c)));
+    let declared = (lo, hi);
+    let mut lo = lo as usize;
+    let mut hi = hi as usize;
+    if b.bytes[..lo] != bytes[..lo] {
+        lo = b.bytes[..lo]
+            .iter()
+            .zip(&bytes[..lo])
+            .position(|(old, new)| old != new)
+            .unwrap();
+    }
+    if b.bytes[hi..] != bytes[hi..] {
+        hi += b.bytes[hi..]
+            .iter()
+            .zip(&bytes[hi..])
+            .rposition(|(old, new)| old != new)
+            .unwrap()
+            + 1;
+    }
+    b.bytes[lo..hi].copy_from_slice(&bytes[lo..hi]);
+    let (lo, hi) = (lo as u32, hi as u32);
+    if (lo, hi) != declared {
+        static REPORTED: AtomicBool = AtomicBool::new(false);
+        if !REPORTED.swap(true, Ordering::Relaxed) || trace_enabled() {
+            eprintln!(
+                "[d3d9] buffer writes extend beyond lock range: kind={:?} size={} declared={}-{} preserved={lo}-{hi}; preserving mapped writes",
+                b.kind, b.size, declared.0, declared.1
+            );
+        }
+    }
+    if hi > lo {
+        if default_pool || b.writable_dirty {
+            if b.dirty_hi <= b.dirty_lo {
+                b.dirty_lo = lo;
+                b.dirty_hi = hi;
+            } else {
+                b.dirty_lo = b.dirty_lo.min(lo);
+                b.dirty_hi = b.dirty_hi.max(hi);
+            }
+        }
+        b.generation = b.generation.wrapping_add(1);
+    }
+}
+
+pub fn d3d9_buffer_sync_locked(resource: &mut D3d9Resource, bytes: &[u8]) -> Status {
+    let Some(resource::ResourceState::Buffer(b)) = resource.state.as_mut() else {
+        return status(StatusCode::InvalidArgument, "D3D9 buffer is not initialized");
+    };
+    if b.lock_count.load(Ordering::Acquire) == 0 || b.writable.is_empty() {
+        return status(StatusCode::Ok, "");
+    }
+    if bytes.len() != b.bytes.len() {
+        return status(
+            StatusCode::InvalidArgument,
+            "D3D9 buffer staging size does not match the buffer",
+        );
+    }
+    let default_pool = b.pool == resource::D3DPOOL_DEFAULT;
+    merge_staged_writes(b, bytes, default_pool);
+    bridge_ok(resource::upload_dirty_buffer(b))
+}
+
 pub fn d3d9_buffer_unlock(resource: &mut D3d9Resource, bytes: &[u8]) -> D3d9BufferUnlockResult {
     let default_pool = matches!(
         resource.state.as_ref(),
@@ -661,52 +727,8 @@ pub fn d3d9_buffer_unlock(resource: &mut D3d9Resource, bytes: &[u8]) -> D3d9Buff
     b.lock_count.fetch_sub(1, Ordering::AcqRel);
     let closed = b.lock_count.load(Ordering::Acquire) == 0;
     if closed && !b.writable.is_empty() {
-        let (lo, hi) = b
-            .writable
-            .iter()
-            .fold((u32::MAX, 0u32), |(lo, hi), &(a, c)| (lo.min(a), hi.max(c)));
-        let declared = (lo, hi);
-        let mut lo = lo as usize;
-        let mut hi = hi as usize;
-        if b.bytes[..lo] != bytes[..lo] {
-            lo = b.bytes[..lo]
-                .iter()
-                .zip(&bytes[..lo])
-                .position(|(old, new)| old != new)
-                .unwrap();
-        }
-        if b.bytes[hi..] != bytes[hi..] {
-            hi += b.bytes[hi..]
-                .iter()
-                .zip(&bytes[hi..])
-                .rposition(|(old, new)| old != new)
-                .unwrap()
-                + 1;
-        }
-        b.bytes[lo..hi].copy_from_slice(&bytes[lo..hi]);
-        let (lo, hi) = (lo as u32, hi as u32);
-        if (lo, hi) != declared {
-            static REPORTED: AtomicBool = AtomicBool::new(false);
-            if !REPORTED.swap(true, Ordering::Relaxed) || trace_enabled() {
-                eprintln!(
-                    "[d3d9] buffer writes extend beyond lock range: kind={:?} size={} declared={}-{} preserved={lo}-{hi}; preserving mapped writes",
-                    b.kind, b.size, declared.0, declared.1
-                );
-            }
-        }
+        merge_staged_writes(b, bytes, default_pool);
         b.writable.clear();
-        if hi > lo {
-            if default_pool || b.writable_dirty {
-                if b.dirty_hi <= b.dirty_lo {
-                    b.dirty_lo = lo;
-                    b.dirty_hi = hi;
-                } else {
-                    b.dirty_lo = b.dirty_lo.min(lo);
-                    b.dirty_hi = b.dirty_hi.max(hi);
-                }
-            }
-            b.generation = b.generation.wrapping_add(1);
-        }
         b.writable_dirty = false;
     }
     if closed {
@@ -4680,7 +4702,6 @@ fn collect_streams(
         if source.buffer == 0 {
             continue;
         }
-        require_unlocked(device, source.buffer, "Draw vertex buffer")?;
         let Some(GpuRegistryEntry::Buffer { uploaded, .. }) = device.registry.get(&source.buffer)
         else {
             return Err(unsupported(
@@ -4700,7 +4721,6 @@ fn collect_streams(
 }
 
 fn index_buffer(device: &D3d9Device, id: u32) -> Result<(Arc<Vec<u8>>, u32), RenderError> {
-    require_unlocked(device, id, "Draw index buffer")?;
     match device.registry.get(&id) {
         Some(GpuRegistryEntry::Buffer { uploaded, format }) => {
             Ok((Arc::clone(&uploaded.lock().unwrap()), *format))
