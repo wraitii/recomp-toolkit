@@ -209,10 +209,14 @@ uint32_t bridge_result(X86 *c, const recomp::d3d::Status &status) {
     if (d3d_bridge_ok(status))
         return D8_OK;
     std::string message(status.message.data(), status.message.size());
-    fprintf(stderr, "d3d8: %s\n", message.c_str());
+    const bool fatal = status.code == recomp::d3d::StatusCode::Unsupported ||
+                       status.code == recomp::d3d::StatusCode::NotImplemented;
+    if (fatal)
+        fprintf(stderr, "d3d8: aborting on unsupported renderer result: %s\n", message.c_str());
+    else
+        fprintf(stderr, "d3d8: %s\n", message.c_str());
     fflush(stderr);
-    if (status.code == recomp::d3d::StatusCode::Unsupported ||
-        status.code == recomp::d3d::StatusCode::NotImplemented)
+    if (fatal)
         imports_unsupported(c);
     if (status.code == recomp::d3d::StatusCode::InvalidArgument)
         return D8_ERR_INVALIDCALL;
@@ -3348,14 +3352,12 @@ void d3d8_register() {
         return;
     done = true;
 
-    com_define(IF_D3D8, "d3d8.dll", "IDirect3D8", g_d3d8, std::size(g_d3d8));
-    com_define(IF_D3D8DEVICE, "d3d8.dll", "IDirect3DDevice8", g_device8, std::size(g_device8));
-    com_define(IF_D3D8SURFACE8, "d3d8.dll", "IDirect3DSurface8", g_surface8, std::size(g_surface8));
-    com_define(IF_D3D8TEXTURE8, "d3d8.dll", "IDirect3DTexture8", g_texture8, std::size(g_texture8));
-    com_define(IF_D3D8VERTEXBUFFER8, "d3d8.dll", "IDirect3DVertexBuffer8", g_vertexbuffer8,
-               std::size(g_vertexbuffer8));
-    com_define(IF_D3D8INDEXBUFFER8, "d3d8.dll", "IDirect3DIndexBuffer8", g_indexbuffer8,
-               std::size(g_indexbuffer8));
+    com_define_checked<IF_D3D8, g_d3d8>("d3d8.dll", "IDirect3D8");
+    com_define_checked<IF_D3D8DEVICE, g_device8>("d3d8.dll", "IDirect3DDevice8");
+    com_define_checked<IF_D3D8SURFACE8, g_surface8>("d3d8.dll", "IDirect3DSurface8");
+    com_define_checked<IF_D3D8TEXTURE8, g_texture8>("d3d8.dll", "IDirect3DTexture8");
+    com_define_checked<IF_D3D8VERTEXBUFFER8, g_vertexbuffer8>("d3d8.dll", "IDirect3DVertexBuffer8");
+    com_define_checked<IF_D3D8INDEXBUFFER8, g_indexbuffer8>("d3d8.dll", "IDirect3DIndexBuffer8");
     com_bind(IF_D3D8, K_D3D8);
     com_bind(IF_D3D8DEVICE, K_D3D8DEVICE);
     com_bind(IF_D3D8SURFACE8, K_D3D8SURFACE);

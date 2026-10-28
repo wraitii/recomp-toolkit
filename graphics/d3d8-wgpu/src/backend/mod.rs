@@ -334,9 +334,9 @@ impl GpuContext {
         operation: &'static str,
         f: impl FnOnce() -> Result<T, RenderError>,
     ) -> Result<T, RenderError> {
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let value = f();
-        match pollster::block_on(self.device.pop_error_scope()) {
+        match pollster::block_on(scope.pop()) {
             Some(error) => Err(RenderError::new(operation, error.to_string())),
             None => value,
         }
@@ -561,6 +561,7 @@ impl GpuContext {
                     depth_stencil_attachment: depth_attachment,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
             }
             self.queue.submit(std::iter::once(encoder.finish()));
@@ -682,8 +683,8 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
                         primitive: Default::default(),
                         depth_stencil: target.depth.as_ref().map(|d| wgpu::DepthStencilState {
                             format: d.format,
-                            depth_write_enabled: flags & 2 != 0,
-                            depth_compare: wgpu::CompareFunction::Always,
+                            depth_write_enabled: Some(flags & 2 != 0),
+                            depth_compare: Some(wgpu::CompareFunction::Always),
                             stencil: wgpu::StencilState {
                                 front: stencil_face,
                                 back: stencil_face,
@@ -707,7 +708,7 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
                                 },
                             })],
                         }),
-                        multiview: None,
+                        multiview_mask: None,
                         cache: None,
                     })
             });
@@ -868,7 +869,9 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
             return Err(error);
         }
 
-        let mapped = slice.get_mapped_range();
+        let mapped = slice
+            .get_mapped_range()
+            .map_err(|error| RenderError::new("read_pixels::mapped_range", error.to_string()))?;
         copy_readback_rows(
             &mapped,
             out,
@@ -943,6 +946,7 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
             .unwrap_or((target.width.max(1), target.height.max(1)));
 
         let config = wgpu::SurfaceConfiguration {
+            color_space: wgpu::SurfaceColorSpace::Auto,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: surface_width,
@@ -984,9 +988,16 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
                 "GpuContext has no window surface (headless context)",
             )
         })?;
-        let frame = surface
-            .get_current_texture()
-            .map_err(|e| RenderError::new("present::get_current_texture", e.to_string()))?;
+        let frame = match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            status => {
+                return Err(RenderError::new(
+                    "present::get_current_texture",
+                    format!("{status:?}"),
+                ));
+            }
+        };
         let frame_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1053,6 +1064,7 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 pass.set_pipeline(&blit.pipeline);
                 pass.set_bind_group(0, &bind_group, &[]);
@@ -1062,7 +1074,7 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
             Ok(())
         })?;
 
-        frame.present();
+        self.queue.present(frame);
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|error| RenderError::new("present::poll", error.to_string()))?;
@@ -1115,8 +1127,8 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
                     self.device
                         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                             label: Some("d3d8-present-blit"),
-                            bind_group_layouts: &[&bind_group_layout],
-                            push_constant_ranges: &[],
+                            bind_group_layouts: &[Some(&bind_group_layout)],
+                            immediate_size: 0,
                         });
                 let pipeline =
                     self.device
@@ -1145,7 +1157,7 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
                                     write_mask: wgpu::ColorWrites::ALL,
                                 })],
                             }),
-                            multiview: None,
+                            multiview_mask: None,
                             cache: None,
                         });
                 Ok((bind_group_layout, pipeline))

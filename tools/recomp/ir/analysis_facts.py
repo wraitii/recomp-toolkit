@@ -265,7 +265,7 @@ def load(path, sha256):
 
     sites = {}
     for row in _rows(data, "sites", path):
-        if not isinstance(row, dict) or set(row) - {"s", "k", "t", "e", "m", "ev"} or "s" not in row:
+        if not isinstance(row, dict) or set(row) - {"s", "k", "t", "e", "m", "ev", "prefer_guest"} or "s" not in row:
             raise TranslateError("%s: malformed site record" % path)
         site = _address(row["s"], path)
         if site in sites:
@@ -273,6 +273,9 @@ def load(path, sha256):
         kind = row.get("k", "call")
         if kind not in KINDS:
             raise TranslateError("%s: site %08x has invalid kind" % (path, site))
+        prefer_guest = row.get("prefer_guest", False)
+        if type(prefer_guest) is not bool or prefer_guest and (version != FORMAT_V2 or kind != "call"):
+            raise TranslateError("%s: site %08x has invalid guest dispatch preference" % (path, site))
         target_id = row.get("t")
         if target_id is not None:
             target_id = _ident(target_id, "site %08x" % site)
@@ -293,11 +296,12 @@ def load(path, sha256):
         effect_evidence = refs(row.get("ev", []), "site %08x effect" % site)
         if effect_id is not None and not effect_evidence:
             raise TranslateError("%s: site %08x effect lacks evidence" % (path, site))
-        if target_id is None and effect_id is None:
-            raise TranslateError("%s: site %08x has neither bound nor effect" % (path, site))
+        if target_id is None and effect_id is None and not prefer_guest:
+            raise TranslateError("%s: site %08x has neither bound, effect nor dispatch preference" % (path, site))
         if effect_id is None and effect_evidence:
             raise TranslateError("%s: site %08x has evidence without an effect" % (path, site))
         sites[site] = {"kind": kind,
+                       "prefer_guest": prefer_guest,
                        "targets": None if target_id is None else target_sets[target_id],
                        "effect": None if effect_id is None else effects[effect_id],
                        "method": method_id,

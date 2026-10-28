@@ -548,6 +548,7 @@ void recomp_jump(X86 *c, uint32_t target)
         if (RECOMP_UNLIKELY(!imports_dispatch(c, target))) recomp_shim_call(c, target);
         return;
     }
+    if (recomp_region_enter(c, target)) return;
     if (recomp_is_call_return(target) || recomp_module_is_call_return(target)) { c->eip = target; return; }
     recomp_unknown_jump(c, target);
 }

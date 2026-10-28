@@ -6,6 +6,7 @@
 //! becomes a named trap body. See `docs/translator.md`.
 
 mod facts;
+mod reloc;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -15,8 +16,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use rk_core::contract::Fields;
-use rk_core::ir::FunctionIr;
-use rk_core::program::Program;
+use rk_core::ir::{FunctionIr, OpCode, Space};
+use rk_core::program::{EntryKind, Program};
 use rk_core::settings::Settings;
 use rk_core::timing::Phases;
 use rk_core::{parse_hex, Addr, Diagnostic, Hex};
@@ -34,6 +35,8 @@ struct Args {
     module: Option<String>,
     #[arg(long)]
     report: Option<PathBuf>,
+    #[arg(long, help = "translate only the [reloc] manifest into out/reloc")]
+    reloc_only: bool,
     #[arg(long)]
     quiet: bool,
     #[arg(long)]
@@ -109,7 +112,11 @@ struct Sites {
     sites: Vec<Addr>,
 }
 
-fn tally(functions: &mut usize, by_reason: &mut BTreeMap<String, Sites>, found: BTreeSet<(Addr, String)>) {
+fn tally(
+    functions: &mut usize,
+    by_reason: &mut BTreeMap<String, Sites>,
+    found: BTreeSet<(Addr, String)>,
+) {
     if found.is_empty() {
         return;
     }
@@ -228,17 +235,19 @@ struct BodyContext<'a> {
     program: &'a Program,
     facts: rk_global::ContractCallFacts<'a>,
     checked: &'a BTreeSet<Addr>,
+    effect_returns: &'a BTreeSet<Addr>,
     x87_modes: rk_x87::ModeInput,
     x87_options: rk_x87::Options,
     fault_state: rk_core::settings::FaultState,
     known_entries: &'a BTreeSet<Addr>,
     setjmp_targets: &'a BTreeSet<Addr>,
-    guest_calls: &'a BTreeMap<Addr, Vec<Addr>>,
+    guest_calls: &'a BTreeSet<Addr>,
     host_calls: &'a BTreeSet<Addr>,
     private_targets: &'a BTreeSet<Addr>,
     private_masks: BTreeMap<Addr, BTreeSet<Fields>>,
     private_input_arguments: BTreeMap<Addr, String>,
     switches: Switches,
+    reloc: Option<rk_emit::RelocEmit>,
 }
 
 impl<'a> BodyContext<'a> {
@@ -250,6 +259,7 @@ impl<'a> BodyContext<'a> {
         rk_emit::EmitContext {
             ir,
             checked_returns: self.checked,
+            effect_returns: self.effect_returns,
             private_masks: &self.private_masks,
             private_input_arguments: &self.private_input_arguments,
             known_entries: self.known_entries,
@@ -258,12 +268,18 @@ impl<'a> BodyContext<'a> {
             guest_calls: self.guest_calls,
             host_calls: self.host_calls,
             private,
+            reloc: self.reloc,
         }
     }
 }
 
 fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::PlannedFunction> {
-    let cg = rk_ir::lower(ir, &ctx.program.image, &rk_x87::Recipes)?;
+    let cg = rk_ir::lower_with(
+        ir,
+        &ctx.program.image,
+        &rk_x87::Recipes,
+        ctx.reloc.is_some(),
+    )?;
     rk_plan::plan_function(
         &cg,
         &rk_plan::PlanOptions {
@@ -342,7 +358,9 @@ fn emit_row(
                 .flatten()
             {
                 if !covered.contains(entry) {
-                    emit_report.fallbacks.insert((*entry, "uncovered entry".to_string()));
+                    emit_report
+                        .fallbacks
+                        .insert((*entry, "uncovered entry".to_string()));
                     body.text.push_str(&format!(
                         "\nvoid fn_{entry:08x}(X86 *c) {{ recomp_unmodelled(c, 0x{entry:08x}u); }}"
                     ));
@@ -369,8 +387,16 @@ fn account(stats: &mut EmitStats, (addr, body, reason, report): BodyRow, bodies:
             stats.c_field_residency_violations += report.c_field_residency_violations;
             stats.c_field_residency_violation_addrs.push(addr);
         }
-        tally(&mut stats.fallback_functions, &mut stats.fallbacks, report.fallbacks);
-        tally(&mut stats.slow_op_functions, &mut stats.slow_ops, report.slow_ops);
+        tally(
+            &mut stats.fallback_functions,
+            &mut stats.fallbacks,
+            report.fallbacks,
+        );
+        tally(
+            &mut stats.slow_op_functions,
+            &mut stats.slow_ops,
+            report.slow_ops,
+        );
     }
     if let Some((reason, detail)) = reason {
         stats.trapping += 1;
@@ -385,17 +411,82 @@ fn account(stats: &mut EmitStats, (addr, body, reason, report): BodyRow, bodies:
     bodies.push(body);
 }
 
+fn effect_returns(stack: &rk_global::stack::Analysis) -> BTreeSet<Addr> {
+    stack
+        .functions
+        .iter()
+        .filter_map(|(&addr, summary)| {
+            (summary.returns != rk_global::stack::ReturnEffect::Exact).then_some(addr)
+        })
+        .chain(stack.unbalanced_returns.iter().copied())
+        .collect()
+}
+
+fn prepare_return_entries(
+    analysis: &mut rk_frontend::Analysis,
+    stack: &rk_global::stack::Analysis,
+) -> BTreeMap<Addr, Addr> {
+    let mut entries = BTreeMap::new();
+    for (&caller, result) in &mut analysis.ir {
+        let Ok(fir) = result else { continue };
+        let mut invalid = None;
+        let mut added = false;
+        for insn in &fir.insns {
+            if insn.mnemonic != "CALL" {
+                continue;
+            }
+            let target = insn.ops.iter().find_map(|op| {
+                matches!(op.opcode, OpCode::Call | OpCode::Branch)
+                    .then_some(op.inputs.first())
+                    .flatten()
+                    .filter(|input| matches!(input.space, Space::Ram | Space::Const))
+                    .map(|input| input.offset as Addr)
+            });
+            let Some(summary) = target.and_then(|target| stack.functions.get(&target)) else {
+                continue;
+            };
+            let rk_global::stack::ReturnEffect::Adjust(delta) = summary.returns else {
+                continue;
+            };
+            let continuation = insn.addr + insn.length as Addr;
+            let adjusted = continuation.wrapping_add(delta as u32);
+            if fir.index_of(adjusted).is_none() {
+                invalid = Some(Diagnostic::new(
+                    insn.addr,
+                    rk_core::Reason::UnsupportedControlFlow {
+                        detail: "return adjustment leaves translated block".into(),
+                    },
+                ));
+                break;
+            }
+            if !fir.entries.contains(&adjusted) {
+                fir.entries.push(adjusted);
+                added = true;
+            }
+            entries.insert(adjusted, caller);
+        }
+        if let Some(diagnostic) = invalid {
+            *result = Err(rk_core::Error::Diagnostic(diagnostic));
+        } else if added {
+            fir.entries.sort_unstable();
+            fir.entries.dedup();
+        }
+    }
+    entries
+}
+
 fn build_bodies(
     program: &Program,
     analysis: &rk_frontend::Analysis,
     owned: Option<BTreeMap<Addr, std::result::Result<FunctionIr, rk_core::Error>>>,
     global: &rk_global::GlobalFacts,
-    guest_calls: &BTreeMap<Addr, Vec<Addr>>,
+    guest_calls: &BTreeSet<Addr>,
     host_calls: &BTreeSet<Addr>,
     settings: &Settings,
     x87_mode: X87Mode,
     switches: Switches,
     only: &[Addr],
+    reloc: Option<rk_emit::RelocEmit>,
 ) -> Result<(
     Vec<Body>,
     EmitStats,
@@ -421,10 +512,12 @@ fn build_bodies(
     } else {
         BTreeSet::new()
     };
+    let effect_returns = effect_returns(&global.returns);
     let make_ctx = |private_masks, private_input_arguments| BodyContext {
         program,
         facts: global.call_facts(),
         checked: &global.private.checked_returns,
+        effect_returns: &effect_returns,
         x87_modes: rk_x87::ModeInput::from(&global.x87),
         x87_options: rk_x87::Options {
             strict: settings.fault_state == rk_core::settings::FaultState::Exact,
@@ -441,6 +534,7 @@ fn build_bodies(
         private_masks,
         private_input_arguments,
         switches,
+        reloc,
     };
     let ctx = make_ctx(BTreeMap::new(), BTreeMap::new());
     let selected: BTreeSet<Addr> = only.iter().copied().collect();
@@ -708,7 +802,10 @@ fn dump_ssa(
         }
         let cg = rk_ir::lower(ir, &program.image, &rk_ir::NoX87)?;
         if prepared {
-            let options = rk_ssa::PrepareOptions { coalesce_roots: switches.coalesce_roots, ..Default::default() };
+            let options = rk_ssa::PrepareOptions {
+                coalesce_roots: switches.coalesce_roots,
+                ..Default::default()
+            };
             match rk_ssa::prepare(&cg, &options) {
                 Ok(ssa) => rk_ssa::dump(&ssa, out)?,
                 Err(error) => writeln!(out, "== prepared {owner:08x}: {error}")?,
@@ -977,6 +1074,20 @@ fn main() -> Result<()> {
     let mut phases = Phases::new(args.quiet);
     let settings = Settings::load(&args.input, args.module.as_deref())?;
     phases.mark("settings");
+    if args.reloc_only {
+        let Some(out) = args.out.as_ref() else {
+            bail!("--out is required with --reloc-only");
+        };
+        let Some(manifest) = &settings.reloc else {
+            bail!("--reloc-only needs a [reloc] manifest in the translation input");
+        };
+        let report = args
+            .report
+            .clone()
+            .unwrap_or_else(|| out.join("translate-reloc-report.json"));
+        reloc::translate(&settings, manifest, out, &report, switches)?;
+        return Ok(());
+    }
     let mut program = rk_image::load(&settings)?;
     phases.mark("load");
     let discovered = rk_discover::discover(&settings, &program)?;
@@ -992,7 +1103,7 @@ fn main() -> Result<()> {
     phases.mark("facts");
     let whole = args.out.is_some() || args.dump.is_empty();
     let wants_global = whole || args.wants(Stage::Global);
-    let global = if wants_global {
+    let mut global = if wants_global {
         rk_global::GlobalFacts::analyze(&rk_global::GlobalInput {
             settings: &settings,
             program: &program,
@@ -1006,6 +1117,34 @@ fn main() -> Result<()> {
         rk_global::GlobalFacts::default()
     };
     phases.mark("global");
+    let extra_entries = if wants_global {
+        prepare_return_entries(&mut analysis, &global.returns)
+    } else {
+        BTreeMap::new()
+    };
+    let effect_returns = effect_returns(&global.returns);
+    global
+        .private
+        .checked_returns
+        .extend(effect_returns.iter().copied());
+    let mut pending: Vec<_> = global.private.checked_returns.iter().copied().collect();
+    while let Some(addr) = pending.pop() {
+        let Some(Ok(fir)) = analysis.ir.get(&addr) else {
+            continue;
+        };
+        for (&index, targets) in &fir.exits {
+            if fir.insns[index as usize].mnemonic != "JMP" {
+                continue;
+            }
+            for &target in targets {
+                if matches!(analysis.ir.get(&target), Some(Ok(_)))
+                    && global.private.checked_returns.insert(target)
+                {
+                    pending.push(target);
+                }
+            }
+        }
+    }
     let only = if whole { &[][..] } else { &args.only[..] };
     let wants_bodies = whole || args.wants(Stage::Bodies);
     let owned = (wants_bodies && args.dump.is_empty()).then(|| std::mem::take(&mut analysis.ir));
@@ -1016,12 +1155,17 @@ fn main() -> Result<()> {
             &analysis,
             owned,
             &global,
-            &facts.call_targets,
+            &facts.guest_calls,
             &facts.host_calls,
             &settings,
-            if switches.x87_dynamic { X87Mode::Dynamic } else { args.x87_mode },
+            if switches.x87_dynamic {
+                X87Mode::Dynamic
+            } else {
+                args.x87_mode
+            },
             switches,
             only,
+            None,
         )?
     } else {
         (
@@ -1033,6 +1177,14 @@ fn main() -> Result<()> {
         )
     };
     phases.mark("emit");
+    for (addr, owner) in extra_entries {
+        program.entries.entry(addr).or_insert(EntryKind::Discovered);
+        let entries = program.interior_by_function.entry(owner).or_default();
+        if !entries.contains(&addr) {
+            entries.push(addr);
+            entries.sort_unstable();
+        }
+    }
     let call_returns = summary.call_returns.clone();
     let translation = Translation {
         settings: &settings,
@@ -1149,6 +1301,12 @@ fn main() -> Result<()> {
             })?,
         )
         .with_context(|| path.display().to_string())?;
+        if args.module.is_none() {
+            if let Some(manifest) = &settings.reloc {
+                let reloc_report = path.with_file_name("translate-reloc-report.json");
+                reloc::translate(&settings, manifest, out, &reloc_report, switches)?;
+            }
+        }
     }
     Ok(())
 }

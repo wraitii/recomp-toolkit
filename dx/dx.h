@@ -18,6 +18,7 @@
 // Registers every DirectDraw, Direct3D, DirectSound, DirectInput, QMixer and
 // weanetr shim and builds the COM vtables in guest memory. Idempotent.
 void dx_register_shims();
+void dx_report_failure(const char *desc, uint32_t hr, uint32_t caller);
 
 // Drops every COM object and rebuilds the vtables. Call after mem_init(),
 // which discards the guest heap the objects and vtables live in.

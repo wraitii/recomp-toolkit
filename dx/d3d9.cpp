@@ -9,6 +9,7 @@
 #include "d3d_bridge_helpers.h"
 #include "d3dx9shader_shim.h"
 #include "d3dx9effect_shim.h"
+#include "d3dx9tex.h"
 #include "../runtime/win32.h"
 #include "../platform/os.h"
 #include "../runtime/display_seam.h"
@@ -39,13 +40,18 @@ static uint32_t bridge_result(X86 *c, const recomp::d3d::Status &status) {
     if (status.code == recomp::d3d::StatusCode::Ok)
         return D3D_OK9;
     std::string message(status.message.data(), status.message.size());
+    const bool fatal = status.code == recomp::d3d::StatusCode::Unsupported ||
+                       status.code == recomp::d3d::StatusCode::NotImplemented;
     if (status.code == recomp::d3d::StatusCode::NotAvailable)
         log_once(("d3d9:not-available:" + message).c_str(), "d3d9: %s", message.c_str());
+    else if (fatal)
+        LOGW("d3d9: aborting on unsupported renderer result: %s", message.c_str());
     else
         LOGW("d3d9: %s", message.c_str());
-    if (status.code == recomp::d3d::StatusCode::Unsupported ||
-        status.code == recomp::d3d::StatusCode::NotImplemented)
+    if (fatal) {
+        fflush(stderr);
         imports_unsupported(c);
+    }
     if (status.code == recomp::d3d::StatusCode::InvalidArgument)
         return D3DERR_INVALIDCALL;
     if (status.code == recomp::d3d::StatusCode::InvalidData)
@@ -87,6 +93,8 @@ static ComObj *level_owner(ComObj *o, uint32_t *face, uint32_t *level, bool *vol
 
 // One scratch block for structures a method fills in for the guest.
 static uint32_t g_scratch = 0, g_scratch_size = 0;
+static float d3dx_rf(uint32_t addr);
+static void d3dx_wf(uint32_t addr, float value);
 
 static ComObj *this_d3d9(X86 *c) {
     ComObj *o = com_this_arg(c);
@@ -234,12 +242,20 @@ static void d3d9_reconcile(std::set<uint32_t> &current, const std::set<uint32_t>
 }
 static void d3d9_reconcile_bindings(std::array<uint32_t, 38> &snapshot,
                                     const std::array<uint32_t, 38> &ids) {
-    for (size_t i = 0; i < ids.size(); ++i)
-        if (snapshot[i] != ids[i] && ids[i])
+    if (snapshot == ids)
+        return;
+    std::array<uint32_t, 38> released;
+    size_t count = 0;
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (snapshot[i] == ids[i])
+            continue;
+        if (ids[i])
             d3d9_ref_add(ids[i]);
-    for (size_t i = 0; i < ids.size(); ++i)
-        if (snapshot[i] != ids[i] && snapshot[i])
-            d3d9_ref_del(snapshot[i]);
+        if (snapshot[i])
+            released[count++] = snapshot[i];
+    }
+    for (size_t i = 0; i < count; ++i)
+        d3d9_ref_del(released[i]);
     snapshot = ids;
 }
 static void d3d9_refresh_bindings(ComObj *dev) {
@@ -708,6 +724,13 @@ void D9_CreateDevice(X86 *c) {
 
 static ComObj *device_backbuffer(ComObj *dev);
 static ComObj *device_depthbuffer(ComObj *dev);
+
+// DIVERGENCE(original): accept gamma updates without changing host output.
+void Dev_SetGammaRamp(X86 *c) {
+    log_once("d3d9.device.SetGammaRamp",
+             "d3d9: SetGammaRamp ignored; gamma correction is not implemented");
+    com_ret(c, 0);
+}
 
 // (this, pRect)
 void Dev_SetScissorRect(X86 *c) {
@@ -1706,6 +1729,111 @@ void X_D3DXCreateVolumeTextureFromFileInMemory(X86 *c) {
     d3dx_create_from_memory(c, recomp::d3d::D3d9TextureKind::Volume);
 }
 
+static uint8_t d3dx_fill_byte(float value) {
+    if (!(value > 0.0f))
+        return 0;
+    if (value >= 1.0f)
+        return 255;
+    return (uint8_t)(value * 255.0f + 0.5f);
+}
+
+static uint32_t d3dx_fill_pixel(uint32_t format, const float c[4], uint8_t out[4]) {
+    uint8_t r = d3dx_fill_byte(c[0]), g = d3dx_fill_byte(c[1]), b = d3dx_fill_byte(c[2]),
+            a = d3dx_fill_byte(c[3]);
+    auto put = [out](std::initializer_list<uint8_t> v) {
+        std::copy(v.begin(), v.end(), out);
+        return (uint32_t)v.size();
+    };
+    switch (format) {
+    case 20:
+        return put({b, g, r});
+    case 21:
+        return put({b, g, r, a});
+    case 22:
+        return put({b, g, r, 255});
+    case 28:
+        return put({a});
+    case 32:
+        return put({r, g, b, a});
+    case 33:
+        return put({r, g, b, 255});
+    case 50:
+        return put({r});
+    case 51:
+        return put({r, a});
+    default:
+        return 0;
+    }
+}
+
+void X_D3DXFillVolumeTexture(X86 *c) {
+    ComObj *tex = com_this(arg(c, 0), IF_D3DVOLUMETEXTURE9);
+    uint32_t callback = arg(c, 1), user = arg(c, 2);
+    if (!tex || !tex->d3d9_resource || !callback) {
+        com_ret(c, D3DERR_INVALIDCALL);
+        return;
+    }
+    recomp::d3d::D3d9TextureDescriptorResult td = tex->d3d9_resource->texture_descriptor();
+    if (td.status.code != recomp::d3d::StatusCode::Ok) {
+        com_ret(c, bridge_result(c, td.status));
+        return;
+    }
+    const float zero[4] = {};
+    uint8_t pixel[4];
+    uint32_t bytes = d3dx_fill_pixel(td.descriptor.format, zero, pixel);
+    if (!bytes) {
+        LOGW("d3dx9: D3DXFillVolumeTexture: unsupported format %u", td.descriptor.format);
+        com_ret(c, D3DERR_INVALIDCALL);
+        return;
+    }
+    uint32_t scratch = heap_alloc(64, true, 16);
+    if (!scratch) {
+        com_ret(c, E_OUTOFMEMORY);
+        return;
+    }
+    uint32_t out = scratch, coord = scratch + 16, texel = scratch + 28, lock = scratch + 40;
+    uint32_t result = D3D_OK9;
+    for (uint32_t level = 0; level < td.descriptor.levels; ++level) {
+        recomp::d3d::D3d9LevelDescriptorResult ld =
+            tex->d3d9_resource->texture_volume_descriptor(level);
+        if (ld.status.code != recomp::d3d::StatusCode::Ok) {
+            result = bridge_result(c, ld.status);
+            break;
+        }
+        level_lock_wgpu(c, tex, 0, level, true, 0, 0, 0, lock, true);
+        result = c->r[0];
+        if (result != D3D_OK9)
+            break;
+        uint32_t pitch = rd32(lock), slice_pitch = rd32(lock + 4), bits = rd32(lock + 8);
+        uint32_t w = ld.descriptor.width, h = ld.descriptor.height, d = ld.descriptor.depth;
+        for (uint32_t z = 0; z < d; ++z) {
+            for (uint32_t y = 0; y < h; ++y) {
+                for (uint32_t x = 0; x < w; ++x) {
+                    memset(gm_ptr(out), 0, 16);
+                    d3dx_wf(coord, ((float)x + 0.5f) / (float)w);
+                    d3dx_wf(coord + 4, ((float)y + 0.5f) / (float)h);
+                    d3dx_wf(coord + 8, ((float)z + 0.5f) / (float)d);
+                    d3dx_wf(texel, 1.0f / (float)w);
+                    d3dx_wf(texel + 4, 1.0f / (float)h);
+                    d3dx_wf(texel + 8, 1.0f / (float)d);
+                    guest_call(c, callback, out, coord, texel, user);
+                    float color[4] = {d3dx_rf(out), d3dx_rf(out + 4), d3dx_rf(out + 8),
+                                      d3dx_rf(out + 12)};
+                    d3dx_fill_pixel(td.descriptor.format, color, pixel);
+                    memcpy(gm_ptr(bits + z * slice_pitch + y * pitch + x * bytes), pixel, bytes);
+                }
+            }
+        }
+        level_unlock_wgpu(c, tex, 0, level);
+        if (c->r[0] != D3D_OK9) {
+            result = c->r[0];
+            break;
+        }
+    }
+    heap_free(scratch);
+    com_ret(c, result);
+}
+
 static bool d3dx_rect(uint32_t addr, recomp::d3d::D3d9Rect &rect, bool &present) {
     present = false;
     rect.left = rect.top = rect.right = rect.bottom = 0;
@@ -1772,43 +1900,73 @@ void X_D3DXLoadSurfaceFromSurface(X86 *c) {
     com_ret(c, bridge_result(c, status));
 }
 
-void X_D3DXSaveSurfaceToFileA(X86 *c) {
-    uint32_t file_addr = arg(c, 0), format = arg(c, 1);
+static bool d3dx_encode_surface(X86 *c, recomp::d3d::D3dxBytesResult &result) {
+    uint32_t format = arg(c, 1);
     ComObj *src = com_this(arg(c, 2));
     if (!src || src->kind != K_D3D9SURFACE) {
         com_ret(c, D3DERR_INVALIDCALL);
-        return;
+        return false;
     }
     if (!d3dx_palette_ok(arg(c, 3))) {
         com_ret(c, D3DERR_INVALIDCALL);
-        return;
+        return false;
     }
     recomp::d3d::D3d9Rect rect{};
     bool present = false;
     if (!d3dx_rect(arg(c, 4), rect, present)) {
         com_ret(c, D3DERR_INVALIDCALL);
-        return;
+        return false;
     }
     uint32_t face = 0, level = 0;
     bool volume = false;
     ComObj *owner = level_owner(src, &face, &level, &volume);
     ComObj *dev = d3dx_device_of(owner);
-    if (!owner || !owner->d3d9_resource || !dev || !file_addr || !gm_valid(file_addr, 1) ||
-        volume) {
+    if (!owner || !owner->d3d9_resource || !dev || volume) {
+        com_ret(c, D3DERR_INVALIDCALL);
+        return false;
+    }
+    result = dev->d3d9_device->d3dx_save_surface(*owner->d3d9_resource, face, level, rect, present,
+                                                 format);
+    if (result.status.code != recomp::d3d::StatusCode::Ok) {
+        com_ret(c, bridge_result(c, result.status));
+        return false;
+    }
+    return true;
+}
+
+void X_D3DXSaveSurfaceToFileA(X86 *c) {
+    uint32_t file_addr = arg(c, 0);
+    if (!file_addr || !gm_valid(file_addr, 1)) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
-    recomp::d3d::D3dxBytesResult result = dev->d3d9_device->d3dx_save_surface(
-        *owner->d3d9_resource, face, level, rect, present, format);
-    if (result.status.code != recomp::d3d::StatusCode::Ok) {
-        com_ret(c, bridge_result(c, result.status));
+    recomp::d3d::D3dxBytesResult result;
+    if (!d3dx_encode_surface(c, result))
         return;
-    }
     std::string path = win32_host_path_op(gm_str(file_addr, 1024), WIN32_FILE_WRITE);
     if (!d3dx_write_file(path, result.bytes.data(), result.bytes.size())) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
+    com_ret(c, D3D_OK9);
+}
+
+void X_D3DXSaveSurfaceToFileInMemory(X86 *c) {
+    uint32_t out = arg(c, 0);
+    if (!out || !gm_valid(out, 4)) {
+        com_ret(c, D3DERR_INVALIDCALL);
+        return;
+    }
+    wr32(out, 0);
+    recomp::d3d::D3dxBytesResult result;
+    if (!d3dx_encode_surface(c, result))
+        return;
+    uint32_t view = d3dx_make_buffer(result.bytes.data(), (uint32_t)result.bytes.size());
+    if (!view) {
+        com_ret(c, E_OUTOFMEMORY);
+        return;
+    }
+    wr32(out, view);
     com_ret(c, D3D_OK9);
 }
 
@@ -2407,6 +2565,51 @@ static void efx_reconcile_refs(std::set<uint32_t> &current, const std::set<uint3
     current = desired;
 }
 
+static bool efx_texture_ref_allowed(uint32_t id, uint32_t device_id, bool check_device) {
+    if (!id)
+        return false;
+    ComObj *o = com_get(id);
+    return o && efx_texture_kind(o->kind) && (!check_device || o->dev_d3d == device_id);
+}
+
+static void efx_reconcile_texture_ref(std::set<uint32_t> &refs, uint32_t id, uint32_t count) {
+    if (!id)
+        return;
+    if (count) {
+        if (refs.insert(id).second)
+            if (ComObj *o = com_get(id))
+                com_addref(o);
+    } else if (refs.erase(id)) {
+        if (ComObj *o = com_get(id))
+            com_release(o);
+    }
+}
+
+static void efx_update_texture_refs(ComObj *fx, uint32_t handle, uint32_t old_id, uint32_t new_id) {
+    D3dxEffectHost *host = efx_host(fx);
+    if (!host || old_id == new_id)
+        return;
+    if (recomp::d3d::d3dx_effect_texture_shared(*host->value, handle) && host->pool_obj) {
+        if (ComObj *pool = com_get(host->pool_obj); pool && pool->d3dx_effect_pool) {
+            uint32_t old_count = recomp::d3d::d3dx_effect_pool_texture_ref_count(
+                *pool->d3dx_effect_pool->value, old_id);
+            uint32_t new_count = recomp::d3d::d3dx_effect_pool_texture_ref_count(
+                *pool->d3dx_effect_pool->value, new_id);
+            if (!efx_texture_ref_allowed(new_id, 0, false))
+                new_count = 0;
+            efx_reconcile_texture_ref(pool->d3dx_effect_pool->texture_refs, old_id, old_count);
+            efx_reconcile_texture_ref(pool->d3dx_effect_pool->texture_refs, new_id, new_count);
+            return;
+        }
+    }
+    uint32_t old_count = recomp::d3d::d3dx_effect_texture_ref_count(*host->value, old_id);
+    uint32_t new_count = recomp::d3d::d3dx_effect_texture_ref_count(*host->value, new_id);
+    if (!efx_texture_ref_allowed(new_id, host->device_id, true))
+        new_count = 0;
+    efx_reconcile_texture_ref(host->texture_refs, old_id, old_count);
+    efx_reconcile_texture_ref(host->texture_refs, new_id, new_count);
+}
+
 static void efx_refresh_textures(ComObj *fx) {
     D3dxEffectHost *host = efx_host(fx);
     if (!host)
@@ -2514,6 +2717,7 @@ static const uint32_t EFX_MANAGER_SET_RENDER_STATE = 7 * 4;
 static const uint32_t EFX_MANAGER_SET_TEXTURE = 8 * 4;
 static const uint32_t EFX_MANAGER_SET_TEXTURE_STAGE_STATE = 9 * 4;
 static const uint32_t EFX_MANAGER_SET_SAMPLER_STATE = 10 * 4;
+static const uint32_t EFX_MANAGER_SET_FVF = 12 * 4;
 static const uint32_t EFX_MANAGER_SET_VERTEX_SHADER = 13 * 4;
 static const uint32_t EFX_MANAGER_SET_VERTEX_SHADER_CONSTANT_F = 14 * 4;
 static const uint32_t EFX_MANAGER_SET_PIXEL_SHADER = 17 * 4;
@@ -3208,22 +3412,18 @@ void Efx_SetTexture(X86 *c) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
-    recomp::d3d::ValueResult previous =
-        recomp::d3d::d3dx_effect_texture(*efx_host(fx)->value, handle);
-    recomp::d3d::Status result =
-        recomp::d3d::d3dx_effect_set_texture(*efx_host(fx)->value, handle, tex ? tex->id : 0);
-    if (result.code != recomp::d3d::StatusCode::Ok) {
-        efx_status(c, result);
+    uint32_t id = tex ? tex->id : 0;
+    recomp::d3d::ValueResult result =
+        recomp::d3d::d3dx_effect_set_texture(*efx_host(fx)->value, handle, id);
+    if (result.status.code != recomp::d3d::StatusCode::Ok) {
+        efx_status(c, result.status);
         return;
     }
-    if (previous.status.code == recomp::d3d::StatusCode::Ok &&
-        previous.value == (tex ? tex->id : 0)) {
+    if (result.value == id) {
         com_ret(c, D3D_OK9);
         return;
     }
-    efx_refresh_textures(fx);
-    if (ComObj *pool = com_get(efx_host(fx)->pool_obj))
-        efx_refresh_pool_textures(pool);
+    efx_update_texture_refs(fx, handle, result.value, id);
     com_ret(c, D3D_OK9);
 }
 
@@ -3510,6 +3710,9 @@ static uint32_t efx_dispatch_commands(X86 *c, ComObj *fx, ComObj *dev,
             result =
                 invoke(EFX_MANAGER_SET_TEXTURE, "SetTexture", {manager, cmd.index, resolved[i]});
             break;
+        case recomp::d3d::D3dxEffectCommandKind::SetFVF:
+            result = invoke(EFX_MANAGER_SET_FVF, "SetFVF", {manager, cmd.value});
+            break;
         case recomp::d3d::D3dxEffectCommandKind::SetVertexShader:
             result =
                 invoke(EFX_MANAGER_SET_VERTEX_SHADER, "SetVertexShader", {manager, resolved[i]});
@@ -3559,6 +3762,24 @@ static uint32_t efx_dispatch_commands(X86 *c, ComObj *fx, ComObj *dev,
     return failure;
 }
 
+static bool d3d9_fvf_decl_view(ComObj *dev, uint32_t handle) {
+    if (dev->d3d9_device->decl_views.find(handle) != dev->d3d9_device->decl_views.end())
+        return true;
+    ComObj *d = com_new(K_D3D9DECL);
+    if (!d)
+        return false;
+    d->dev_d3d = dev->id;
+    d->d3d9_state_handle = handle;
+    com_internalize(d);
+    if (!com_view(d, IF_D3DVERTEXDECL9)) {
+        com_release_internal(d);
+        return false;
+    }
+    dev->d3d9_device->decl_views[handle] = d->id;
+    dev->d3d9_device->fvf_decls.insert(d->id);
+    return true;
+}
+
 static uint32_t efx_run(X86 *c, ComObj *fx, ComObj *dev, recomp::d3d::D3dxEffectRunResult &result) {
     D3dxEffectHost *host = efx_host(fx);
     uint32_t hr;
@@ -3574,8 +3795,12 @@ static uint32_t efx_run(X86 *c, ComObj *fx, ComObj *dev, recomp::d3d::D3dxEffect
         hr = efx_dispatch_commands(c, fx, dev, result.commands, result.values);
         if (result.reserved)
             recomp::d3d::d3dx_effect_batch_finish(*host->value, !efx_hr_failed(hr));
-        else
+        else {
+            recomp::d3d::ValueResult decl = dev->d3d9_device->vertex_declaration();
+            if (d3d_bridge_ok(decl.status) && decl.value)
+                d3d9_fvf_decl_view(dev, decl.value);
             d3d9_refresh_bindings(dev);
+        }
     }
     recomp::d3d::d3dx_effect_recycle(*host->value, std::move(result.commands),
                                      std::move(result.values));
@@ -5044,7 +5269,7 @@ static void buffer_unlock_wgpu(X86 *c) {
     }
     auto it = o->d3d9_resource->staging.find(0);
     if (it == o->d3d9_resource->staging.end() || !it->second.addr) {
-        com_ret(c, D3DERR_INVALIDCALL);
+        com_ret(c, D3D_OK9);
         return;
     }
     rust::Slice<const uint8_t> bytes(gm_ptr(it->second.addr), it->second.size);
@@ -6109,24 +6334,10 @@ void Dev_SetFVF(X86 *c) {
         com_ret(c, bridge_result(c, result.status));
         return;
     }
-    if (dev->d3d9_device->decl_views.find(result.value) == dev->d3d9_device->decl_views.end()) {
-        ComObj *d = com_new(K_D3D9DECL);
-        if (!d) {
-            dev->d3d9_device->destroy_declaration(result.value);
-            com_ret(c, E_OUTOFMEMORY);
-            return;
-        }
-        d->dev_d3d = dev->id;
-        d->d3d9_state_handle = result.value;
-        com_internalize(d);
-        uint32_t view = com_view(d, IF_D3DVERTEXDECL9);
-        if (!view) {
-            com_release_internal(d);
-            com_ret(c, E_OUTOFMEMORY);
-            return;
-        }
-        dev->d3d9_device->decl_views[result.value] = d->id;
-        dev->d3d9_device->fvf_decls.insert(d->id);
+    if (!d3d9_fvf_decl_view(dev, result.value)) {
+        dev->d3d9_device->destroy_declaration(result.value);
+        com_ret(c, E_OUTOFMEMORY);
+        return;
     }
     recomp::d3d::Status status = dev->d3d9_device->set_fvf_binding(result.value, fvf);
     if (d3d_bridge_ok(status))
@@ -6655,10 +6866,9 @@ void d3d9_register() {
         return;
     done = true;
 
-    com_define(IF_D3D9, "d3d9.dll", "IDirect3D9", g_d3d9, std::size(g_d3d9));
-    com_define(IF_D3DDEVICE9, "d3d9.dll", "IDirect3DDevice9", g_device9, std::size(g_device9));
-    com_define(IF_D3DRESOURCE9, "d3d9.dll", "IDirect3DResource9", g_resource9,
-               std::size(g_resource9));
+    com_define_checked<IF_D3D9, g_d3d9>("d3d9.dll", "IDirect3D9");
+    com_define_checked<IF_D3DDEVICE9, g_device9>("d3d9.dll", "IDirect3DDevice9");
+    com_define_checked<IF_D3DRESOURCE9, g_resource9>("d3d9.dll", "IDirect3DResource9");
     com_bind(IF_D3D9, K_D3D9);
     com_bind(IF_D3DDEVICE9, K_D3D9DEVICE);
     com_bind(IF_D3DRESOURCE9, K_D3D9VB);
@@ -6666,26 +6876,20 @@ void d3d9_register() {
     com_register_iid(IF_D3D9, IID_IDirect3D9_);
     com_register_iid(IF_D3DDEVICE9, IID_IDirect3DDevice9_);
     com_register_iid(IF_D3DRESOURCE9, IID_IDirect3DResource9_);
-    com_define(IF_D3DTEXTURE9, "d3d9.dll", "IDirect3DTexture9", g_texture9, std::size(g_texture9));
-    com_define(IF_D3DCUBETEXTURE9, "d3d9.dll", "IDirect3DCubeTexture9", g_cubetexture9,
-               std::size(g_cubetexture9));
-    com_define(IF_D3DSURFACE9, "d3d9.dll", "IDirect3DSurface9", g_surface9, std::size(g_surface9));
-    com_define(IF_D3DVERTEXBUFFER9, "d3d9.dll", "IDirect3DVertexBuffer9", g_vb9, std::size(g_vb9));
-    com_define(IF_D3DINDEXBUFFER9, "d3d9.dll", "IDirect3DIndexBuffer9", g_ib9, std::size(g_ib9));
-    com_define(IF_D3DVERTEXDECL9, "d3d9.dll", "IDirect3DVertexDeclaration9", g_decl9,
-               std::size(g_decl9));
-    com_define(IF_D3DQUERY9, "d3d9.dll", "IDirect3DQuery9", g_query9, std::size(g_query9));
-    com_define(IF_D3DBASETEXTURE9, "d3d9.dll", "IDirect3DBaseTexture9", g_basetexture9,
-               std::size(g_basetexture9));
-    com_define(IF_D3DVOLUME9, "d3d9.dll", "IDirect3DVolume9", g_volume9, std::size(g_volume9));
-    com_define(IF_D3DVOLUMETEXTURE9, "d3d9.dll", "IDirect3DVolumeTexture9", g_volumetexture9,
-               std::size(g_volumetexture9));
-    com_define(IF_D3DVERTEXSHADER9, "d3d9.dll", "IDirect3DVertexShader9", g_vertexshader9,
-               std::size(g_vertexshader9));
-    com_define(IF_D3DPIXELSHADER9, "d3d9.dll", "IDirect3DPixelShader9", g_pixelshader9,
-               std::size(g_pixelshader9));
-    com_define(IF_D3DSTATEBLOCK9, "d3d9.dll", "IDirect3DStateBlock9", g_stateblock9,
-               std::size(g_stateblock9));
+    com_define_checked<IF_D3DTEXTURE9, g_texture9>("d3d9.dll", "IDirect3DTexture9");
+    com_define_checked<IF_D3DCUBETEXTURE9, g_cubetexture9>("d3d9.dll", "IDirect3DCubeTexture9");
+    com_define_checked<IF_D3DSURFACE9, g_surface9>("d3d9.dll", "IDirect3DSurface9");
+    com_define_checked<IF_D3DVERTEXBUFFER9, g_vb9>("d3d9.dll", "IDirect3DVertexBuffer9");
+    com_define_checked<IF_D3DINDEXBUFFER9, g_ib9>("d3d9.dll", "IDirect3DIndexBuffer9");
+    com_define_checked<IF_D3DVERTEXDECL9, g_decl9>("d3d9.dll", "IDirect3DVertexDeclaration9");
+    com_define_checked<IF_D3DQUERY9, g_query9>("d3d9.dll", "IDirect3DQuery9");
+    com_define_checked<IF_D3DBASETEXTURE9, g_basetexture9>("d3d9.dll", "IDirect3DBaseTexture9");
+    com_define_checked<IF_D3DVOLUME9, g_volume9>("d3d9.dll", "IDirect3DVolume9");
+    com_define_checked<IF_D3DVOLUMETEXTURE9, g_volumetexture9>("d3d9.dll",
+                                                               "IDirect3DVolumeTexture9");
+    com_define_checked<IF_D3DVERTEXSHADER9, g_vertexshader9>("d3d9.dll", "IDirect3DVertexShader9");
+    com_define_checked<IF_D3DPIXELSHADER9, g_pixelshader9>("d3d9.dll", "IDirect3DPixelShader9");
+    com_define_checked<IF_D3DSTATEBLOCK9, g_stateblock9>("d3d9.dll", "IDirect3DStateBlock9");
     com_register_iid(IF_D3DTEXTURE9, IID_IDirect3DTexture9_);
     com_register_iid(IF_D3DCUBETEXTURE9, IID_IDirect3DCubeTexture9_);
     com_register_iid(IF_D3DSURFACE9, IID_IDirect3DSurface9_);

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rk_core::ir::SehEffect;
 use rk_core::program::{Image, Program};
 use rk_core::{Addr, Diagnostic, Result};
-use rk_decode::{gpr32, imm, mem, DecodedInsn, JCC, Operand, OperandKind};
+use rk_decode::{gpr32, imm, mem, DecodedInsn, Operand, OperandKind, JCC};
 
 use crate::cfg::RawFunction;
 use crate::{R_EAX, R_EBP, R_ECX, R_EDX, R_ESP};
@@ -16,8 +16,8 @@ pub(crate) const MSVC_EH3_FRAME_LEN: u32 = 29;
 const MSVC_EH3_HANDLER_HEX: &str = "558bec83ec0853565755fc8b5d0c8b4508f74004060000000f85";
 
 const EXPLICIT_DESTINATION: [&str; 22] = [
-    "MOV", "LEA", "ADD", "SUB", "AND", "OR", "XOR", "INC", "DEC", "NEG", "NOT", "SHL",
-    "SHR", "SAR", "MOVZX", "MOVSX", "POP", "PUSH", "CMP", "TEST", "JMP", "NOP",
+    "MOV", "LEA", "ADD", "SUB", "AND", "OR", "XOR", "INC", "DEC", "NEG", "NOT", "SHL", "SHR",
+    "SAR", "MOVZX", "MOVSX", "POP", "PUSH", "CMP", "TEST", "JMP", "NOP",
 ];
 
 fn hex_nibble(b: u8) -> Option<u8> {
@@ -173,7 +173,11 @@ impl RawFunction {
         })
     }
 
-    pub(crate) fn seh_escaping_returns(&self, program: &Program, helpers: &BTreeSet<Addr>) -> BTreeSet<u32> {
+    pub(crate) fn seh_escaping_returns(
+        &self,
+        program: &Program,
+        helpers: &BTreeSet<Addr>,
+    ) -> BTreeSet<u32> {
         if self.seh_sites.is_empty()
             && !self.decoded.iter().any(|ins| {
                 ins.mnemonic == "CALL"
@@ -196,7 +200,9 @@ impl RawFunction {
             let ins = &self.decoded[index];
             if self.seh_sites.contains_key(&i)
                 || (ins.mnemonic == "CALL"
-                    && self.branch_target(index).is_some_and(|t| helpers.contains(&t)))
+                    && self
+                        .branch_target(index)
+                        .is_some_and(|t| helpers.contains(&t)))
             {
                 active = true;
             } else if self.seh_restores.contains(&i) || self.calls_seh_epilog(program, index) {
@@ -230,7 +236,9 @@ impl RawFunction {
             if self.decoded[i as usize].mnemonic != "MOV" {
                 return Err(Diagnostic::error(
                     self.decoded[i as usize].addr,
-                    rk_core::Reason::Unsupported { detail: "SEH frame site is not a MOV".into() },
+                    rk_core::Reason::Unsupported {
+                        detail: "SEH frame site is not a MOV".into(),
+                    },
                 ));
             }
         }
@@ -258,7 +266,9 @@ impl RawFunction {
             } else if ins.mnemonic == "POP" && self.seh_restores.contains(&i) {
                 effects.insert(i, vec![SehEffect::Leave]);
             } else if ins.mnemonic == "CALL"
-                && self.branch_target(i as usize).is_some_and(|t| helpers.contains(&t))
+                && self
+                    .branch_target(i as usize)
+                    .is_some_and(|t| helpers.contains(&t))
             {
                 effects.insert(i, vec![SehEffect::Adopt]);
             } else if ins.mnemonic == "RET" && self.seh_escapes.contains(&i) {
@@ -269,12 +279,18 @@ impl RawFunction {
     }
 }
 
-pub(crate) fn seh_helpers(program: &Program, raw: &[(Addr, Result<RawFunction>)]) -> BTreeSet<Addr> {
+pub(crate) fn seh_helpers(
+    program: &Program,
+    raw: &[(Addr, Result<RawFunction>)],
+) -> BTreeSet<Addr> {
     let mut helpers: BTreeSet<Addr> = raw
         .iter()
         .filter_map(|(addr, raw)| {
             let raw = raw.as_ref().ok()?;
-            (!raw.seh_escaping_returns(program, &BTreeSet::new()).is_empty()).then_some(*addr)
+            (!raw
+                .seh_escaping_returns(program, &BTreeSet::new())
+                .is_empty())
+            .then_some(*addr)
         })
         .collect();
     loop {
@@ -286,9 +302,14 @@ pub(crate) fn seh_helpers(program: &Program, raw: &[(Addr, Result<RawFunction>)]
                     return None;
                 }
                 let calls = raw.decoded.iter().enumerate().filter_map(|(i, ins)| {
-                    (ins.mnemonic == "CALL").then(|| raw.branch_target(i)).flatten()
+                    (ins.mnemonic == "CALL")
+                        .then(|| raw.branch_target(i))
+                        .flatten()
                 });
-                calls.into_iter().any(|target| helpers.contains(&target)).then_some(*addr)
+                calls
+                    .into_iter()
+                    .any(|target| helpers.contains(&target))
+                    .then_some(*addr)
             })
             .collect();
         if pending.is_empty() {
@@ -326,7 +347,9 @@ fn writes_reg32(ins: &DecodedInsn, reg: u8) -> bool {
     if ins.mnemonic.starts_with("LOOP") {
         return reg == R_ECX;
     }
-    if matches!(ins.mnemonic.as_str(), "CMP" | "TEST" | "PUSH" | "JMP") || JCC.contains(&ins.mnemonic.as_str()) {
+    if matches!(ins.mnemonic.as_str(), "CMP" | "TEST" | "PUSH" | "JMP")
+        || JCC.contains(&ins.mnemonic.as_str())
+    {
         return false;
     }
     match ins.operands[0].kind {
@@ -363,8 +386,18 @@ fn seh_zero_base(raw: &RawFunction, i: usize, reg: Option<u8>) -> bool {
         }
         if !matches!(
             ins.mnemonic.as_str(),
-            "MOV" | "LEA" | "POP" | "PUSH" | "ADD" | "SUB" | "AND" | "OR" | "XOR" | "TEST"
-                | "CMP" | "NOP"
+            "MOV"
+                | "LEA"
+                | "POP"
+                | "PUSH"
+                | "ADD"
+                | "SUB"
+                | "AND"
+                | "OR"
+                | "XOR"
+                | "TEST"
+                | "CMP"
+                | "NOP"
         ) || writes_reg32(ins, reg)
         {
             return false;
@@ -435,7 +468,12 @@ pub(crate) fn seh_frame_sites(raw: &RawFunction, image: &Image) -> BTreeMap<u32,
             let amount = &reserve.operands[1];
             if gpr32(dst) != Some(R_ESP)
                 || imm(amount).is_none_or(|v| {
-                    v as u32 != if reserve.mnemonic == "ADD" { 0xffff_fff0 } else { 16 }
+                    v as u32
+                        != if reserve.mnemonic == "ADD" {
+                            0xffff_fff0
+                        } else {
+                            16
+                        }
                 })
             {
                 continue;
@@ -454,10 +492,12 @@ pub(crate) fn seh_frame_sites(raw: &RawFunction, image: &Image) -> BTreeMap<u32,
         let dst = &mov.operands[0];
         let src = &mov.operands[1];
         let dst_base = mem(dst).and_then(|(base, _, _, _, _)| base);
-        let zero_base = if seh_zero_base(raw, i, dst_base) { dst_base.unwrap_or(0) } else { 0 };
-        if !seh_chain_operand(dst, zero_base)
-            || gpr32(src) != Some(R_ESP)
-            || !raw.contiguous[i - 1]
+        let zero_base = if seh_zero_base(raw, i, dst_base) {
+            dst_base.unwrap_or(0)
+        } else {
+            0
+        };
+        if !seh_chain_operand(dst, zero_base) || gpr32(src) != Some(R_ESP) || !raw.contiguous[i - 1]
         {
             continue;
         }
@@ -470,7 +510,11 @@ pub(crate) fn seh_frame_sites(raw: &RawFunction, image: &Image) -> BTreeMap<u32,
             let Some(pushed_reg) = gpr32(pushed) else {
                 continue;
             };
-            if pushed_reg == R_ESP || load.mnemonic != "MOV" || load.operands.len() != 2 || !raw.contiguous[i - 2] {
+            if pushed_reg == R_ESP
+                || load.mnemonic != "MOV"
+                || load.operands.len() != 2
+                || !raw.contiguous[i - 2]
+            {
                 continue;
             }
             let loaded = &load.operands[0];
@@ -514,10 +558,7 @@ fn seh_except_entry(ins: &DecodedInsn) -> bool {
         return false;
     }
     mem(&ins.operands[1]).is_some_and(|(base, index, _scale, disp, seg)| {
-        base == Some(R_EBP)
-            && index.is_none()
-            && seg.is_none()
-            && disp as u32 == 0xffff_ffe8
+        base == Some(R_EBP) && index.is_none() && seg.is_none() && disp as u32 == 0xffff_ffe8
     })
 }
 
@@ -601,7 +642,9 @@ pub(crate) fn eh3_trylevels(raw: &RawFunction, program: &Program) -> Option<BTre
         let source_reg = src.and_then(gpr32);
         if ins.mnemonic == "MOV" && source_reg.is_some() {
             let constants = constants.get_or_insert_with(|| register_constants(raw, program));
-            let value = constants.get(&(i as u32)).and_then(|s| s.get(&source_reg.unwrap()))?;
+            let value = constants
+                .get(&(i as u32))
+                .and_then(|s| s.get(&source_reg.unwrap()))?;
             levels.insert(*value);
         } else if ins.mnemonic == "MOV" && value.is_some() {
             levels.insert(value.unwrap());

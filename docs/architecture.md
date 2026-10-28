@@ -219,7 +219,10 @@ Unsupported semantics stop with diagnostics, without fabricating a return.
 `tools/build.py --no-pcode` omits the runtime SLEIGH library and evaluator;
 missing code then fails explicitly. Mobile, web and Windows builds currently
 omit this linkage too. A complete static map does not cover heap-generated code,
-which still requires the interpreter when used by the guest.
+which still requires the interpreter when used by the guest. When a game supplies
+a reloc manifest, heap bodies matching a translated template are bound at run
+time by `runtime/reloc.cpp` before the interpreter; each entry revalidates the
+guest bytes and import slots, `RECOMP_RELOC=off` restores the interpreter path.
 `rk-pcode-ffi` lifts live bytes through the translator's pinned SLEIGH backend;
 `runtime/pcode.cpp` evaluates them and `pcode_x86.cpp` maps guest state and dispatch.
 Cached lifts are byte-validated, and nested execution retains shared ownership.

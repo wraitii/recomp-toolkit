@@ -117,6 +117,9 @@ pub struct DiscoveryReport {
 
 impl DiscoveryReport {
     pub fn empty() -> Self {
-        Self { converged: true, ..Self::default() }
+        Self {
+            converged: true,
+            ..Self::default()
+        }
     }
 }

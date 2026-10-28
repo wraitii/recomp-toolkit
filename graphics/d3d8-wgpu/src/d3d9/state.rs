@@ -410,7 +410,7 @@ impl D3d9StateBlock {
             entry.1 = state.transform[entry.0 as usize];
         }
         if self.viewport.is_some() {
-            self.viewport = Some(state.viewport());
+            self.viewport = Some(*state.viewport());
         }
         if self.scissor.is_some() {
             self.scissor = Some(state.scissor());
@@ -584,13 +584,13 @@ pub struct D3d9State {
     ps_const_f: [[f32; 4]; PS_CONST_F],
     ps_const_i: [[i32; 4]; PS_CONST_I],
     ps_const_b: [u32; PS_CONST_B],
-    target_width: u32,
-    target_height: u32,
+    target_viewport: Viewport,
     blocks: BTreeMap<u32, D3d9StateBlock>,
     next_block: u32,
     recording: Option<D3d9StateBlock>,
     recording_handle: u32,
     pipeline_fingerprint: u64,
+    selection_revision: u64,
 }
 
 impl Default for D3d9State {
@@ -662,13 +662,20 @@ impl Default for D3d9State {
             ps_const_f: [[0.0; 4]; PS_CONST_F],
             ps_const_i: [[0; 4]; PS_CONST_I],
             ps_const_b: [0; PS_CONST_B],
-            target_width: 0,
-            target_height: 0,
+            target_viewport: Viewport {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+                min_z: 0.0,
+                max_z: 1.0,
+            },
             blocks: BTreeMap::new(),
             next_block: 1,
             recording: None,
             recording_handle: 0,
             pipeline_fingerprint: 0,
+            selection_revision: 0,
         };
         state.pipeline_fingerprint = state.full_fingerprint();
         state
@@ -687,27 +694,20 @@ impl Default for StreamSource {
 
 impl D3d9State {
     pub fn set_target_size(&mut self, width: u32, height: u32) {
-        self.target_width = width;
-        self.target_height = height;
+        self.target_viewport.width = width;
+        self.target_viewport.height = height;
     }
 
-    pub fn viewport(&self) -> Viewport {
-        self.viewport.unwrap_or(Viewport {
-            x: 0,
-            y: 0,
-            width: self.target_width,
-            height: self.target_height,
-            min_z: 0.0,
-            max_z: 1.0,
-        })
+    pub fn viewport(&self) -> &Viewport {
+        self.viewport.as_ref().unwrap_or(&self.target_viewport)
     }
 
     pub fn scissor(&self) -> Scissor {
         self.scissor.unwrap_or(Scissor {
             left: 0,
             top: 0,
-            right: self.target_width as i32,
-            bottom: self.target_height as i32,
+            right: self.target_viewport.width as i32,
+            bottom: self.target_viewport.height as i32,
         })
     }
 
@@ -775,9 +775,34 @@ impl D3d9State {
         self.pipeline_fingerprint
     }
 
+    pub(crate) fn memo_trace_fingerprints(&self) -> [u64; 3] {
+        let mut resources = self.pipeline_fingerprint;
+        for stage in 0..MAX_SAMPLERS {
+            resources ^= fingerprint_word(FP_TEXTURE + stage as u64, self.textures[stage]);
+        }
+        let mut bindings = resources;
+        for (stage, row) in self.sampler.iter().enumerate() {
+            for (index, &value) in row.iter().enumerate() {
+                bindings ^= fingerprint_word(FP_SAMPLER + (stage * 14 + index) as u64, value);
+            }
+        }
+        [self.pipeline_fingerprint, resources, bindings]
+    }
+
+    pub(crate) fn selection_revision(&self) -> u64 {
+        self.selection_revision
+    }
+
     fn track(&mut self, slot: u64, old: u32, new: u32) {
         if old != new {
             self.pipeline_fingerprint ^= fingerprint_word(slot, old) ^ fingerprint_word(slot, new);
+            if matches!(slot,
+                7 | 8 | 9 | 14 | 19 | 20 | 22 | 23 | 27 | 28 | 35
+                | 52..=56 | 58 | 59 | 152 | 162 | 168 | 171 | 175
+                | 185..=189 | 195 | 206..=209 | FP_VERTEX_SHADER | FP_PIXEL_SHADER
+            ) {
+                self.selection_revision += 1;
+            }
         }
     }
 
@@ -1000,36 +1025,6 @@ impl D3d9State {
                 "SetViewport",
                 "viewport depth range must be finite",
             ));
-        }
-        if self.target_width != 0 {
-            let right = viewport
-                .x
-                .checked_add(viewport.width)
-                .ok_or_else(|| invalid("SetViewport", "viewport X range overflows"))?;
-            if right > self.target_width {
-                return Err(invalid(
-                    "SetViewport",
-                    format!(
-                        "viewport X range {right} exceeds target width {}",
-                        self.target_width
-                    ),
-                ));
-            }
-        }
-        if self.target_height != 0 {
-            let bottom = viewport
-                .y
-                .checked_add(viewport.height)
-                .ok_or_else(|| invalid("SetViewport", "viewport Y range overflows"))?;
-            if bottom > self.target_height {
-                return Err(invalid(
-                    "SetViewport",
-                    format!(
-                        "viewport Y range {bottom} exceeds target height {}",
-                        self.target_height
-                    ),
-                ));
-            }
         }
         if self.recording.is_some() {
             self.recording.as_mut().unwrap().viewport = Some(viewport);
@@ -1690,7 +1685,7 @@ impl D3d9State {
             }
         }
         if all {
-            block.viewport = Some(self.viewport());
+            block.viewport = Some(*self.viewport());
             block.scissor = Some(self.scissor());
             block.material = Some(self.material);
             for index in 0..MAX_CLIP_PLANES {
@@ -1813,15 +1808,13 @@ impl D3d9State {
     }
 
     pub fn clear_pipeline(&mut self) {
-        let target_width = self.target_width;
-        let target_height = self.target_height;
+        let target_viewport = self.target_viewport;
         let blocks = std::mem::take(&mut self.blocks);
         let next_block = self.next_block;
         let recording_handle = self.recording_handle;
         drop(blocks);
         *self = Self::default();
-        self.target_width = target_width;
-        self.target_height = target_height;
+        self.target_viewport = target_viewport;
         self.next_block = next_block;
         self.recording_handle = recording_handle;
     }

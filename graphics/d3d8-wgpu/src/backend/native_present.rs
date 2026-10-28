@@ -1,7 +1,8 @@
 use crate::RenderError;
 
 #[cfg(target_os = "macos")]
-pub(crate) type ReadyEvent = metal::SharedEvent;
+pub(crate) type ReadyEvent =
+    objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLSharedEvent>>;
 #[cfg(not(target_os = "macos"))]
 pub(crate) type ReadyEvent = ();
 
@@ -9,7 +10,10 @@ pub(crate) type ReadyEvent = ();
 pub(crate) fn create_ready_event(device: &wgpu::Device) -> Result<ReadyEvent, RenderError> {
     let hal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
         .ok_or_else(|| RenderError::new("PresentHandoff", "the device is not a Metal device"))?;
-    Ok(hal.raw_device().lock().new_shared_event())
+    use objc2_metal::MTLDevice;
+    hal.raw_device()
+        .newSharedEvent()
+        .ok_or_else(|| RenderError::new("PresentHandoff", "Metal shared-event allocation failed"))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -28,19 +32,24 @@ pub(crate) fn signal_ready(
 ) -> Result<*mut u8, RenderError> {
     let hal = unsafe { queue.as_hal::<wgpu::hal::api::Metal>() }
         .ok_or_else(|| RenderError::new("PresentHandoff", "the queue is not a Metal queue"))?;
-    metal::objc::rc::autoreleasepool(|| {
-        let queue = hal.as_raw().lock();
-        let command = queue.new_command_buffer();
-        command.encode_signal_event(event, value);
+    use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
+    objc2::rc::autoreleasepool(|_| {
+        let command = hal.as_raw().commandBuffer().ok_or_else(|| {
+            RenderError::new(
+                "PresentHandoff",
+                "Metal signal command-buffer allocation failed",
+            )
+        })?;
+        command.encodeSignalEvent_value((**event).as_ref(), value);
         command.commit();
-    });
+        Ok::<_, RenderError>(())
+    })?;
     Ok(ready_event_handle(event))
 }
 
 #[cfg(target_os = "macos")]
 pub(crate) fn ready_event_handle(event: &ReadyEvent) -> *mut u8 {
-    let raw: &metal::SharedEventRef = event;
-    (raw as *const metal::SharedEventRef).cast_mut().cast()
+    objc2::rc::Retained::as_ptr(event).cast_mut().cast()
 }
 
 #[cfg(not(target_os = "macos"))]

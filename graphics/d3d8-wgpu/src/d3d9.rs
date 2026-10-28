@@ -38,6 +38,7 @@ pub mod query;
 pub mod resource;
 pub mod shader;
 pub mod state;
+mod stats;
 pub mod wgsl;
 
 pub use d3dx::*;
@@ -296,7 +297,11 @@ struct DrawViews {
     key: (u32, u32, u64),
     target: SurfaceView,
     depth: Option<SurfaceView>,
-    textures: [Option<CachedBinding>; state::MAX_SAMPLERS],
+}
+
+struct DrawTextures {
+    epoch: u64,
+    bindings: [Option<CachedBinding>; state::MAX_SAMPLERS],
 }
 
 struct CachedBinding {
@@ -355,8 +360,9 @@ pub struct D3d9Device {
     registry: FastMap<u32, GpuRegistryEntry>,
     registry_epoch: u64,
     draw_views: Option<Box<DrawViews>>,
+    draw_textures: Option<Box<DrawTextures>>,
     view_cache: RefCell<FastMap<TextureViewKey, wgpu::TextureView>>,
-    locks: BTreeMap<u32, Vec<Arc<AtomicU32>>>,
+    locks: FastMap<u32, Vec<Arc<AtomicU32>>>,
     draw: draw::D3d9DrawState,
     present_ring: Option<present::PresentRing>,
     queries: query::D3d9Queries,
@@ -646,7 +652,7 @@ pub fn d3d9_buffer_unlock(resource: &mut D3d9Resource, bytes: &[u8]) -> D3d9Buff
     };
     if b.lock_count.load(Ordering::Acquire) == 0 {
         return D3d9BufferUnlockResult {
-            status: status(StatusCode::InvalidArgument, "D3D9 buffer is not locked"),
+            status: status(StatusCode::Ok, ""),
             closed: false,
         };
     }
@@ -1361,8 +1367,9 @@ impl Default for D3d9Device {
             registry: FastMap::default(),
             registry_epoch: 0,
             draw_views: None,
+            draw_textures: None,
             view_cache: RefCell::new(FastMap::default()),
-            locks: BTreeMap::new(),
+            locks: FastMap::default(),
             draw: draw::D3d9DrawState::default(),
             present_ring: None,
             queries: query::D3d9Queries::new(),
@@ -1752,7 +1759,11 @@ pub fn d3d9_create_device(
     };
     device.features = gpu.device.features();
     device.limits = gpu.device.limits();
-    device.d3d9_gpu = Some(D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone()));
+    let d3d9_gpu = D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone());
+    if let Err(error) = draw::uber::prepare(&d3d9_gpu) {
+        return fail_status(&present, bridge_error(error));
+    }
+    device.d3d9_gpu = Some(d3d9_gpu);
     device.gpu = Some(gpu);
     device.reservation = Some(reservation);
     device.adapter = request.adapter;
@@ -1849,6 +1860,16 @@ fn gpu_entry_from_staged(
             fresh: fresh_or_new(resource.level_freshness(0, 0)),
         }),
         _ => None,
+    }
+}
+
+fn registry_texture(entry: &GpuRegistryEntry) -> Option<&wgpu::Texture> {
+    match entry {
+        GpuRegistryEntry::Texture { texture, .. } | GpuRegistryEntry::Surface { texture, .. } => {
+            Some(texture)
+        }
+        GpuRegistryEntry::TextureAlias { gpu, .. } => gpu.as_ref(),
+        GpuRegistryEntry::Buffer { .. } => None,
     }
 }
 
@@ -1977,10 +1998,31 @@ pub fn d3d9_register_implicit_targets(
 
 pub fn d3d9_unregister_resource(device: &mut D3d9Device, id: u32) -> Status {
     device.resources.remove(&id);
-    device.registry.remove(&id);
+    let released = device.registry.remove(&id);
+    if let Some(texture) = released.as_ref().and_then(registry_texture) {
+        device.draw.drop_texture(texture);
+        if !device
+            .registry
+            .values()
+            .any(|entry| registry_texture(entry) == Some(texture))
+        {
+            device
+                .view_cache
+                .borrow_mut()
+                .retain(|key, _| &key.texture != texture);
+        }
+    }
     device.registry_epoch += 1;
     device.locks.remove(&id);
-    device.draw.drop_resource(id);
+    device.draw_views = None;
+    stats::record(|s| {
+        if let Some(textures) = &device.draw_textures {
+            s.texture_epoch_invalidations += 1;
+            s.texture_invalidated_slots +=
+                textures.bindings.iter().filter(|b| b.is_some()).count() as u64;
+        }
+    });
+    device.draw_textures = None;
     if device.render_target_id == id {
         device.render_target_id = 0;
     }
@@ -2151,6 +2193,10 @@ pub fn d3d9_reset(device: &mut D3d9Device, request: &D3d9ResetRequest) -> D3d9Re
             }
         };
         let d3d9_gpu = D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone());
+        if let Err(error) = draw::uber::prepare(&d3d9_gpu) {
+            device.replacement = Some((gpu, loss));
+            return reset_fail(present, bridge_error(error));
+        }
         device.restore = Some(RestorePlan {
             gpu: Some(gpu),
             d3d9_gpu,
@@ -2531,7 +2577,7 @@ fn prepare_present(
     };
     let gpu = bridge_gpu(device).map_err(bridge_error)?;
     let result = flush_draws_with_gpu(device, &gpu);
-    device.draw.end_frame();
+    device.draw.end_frame(&gpu);
     let result = bridge_gpu_ok(&gpu, result);
     if result.code != StatusCode::Ok {
         return Err(result);
@@ -3466,9 +3512,10 @@ pub fn d3d9_check_device_format_conversion(request: &D3d9CheckFormatConversionRe
     if let Err(status) = check_adapter(request.adapter, request.device_type) {
         return status;
     }
-    if request.source_format == request.destination_format
-        && format::is_supported(request.source_format)
-        && !format::is_block(request.source_format)
+    if copy::supports_format_conversion(request.source_format, request.destination_format)
+        || (request.source_format == request.destination_format
+            && format::is_supported(request.source_format)
+            && !format::is_block(request.source_format))
     {
         return status(StatusCode::Ok, "");
     }
@@ -4027,7 +4074,7 @@ pub fn d3d9_get_shader(device: &D3d9Device, pixel: bool) -> ValueResult {
 
 pub fn d3d9_shader_function(device: &D3d9Device, pixel: bool, handle: u32) -> ValuesResult {
     match device.objects.shader(pixel, handle) {
-        Ok(record) => ok_values(record.code.clone()),
+        Ok(record) => ok_values(record.code.to_vec()),
         Err(error) => err_values(error),
     }
 }
@@ -4310,9 +4357,6 @@ fn cached_texture_view(
     let mut views = cache.borrow_mut();
     if let Some(view) = views.get(&key) {
         return view.clone();
-    }
-    if views.len() >= 256 {
-        views.clear();
     }
     let view = texture.create_view(&descriptor);
     views.insert(key, view.clone());
@@ -4605,6 +4649,7 @@ fn resolve_binding(device: &D3d9Device, id: u32, stage: u32) -> Result<CachedBin
     let is_depth = format::is_depth(format);
     let binding = draw::BoundTexture {
         stage,
+        texture: texture.clone(),
         view: sampling_view(&device.view_cache, &texture, kind, is_depth),
         width,
         height,
@@ -4626,8 +4671,6 @@ fn resolve_binding(device: &D3d9Device, id: u32, stage: u32) -> Result<CachedBin
 fn bound_textures_cached(
     device: &D3d9Device,
     cache: &mut [Option<CachedBinding>; state::MAX_SAMPLERS],
-    target: &SurfaceView,
-    depth: Option<&SurfaceView>,
 ) -> Result<draw::BoundTextures, RenderError> {
     let mut out = draw::BoundTextures::new();
     for stage in 0..state::MAX_SAMPLERS as u32 {
@@ -4638,21 +4681,23 @@ fn bound_textures_cached(
         require_unlocked(device, id, "Draw texture")?;
         let cached = match cache[stage as usize].take() {
             Some(mut cached) if cached.id == id => {
+                stats::record(|s| s.texture_hits += 1);
                 if let Some(lod) = &cached.lod {
                     cached.binding.lod = lod.load(Ordering::Acquire);
                 }
                 cached
             }
-            _ => resolve_binding(device, id, stage)?,
+            previous => {
+                stats::record(|s| {
+                    if previous.is_some() {
+                        s.texture_changed_misses += 1;
+                    } else {
+                        s.texture_cold_misses += 1;
+                    }
+                });
+                resolve_binding(device, id, stage)?
+            }
         };
-        if cached.texture == target.texture
-            || depth.is_some_and(|depth| cached.texture == depth.texture)
-        {
-            return Err(unsupported(
-                "Draw",
-                "the current render target is bound as a sampler",
-            ));
-        }
         out.push(cached.binding.clone());
         cache[stage as usize] = Some(cached);
     }
@@ -4763,15 +4808,11 @@ fn resolve_draw_views(
             "depth surface is smaller than the render target",
         ));
     }
-    Ok(Box::new(DrawViews {
-        key,
-        target,
-        depth,
-        textures: Default::default(),
-    }))
+    Ok(Box::new(DrawViews { key, target, depth }))
 }
 
 fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<(), RenderError> {
+    stats::record(|s| s.draws += 1);
     let gpu = bridge_gpu(device)?;
     require_unlocked(device, device.render_target_id, "D3D9 surface")?;
     if device.depth_target_id != 0 {
@@ -4782,23 +4823,35 @@ fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<
         device.depth_target_id,
         device.registry_epoch,
     );
-    let mut views = match device.draw_views.take() {
+    let views = match device.draw_views.take() {
         Some(views) if views.key == key => views,
         _ => resolve_draw_views(device, key)?,
     };
-    let textures = bound_textures_cached(
-        device,
-        &mut views.textures,
-        &views.target,
-        views.depth.as_ref(),
-    )?;
+    let mut textures = match device.draw_textures.take() {
+        Some(textures) if textures.epoch == device.registry_epoch => textures,
+        previous => {
+            stats::record(|s| {
+                if let Some(textures) = &previous {
+                    s.texture_epoch_invalidations += 1;
+                    s.texture_invalidated_slots +=
+                        textures.bindings.iter().filter(|b| b.is_some()).count() as u64;
+                }
+            });
+            Box::new(DrawTextures {
+                epoch: device.registry_epoch,
+                bindings: Default::default(),
+            })
+        }
+    };
+    let bindings = bound_textures_cached(device, &mut textures.bindings)?;
     let snapshot = draw::DrawSnapshot {
         command,
         target: views.target.clone(),
         depth: views.depth.clone(),
-        textures,
+        textures: bindings,
     };
     device.draw_views = Some(views);
+    device.draw_textures = Some(textures);
     if gpu.is_physical() {
         return Err(RenderError::new("Draw", gpu.loss().physical_message()));
     }
@@ -5054,7 +5107,7 @@ pub fn d3d9_clear(
     let viewport = device.state.viewport();
     let mut regions = Vec::new();
     if rects.is_empty() {
-        if let Some(region) = clear_region(None, &viewport, target.width, target.height) {
+        if let Some(region) = clear_region(None, viewport, target.width, target.height) {
             regions.push(region);
         }
     } else {
@@ -5065,7 +5118,7 @@ pub fn d3d9_clear(
                 right: rect.right,
                 bottom: rect.bottom,
             };
-            if let Some(region) = clear_region(Some(rect), &viewport, target.width, target.height) {
+            if let Some(region) = clear_region(Some(rect), viewport, target.width, target.height) {
                 regions.push(region);
             }
         }

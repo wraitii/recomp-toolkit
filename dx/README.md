@@ -37,6 +37,10 @@ in `host_api.h`; D3D8 and D3D9 hand their draws to the Rust
 | Networking | `weanetr.cpp` | the 17 MLDPlay methods, reporting no networking (`GetCurrentMs` excepted) |
 | Tests | `tests/` | `dx_tests` for the shim paths, `pad_tests` for the DirectInput joystick and XInput, plus the D3D8 descriptor/rendering and D3D7 mipmap suites |
 
+DirectInput gamepad feedback supports constant and periodic effects. Directional
+wheel forces are approximated on both rumble motors; condition and ramp effects
+are unsupported. Short periodic effects use their mean to avoid aliasing.
+
 ## Renderers
 
 | Layer | Rasterization | Notes |

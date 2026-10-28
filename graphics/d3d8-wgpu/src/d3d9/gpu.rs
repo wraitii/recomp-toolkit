@@ -117,6 +117,7 @@ impl PendingClear {
             depth_stencil_attachment: depth,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
     }
 }
@@ -219,11 +220,10 @@ impl PendingWork {
             return;
         };
         self.staging.finish();
-        let next = self
-            .submitter
-            .belts
-            .try_recv()
-            .unwrap_or_else(|_| wgpu::util::StagingBelt::new(STAGING_CHUNK));
+        let next =
+            self.submitter.belts.try_recv().unwrap_or_else(|_| {
+                wgpu::util::StagingBelt::new(self.device.clone(), STAGING_CHUNK)
+            });
         let staging = std::mem::replace(&mut self.staging, next);
         self.submitter.send(SubmitJob::Frame(encoder, staging));
     }
@@ -237,6 +237,9 @@ impl Drop for PendingWork {
 
 pub struct D3d9Gpu {
     pub device: wgpu::Device,
+    pub(crate) backend: wgpu::Backend,
+    pub(crate) interpreter:
+        Arc<std::sync::OnceLock<crate::render::interpreter::PreparedInterpreter>>,
     queue: wgpu::Queue,
     pending: Arc<Mutex<PendingWork>>,
     loss: D3d9Loss,
@@ -248,6 +251,8 @@ impl Clone for D3d9Gpu {
     fn clone(&self) -> Self {
         Self {
             device: self.device.clone(),
+            backend: self.backend,
+            interpreter: Arc::clone(&self.interpreter),
             queue: self.queue.clone(),
             pending: Arc::clone(&self.pending),
             loss: self.loss.clone(),
@@ -265,11 +270,13 @@ impl D3d9Gpu {
     pub fn from_context_with_loss(gpu: &GpuContext, loss: D3d9Loss) -> Self {
         Self {
             device: gpu.device.clone(),
+            backend: gpu.adapter_info.backend,
+            interpreter: Arc::new(std::sync::OnceLock::new()),
             queue: gpu.queue.clone(),
             pending: Arc::new(Mutex::new(PendingWork {
                 device: gpu.device.clone(),
                 encoder: None,
-                staging: wgpu::util::StagingBelt::new(STAGING_CHUNK),
+                staging: wgpu::util::StagingBelt::new(gpu.device.clone(), STAGING_CHUNK),
                 clear: None,
                 submitter: Submitter::new(gpu.queue.clone()),
                 flush_pending: Arc::new(AtomicBool::new(false)),
@@ -296,16 +303,14 @@ impl D3d9Gpu {
         completed: impl Fn(bool) + Send + Sync + 'static,
     ) -> Result<bool, RenderError> {
         let mut pending = self.pending.lock().unwrap();
-        pending.apply_clear();
-        let PendingWork {
-            device, encoder, ..
-        } = &mut *pending;
-        let registered =
-            crate::backend::native_completion::register(frame_encoder(device, encoder), completed)?;
-        if registered {
-            pending.submit();
-        }
-        Ok(registered)
+        pending.submit();
+        let Some(marker) = crate::backend::native_completion::marker(&self.device, completed)?
+        else {
+            return Ok(false);
+        };
+        pending.encoder = Some(marker);
+        pending.submit();
+        Ok(true)
     }
 
     pub(crate) fn request_flush(&self) {
@@ -405,10 +410,11 @@ impl D3d9Gpu {
                 unsafe { self.device.as_hal::<wgpu::hal::api::Metal>() }.ok_or_else(|| {
                     RenderError::new("GetAvailableTextureMem", "the device is not a Metal device")
                 })?;
-            let raw = hal.raw_device().lock();
+            use objc2_metal::MTLDevice;
+            let raw = hal.raw_device();
             Ok(raw
-                .recommended_max_working_set_size()
-                .saturating_sub(raw.current_allocated_size() as u64))
+                .recommendedMaxWorkingSetSize()
+                .saturating_sub(raw.currentAllocatedSize() as u64))
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -427,11 +433,11 @@ impl D3d9Gpu {
         if self.is_physical() {
             return Err(RenderError::new(operation, self.loss.physical_message()));
         }
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let oom_scope = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let value = f();
-        let oom = pollster::block_on(self.device.pop_error_scope());
-        let validation = pollster::block_on(self.device.pop_error_scope());
+        let oom = pollster::block_on(oom_scope.pop());
+        let validation = pollster::block_on(validation_scope.pop());
         if let Some(error) = oom {
             return Err(RenderError::out_of_memory(operation, error.to_string()));
         }
@@ -637,6 +643,7 @@ impl D3d9Gpu {
                     }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 pass.set_pipeline(&pipeline);
                 pass.set_bind_group(0, &bind, &[]);
@@ -673,8 +680,8 @@ impl D3d9Gpu {
                 self.device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some("d3d9-depth-upload"),
-                        bind_group_layouts: &[&layout],
-                        push_constant_ranges: &[],
+                        bind_group_layouts: &[Some(&layout)],
+                        immediate_size: 0,
                     });
             let pipeline = self
                 .device
@@ -696,13 +703,13 @@ impl D3d9Gpu {
                     primitive: wgpu::PrimitiveState::default(),
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: wgpu::TextureFormat::Depth32Float,
-                        depth_write_enabled: true,
-                        depth_compare: wgpu::CompareFunction::Always,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Always),
                         stencil: wgpu::StencilState::default(),
                         bias: wgpu::DepthBiasState::default(),
                     }),
                     multisample: wgpu::MultisampleState::default(),
-                    multiview: None,
+                    multiview_mask: None,
                     cache: None,
                 });
             Ok(DepthUpload { pipeline, layout })
@@ -807,7 +814,10 @@ impl D3d9Gpu {
                 self.queue().submit(std::iter::once(encoder.finish()));
                 self.map_buffer(&buffer, buffer_bytes)?;
                 {
-                    let mapped = buffer.slice(0..buffer_bytes).get_mapped_range();
+                    let mapped = buffer
+                        .slice(0..buffer_bytes)
+                        .get_mapped_range()
+                        .map_err(|error| RenderError::new("ReadbackTexture", error.to_string()))?;
                     let base = slice as usize * slice_size as usize;
                     for row in 0..copy_rows as usize {
                         let src = row * padded as usize;
@@ -899,6 +909,7 @@ impl D3d9Gpu {
                             depth_stencil_attachment: None,
                             timestamp_writes: None,
                             occlusion_query_set: None,
+                            multiview_mask: None,
                         });
                         pass.set_pipeline(&pipeline);
                         pass.set_bind_group(0, &bind, &[]);
@@ -971,8 +982,8 @@ impl MipGenState {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("d3d9-mipgen"),
-            bind_group_layouts: &[&layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("d3d9-mipgen"),
@@ -996,7 +1007,7 @@ impl MipGenState {
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
         let filter = if linear {
@@ -1008,7 +1019,7 @@ impl MipGenState {
             label: Some("d3d9-mipgen"),
             mag_filter: filter,
             min_filter: filter,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
         self.cached = Some(MipGen {

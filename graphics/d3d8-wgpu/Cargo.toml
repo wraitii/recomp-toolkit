@@ -34,18 +34,21 @@ log = "0.4"
 pollster = "0.4"
 smallvec = { version = "1", features = ["union"] }
 texpresso = "2"
-wgpu = "27"
+wgpu = "30.0.1"
 winit = "0.30"
-naga = { version = "27", features = ["wgsl-in"] }
+naga = { version = "30", features = ["wgsl-in"] }
 
 [build-dependencies]
 cxx-build = "=1.0.171"
+naga = { version = "30", features = ["wgsl-in", "msl-out", "termcolor", "stderr"] }
 
 [dependencies.cxx]
 version = "=1.0.171"
 
-# The present handoff reads the raw MTLTexture behind wgpu's Metal backend;
-# 0.32 is the version wgpu-hal 27 exposes through `raw_handle`.
 [target.'cfg(target_os = "macos")'.dependencies]
-metal = "0.32"
-block = "0.1"
+objc2 = "0.6"
+objc2-metal = "0.3"
+block2 = "0.6"
+
+[profile.release]
+debug = "line-tables-only"

@@ -8,6 +8,7 @@
 mod callgraph;
 mod cfg;
 mod contracts;
+pub mod memory;
 mod modes;
 mod private;
 pub mod stack;
@@ -64,7 +65,9 @@ impl CallFacts for ContractCallFacts<'_> {
 
 impl From<&X87ModeFacts> for rk_x87::ModeInput {
     fn from(facts: &X87ModeFacts) -> Self {
-        Self { known_modes: facts.known_modes.clone() }
+        Self {
+            known_modes: facts.known_modes.clone(),
+        }
     }
 }
 
@@ -110,6 +113,9 @@ pub struct GlobalReport {
 #[derive(Clone, Debug, Default)]
 pub struct GlobalFacts {
     pub stack: stack::Analysis,
+    pub returns: stack::Analysis,
+    pub memory: memory::Analysis,
+    memory_inference: bool,
     pub contracts: BTreeMap<Addr, Contract>,
     pub indirect_contracts: BTreeMap<Addr, Contract>,
     pub site_effects: BTreeMap<Addr, ConfiguredEffect>,
@@ -125,10 +131,23 @@ impl GlobalFacts {
         let mut mode_opaque = opaque_helpers.clone();
         mode_opaque.extend(native.iter().copied());
         let stack = if input.settings.stack_memory {
-            stack::analyze(input.program, input.analysis, &mode_opaque, input.indirect)
+            stack::analyze(
+                input.program,
+                input.analysis,
+                &mode_opaque,
+                input.indirect,
+                false,
+            )
         } else {
             stack::Analysis::default()
         };
+        let returns = stack::analyze(
+            input.program,
+            input.analysis,
+            &mode_opaque,
+            input.indirect,
+            true,
+        );
         let modes = modes::analyze(
             input.analysis,
             input.indirect,
@@ -150,6 +169,18 @@ impl GlobalFacts {
             input.site_effects,
             &native,
         )?;
+        let memory = {
+            let calls = stack::CallFacts {
+                registers: ContractCallFacts {
+                    contracts: &contracts.contracts,
+                    indirect: &contracts.indirect,
+                    effects: input.site_effects,
+                },
+                stack: &stack,
+                memory: None,
+            };
+            memory::analyze(input, &mode_opaque, &calls)
+        };
         let mut opaque = opaque_helpers;
         opaque.extend(contracts.rejected.keys().copied());
         let private = private::analyze(&private::PrivateInput {
@@ -162,8 +193,16 @@ impl GlobalFacts {
         let mut report = GlobalReport {
             stack_functions: stack.functions.len(),
             stack_sites: stack.sites.len(),
-            stack_readonly_sites: stack.sites.values().filter(|summary| summary.effect.writes.is_empty()).count(),
-            stack_mapped_noreturn_sites: stack.sites.values().filter(|summary| summary.mapped_noreturn).count(),
+            stack_readonly_sites: stack
+                .sites
+                .values()
+                .filter(|summary| summary.effect.writes.is_empty())
+                .count(),
+            stack_mapped_noreturn_sites: stack
+                .sites
+                .values()
+                .filter(|summary| summary.mapped_noreturn)
+                .count(),
             stack_rejected: stack.rejected.clone(),
             stack_rejected_sites: stack.rejected_sites.clone(),
             functions: input.program.functions.len(),
@@ -198,6 +237,9 @@ impl GlobalFacts {
         }
         Ok(Self {
             stack,
+            returns,
+            memory,
+            memory_inference: input.settings.stack_memory,
             contracts: contracts.contracts,
             indirect_contracts: contracts.indirect,
             site_effects: input.site_effects.clone(),
@@ -216,7 +258,11 @@ impl GlobalFacts {
     }
 
     pub fn inference_call_facts(&self) -> stack::CallFacts<'_> {
-        stack::CallFacts { registers: self.call_facts(), stack: &self.stack }
+        stack::CallFacts {
+            registers: self.call_facts(),
+            stack: &self.stack,
+            memory: self.memory_inference.then_some(&self.memory),
+        }
     }
 
     pub fn summary(&self) -> String {
@@ -235,6 +281,14 @@ impl GlobalFacts {
                 out,
                 "instruction-mismatch {:08x} expected={expected} visited={visited}",
                 addr
+            )?;
+        }
+        writeln!(out, "memory-effects")?;
+        for (&addr, effects) in &self.memory.functions {
+            writeln!(
+                out,
+                "memory {addr:08x} reads={:?} writes={:?}",
+                effects.reads, effects.writes
             )?;
         }
         writeln!(out, "contracts")?;

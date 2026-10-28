@@ -1,5 +1,5 @@
-//! Byte-lane SSA over `CgFunction`. Registers and flags are tracked per byte and memory as a single
-//! token, and each observable effect gets a boundary carrying the state at that point. Calls use
+//! Byte-lane SSA over `CgFunction`, with range-scoped memory definitions and conservative residual
+//! memory. Observable effects retain ordered boundaries carrying the guest state. Calls use
 //! `CallFacts` under the optimizing policy and conservative effects otherwise. `prepare`
 //! canonicalizes, forwards stores to loads, coalesces whole-register phis and removes dead values;
 //! `liveness` and `flags` derive state publications and lazy flag plans.
@@ -10,6 +10,7 @@ use rk_core::contract::{Field, Fields};
 use rk_core::{Addr, Lookup};
 use rk_ir::{Op, SlowInsn, StateKey};
 
+pub mod address;
 mod build;
 mod canonical;
 mod coalesce;
@@ -17,12 +18,14 @@ mod dump;
 mod flags;
 mod forward;
 mod liveness;
+pub mod memory;
 mod prepare;
 mod validate;
 pub use validate::validate;
 
 pub use build::{
-    build, BuildOptions, CallEffect, CallFacts, ConservativeCallFacts, StackEffect, DEFAULT_VALUE_BUDGET,
+    build, BuildOptions, CallEffect, CallFacts, ConservativeCallFacts, StackEffect,
+    DEFAULT_VALUE_BUDGET,
 };
 pub use canonical::canonicalize;
 pub use dump::dump;
@@ -137,6 +140,7 @@ pub struct Ssa {
     pub flags: Vec<FlagRecord>,
     pub loc: Vec<Option<InsnLoc>>,
     pub value_addr: Vec<Addr>,
+    pub(crate) memory_partitioned: bool,
     pub(crate) phi_key: Lookup<ValueId, usize>,
     pub(crate) entry_reads: Vec<Vec<(usize, ValueId)>>,
     pub(crate) exit_state: Vec<Vec<Option<ValueId>>>,
@@ -148,12 +152,22 @@ impl Ssa {
         let id = self.values.len() as ValueId;
         let start = self.args.len() as u32;
         self.args.extend_from_slice(args);
-        self.values.push(Value { op, size, args_start: start, args_len: args.len() as u32 });
+        self.values.push(Value {
+            op,
+            size,
+            args_start: start,
+            args_len: args.len() as u32,
+        });
         self.value_addr.push(addr);
         id
     }
 
-    pub(crate) fn constant(&mut self, cache: &mut BTreeMap<(u8, u64), ValueId>, size: u8, data: u64) -> ValueId {
+    pub(crate) fn constant(
+        &mut self,
+        cache: &mut BTreeMap<(u8, u64), ValueId>,
+        size: u8,
+        data: u64,
+    ) -> ValueId {
         let data = data & rk_core::mask(size as u32);
         if let Some(&value) = cache.get(&(size, data)) {
             return value;
@@ -210,7 +224,9 @@ impl Ssa {
         let mut blocks = vec![Vec::new(); self.blocks.len()];
         for (block, item) in self.blocks.iter().enumerate() {
             for &phi in &item.phis {
-                let Some(&key) = self.phi_key.get(&phi) else { continue };
+                let Some(&key) = self.phi_key.get(&phi) else {
+                    continue;
+                };
                 blocks[block].push((key, phi, self.args(phi).to_vec()));
             }
         }

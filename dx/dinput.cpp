@@ -22,6 +22,7 @@
 #include <string.h>
 #include <iterator>
 #include <algorithm>
+#include <cmath>
 #include "../platform/os.h"
 
 #define IID_BYTES(a, b, c, d0, d1, d2, d3, d4, d5, d6, d7)                                         \
@@ -85,6 +86,9 @@ std::set<uint32_t> g_acquired_mice;
 std::set<uint32_t> g_exclusive_mice;
 std::atomic<uint32_t> g_acquired_mouse_count{0};
 std::atomic<uint32_t> g_exclusive_mouse_count{0};
+void effect_stop_device(uint32_t device);
+void effect_forget_device(uint32_t device);
+uint32_t effect_set_property(uint32_t prop, uint32_t value);
 void publish_mouse_acquisition(ComObj *d) {
     if (d->dev_type != DIDEVTYPE_MOUSE)
         return;
@@ -100,6 +104,8 @@ void publish_mouse_acquisition(ComObj *d) {
     g_exclusive_mouse_count.store(uint32_t(g_exclusive_mice.size()));
 }
 void device_destroy(ComObj *d) {
+    effect_stop_device(d->id);
+    effect_forget_device(d->id);
     d->acquired = false;
     publish_mouse_acquisition(d);
 }
@@ -388,6 +394,10 @@ void Device_SetProperty(X86 *c) {
         com_ret(c, DIERR_INVALIDPARAM);
         return;
     }
+    if (is_joystick(d) && (prop == 7 || prop == 9)) {
+        com_ret(c, effect_set_property(prop, rd32(ph + DIPROPDWORD_OFF_dwData)));
+        return;
+    }
     uint32_t hr = DI_OK;
     if (is_joystick(d) && joy_set_property(d, prop, ph, &hr)) {
         com_ret(c, hr);
@@ -453,6 +463,7 @@ void Device_Unacquire(X86 *c) {
         return;
     }
     d->acquired = false;
+    effect_stop_device(d->id);
     publish_mouse_acquisition(d);
     d->events.clear();
     com_ret(c, DI_OK);
@@ -722,11 +733,9 @@ DX_STUB(Device_RunControlPanel, DIERR_UNSUPPORTED)
 DX_STUB(Device_Initialize, DI_OK)
 
 // --- IDirectInputDevice2A additions (force feedback and polling)
-DX_STUB(Device_CreateEffect, DIERR_UNSUPPORTED)
-DX_STUB(Device_EnumEffects, DI_OK)
-DX_STUB(Device_GetEffectInfo, DIERR_UNSUPPORTED)
+#include "dinput_effects.h"
+
 DX_STUB(Device_GetForceFeedbackState, DIERR_UNSUPPORTED)
-DX_STUB(Device_SendForceFeedbackCommand, DIERR_UNSUPPORTED)
 DX_STUB(Device_EnumCreatedEffectObjects, DI_OK)
 DX_STUB(Device_Escape, DIERR_UNSUPPORTED)
 
@@ -874,6 +883,8 @@ static void enum_devices(X86 *c, bool v8) {
     };
     bool stopped = false;
     for (const Dev &d : devs) {
+        if (flags & DIEDFL_FORCEFEEDBACK)
+            continue;
         // DIEDFL_ALLDEVICES is 0, and a non-zero devtype filters by type.
         if (devtype && devtype != d.type)
             continue;
@@ -908,7 +919,7 @@ static void enum_devices(X86 *c, bool v8) {
     if (v8 && version < DIRECTINPUT_VERSION_8)
         version = DIRECTINPUT_VERSION_8;
     if (!stopped && joy_served() && joy_enum_matches(devtype, version) &&
-        !(flags & DIEDFL_FORCEFEEDBACK)) {
+        (!(flags & DIEDFL_FORCEFEEDBACK) || joy_has_feedback())) {
         uint32_t a = scratch(INST_SIZE);
         if (a) {
             wr32(a, INST_SIZE);
@@ -1155,6 +1166,18 @@ const ImportShim g_dinput_exports[] = {
 
 } // namespace
 
+extern "C" void dinput_feedback_tick() {
+    feedback_tick();
+}
+
+extern "C" void dinput_feedback_focus_lost() {
+    std::lock_guard<std::mutex> lock(g_effect_mutex);
+    for (auto &entry : g_effects) {
+        entry.second.playing = false;
+        ++entry.second.revision;
+    }
+}
+
 extern "C" int dinput_host_mouse_acquired() {
     return g_acquired_mouse_count.load() != 0;
 }
@@ -1180,6 +1203,8 @@ uint32_t di_scratch(uint32_t n) {
 }
 
 void dinput_reset() {
+    effect_reset();
+    host_pad_dinput_rumble(0);
     g_scratch = 0;
     g_scratch_size = 0;
     // The devices these handles belonged to are gone with the arena, and the
@@ -1200,16 +1225,17 @@ void dinput_register() {
         return;
     done = true;
     com_set_destructor(K_DIDEVICE, device_destroy);
+    com_set_destructor(K_DINPUTEFFECT, effect_destroy);
+    com_define_checked<IF_DINPUTEFFECT, g_effect_methods>("DINPUT.dll", "IDirectInputEffect");
+    com_bind(IF_DINPUTEFFECT, K_DINPUTEFFECT);
 
-    com_define(IF_DINPUT, "DINPUT.dll", "IDirectInputA", g_dinput, std::size(g_dinput));
-    com_define(IF_DINPUTDEVICE, "DINPUT.dll", "IDirectInputDeviceA", g_didevice,
-               std::size(g_didevice));
+    com_define_checked<IF_DINPUT, g_dinput>("DINPUT.dll", "IDirectInputA");
+    com_define_checked<IF_DINPUTDEVICE, g_didevice>("DINPUT.dll", "IDirectInputDeviceA");
 
     com_bind(IF_DINPUT, K_DINPUT);
     com_bind(IF_DINPUTDEVICE, K_DIDEVICE);
-    com_define(IF_DINPUT8, "DINPUT8.dll", "IDirectInput8A", g_dinput8, std::size(g_dinput8));
-    com_define(IF_DINPUTDEVICE8, "DINPUT8.dll", "IDirectInputDevice8A", g_didevice8,
-               std::size(g_didevice8));
+    com_define_checked<IF_DINPUT8, g_dinput8>("DINPUT8.dll", "IDirectInput8A");
+    com_define_checked<IF_DINPUTDEVICE8, g_didevice8>("DINPUT8.dll", "IDirectInputDevice8A");
     com_bind(IF_DINPUT8, K_DINPUT);
     com_bind(IF_DINPUTDEVICE8, K_DIDEVICE);
     // {BF798030-483A-4DA2-AA99-5D64ED369700}, {54D41080-DC15-4833-A41B-748F73A38179}

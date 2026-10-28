@@ -1,3 +1,132 @@
+# D3D9 interpreter coverage
+
+The interpreter implements a bounded SM2 VS/PS subset. Hybrid is the default on
+Metal, with a specialized override; other backends remain specialized by default.
+The current coverage has user visual and Metal GPU review. Runtime failure and
+device-reset stress checks remain outstanding. The [renderer README](README.md#d3d9-compilation-contract)
+documents the compilation contract, ownership, modes and validation status.
+`src/shader/uber/` defines ABI v8 / interpreter v14. A program is 17424 bytes:
+a four-u32 header (ABI version, pixel flag, instruction count, definition count),
+256 zero-padded 16-u32 instruction records and 32 definition records (index/padding
+and float bits). Opcode bits 8–10 mark immediate sources, bit 16 selects projected
+TEX and bit 17 saturates the result before masked writes; source records
+hold type/index/swizzle/flags. Flag bit 0 negates, bit 8 selects relative addressing,
+and bits 9–10 select the address component. Original bytecode equality plus ABI
+version identifies program data; capacity overflow is excluded.
+
+Admitted arithmetic is MOV/ADD/MUL/MAD/DP3/DP4/RCP/RSQ/MIN/MAX/SLT/LRP/CMP/
+NRM/FRC/SGE/EXP/EXPP/LOG/ABS/POW/DP2ADD, plus vertex MOVA/SINCOS and pixel TEX through five 2D textures
+and two cube maps. Projected sampling is limited to 2D textures.
+Capacities are 12 temporaries, 256 instructions, 32 float DEFs, 256/32 float
+constants, vertex oPos/oD0–1/oT0–7/a0, pixel v0–1/t0–7 and oC0. Up to seven
+consecutive vertex inputs admit position, normal, tangent, color0/1, UV0–3 and blend
+indices/weights. Source swizzles, negation and destination
+masks and saturation are supported. MOVA rounds using the existing specializer's nearest-integer
+helper. Relative vertex constants use the selected a0 component and the same
+clamped index as specialization; shader DEFs override device constants even for
+relative reads. Direct DEF reads become immediate bits. TEX requires unmodified,
+identity-swizzled t0–7 or temporary coordinates and a declared sampler, a temporary destination and
+full mask. Pixel partial-precision hints on instructions/declarations execute
+at full precision, as permitted by [D3D9](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx9-graphics-reference-asm-ps-instructions-modifiers-ps-2-0) and matching specialization.
+Integer/bool definitions, other modifiers, shifts, pixel relative
+addressing, flow control, coissue and other models/registers/samplers remain
+excluded. TEXKILL accepts full-mask temporary or t0–7 operands and records any negative
+component (all four for SM2, matching specialization and vkd3d). Its destination
+record marks no write; its operand is encoded as an identity-swizzled source.
+SINCOS accepts x/y masks and uses the existing specializer’s cosine/sine behavior;
+Its replicated angle and distinct constant operands follow the
+[D3D9 form](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/sincos---vs);
+approximation constants do not need register reads.
+Specialization remains unchanged.
+
+All families use seven Float32x4 attributes (112-byte stride), existing 42-component
+varyings, smooth interpolation, CW triangles and one sample. Shorter declarations
+pad unused attributes with zero; lowering rejects reads of undeclared inputs.
+`compare-family11` prepares the original family; hybrid and interpreter-only
+prepare 43 exact captured states, including all five previous families. They use
+BGRA8/RGBA8, triangle list/strip, no culling/front/back culling, opaque/alpha/additive
+blending and absent/LESS/LEQUAL/ALWAYS depth, with writes only where captured.
+Packed strips expand guest indices into non-indexed vertices, so prepared strip
+pipelines use no strip index format, matching selection and draw submission.
+The finite manifest is in `src/render/interpreter.rs`; other combinations fall back.
+
+All share one module, layout and program allocations. Existing input conversion,
+half-pixel correction, raster output processing and sampler state are reused;
+opaque texture alpha is a per-binding bit in the per-draw flags. Sampled guest
+sampler slots s0–15 map deterministically to physical 2D slots 0–4 (ascending guest
+slot order) and cube slots 5–6. Bound sampled resources must match those dimensions
+and be filterable. Unbound declared textures return (0, 0, 0, 1), matching specialization
+and [Wine’s D3D9 conformance evidence](https://www.winehq.org/pipermail/wine-devel/2019-July/148434.html).
+The third texture-flags word holds a per-draw physical-slot mask that skips sampling; the specialized handoff omits those
+resource bindings. Unused and unbound bindings receive
+private 2D/cube views and samplers. Unused declarations consume no mapped slots,
+coverage checks or specialized bindings. Ready hybrid specializations retain guest
+sampler bindings and use native vertex fetch where supported, otherwise the
+existing compact packer. Integer/bool banks, vertex textures, biased sampling,
+shader depth output and MRT have no coverage. Stencil writes remain disabled.
+
+One bind group contains four dynamic uniforms (bindings 0/1: 4096-byte VS bank /
+272-byte parameters; 2/3: 512-byte PS bank / 64-byte parameters), texture/sampler
+4–10/20–26, and immutable 17424-byte program uniforms 36/37. It needs three uniforms per
+stage, four dynamic uniforms, seven vertex attributes, seven textures/samplers and
+42 inter-stage components; initialization checks the requested device limits.
+Prepared module/pipeline ownership follows the device. Queued draws and bindings
+retain their program buffers; reset clears program uploads and replacement devices
+prepare the selected manifest. Specialization cache eviction retains interpreter residency.
+
+Register-read helpers borrow the register state and skip unused operands using
+draw-uniform opcode decisions (TEX reads coordinates, not sampler metadata as a
+register). All required operand values are read
+before the instruction writes its destination. Both stages execute a bounded loop through uniform instruction data, with a
+draw-uniform instruction index and a maximum of 256 admitted instructions. Guest
+flow control remains excluded. TEXKILL accumulates a sticky kill flag at its
+instruction position; discard occurs after all instruction slots, preserving
+implicit sampling derivatives. Sampling remains implicit; alpha discard occurs
+after instruction execution. The build validates the generated WGSL with all Naga
+30 validation flags, verifies uploaded ABI layouts and translates both entry
+points to Metal with real binding maps. No derivative diagnostic is suppressed
+and no fixed LOD is substituted. Native compiler acceptance, rendering agreement,
+gameplay agreement and execution cost remain capture gates.
+Semantic references: Microsoft's [MOVA](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/mova---vs),
+[FRC](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/frc---vs), [DP4](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dp4---vs),
+[TEXLD](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/texld---ps-2-0),
+[TEXLDP](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/texldp---ps),
+[RCP](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/rcp---vs) and
+[RSQ](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/rsq---ps)
+and [WGSL uniformity](https://www.w3.org/TR/WGSL/#uniformity).
+
+## Extending D3D9 coverage
+
+Extend the shared decoder/admission and specialization semantics as needed before
+interpreter lowering. Preserve shader creation errors and handle allocation,
+source-before-write aliasing, DEF precedence, register defaults and model-specific
+modifiers. Encode float bits and explicit integer records; change ABI/version
+identities when their contracts change. Check original shader bytes and relevant
+callers alongside semantic references. Record accepted differences explicitly as
+`DIVERGENCE(original):` or `BUGFIX(original)` with evidence.
+
+Every added family needs complete texture/sampler, uniform, vertex/varying and
+output budgets checked against device limits. Keep guest sampler mapping separate
+from physical bindings and shader execution choice separate from vertex fetch.
+Depth output and MRT require explicit output families; an always-present depth
+output can change early-depth behavior. Prepared families must contain reusable
+descriptions, never game shader bytes.
+
+Fragment control flow requires an execution model for active lanes,
+reconvergence, derivatives and discard/helper lanes before admission. A
+per-fragment program counter, suppressed uniformity diagnostics or fixed-LOD
+sampling does not establish correct implicit derivatives. Do not silently cap
+legal loops or truncate execution. Unsupported forms stay on specialization
+where implemented, otherwise fail by name.
+
+SM1 expansion and SM3 are unfinished capability work. SM3 needs declared semantic
+linkage and masks, register/address/predicate rules, loops/calls, VPOS/VFACE,
+vertex sampling, derivative/texture operations, depth/MRT outputs and legal stage
+pairings. The current fixed varying layout is not a universal SM3 interface.
+Specialization and interpretation may gain coverage separately; advertise a
+shader model only when its required contract is implemented, not merely because
+its version token is accepted.
+
 # D3D8 shader-model 1.1
 
 The guest bridge implements Create/Set/Get/DeleteVertexShader and PixelShader,

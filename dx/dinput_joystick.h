@@ -127,6 +127,7 @@ extern const uint8_t GUID_RecompPadProduct_[16];  // fixed, kit-owned
 // ---------------------------------------------------------------------------
 // The pad is offered as a joystick: native pad mode with the DirectInput bit.
 bool joy_served();
+bool joy_has_feedback();
 // GUID_Joystick or the pad's instance GUID.
 bool joy_guid(const uint8_t *guid16);
 // Whether an EnumDevices type filter lets the pad through. DirectInput 8
@@ -182,3 +183,6 @@ void joy_acquired(ComObj *d);
 uint32_t di_scratch(uint32_t n);
 // An ASCII name as UTF-16, NUL-terminated, in a field of `units` characters.
 void di_put_wide(uint32_t at, const char *name, uint32_t units);
+
+int joy_haptic_axis(const ComObj *device, uint32_t object, uint32_t how);
+int joy_haptic_button(const ComObj *device, uint32_t object, uint32_t how);

@@ -182,6 +182,13 @@ int os_compare_utf16(uint32_t lcid, uint32_t flags, const uint16_t *a, int a_len
                      int b_len);
 
 // ---------------------------------------------------------------------------
+// Host call stack of the caller, innermost first, one symbolized frame per
+// call. Returns the number of frames reported; 0 where unavailable.
+// ---------------------------------------------------------------------------
+typedef void (*OsFrameFn)(const char *frame, void *ctx);
+int os_backtrace(int max_frames, OsFrameFn fn, void *ctx);
+
+// ---------------------------------------------------------------------------
 // Network identity. Used by the winsock name-resolution shims; the commands
 // above never need a DNS resolver, so these are the only socket calls here.
 // ---------------------------------------------------------------------------

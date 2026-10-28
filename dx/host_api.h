@@ -344,6 +344,44 @@ uint32_t host_pad_state(HostPadState *out);
 int host_pad_next_event(uint32_t after, HostPadEvent *out);
 /* Rumble request, 0..65535 each. Weak default: no-op. */
 void host_pad_rumble(uint16_t low, uint16_t high);
+
+typedef struct HostHapticCondition {
+    int32_t offset, positive_coefficient, negative_coefficient;
+    uint32_t positive_saturation, negative_saturation, deadband;
+} HostHapticCondition;
+typedef struct HostHapticEffect {
+    uint32_t type, duration, sample_period, gain, trigger_button, trigger_interval, start_delay;
+    uint32_t axes, axis[3], coordinates;
+    int32_t direction[3];
+    uint32_t envelope, attack_level, attack_time, fade_level, fade_time;
+    int32_t magnitude, offset, ramp_start, ramp_end;
+    uint32_t phase, period;
+    HostHapticCondition condition[3];
+} HostHapticEffect;
+typedef struct HostHapticRequest {
+    uint32_t operation, id, generation, value, flags;
+    HostHapticEffect effect;
+    uint32_t features, result_id, result_generation;
+} HostHapticRequest;
+enum {
+    HOST_HAPTIC_CAPS,
+    HOST_HAPTIC_CREATE,
+    HOST_HAPTIC_UPDATE,
+    HOST_HAPTIC_START,
+    HOST_HAPTIC_STOP,
+    HOST_HAPTIC_DESTROY,
+    HOST_HAPTIC_STOP_ALL,
+    HOST_HAPTIC_PAUSE,
+    HOST_HAPTIC_RESUME,
+    HOST_HAPTIC_GAIN,
+    HOST_HAPTIC_AUTOCENTER,
+    HOST_HAPTIC_STATUS,
+    HOST_HAPTIC_TRACKED_STATUS
+};
+int host_haptic_request(HostHapticRequest *request);
+void host_pad_dinput_rumble(uint16_t level);
+int host_pad_dinput_rumble_enabled(void);
+
 /* Axis and button order for the DirectInput device (RECOMP_CONTROLS_NATIVE_*).
  * Weak defaults: the spec order. */
 const char *host_pad_native_axes(void);

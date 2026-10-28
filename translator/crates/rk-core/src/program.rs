@@ -78,7 +78,8 @@ impl Image {
     }
 
     pub fn rd32(&self, va: Addr) -> Option<u32> {
-        self.bytes(va, 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        self.bytes(va, 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
     pub fn relocated_pointers(&self) -> BTreeMap<Addr, Addr> {
@@ -194,11 +195,15 @@ impl Program {
             return None;
         }
         let slot = u32::from_le_bytes([raw[2], raw[3], raw[4], raw[5]]);
-        self.image.imports.get(&slot).map(|import| import.name.as_str())
+        self.image
+            .imports
+            .get(&slot)
+            .map(|import| import.name.as_str())
     }
 
     pub fn is_setjmp_thunk(&self, va: Addr) -> bool {
-        self.import_thunk_name(va).is_some_and(|name| name.trim_start_matches('_') == "setjmp3")
+        self.import_thunk_name(va)
+            .is_some_and(|name| name.trim_start_matches('_') == "setjmp3")
     }
 
     pub fn containing(&self, addr: Addr) -> Option<Addr> {

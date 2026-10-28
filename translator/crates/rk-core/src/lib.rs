@@ -9,6 +9,7 @@ pub mod diag;
 pub mod facts;
 pub mod ir;
 pub mod lookup;
+pub mod memory;
 pub mod program;
 pub mod settings;
 pub mod timing;

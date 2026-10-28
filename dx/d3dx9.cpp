@@ -378,6 +378,30 @@ static const ImportShim g_d3dx9_exports[] = {
     {"d3dx9_26.dll", "D3DXVec3Normalize", 2, X_D3DXVec3Normalize},
 };
 
+static const ImportShim g_d3dx9_30_exports[] = {
+    {"d3dx9_30.dll", "D3DXVec3Transform", 3, X_D3DXVec3Transform},
+    {"d3dx9_30.dll", "D3DXMatrixInverse", 3, X_D3DX33MatrixInverse},
+    {"d3dx9_30.dll", "D3DXCreateVolumeTextureFromFileInMemory", 4,
+     X_D3DXCreateVolumeTextureFromFileInMemory},
+    {"d3dx9_30.dll", "D3DXCreateCubeTextureFromFileInMemory", 4,
+     X_D3DXCreateCubeTextureFromFileInMemory},
+    {"d3dx9_30.dll", "D3DXLoadSurfaceFromSurface", 8, X_D3DXLoadSurfaceFromSurface},
+    {"d3dx9_30.dll", "D3DXSaveSurfaceToFileA", 5, X_D3DXSaveSurfaceToFileA},
+    {"d3dx9_30.dll", "D3DXCreateEffectPool", 1, X_D3DX33CreateEffectPool},
+    {"d3dx9_30.dll", "D3DXCreateEffectFromResourceA", 9, X_D3DXCreateEffectFromResourceA},
+    {"d3dx9_30.dll", "D3DXVec4Transform", 3, X_D3DXVec4Transform},
+    {"d3dx9_30.dll", "D3DXMatrixPerspectiveLH", 5, X_D3DXMatrixPerspectiveLH},
+    {"d3dx9_30.dll", "D3DXMatrixTranslation", 4, X_D3DXMatrixTranslation},
+    {"d3dx9_30.dll", "D3DXVec3TransformCoordArray", 6, X_D3DXVec3TransformCoordArray},
+    {"d3dx9_30.dll", "D3DXVec3Normalize", 2, X_D3DXVec3Normalize},
+    {"d3dx9_30.dll", "D3DXVec3TransformNormal", 3, X_D3DXVec3TransformNormal},
+    {"d3dx9_30.dll", "D3DXSaveSurfaceToFileInMemory", 5, X_D3DXSaveSurfaceToFileInMemory},
+    {"d3dx9_30.dll", "D3DXFillVolumeTexture", 3, X_D3DXFillVolumeTexture},
+    {"d3dx9_30.dll", "D3DXMatrixMultiply", 3, X_D3DX33MatrixMultiply},
+    {"d3dx9_30.dll", "D3DXMatrixOrthoLH", 5, X_D3DXMatrixOrthoLH},
+    {"d3dx9_30.dll", "D3DXMatrixTranspose", 2, X_D3DX33MatrixTranspose},
+};
+
 #include "d3dx9_33_interfaces.inc"
 #include "d3dx9_imports.inc"
 
@@ -412,5 +436,6 @@ void d3dx9_register() {
     com_set_destructor(K_D3DXCONSTANTTABLE, d3dx_ctab_destroy);
     imports_register(g_d3dx9_exports, std::size(g_d3dx9_exports));
     imports_register(g_d3dx9_27_exports, std::size(g_d3dx9_27_exports));
+    imports_register(g_d3dx9_30_exports, std::size(g_d3dx9_30_exports));
     imports_register(g_d3dx9_33_exports, std::size(g_d3dx9_33_exports));
 }

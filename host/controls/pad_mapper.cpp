@@ -186,6 +186,8 @@ bool parse_field(const std::string &key, const std::string &value, PadMapperProf
         p->version = uint32_t(v);
         return true;
     }
+    if (key == "directinput_rumble")
+        return parse_bool(value, &p->directinput_rumble);
     if (key == "stick_deadzone")
         return parse_float(value, &p->stick_deadzone);
 
@@ -404,6 +406,7 @@ std::string serialize_pad_mapper_profile(const PadMapperProfile &p, std::string 
     if (error)
         error->clear();
     std::string out = "version=1\nstick_deadzone=" + number(p.stick_deadzone) + "\n";
+    out += std::string("directinput_rumble=") + (p.directinput_rumble ? "1\n" : "0\n");
     for (int i = 0; i < kSdlAxisCount; ++i) {
         const AxisCalibration &c = p.axes[size_t(i)];
         const std::string x = "axis." + std::to_string(i) + ".";
@@ -470,7 +473,7 @@ bool parse_pad_mapper_profile(const std::string &text, PadMapperProfile *profile
     }
     if (!seen.count("version"))
         return fail("missing profile version");
-    if (seen.size() != 114)
+    if (seen.size() - seen.count("directinput_rumble") != 114)
         return fail("incomplete pad mapper profile");
     std::string validation;
     if (!validate_pad_mapper_profile(next, &validation))

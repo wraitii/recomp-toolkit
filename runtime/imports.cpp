@@ -27,15 +27,43 @@ void imports_unsupported(X86 *) {
 
 namespace {
 
+constexpr uint8_t kTraceFiltered = 1;
+constexpr uint8_t kTraceVerbose = 2;
+
+struct ImportTracing {
+    const char *filter = nullptr;
+    uint8_t flags = 0;
+};
+
+ImportTracing g_import_tracing;
+
+constexpr uint8_t kDispatchAtomic = 1;
+constexpr uint8_t kDispatchSlow = 2;
+
+struct TrampDispatch {
+    void (*fn)(X86 *) = nullptr;
+    uint32_t calls = 0;
+    uint16_t pop = 4;
+    uint8_t argc = 0;
+    uint8_t flags = 0;
+
+    void set(void (*handler)(X86 *), uint8_t args) {
+        fn = handler;
+        argc = args;
+        pop = args >= ARGC_UNKNOWN ? 4 : 4 + 4u * args;
+        flags = (flags & kDispatchAtomic) |
+                ((!fn || fn == imports_unsupported || args == ARGC_UNKNOWN) ? kDispatchSlow : 0);
+    }
+};
+
+TrampDispatch g_dispatch[TRAMP_MAX];
+uint32_t g_tramp_count = 0;
+
 struct Tramp {
     std::string dll;
     std::string name;
     std::string desc; // "DLL!name", stable storage for imports_describe
-    uint8_t argc = 0;
-    void (*fn)(X86 *) = nullptr;
-    uint32_t calls = 0;
-    // Entered without a scheduling checkpoint (see atomic_import).
-    bool atomic = false;
+    TrampDispatch *dispatch = nullptr;
 };
 
 // Imports whose callers have just set up state the call reads back, with no
@@ -50,7 +78,12 @@ bool atomic_import(const std::string &key) {
 // Deliberately leaked: an atexit hook (RECOMP_IMPORT_STATS) reads these after
 // static destructors would otherwise have run.
 std::vector<Tramp> &tramps() {
-    static auto *v = new std::vector<Tramp>();
+    static auto *v = [] {
+        g_import_tracing.filter = recomp_env("TRACE_IMPORTS");
+        g_import_tracing.flags =
+            (g_import_tracing.filter ? kTraceFiltered : 0) | (log_level() >= 2 ? kTraceVerbose : 0);
+        return new std::vector<Tramp>();
+    }();
     return *v;
 }
 std::map<std::string, uint32_t> &index() {
@@ -129,10 +162,8 @@ void imports_register(const ImportShim *shims, size_t count) {
         // If a trampoline already exists, upgrade it in place.
         auto ti = index().find(k);
         if (ti != index().end()) {
-            Tramp &t = tramps()[ti->second];
-            if (s.fn)
-                t.fn = s.fn;
-            t.argc = s.argc_stdcall;
+            TrampDispatch &d = g_dispatch[ti->second];
+            d.set(s.fn ? s.fn : d.fn, s.argc_stdcall);
         }
     }
 }
@@ -155,43 +186,41 @@ uint32_t imports_alloc_trampoline(const char *dll, const char *name, void (*fn)(
     std::string k = key_of(dll, name);
     auto it = index().find(k);
     if (it != index().end()) {
-        Tramp &t = tramps()[it->second];
+        TrampDispatch &d = g_dispatch[it->second];
         if (fn) {
-            t.fn = fn;
             // The loader can reinstall its unsupported handler on image reload.
             // An unknown replacement signature must not erase known ABI evidence.
-            if (argc_stdcall != ARGC_UNKNOWN)
-                t.argc = argc_stdcall;
-            if (t.argc == ARGC_UNKNOWN)
-                t.argc = decorated_stdcall_args(name);
+            uint8_t argc = argc_stdcall == ARGC_UNKNOWN ? d.argc : argc_stdcall;
+            if (argc == ARGC_UNKNOWN)
+                argc = decorated_stdcall_args(name);
+            d.set(fn, argc);
         }
         return TRAMP_BASE + TRAMP_STRIDE * it->second;
     }
 
     Tramp t;
-    t.atomic = atomic_import(k);
     t.dll = dll ? dll : "?";
     t.name = name ? name : "?";
     t.desc = t.dll + "!" + t.name;
-    t.fn = fn;
-    t.argc = argc_stdcall;
 
     auto ri = registry().find(k);
-    if (ri != registry().end()) {
-        if (!t.fn)
-            t.fn = ri->second.fn;
-        if (!fn)
-            t.argc = ri->second.argc_stdcall;
+    if (ri != registry().end() && !fn) {
+        fn = ri->second.fn;
+        argc_stdcall = ri->second.argc_stdcall;
     }
-    if (t.argc == ARGC_UNKNOWN)
-        t.argc = decorated_stdcall_args(name);
+    if (argc_stdcall == ARGC_UNKNOWN)
+        argc_stdcall = decorated_stdcall_args(name);
 
     uint32_t idx = (uint32_t)tramps().size();
     if (idx >= TRAMP_MAX) {
         LOGW("imports: trampoline space exhausted (%u entries) for %s", idx, t.desc.c_str());
         return 0;
     }
+    t.dispatch = &g_dispatch[idx];
+    t.dispatch->flags = atomic_import(k) ? kDispatchAtomic : 0;
+    t.dispatch->set(fn, argc_stdcall);
     tramps().push_back(t);
+    g_tramp_count = idx + 1;
     index()[k] = idx;
     return TRAMP_BASE + TRAMP_STRIDE * idx;
 }
@@ -296,7 +325,7 @@ uint8_t imports_argc(uint32_t trampoline) {
     if (!imports_is_trampoline(trampoline))
         return 0;
     uint32_t idx = (trampoline - TRAMP_BASE) / TRAMP_STRIDE;
-    return idx < tramps().size() ? tramps()[idx].argc : 0;
+    return idx < tramps().size() ? g_dispatch[idx].argc : 0;
 }
 
 uint32_t imports_count() {
@@ -307,29 +336,31 @@ uint32_t imports_call_count(const char *dll, const char *name) {
     auto it = index().find(key_of(dll, name));
     if (it == index().end())
         return 0;
-    return tramps()[it->second].calls;
+    return g_dispatch[it->second].calls;
 }
 
 void imports_dump_stats(FILE *out) {
     std::vector<const Tramp *> v;
     for (const Tramp &t : tramps())
-        if (t.calls)
+        if (t.dispatch->calls)
             v.push_back(&t);
-    std::sort(v.begin(), v.end(),
-              [](const Tramp *a, const Tramp *b) { return a->calls > b->calls; });
+    std::sort(v.begin(), v.end(), [](const Tramp *a, const Tramp *b) {
+        return a->dispatch->calls > b->dispatch->calls;
+    });
     fprintf(out, "import calls (%zu of %zu entries used):\n", v.size(), tramps().size());
     for (const Tramp *t : v)
-        fprintf(out, "  %8u  %-40s %s\n", t->calls, t->desc.c_str(), t->fn ? "" : "(logging only)");
+        fprintf(out, "  %8u  %-40s %s\n", t->dispatch->calls, t->desc.c_str(),
+                t->dispatch->fn ? "" : "(logging only)");
 }
 
 void imports_coverage(uint32_t *implemented, uint32_t *logging_only, uint32_t *unknown_argc) {
     uint32_t impl = 0, log_only = 0, unknown = 0;
     for (const Tramp &t : tramps()) {
-        if (t.fn)
+        if (t.dispatch->fn)
             ++impl;
         else
             ++log_only;
-        if (t.argc == ARGC_UNKNOWN)
+        if (t.dispatch->argc == ARGC_UNKNOWN)
             ++unknown;
     }
     if (implemented)
@@ -345,13 +376,13 @@ void imports_dump_coverage(FILE *out) {
     std::vector<const Tramp *> log_only, unknown;
     for (const Tramp &t : tramps()) {
         auto &e = per_dll[t.dll];
-        if (t.fn)
+        if (t.dispatch->fn)
             ++e.first;
         else {
             ++e.second;
             log_only.push_back(&t);
         }
-        if (t.argc == ARGC_UNKNOWN)
+        if (t.dispatch->argc == ARGC_UNKNOWN)
             unknown.push_back(&t);
     }
     fprintf(out, "import coverage by DLL (implemented / logging-only):\n");
@@ -372,9 +403,9 @@ void imports_dump_coverage(FILE *out) {
 void imports_dump_report(FILE *out) {
     std::vector<const Tramp *> called, not_reached, log_only;
     for (const Tramp &t : tramps()) {
-        if (!t.fn)
+        if (!t.dispatch->fn)
             log_only.push_back(&t);
-        else if (t.calls)
+        else if (t.dispatch->calls)
             called.push_back(&t);
         else
             not_reached.push_back(&t);
@@ -386,18 +417,18 @@ void imports_dump_report(FILE *out) {
 
     fprintf(out, "implemented and called (%zu):\n", called.size());
     for (const Tramp *t : called)
-        fprintf(out, "  %-44s %u calls\n", t->desc.c_str(), t->calls);
+        fprintf(out, "  %-44s %u calls\n", t->desc.c_str(), t->dispatch->calls);
     fprintf(out, "implemented but not reached (%zu):\n", not_reached.size());
     for (const Tramp *t : not_reached)
         fprintf(out, "  %s\n", t->desc.c_str());
     fprintf(out, "logging-only (%zu), of which called: ", log_only.size());
     uint32_t hit = 0;
     for (const Tramp *t : log_only)
-        if (t->calls)
+        if (t->dispatch->calls)
             ++hit;
     fprintf(out, "%u\n", hit);
     for (const Tramp *t : log_only)
-        fprintf(out, "  %-44s %s\n", t->desc.c_str(), t->calls ? "CALLED" : "");
+        fprintf(out, "  %-44s %s\n", t->desc.c_str(), t->dispatch->calls ? "CALLED" : "");
 }
 
 namespace {
@@ -492,66 +523,11 @@ void imports_call_leaves_surfaces() {
     --g_import_calls;
 }
 
-bool imports_dispatch(X86 *c, uint32_t target) {
-    if (g_call_observer || g_return_observer)
-        x86_cc_settle(c);
-    if (!imports_is_trampoline(target))
-        return false;
-    // A bounded scheduling checkpoint. Cooperative threads must not depend on
-    // the guest happening to call a blocking API: the guest's frame limiter spins on
-    // GetTickCount and would otherwise starve the service threads for as long
-    // as it liked, expired waits and all. Every call into the runtime is a
-    // checkpoint, rate limited to one yield per millisecond per thread, and it
-    // runs before the shim so the guest state is a consistent call boundary -
-    // except at an atomic import, and inside a sched_atomic_enter stretch.
-    uint32_t idx = (target - TRAMP_BASE) / TRAMP_STRIDE;
-    std::vector<Tramp> &table = tramps();
-    if (idx >= table.size() || !table[idx].atomic)
-        recomp_execution_checkpoint_charge(c, kImportCheckpointCost);
-    if (idx >= table.size()) {
-        LOGW("imports: call to unallocated trampoline %08x (ESP=%08x, return=%08x)", target,
-             c->r[R_ESP], rd32(c->r[R_ESP]));
-        fflush(stderr);
-        abort();
-    }
-    // The shim may allocate trampolines (GetProcAddress, a COM shim, a guest
-    // callback), which reallocates this vector, so nothing may hold a
-    // reference to the element across the call.
-    void (*fn)(X86 *) = table[idx].fn;
-    uint8_t argc = table[idx].argc;
-    // A guest exception can longjmp across fn(c). Keep no C++ owner live
-    // across that call, and do not retain a pointer into the movable vector.
-    // The copy exists because the shim can reallocate `tramps()`; only take it
-    // when a consumer is actually active, since the snprintf runs on every
-    // import call. `argc == ARGC_UNKNOWN` needs the description for the
-    // once-only key below, and the null/unsupported shims name the import in
-    // their diagnostic.
-    // RECOMP_TRACE_IMPORTS=<substring>[,<substring>...] logs every import whose "dll!name"
-    // contains the substring, with its stdcall arguments (hex and as float)
-    // and the guest return address.
-    static const char *trace_filter = recomp_env("TRACE_IMPORTS");
-    const bool need_desc = trace_filter != nullptr || g_call_observer != nullptr || fn == nullptr ||
-                           fn == imports_unsupported || argc == ARGC_UNKNOWN || log_level() >= 2;
-    char desc[512];
-    desc[0] = 0;
-    if (need_desc) {
-        const std::string &d = table[idx].desc;
-        size_t n = std::min(d.size(), sizeof desc - 1);
-        memcpy(desc, d.data(), n);
-        desc[n] = 0;
-    }
-    ++table[idx].calls;
-    ++g_import_calls;
-
-    uint32_t ret_addr = rd32(c->r[R_ESP]);
-    // The guest EIP is only advanced at call boundaries, so without this a
-    // shim that stops (an abort) reports the PREVIOUS import's return address.
-    // Nothing reads EIP across a running shim except diagnostics and SEH, and
-    // the generated code restores it from the stack on RET, so publishing the
-    // current call's return address here is the honest value.
-    c->eip = ret_addr;
-    LOGV("-> %s (esp=%08x ret=%08x)", desc, c->r[R_ESP], ret_addr);
-    // A comma separates alternatives: RECOMP_TRACE_IMPORTS=mmio,QSWaveMix.
+[[gnu::noinline]] static void trace_import_enter(X86 *c, const char *desc, uint8_t argc,
+                                                 uint32_t ret_addr) {
+    if (g_import_tracing.flags & kTraceVerbose)
+        log_msg(2, "-> %s (esp=%08x ret=%08x)", desc, c->r[R_ESP], ret_addr);
+    const char *trace_filter = g_import_tracing.filter;
     auto trace_match = [&]() {
         if (!trace_filter)
             return false;
@@ -584,7 +560,44 @@ bool imports_dispatch(X86 *c, uint32_t target) {
         }
         LOGW("%s", line);
     }
-    recomp_seh_validate_chain(c, "import enter", desc);
+    if (g_import_tracing.flags & kTraceVerbose)
+        recomp_seh_validate_chain_body(c, "import enter", desc);
+}
+
+[[gnu::noinline]] static bool imports_dispatch_slow(X86 *c, uint32_t idx, void (*fn)(X86 *),
+                                                    uint8_t argc, uint8_t tracing) {
+    std::vector<Tramp> &table = tramps();
+    const uint16_t pop = g_dispatch[idx].pop;
+    // A guest exception can longjmp across fn(c). Keep no C++ owner live
+    // across that call, and do not retain a pointer into the movable vector.
+    // The copy exists because the shim can reallocate `tramps()`; only take it
+    // when a consumer is active. Unknown arity and null/unsupported shims also
+    // need the description for their diagnostics.
+    // RECOMP_TRACE_IMPORTS=<substring>[,<substring>...] logs every import whose "dll!name"
+    // contains the substring, with its stdcall arguments (hex and as float)
+    // and the guest return address.
+    const bool need_desc = tracing || g_call_observer != nullptr || fn == nullptr ||
+                           fn == imports_unsupported || argc == ARGC_UNKNOWN;
+    char desc[512];
+    desc[0] = 0;
+    if (need_desc) {
+        const std::string &d = table[idx].desc;
+        size_t n = std::min(d.size(), sizeof desc - 1);
+        memcpy(desc, d.data(), n);
+        desc[n] = 0;
+    }
+    ++g_dispatch[idx].calls;
+    ++g_import_calls;
+
+    uint32_t ret_addr = rd32(c->r[R_ESP]);
+    // The guest EIP is only advanced at call boundaries, so without this a
+    // shim that stops (an abort) reports the PREVIOUS import's return address.
+    // Nothing reads EIP across a running shim except diagnostics and SEH, and
+    // the generated code restores it from the stack on RET, so publishing the
+    // current call's return address here is the honest value.
+    c->eip = ret_addr;
+    if (tracing)
+        trace_import_enter(c, desc, argc, ret_addr);
 
     // The arguments as they are NOW, before the shim runs: a stdcall shim pops
     // them, so after the call they are gone and this is the only point they
@@ -637,26 +650,60 @@ bool imports_dispatch(X86 *c, uint32_t target) {
     // Read after the shim ran, so the pointer is into the table as it is now.
     if (g_return_observer)
         g_return_observer(table[idx].desc.c_str(), c->r[R_EAX], ret_addr);
-    LOGV("<- %s (eax=%08x)", desc, c->r[R_EAX]);
+    if (tracing & kTraceVerbose)
+        log_msg(2, "<- %s (eax=%08x)", desc, c->r[R_EAX]);
 
-    uint32_t pop = 4;
-    if (argc == ARGC_CDECL) {
-        pop = 4;
-    } else if (argc == ARGC_UNKNOWN) {
-        pop = 4;
+    if (argc == ARGC_UNKNOWN) {
         char key[sizeof desc + 6];
         snprintf(key, sizeof key, "%s#argc", desc);
         log_once(key,
                  "%s has an unknown stdcall argument count: not adjusting ESP, "
                  "the guest stack will drift if it is really stdcall",
                  desc);
-    } else {
-        pop = 4 + 4u * argc;
     }
     c->r[R_ESP] += pop;
     c->eip = ret_addr;
-    recomp_seh_validate_chain(c, "import leave", desc);
+    if (tracing & kTraceVerbose)
+        recomp_seh_validate_chain_body(c, "import leave", desc);
     return true;
+}
+
+bool imports_dispatch(X86 *c, uint32_t target) {
+    if (RECOMP_UNLIKELY(g_call_observer || g_return_observer))
+        x86_cc_settle(c);
+    if (!imports_is_trampoline(target))
+        return false;
+    uint32_t idx = (target - TRAMP_BASE) / TRAMP_STRIDE;
+    TrampDispatch &d = g_dispatch[idx];
+    if (idx >= g_tramp_count || !(d.flags & kDispatchAtomic))
+        recomp_execution_checkpoint_charge(c, kImportCheckpointCost);
+    if (RECOMP_UNLIKELY(idx >= g_tramp_count)) {
+        LOGW("imports: call to unallocated trampoline %08x (ESP=%08x, return=%08x)", target,
+             c->r[R_ESP], rd32(c->r[R_ESP]));
+        fflush(stderr);
+        abort();
+    }
+    void (*fn)(X86 *) = d.fn;
+    uint8_t argc = d.argc;
+    const uint8_t tracing = g_import_tracing.flags;
+#ifdef RECOMP_CHECK_CALL_FACTS
+    return imports_dispatch_slow(c, idx, fn, argc, tracing);
+#else
+    if (RECOMP_UNLIKELY(tracing || g_call_observer || g_return_observer ||
+                        (d.flags & kDispatchSlow)))
+        return imports_dispatch_slow(c, idx, fn, argc, tracing);
+    ++g_dispatch[idx].calls;
+    ++g_import_calls;
+    const uint32_t ret_addr = rd32(c->r[R_ESP]);
+    c->eip = ret_addr;
+    const uint16_t pop = d.pop;
+    fn(c);
+    if (RECOMP_UNLIKELY(g_return_observer))
+        g_return_observer(tramps()[idx].desc.c_str(), c->r[R_EAX], ret_addr);
+    c->r[R_ESP] += pop;
+    c->eip = ret_addr;
+    return true;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -845,6 +892,7 @@ void imports_init() {
     oleaut32_register();
     misc_dlls_register();
     msvcr90_register();
+    msvcr71_register();
     steam_api_register();
     comctl32_register();
     media_foundation_register();

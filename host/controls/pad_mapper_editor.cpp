@@ -113,6 +113,10 @@ void PadMapperEditor::set_device(const std::string &name, bool connected) {
         changed();
     }
 }
+void PadMapperEditor::set_message(const std::string &message) {
+    validation_error_ = message;
+    changed();
+}
 void PadMapperEditor::suspend() {
     capture_ = Capture::None;
     pressed_ = -1;
@@ -250,7 +254,15 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
         text(m, top, col, px(22), "Controller mappings", false);
         text(m, top + px(30), col, px(46),
              "Change controller outputs and add keyboard keys in Mapping.");
-        add_key(m, top + px(148), px(148), row, "Presets...", false, 12);
+        add_key(m, top + px(112), px(148), row, "Presets...", false, 12);
+        add_key(m, top + px(152), px(148), row, "Test rumble", false, 14);
+        add_key(m, top + px(192), col, row,
+                std::string("DirectInput force feedback as rumble: ") +
+                    (profile_.directinput_rumble ? "On" : "Off"),
+                profile_.directinput_rumble, 15);
+        text(m, top + px(230), col, px(46),
+             "Approximate older games' force effects using controller vibration. "
+             "Off hides rumble-based force feedback from games.");
         text(right, top, col, px(22), "Test controller", false);
         for (int i = 0; i < 6; ++i)
             add_meter(right, top + px(26) + i * px(28), col, px(22), axes[i], axis(raw, i), i < 4);
@@ -491,6 +503,7 @@ void PadMapperEditor::select(int source) {
     changed();
 }
 void PadMapperEditor::preset(int index) {
+    bool directinput_rumble = profile_.directinput_rumble;
     switch (index) {
     case 0:
         profile_ = pad_mapper_native_profile();
@@ -499,6 +512,7 @@ void PadMapperEditor::preset(int index) {
         profile_ = pad_mapper_combined_pedals();
         break;
     }
+    profile_.directinput_rumble = directinput_rumble;
 }
 void PadMapperEditor::activate(int id) {
     validation_error_.clear();
@@ -523,6 +537,10 @@ void PadMapperEditor::activate(int id) {
     } else if (id == 13) {
         advanced_ = !advanced_;
         detail_scroll_ = 0;
+    } else if (id == 14) {
+        action_ = PadMapperEditorAction::TestRumble;
+    } else if (id == 15) {
+        profile_.directinput_rumble = !profile_.directinput_rumble;
     } else if (id == 16) {
         if (!connected_)
             validation_error_ = "Connect a controller before identifying an input.";

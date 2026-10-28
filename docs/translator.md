@@ -131,6 +131,17 @@ only when receiver and vptr SSA values both match. Refinement intersects proven 
 across passes over the frozen universe, retaining prior bounds for unresolved sites;
 empty intersections or exclusions of observed targets are rejected and reported.
 
+SSA memory uses exact entry-ESP and absolute ranges plus residual memory. EBP accesses
+need a proved frame derivation. Bounded addresses carry may-write footprints; unknown
+reads depend on every possibly aliased range and residual memory. May-definitions retain
+the prior version, and disjoint writes retain the existing range definition. Different
+address roots alone never prove disjointness. Read/write summaries use the call-graph
+SCC fixed point, translate frame offsets at each call site, and widen unresolved or
+unbounded effects to opaque memory. Types and local layouts are not alias proofs.
+Production call dispatch remains opaque to memory forwarding because hooks and scheduler
+handoffs can add effects; original-code summaries feed the explicitly enabled offline
+inference below.
+
 `[translate] stack_memory` enables additional original-code summaries for offline
 inference; it defaults to false. Ghost Recon enables it with the explicit premise
 that no concurrent guest execution interferes with these calls. This setting does
@@ -138,7 +149,7 @@ not disable threads or change scheduling. The summaries model unmodified guest
 code; hooks replacing that behavior must respect its contracts or use the runtime's
 existing fallback paths.
 
-The analyzer tracks symbolic entry-ESP offsets, saved register values, stack-slot
+The frame-balance analyzer tracks entry-ESP offsets, saved register values, stack-slot
 contents and the incoming return address. Joins retain only identical values.
 Every normal return must restore ESP and retain the original return-address slot;
 all returns must agree on cleanup. Writes must have a proved stack address and
@@ -190,7 +201,12 @@ V2 retains V1 shared `targets`, `effects`, `sites`, `imports` and `evidence`, an
 symbolic `methods` (site key `m`), assumption provenance and input digests. `regs` accepts
 `abi`, `unknown`, or explicit `reads`/`kills`/`writes`/`preserves` lists containing GPR and
 arithmetic-flag names. CW effects use `preserved`/`known`/`value` masks. Method identities
-are not exhaustive target bounds. Only exhaustive guest target sets feed dispatch
+are not exhaustive target bounds. A call site's `prefer_guest: true` selects the
+guest-preferring dispatch helper when all supplied observations reach guest code,
+including auxiliary modules. Mixed or unknown observations leave the site generic.
+The preference requires no vtable shape or target bound and grants no register,
+stack or effect guarantees; unresolved targets retain the helper's normal slow
+fallback. Only exhaustive guest target sets feed dispatch
 bounds; sites are instruction addresses, `k` defaults to `call`, and `jump` means a tail
 JMP. Explicit unknown effects stay conservative. Rust recomputes function preservation
 and CW summaries. V1 remains supported; legacy `indirect_targets` and `call_effects`

@@ -22,6 +22,8 @@ pub mod d3d8;
 pub mod d3d9;
 pub(crate) mod fast_map;
 pub mod probe;
+pub(crate) mod render;
+pub(crate) mod shader;
 
 /// Named failure at the renderer boundary; unsupported behavior is never success.
 #[derive(Clone, Debug)]

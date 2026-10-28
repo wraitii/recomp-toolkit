@@ -33,7 +33,9 @@ pub(crate) fn reads_c_field(
         return false;
     }
     match s.value(value).op {
-        Op::Input(StateKey::Memory) | Op::StateReload(StateKey::Memory) | Op::StateKeep(StateKey::Memory) => false,
+        Op::Input(StateKey::Memory)
+        | Op::StateReload(StateKey::Memory)
+        | Op::StateKeep(StateKey::Memory) => false,
         Op::Input(key) | Op::StateReload(key) | Op::StateKeep(key) => private_loads(private, key),
         Op::Byte(_) => s
             .args(value)
@@ -53,7 +55,8 @@ pub(crate) fn reads_c_field(
 
 pub(crate) fn identity_assignment(line: &str) -> bool {
     let text = line.trim().trim_end_matches(';');
-    text.split_once('=').is_some_and(|(target, value)| target.trim() == value.trim())
+    text.split_once('=')
+        .is_some_and(|(target, value)| target.trim() == value.trim())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -67,9 +70,16 @@ pub(crate) enum Location {
 }
 
 pub(crate) fn x87_reads_flags(line: &str) -> bool {
-    ["c->eflags_cf", "c->eflags_pf", "c->eflags_af", "c->eflags_zf", "c->eflags_sf", "c->eflags_of"]
-        .iter()
-        .any(|field| line.contains(field))
+    [
+        "c->eflags_cf",
+        "c->eflags_pf",
+        "c->eflags_af",
+        "c->eflags_zf",
+        "c->eflags_sf",
+        "c->eflags_of",
+    ]
+    .iter()
+    .any(|field| line.contains(field))
 }
 
 pub(crate) fn cc_mask(fields: Fields) -> u8 {
@@ -99,7 +109,9 @@ pub(crate) fn location(key: StateKey) -> Option<Location> {
     if let Some((reg, offset)) = rk_ir::xmm_offset(key) {
         return Some(Location::Xmm(reg, (offset / 4) as usize));
     }
-    let StateKey::Register(offset) = key else { return None };
+    let StateKey::Register(offset) = key else {
+        return None;
+    };
     let (name, _) = Registers::get().covering(offset as u64)?;
     match name {
         "EIP" | "IP" => Some(Location::Eip),

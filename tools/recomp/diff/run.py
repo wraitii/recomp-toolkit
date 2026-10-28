@@ -319,6 +319,7 @@ class Inputs:
         self.rng = random.Random(seed)
         self.np = np.random.default_rng(seed)
         self.image = image
+        self.pool = b""
 
     def pointer(self):
         return SCRATCH + (self.rng.randrange(SCRATCH_SIZE * 3 // 4) & ~3)
@@ -334,6 +335,12 @@ class Inputs:
         return self.rng.getrandbits(32)
 
     def words(self, size):
+        if len(self.pool) < 2 * size:
+            self.pool = self.fresh(2 * size)
+        at = self.rng.randrange(size // 4 + 1) * 4
+        return self.pool[at:at + size]
+
+    def fresh(self, size):
         n = size // 4
         kind = self.np.random(n)
         pointers = SCRATCH + self.np.integers(0, SCRATCH_SIZE * 3 // 16, n) * 4
@@ -351,6 +358,18 @@ class Inputs:
         eflags = 0x202 | (self.rng.getrandbits(12) & (FLAG_MASK & ~FLAGS["DF"]))
         return (regs, eflags, self.rng.choice(self.cws), stack,
                 [(SCRATCH, self.words(SCRATCH_SIZE)), (TEB, teb())] + [(a, self.words(n)) for a, n in self.image.bss])
+
+    def structured(self, index):
+        pointer = SCRATCH + 0x1000
+        regs = [pointer if index == 1 else 0] * 8
+        regs[1], regs[4] = pointer, ESP_INIT
+        stack = struct.pack("<I", MAGIC_RET) + struct.pack(
+            "<I", pointer if index == 2 else 0) * (ARG_BYTES // 4 - 1)
+        fill = (0, 1, 255, SCRATCH + 0x2000, 0)[index]
+        scratch = bytearray(struct.pack("<I", fill) * (SCRATCH_SIZE // 4))
+        struct.pack_into("<I", scratch, 0x1000, 0)
+        return (regs, 0x202, self.cws[index % len(self.cws)], stack,
+                [(SCRATCH, bytes(scratch)), (TEB, teb())] + [(a, bytes(n)) for a, n in self.image.bss])
 
 
 def ext80(b):
@@ -530,14 +549,29 @@ def run_variant(native, mode, addr, data, fills, stack, region_list, regs, eflag
     return ("state", native_snapshot(native, st, region_list))
 
 
+def apply_fixed(values, spec):
+    regs, eflags, cw, stack, fills = values
+    regs = list(regs)
+    stack = bytearray(stack)
+    for name, value in spec.get("regs", {}).items():
+        regs[REG_NAMES.index(name)] = value & 0xffffffff
+    if spec.get("eflags") is not None:
+        eflags = spec["eflags"] & 0xffffffff
+    for index, value in spec.get("args", {}).items():
+        struct.pack_into("<I", stack, 4 + 4 * index, value & 0xffffffff)
+    return regs, eflags, cw, bytes(stack), fills
+
+
 class RecordedInputs:
     def __init__(self, addr, image, args):
         self.addr, self.args, self.iteration = addr, args, 0
         self.source = Inputs(args.seed ^ addr, image, args.fpu_cw)
+        self.fixed = getattr(args, "fixed_inputs", {}).get(addr, [])
 
     def make(self):
         args = self.args
-        filename = "%08x-%06d.json.gz" % (self.addr, self.iteration)
+        index = self.iteration
+        filename = "%08x-%06d.json.gz" % (self.addr, index)
         self.iteration += 1
         if args.replay_inputs:
             with gzip.open(args.replay_inputs / filename, "rt") as stream:
@@ -545,7 +579,10 @@ class RecordedInputs:
             return (record["regs"], record["eflags"], record["cw"],
                     base64.b64decode(record["stack"], validate=True),
                     [(addr, base64.b64decode(data, validate=True)) for addr, data in record["fills"]])
-        values = self.source.make()
+        values = (self.source.make() if index < args.iterations
+                  else self.source.structured(index - args.iterations))
+        if index < len(self.fixed):
+            values = apply_fixed(values, self.fixed[index])
         if args.record_inputs:
             regs, eflags, cw, stack, fills = values
             record = {"regs": regs, "eflags": eflags, "cw": cw,
@@ -565,7 +602,7 @@ def run_single(addr, native, emu, image, args):
     region_list = regions(image)
     skipped = Counter()
     compared = 0
-    for it in range(args.iterations):
+    for it in range(args.iterations + args.structured_inputs):
         regs, eflags, cw, stack, fills = inputs.make()
         reason, oracle = emulate_original(u, emu, addr, data, region_list, args,
                                           regs, eflags, cw, stack, fills)
@@ -599,7 +636,7 @@ def run_paired(addr, native, emu, image, args):
     oracle_store = {"specialized": {}, "ordinary": {}}
     pair_store = {}
     first = {}
-    for it in range(args.iterations):
+    for it in range(args.iterations + args.structured_inputs):
         regs, eflags, cw, stack, fills = inputs.make()
         reason, oracle = emulate_original(u, emu, addr, data, region_list, args,
                                           regs, eflags, cw, stack, fills)
@@ -676,7 +713,7 @@ def run_all(addrs, args, dylib, image):
             if chunk:
                 running[fd][3].extend(chunk)
                 continue
-            pid, addr, _, out = running.pop(fd)
+            pid, addr, begun, out = running.pop(fd)
             os.close(fd)
             _, status = os.waitpid(pid, 0)
             if out:
@@ -685,6 +722,7 @@ def run_all(addrs, args, dylib, image):
                 results.append({"addr": addr, "status": "crashed",
                                 "problems": ["translation crashed (signal %d)" % os.WTERMSIG(status)
                                              if os.WIFSIGNALED(status) else "worker exited"]})
+            results[-1]["seconds"] = round(time.time() - begun, 3)
             report(results[-1], len(results), len(addrs))
         now = time.time()
         for fd, (pid, addr, begun, _) in list(running.items()):
@@ -761,7 +799,10 @@ def main():
     recording = parser.add_mutually_exclusive_group()
     recording.add_argument("--record-inputs", type=Path)
     recording.add_argument("--replay-inputs", type=Path)
-    parser.add_argument("--iterations", type=int, default=200)
+    parser.add_argument("--iterations", type=int, default=25,
+                        help="random inputs per function (default: 25), followed by five structured seeds")
+    parser.add_argument("--no-structured-inputs", action="store_true",
+                        help="omit the five structured seeds; suites always use their original input schedule")
     parser.add_argument("--max-insns", type=int, default=200000)
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--seed", type=int, default=1)
@@ -780,6 +821,8 @@ def main():
             parser.error("regression suite schema or executable identity mismatch")
         args.seed, args.iterations = suite["seed"], suite["iterations"]
         args.fpu_cw = [int(cw, 16) for cw in suite["fpu_cws"]]
+
+    args.structured_inputs = 0 if suite or args.no_structured_inputs else 5
 
     for name, value in (("--iterations", args.iterations), ("--jobs", args.jobs),
                         ("--max-insns", args.max_insns), ("--timeout", args.timeout)):
@@ -848,8 +891,11 @@ def main():
         print("saved baseline: %s" % args.save_baseline)
 
     input_manifest = {"format": "recomp-diff-inputs-v1", "executable_sha256": digest,
-                      "functions": ["%08x" % addr for addr in addrs], "iterations": args.iterations,
+                      "functions": ["%08x" % addr for addr in addrs],
+                      "iterations": args.iterations + args.structured_inputs,
                       "seed": args.seed, "fpu_cws": args.fpu_cw}
+    if args.structured_inputs:
+        input_manifest["structured_inputs"] = args.structured_inputs
     if args.record_inputs:
         args.record_inputs.mkdir(parents=True, exist_ok=False)
         write_exclusive(args.record_inputs / "manifest.json", json.dumps(input_manifest, sort_keys=True))
@@ -891,7 +937,9 @@ def main():
         "indirect_targets_sha256": sha256_or_none(args.game_dir / indirect) if indirect else None,
         "analysis_facts_sha256": sha256_or_none(args.game_dir / analysis) if analysis else None,
         "seed": args.seed,
-        "iterations": args.iterations,
+        "iterations": args.iterations + args.structured_inputs,
+        "random_iterations": args.iterations,
+        "structured_inputs": args.structured_inputs,
         "fpu_cws": ["%04x" % cw for cw in args.fpu_cw],
         "max_insns": args.max_insns,
         "timeout": args.timeout,

@@ -41,7 +41,10 @@ pub fn helper(raw: &[u8]) -> Option<&'static str> {
         }
         out
     });
-    table.iter().find(|(bytes, _)| bytes.as_slice() == raw).map(|(_, name)| *name)
+    table
+        .iter()
+        .find(|(bytes, _)| bytes.as_slice() == raw)
+        .map(|(_, name)| *name)
 }
 
 fn leak(text: &str) -> &'static str {
@@ -62,7 +65,8 @@ pub fn effect(name: &str) -> (Fields, Fields) {
         reads.insert(Field::Ecx);
     }
     let mut writes = reads;
-    if base.starts_with("stos") || base.starts_with("scas")
+    if base.starts_with("stos")
+        || base.starts_with("scas")
         || (base.starts_with("lods") && (rep || base != "lodsd"))
     {
         reads.insert(Field::Eax);

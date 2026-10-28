@@ -87,6 +87,45 @@
     "unknown": {
       "regs": "unknown",
       "x87": "unknown"
+    },
+    "com-leaf": {
+      "regs": {
+        "reads": [
+          "EAX",
+          "ECX",
+          "EDX",
+          "EBX",
+          "ESP",
+          "EBP",
+          "ESI",
+          "EDI",
+          "CF",
+          "PF",
+          "AF",
+          "ZF",
+          "SF",
+          "OF"
+        ],
+        "kills": [],
+        "writes": [
+          "EAX",
+          "ESP"
+        ],
+        "preserves": [
+          "ECX",
+          "EDX",
+          "EBX",
+          "EBP",
+          "ESI",
+          "EDI",
+          "CF",
+          "PF",
+          "AF",
+          "ZF",
+          "SF",
+          "OF"
+        ]
+      }
     }
   },
   "families": [
@@ -97,6 +136,20 @@
         "dx/d3d8.cpp handlers and D3D8-specific COM lifetime hooks do not invoke guest callbacks; com_ret writes guest EAX, imports_dispatch adjusts ESP, and other GPRs and arithmetic flags retain their guest values. Reads remain conservative.",
         "dx/d3d8_fpu.h contains the only D3D8 guest CW update; only CreateDevice carries a CW effect. Unsupported methods terminate with named diagnostics."
       ]
+    },
+    {
+      "pattern": "d3d9.dll!*::*",
+      "effect": "unknown",
+      "evidence": [
+        "D3D9 methods remain unknown unless explicitly audited below; device lifecycle can invoke guest window procedures and D3DX lifetime paths can invoke guest state managers."
+      ]
+    },
+    {
+      "pattern": "dsound.dll!*::*",
+      "effect": "com-leaf",
+      "evidence": [
+        "dx/dsound.cpp COM method tables dispatch to native handlers and COM lifetime hooks without guest callbacks or guest CPU writes beyond com_ret; DirectSoundEnumerate callbacks are separate DLL exports, outside this family. dx/com.h com_ret writes EAX and runtime/imports.cpp performs the stdcall ESP adjustment. Other GPRs and arithmetic flags retain their guest values; reads remain conservative."
+      ]
     }
   ],
   "methods": [
@@ -105,6 +158,20 @@
       "effect": "d3d8-create-device",
       "evidence": [
         "D3D8 CreateDevice changes PC/RC unless D3DCREATE_FPU_PRESERVE; early returns precede the control-word update, so only the fixed bits are asserted"
+      ]
+    },
+    {
+      "identity": "d3d9.dll!IDirect3DDevice9::SetVertexShaderConstantF",
+      "effect": "com-leaf",
+      "evidence": [
+        "dx/d3d9.cpp Dev_SetVertexShaderConstantF validates guest memory and copies constants to the native device bridge; bridge_result and com_ret write EAX without guest callbacks. runtime/imports.cpp adjusts ESP; other GPRs and arithmetic flags are unchanged."
+      ]
+    },
+    {
+      "identity": "d3d9.dll!IDirect3DDevice9::SetPixelShaderConstantF",
+      "effect": "com-leaf",
+      "evidence": [
+        "dx/d3d9.cpp Dev_SetPixelShaderConstantF validates guest memory and copies constants to the native device bridge; bridge_result and com_ret write EAX without guest callbacks. runtime/imports.cpp adjusts ESP; other GPRs and arithmetic flags are unchanged."
       ]
     }
   ],

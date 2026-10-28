@@ -1,29 +1,37 @@
 use crate::RenderError;
 
-pub(crate) fn register(
-    encoder: &mut wgpu::CommandEncoder,
+pub(crate) fn marker(
+    device: &wgpu::Device,
     completed: impl Fn(bool) + Send + Sync + 'static,
-) -> Result<bool, RenderError> {
+) -> Result<Option<wgpu::CommandEncoder>, RenderError> {
     #[cfg(target_os = "macos")]
     unsafe {
-        encoder.as_hal_mut::<wgpu::hal::api::Metal, _, _>(move |hal| {
+        use objc2::runtime::ProtocolObject;
+        use objc2_metal::{MTLCommandBuffer, MTLCommandBufferStatus};
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("d3d9-event-query-marker"),
+        });
+        let registered = encoder.as_hal_mut::<wgpu::hal::api::Metal, _, _>(move |hal| {
             let Some(hal) = hal else {
                 return Ok(false);
             };
             let command = hal.raw_command_buffer().ok_or_else(|| {
                 RenderError::new("Issue", "Metal query command buffer is missing")
             })?;
-            let handler = block::ConcreteBlock::new(move |command: &metal::CommandBufferRef| {
-                completed(command.status() == metal::MTLCommandBufferStatus::Completed);
-            })
-            .copy();
-            command.add_completed_handler(&handler);
+            let handler = block2::RcBlock::new(
+                move |command: std::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+                    completed(command.as_ref().status() == MTLCommandBufferStatus::Completed);
+                },
+            );
+            command.addCompletedHandler(block2::RcBlock::as_ptr(&handler));
             Ok(true)
-        })
+        })?;
+        Ok(registered.then_some(encoder))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (encoder, completed);
-        Ok(false)
+        let _ = (device, completed);
+        Ok(None)
     }
 }

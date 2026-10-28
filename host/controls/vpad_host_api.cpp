@@ -53,6 +53,14 @@ void host_pad_rumble(uint16_t low, uint16_t high) {
     controls::vpad().request_rumble(low, high);
 }
 
+void host_pad_dinput_rumble(uint16_t level) {
+    controls::vpad().request_dinput_rumble(level);
+}
+
+int host_pad_dinput_rumble_enabled(void) {
+    return controls::vpad().dinput_rumble_enabled();
+}
+
 const char *host_pad_native_axes(void) {
     return RECOMP_CONTROLS_NATIVE_AXES;
 }

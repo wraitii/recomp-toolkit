@@ -174,6 +174,16 @@ if(RECOMP_HAVE_GEN)
   recomp_generated_source_options(${RECOMP_GEN_SOURCES})
   recomp_translation_overrides(recomp_gen "${RECOMP_GEN_DIR}" "${RECOMP_EFFECTIVE_OVERRIDE}")
   recomp_optimize(recomp_gen 2)
+  if(EXISTS "${RECOMP_GEN_DIR}/reloc/table.c")
+    set(RECOMP_RELOC_DIR "${RECOMP_GEN_DIR}/reloc")
+    recomp_translation_sources(RECOMP_RELOC_SOURCES "${RECOMP_RELOC_DIR}")
+    add_library(recomp_gen_reloc STATIC ${RECOMP_RELOC_SOURCES})
+    set_target_properties(recomp_gen_reloc PROPERTIES
+      ARCHIVE_OUTPUT_DIRECTORY ${RECOMP_ARCHIVE_DIR} OUTPUT_NAME recomp_gen_reloc)
+    target_include_directories(recomp_gen_reloc PRIVATE ${RECOMP_RELOC_DIR} ${RECOMP_GEN_DIR} ${RECOMP_ROOT} ${RECOMP_ROOT}/runtime)
+    target_compile_options(recomp_gen_reloc PRIVATE ${RECOMP_WARN_GEN})
+    recomp_optimize(recomp_gen_reloc 2)
+  endif()
   # Desktop macOS keeps each auxiliary image in its own dylib: one static
   # executable of every translation exceeds the arm64 branch range. Other
   # platforms keep the static whole-archive layout.
@@ -185,6 +195,8 @@ if(RECOMP_HAVE_GEN)
     endif()
     set(aux_target "recomp_gen_${key}")
     recomp_translation_sources(aux_sources "${dir}")
+    # The main image owns the one call-fact table the runtime links against.
+    list(FILTER aux_sources EXCLUDE REGEX "/call_facts\\.c$")
     if(RECOMP_AUX_SHARED)
       add_library(${aux_target} SHARED ${aux_sources})
       set_target_properties(${aux_target} PROPERTIES
@@ -213,6 +225,9 @@ endif()
 # reached by address.
 function(recomp_link_gen target)
   target_link_libraries(${target} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,recomp_gen>")
+  if(TARGET recomp_gen_reloc)
+    target_link_libraries(${target} PRIVATE "$<LINK_LIBRARY:WHOLE_ARCHIVE,recomp_gen_reloc>")
+  endif()
   foreach(piece ${RECOMP_GEN_PIECES})
     target_link_libraries(${target} PRIVATE ${piece})
   endforeach()

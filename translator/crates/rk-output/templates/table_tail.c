@@ -1,3 +1,5 @@
+#include "reloc.h"
+
 int recomp_is_call_return(uint32_t target)
 {
     uint32_t off = target - recomp_call_return_min;
@@ -147,6 +149,7 @@ void recomp_jump(X86 *c, uint32_t target)
         if (RECOMP_UNLIKELY(!imports_dispatch(c, target))) recomp_shim_call(c, target);
         return;
     }
+    if (recomp_region_enter(c, target)) return;
     if (recomp_is_call_return(target) || recomp_module_is_call_return(target)) { c->eip = target; return; }
     recomp_unknown_jump(c, target);
 }
@@ -155,6 +158,7 @@ void recomp_unknown_jump(X86 *c, uint32_t target)
 {
     if (recomp_run_thunk(c, target)) return;
     if (recomp_region_enter(c, target)) return;
+    if (recomp_reloc_call(c, target)) return;
     /* The address is code the map does not carry: record it (RECOMP_DISCOVERY)
      * so it can be added in Ghidra, then let the interpreter carry the run
      * past the gap so one run reports every gap it reaches. */

@@ -5,6 +5,7 @@
 
 void kernel32_wide_register();
 void kernel32_exit_process(uint32_t code);
+void kernel32_exit_thread(X86 *c);
 std::string current_directory();
 void set_current_directory_named(X86 *c, const std::string &name);
 void create_file_named(X86 *c, const std::string &name);
@@ -18,6 +19,9 @@ void move_file_ex_named(X86 *c, const std::string &source, const std::string &de
 void copy_file_named(X86 *c, const std::string &source, const std::string &dest);
 void find_first_named(X86 *c, const std::string &pattern, bool wide);
 void find_next(X86 *c, bool wide);
+uint32_t win32_crt_findfirst(const std::string &pattern, uint32_t data);
+bool win32_crt_findnext(uint32_t handle, uint32_t data);
+bool win32_crt_findclose(uint32_t handle);
 std::string full_path_named(const std::string &name);
 void volume_information_named(X86 *c, const std::string &root, bool wide);
 void disk_free_space(X86 *c);

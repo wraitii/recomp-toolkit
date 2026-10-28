@@ -23,18 +23,6 @@ std::vector<bool> &audio_channels() {
 }
 const size_t MAX_AUDIO_CHANNELS = 128;
 
-// ---------------------------------------------------------------------------
-// Failure reporting for the DirectX shims.
-//
-// A guest that gives up during Direct3D initialisation says nothing about
-// why: it takes the failure branch and exits. The one thing that identifies
-// the cause is which method returned which HRESULT, so every COM method in
-// this layer is watched and any failing return is named with its guest call
-// site, again at every power-of-two repeat count. Naming it here
-// rather than at each `com_ret(c, DDERR_...)` keeps several hundred call
-// sites free of logging and, more importantly, means a failure path added
-// later is reported without anyone remembering to instrument it.
-// ---------------------------------------------------------------------------
 // Every DirectDraw/Direct3D/DirectSound/DirectInput error the SDK headers
 // name, so a failure reads as a name rather than a number. Generated from
 // ddraw.h, d3d.h, d3d9.h, d3dx9.h, dsound.h and dinput.h.
@@ -533,14 +521,14 @@ const char *hresult_name(uint32_t hr) {
 }
 
 struct FailureSite {
-    const char *desc;
+    std::string desc;
     uint32_t eax, caller;
     bool operator==(const FailureSite &) const = default;
 };
 
 struct FailureSiteHash {
     size_t operator()(const FailureSite &s) const {
-        return std::hash<const void *>()(s.desc) ^ (size_t(s.eax) * 0x9e3779b97f4a7c15ull) ^
+        return std::hash<std::string>()(s.desc) ^ (size_t(s.eax) * 0x9e3779b97f4a7c15ull) ^
                (size_t(s.caller) << 17);
     }
 };
@@ -565,14 +553,8 @@ bool expected_capability_miss(const char *desc, uint32_t hr) {
 }
 
 [[gnu::noinline]] void report_failure(const char *desc, uint32_t eax, uint32_t caller) {
-    static auto *watched = new std::unordered_map<const char *, bool>();
-    auto [kind, unseen] = watched->try_emplace(desc, false);
-    if (unseen) {
-        const char *method = strstr(desc, "::");
-        kind->second =
-            method && strcmp(method, "::GetAvailableTextureMem") != 0 && strstr(desc, "IDirect");
-    }
-    if (!kind->second)
+    const char *method = strstr(desc, "::");
+    if (!method || strcmp(method, "::GetAvailableTextureMem") == 0 || !strstr(desc, "IDirect"))
         return;
     static auto *sites = new std::unordered_map<FailureSite, uint64_t, FailureSiteHash>();
     uint64_t count = ++(*sites)[FailureSite{desc, eax, caller}];
@@ -582,6 +564,8 @@ bool expected_capability_miss(const char *desc, uint32_t hr) {
     LOGW("dx: %s failed: %s (0x%08x) returning to 0x%08x, %llu times", desc, n ? n : "HRESULT", eax,
          caller, (unsigned long long)count);
 }
+
+} // namespace
 
 void dx_report_failure(const char *desc, uint32_t eax, uint32_t caller) {
     if (!(eax & 0x80000000u) || !desc)
@@ -593,8 +577,6 @@ void dx_report_failure(const char *desc, uint32_t eax, uint32_t caller) {
     }
     report_failure(desc, eax, caller);
 }
-
-} // namespace
 
 int32_t dx_alloc_audio_channel() {
     auto &used = audio_channels();
@@ -635,10 +617,6 @@ static void file_audio_frame_pump(X86 *c) {
 }
 
 void dx_register_shims() {
-    // Installed before the tables so a failure during registration itself,
-    // and every failure afterwards, is named rather than silent.
-    imports_set_return_observer(dx_report_failure);
-
     // Order matters only in that ddraw_register installs the QueryInterface
     // hook that hands out Direct3D, and d3d_register must have defined the
     // Direct3D vtables by the time the guest uses it. Both run here, so any

@@ -71,7 +71,10 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     }
     let mut boundaries: BTreeMap<ValueId, Vec<StateKey>> = publish.clone();
     for (&value, keys) in &guard {
-        boundaries.entry(value).or_default().extend(keys.iter().copied());
+        boundaries
+            .entry(value)
+            .or_default()
+            .extend(keys.iter().copied());
     }
     let mut live_publish = BTreeMap::new();
     for (value, keys) in &boundaries {
@@ -121,8 +124,13 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
         if !live.contains(&(index as ValueId)) {
             continue;
         }
-        let (rk_ir::Op::StateKeep(key) | rk_ir::Op::StateReload(key)) = value.op else { continue };
-        if !ssa.field(key).is_some_and(|field| Fields::FLAGS.contains(field)) {
+        let (rk_ir::Op::StateKeep(key) | rk_ir::Op::StateReload(key)) = value.op else {
+            continue;
+        };
+        if !ssa
+            .field(key)
+            .is_some_and(|field| Fields::FLAGS.contains(field))
+        {
             continue;
         }
         settle_sites.insert(ssa.args(index as ValueId)[0]);
@@ -130,19 +138,29 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     let mut reload_masks: BTreeMap<ValueId, Fields> = BTreeMap::new();
     for (index, value) in ssa.values.iter().enumerate() {
         let id = index as ValueId;
-        let rk_ir::Op::StateReload(key) = value.op else { continue };
-        let Some(field) = ssa.field(key) else { continue };
+        let rk_ir::Op::StateReload(key) = value.op else {
+            continue;
+        };
+        let Some(field) = ssa.field(key) else {
+            continue;
+        };
         let site = ssa.args(id)[0];
         *reload_masks.entry(site).or_default() |= Fields(field.bit());
     }
     for (value, keys) in &base {
-        let Some(state) = ssa.boundary(*value) else { continue };
+        let Some(state) = ssa.boundary(*value) else {
+            continue;
+        };
         for &(key, state_value) in state {
             if !keys.contains(&key) {
                 continue;
             }
-            let rk_ir::Op::StateReload(loaded) = ssa.value(state_value).op else { continue };
-            let Some(field) = ssa.field(loaded) else { continue };
+            let rk_ir::Op::StateReload(loaded) = ssa.value(state_value).op else {
+                continue;
+            };
+            let Some(field) = ssa.field(loaded) else {
+                continue;
+            };
             let site = ssa.args(state_value)[0];
             *reload_masks.entry(site).or_default() |= Fields(field.bit());
         }
@@ -151,7 +169,9 @@ pub fn plan_function(cg: &CgFunction, opts: &PlanOptions<'_>) -> Result<PlannedF
     let mut requested: BTreeMap<(Addr, Fields), ()> = BTreeMap::new();
     for (index, value) in ssa.values.iter().enumerate() {
         let id = index as ValueId;
-        let rk_ir::Op::Call { target } = value.op else { continue };
+        let rk_ir::Op::Call { target } = value.op else {
+            continue;
+        };
         if !opts.private_targets.contains(&target) {
             continue;
         }
@@ -188,7 +208,10 @@ fn reduce_publications(
     s: &Ssa,
     base: &BTreeMap<ValueId, Vec<StateKey>>,
     call_facts: &dyn CallFacts,
-) -> (BTreeMap<ValueId, Vec<StateKey>>, BTreeMap<ValueId, Vec<StateKey>>) {
+) -> (
+    BTreeMap<ValueId, Vec<StateKey>>,
+    BTreeMap<ValueId, Vec<StateKey>>,
+) {
     let block_count = s.blocks.len();
     if block_count == 0 || s.keys.is_empty() {
         return (BTreeMap::new(), BTreeMap::new());
@@ -211,6 +234,26 @@ fn reduce_publications(
                 .map(|(_, value)| *value)
         })
         .collect();
+    let mut reloads: BTreeMap<ValueId, Vec<(usize, ValueId)>> = BTreeMap::new();
+    for (index, item) in s.values.iter().enumerate() {
+        let value = index as ValueId;
+        let (source, lane) = match item.op {
+            rk_ir::Op::StateReload(_) => (value, None),
+            rk_ir::Op::Byte(lane) => (s.args(value)[0], Some(lane)),
+            _ => continue,
+        };
+        let rk_ir::Op::StateReload(loaded) = s.value(source).op else {
+            continue;
+        };
+        for (index, key) in s.keys.iter().enumerate() {
+            if lane.map_or(loaded == *key, |lane| same_word_lane(loaded, *key, lane)) {
+                reloads
+                    .entry(s.args(source)[0])
+                    .or_default()
+                    .push((index, value));
+            }
+        }
+    }
     let phi_lanes = s.phi_lanes();
     let successors = successors(s);
     let mut out = vec![vec![None; n]; block_count];
@@ -219,7 +262,17 @@ fn reduce_publications(
     while let Some(block) = pending.pop_front() {
         queued[block] = false;
         let mut resident = resident_in(s, block, &out, &dispatch, &phi_lanes[block]);
-        walk_block(s, block, base, call_facts, &key_index, &mut resident, None, None);
+        walk_block(
+            s,
+            block,
+            base,
+            call_facts,
+            &key_index,
+            &reloads,
+            &mut resident,
+            None,
+            None,
+        );
         if resident != out[block] {
             out[block] = resident;
             for &next in &successors[block] {
@@ -240,6 +293,7 @@ fn reduce_publications(
             base,
             call_facts,
             &key_index,
+            &reloads,
             &mut resident,
             Some(&mut publish),
             Some(&mut guard),
@@ -309,19 +363,21 @@ fn walk_block(
     base: &BTreeMap<ValueId, Vec<StateKey>>,
     call_facts: &dyn CallFacts,
     key_index: &rk_core::Lookup<StateKey, usize>,
+    reloads: &BTreeMap<ValueId, Vec<(usize, ValueId)>>,
     resident: &mut [Option<ValueId>],
     mut publish: Option<&mut BTreeMap<ValueId, Vec<StateKey>>>,
     mut guard: Option<&mut BTreeMap<ValueId, Vec<StateKey>>>,
 ) {
     let item = &s.blocks[block];
     for value in item.phis.iter().chain(item.ops.iter()).copied() {
-        let Some(state) = s.boundary(value) else { continue };
+        let Some(state) = s.boundary(value) else {
+            continue;
+        };
         for &(key, state_value) in state {
-            let Some(&index) = key_index.get(&key) else { continue };
+            let Some(&index) = key_index.get(&key) else {
+                continue;
+            };
             match s.value(state_value).op {
-                rk_ir::Op::StateReload(loaded) if loaded == key => {
-                    resident[index] = Some(state_value);
-                }
                 rk_ir::Op::StateKeep(loaded) if loaded == key => {
                     let old = s.args(state_value)[1];
                     if resident[index] == Some(old) {
@@ -331,19 +387,10 @@ fn walk_block(
                 rk_ir::Op::Byte(lane) => {
                     let source = s.args(state_value)[0];
                     match s.value(source).op {
-                        rk_ir::Op::StateReload(loaded)
-                            if same_word_lane(loaded, key, lane) =>
-                        {
-                            resident[index] = Some(state_value);
-                        }
-                        rk_ir::Op::StateKeep(loaded)
-                            if same_word_lane(loaded, key, lane) =>
-                        {
+                        rk_ir::Op::StateKeep(loaded) if same_word_lane(loaded, key, lane) => {
                             let old = s.args(source)[1];
                             let old_lane = match s.value(old).op {
-                                rk_ir::Op::Pack => {
-                                    s.args(old).get(lane as usize).copied()
-                                }
+                                rk_ir::Op::Pack => s.args(old).get(lane as usize).copied(),
                                 _ if lane == 0 => Some(old),
                                 _ => None,
                             };
@@ -357,13 +404,18 @@ fn walk_block(
                 _ => {}
             }
         }
-        let Some(keys) = base.get(&value) else { continue };
-        let current: BTreeMap<StateKey, ValueId> =
-            state.iter().copied().collect();
+        let Some(keys) = base.get(&value) else {
+            continue;
+        };
+        let current: BTreeMap<StateKey, ValueId> = state.iter().copied().collect();
         let escape_only = s.value(value).op == rk_ir::Op::BranchInd;
         for key in keys {
-            let Some(&state_value) = current.get(key) else { continue };
-            let Some(&index) = key_index.get(key) else { continue };
+            let Some(&state_value) = current.get(key) else {
+                continue;
+            };
+            let Some(&index) = key_index.get(key) else {
+                continue;
+            };
             if resident[index] != Some(state_value) {
                 if !escape_only {
                     resident[index] = Some(state_value);
@@ -385,7 +437,9 @@ fn walk_block(
                     if keys.iter().any(|required| required == key) {
                         continue;
                     }
-                    let Some(&state_value) = current.get(key) else { continue };
+                    let Some(&state_value) = current.get(key) else {
+                        continue;
+                    };
                     if resident[index] == Some(state_value) {
                         continue;
                     }
@@ -399,6 +453,11 @@ fn walk_block(
                 if s.field(*key).is_some_and(|field| writes.contains(field)) {
                     resident[index] = None;
                 }
+            }
+        }
+        if let Some(values) = reloads.get(&value) {
+            for &(index, loaded) in values {
+                resident[index] = Some(loaded);
             }
         }
     }
@@ -423,7 +482,11 @@ fn same_word_lane(loaded: StateKey, key: StateKey, lane: u8) -> bool {
 
 fn boundary_writes(s: &Ssa, call_facts: &dyn CallFacts, value: ValueId) -> Fields {
     match s.value(value).op {
-        rk_ir::Op::Call { target } => call_facts.call(s.value_addr[value as usize], Some(target)).writes,
+        rk_ir::Op::Call { target } => {
+            call_facts
+                .call(s.value_addr[value as usize], Some(target))
+                .writes
+        }
         rk_ir::Op::CallInd => call_facts.call(s.value_addr[value as usize], None).writes,
         rk_ir::Op::String(name) => rk_ir::string::effect(name.0).1,
         rk_ir::Op::Slow(_) | rk_ir::Op::Div { .. } | rk_ir::Op::Idiv { .. } => Fields::ALL,

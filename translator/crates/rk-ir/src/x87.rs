@@ -83,16 +83,43 @@ pub enum X87Eager {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum X87Op {
     Constant(&'static str),
-    Push { src: Option<u8>, bits: u16 },
-    PushInteger { bits: u16 },
-    Store { dst: Option<u8>, bits: u16, pop: bool, integer: bool },
+    Push {
+        src: Option<u8>,
+        bits: u16,
+    },
+    PushInteger {
+        bits: u16,
+    },
+    Store {
+        dst: Option<u8>,
+        bits: u16,
+        pop: bool,
+        integer: bool,
+    },
     Arithmetic(Arithmetic),
-    Compare { quiet: bool, integer: bool, src: u8, bits: u16, pops: u8, zero: bool },
-    CompareFlags { quiet: bool, src: u8, pop: bool },
+    Compare {
+        quiet: bool,
+        integer: bool,
+        src: u8,
+        bits: u16,
+        pops: u8,
+        zero: bool,
+    },
+    CompareFlags {
+        quiet: bool,
+        src: u8,
+        pop: bool,
+    },
     Unary(X87Unary),
-    Remainder { ieee: bool },
-    Exchange { src: u8 },
-    Free { src: u8 },
+    Remainder {
+        ieee: bool,
+    },
+    Exchange {
+        src: u8,
+    },
+    Free {
+        src: u8,
+    },
     Status,
     Environment(X87Environment),
     Clear,
@@ -124,20 +151,24 @@ impl X87Op {
             | X87Op::Arithmetic(Arithmetic { bits: 1.., .. })
             | X87Op::Compare { bits: 1.., .. }
             | X87Op::Compare { zero: true, .. } => Some(MemoryEffect::Read),
-            X87Op::Store { dst: None, bits: 1.., .. } => Some(MemoryEffect::Write),
+            X87Op::Store {
+                dst: None,
+                bits: 1..,
+                ..
+            } => Some(MemoryEffect::Write),
             X87Op::Environment(
                 X87Environment::StoreCw
                 | X87Environment::StoreSw
                 | X87Environment::StoreEnv
                 | X87Environment::Save,
             ) => Some(MemoryEffect::Write),
-            X87Op::Environment(X87Environment::LoadCw | X87Environment::LoadEnv | X87Environment::Restore) => {
-                Some(MemoryEffect::Read)
-            }
+            X87Op::Environment(
+                X87Environment::LoadCw | X87Environment::LoadEnv | X87Environment::Restore,
+            ) => Some(MemoryEffect::Read),
             X87Op::Eager(X87Eager::Fbstp) => Some(MemoryEffect::Write),
-            X87Op::LegacyEnvironment(X87Legacy::Save | X87Legacy::StoreEnv | X87Legacy::BcdStore) => {
-                Some(MemoryEffect::Write)
-            }
+            X87Op::LegacyEnvironment(
+                X87Legacy::Save | X87Legacy::StoreEnv | X87Legacy::BcdStore,
+            ) => Some(MemoryEffect::Write),
             X87Op::LegacyEnvironment(X87Legacy::Restore | X87Legacy::LoadEnv) => {
                 Some(MemoryEffect::Read)
             }
@@ -162,14 +193,23 @@ impl X87Op {
 
     pub fn cw_sensitive(self) -> bool {
         match self {
-            X87Op::Arithmetic(Arithmetic { integer: false, .. }) => {
-                !matches!(self, X87Op::Arithmetic(Arithmetic { operator: ArithmeticOp::Div, .. }))
-            }
+            X87Op::Arithmetic(Arithmetic { integer: false, .. }) => !matches!(
+                self,
+                X87Op::Arithmetic(Arithmetic {
+                    operator: ArithmeticOp::Div,
+                    ..
+                })
+            ),
             X87Op::Arithmetic(Arithmetic { integer: true, .. })
             | X87Op::Unary(X87Unary::Sqrt | X87Unary::Round)
             | X87Op::Store { integer: true, .. }
             | X87Op::CompareFlags { .. } => true,
-            X87Op::Store { dst: None, bits: 32, integer: false, .. } => true,
+            X87Op::Store {
+                dst: None,
+                bits: 32,
+                integer: false,
+                ..
+            } => true,
             _ => false,
         }
     }

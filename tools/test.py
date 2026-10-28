@@ -74,10 +74,24 @@ def main():
     group.add_argument("--native", action="store_true", help="Build and run the native suites")
     group.add_argument("--mods", action="store_true", help="Real game-backed mod tests")
     group.add_argument("--compile-only", action="store_true", help="Build the native test binaries only")
+    group.add_argument("--translator", action="store_true", help="Run the synthetic translator cases")
+    parser.add_argument("--case", action="append", default=[], help="Translator case name (repeatable)")
     parser.add_argument("--preset", default=build_py.default_preset())
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 2, 8))
+    parser.add_argument("--iterations", type=int, default=200, help="Translator inputs per case")
     build_py.game_config.add_game_args(parser)
-    args = build_py.game_config.resolve_game_args(parser.parse_args())
+    raw = parser.parse_args()
+    if raw.translator:
+        build_py.test_translator_analysis(ROOT / "build")
+        command = [sys.executable, str(ROOT / "tests/translator/run.py"),
+                   "--iterations", str(raw.iterations), "--jobs", str(raw.jobs)]
+        for case in raw.case:
+            command += ["--case", case]
+        run(command, without_switches(os.environ))
+        return
+    if raw.case:
+        parser.error("--case requires --translator")
+    args = build_py.game_config.resolve_game_args(raw)
     if not (args.game_dir / "game.toml").is_file():
         parser.error("No game config at %s/game.toml" % args.game_dir)
     cfg = build_py.game_config.load(args.game_dir, args.build_root)

@@ -1310,8 +1310,23 @@ pub fn upload_buffer(resource: &mut D3d9Resource) -> Result<(), RenderError> {
     let align = wgpu::COPY_BUFFER_ALIGNMENT as u32;
     let copy_lo = (lo - lo % align) as usize;
     let copy_hi = (hi.next_multiple_of(align) as usize).min(b.bytes.len());
-    Arc::make_mut(&mut b.uploaded.lock().unwrap())[copy_lo..copy_hi]
-        .copy_from_slice(&b.bytes[copy_lo..copy_hi]);
+    {
+        let mut uploaded = b.uploaded.lock().unwrap();
+        super::stats::record(|s| {
+            s.buffer_uploads += 1;
+            s.buffer_upload_bytes += (copy_hi - copy_lo) as u64;
+            let strong = Arc::strong_count(&uploaded);
+            let weak_detach = strong == 1 && Arc::weak_count(&uploaded) != 0;
+            s.buffer_snapshot_copies += u64::from(strong > 1);
+            s.buffer_weak_detaches += u64::from(weak_detach);
+            if matches!(b.format, 101 | 102) {
+                s.index_buffer_uploads += 1;
+                s.index_buffer_snapshot_copies += u64::from(strong > 1);
+                s.index_buffer_weak_detaches += u64::from(weak_detach);
+            }
+        });
+        Arc::make_mut(&mut uploaded)[copy_lo..copy_hi].copy_from_slice(&b.bytes[copy_lo..copy_hi]);
+    }
     b.dirty_lo = 0;
     b.dirty_hi = 0;
     Ok(())

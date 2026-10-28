@@ -59,6 +59,14 @@ void recomp_region_missing(X86 *c, uint32_t target) {
     harness_escape("region-missing", target);
     last_unknown = target;
 }
+void recomp_unexpected_return(X86 *c, uint32_t site, uint32_t expected, uint32_t target) {
+    (void)c;
+    (void)expected;
+    if (target == 0x0deac000u)
+        return;
+    harness_escape("unexpected-return", target);
+    last_unknown = site;
+}
 uint32_t recomp_guest_call(X86 *c, uint32_t fn, const uint32_t *args, int nargs) {
     (void)c;
     (void)args;

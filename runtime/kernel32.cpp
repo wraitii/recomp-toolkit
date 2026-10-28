@@ -643,6 +643,15 @@ bool win32_reset_event(uint32_t handle) {
     return true;
 }
 
+bool win32_close_event(uint32_t handle) {
+    HObj *o = handle_get(handle, H_EVENT);
+    if (!o)
+        return false;
+    if (!--o->references)
+        handles().erase(handle);
+    return true;
+}
+
 bool win32_signal_event(uint32_t handle, bool pulse) {
     HObj *o = handle_get(handle, H_EVENT);
     if (!o)
@@ -1880,7 +1889,7 @@ void k_SetHandleCount(X86 *c) {
 }
 
 void k_OutputDebugStringA(X86 *c) {
-    LOGW("OutputDebugString: %s", gm_str(arg(c, 0)).c_str());
+    LOGV("OutputDebugString: %s", gm_str(arg(c, 0)).c_str());
     set_eax(c, 0);
 }
 
@@ -2491,6 +2500,7 @@ struct GuestThread {
     size_t index = 0;
     uint32_t handle = 0; // 0 for the main thread: it has none
     uint32_t id = 1;     // GetCurrentThreadId
+    uint32_t start = 0, param = 0;
     X86 ctx{};
     uint32_t stack_lo = 0, stack_hi = 0;
     uint32_t teb = TEB_BASE, tls = TLS_BASE;
@@ -3390,6 +3400,10 @@ uint32_t guest_wait_objects(const uint32_t *handles, uint32_t count, bool wait_a
                             uint32_t timeout_ms) {
     return sched_wait_objects(handles, count, wait_all, timeout_ms);
 }
+uint32_t guest_wait_objects_ex(X86 *c, const uint32_t *handles, uint32_t count, bool wait_all,
+                               uint32_t timeout_ms, bool alertable) {
+    return sched_wait_objects_ex(c, handles, count, wait_all, timeout_ms, alertable);
+}
 
 // Installs what the run thread does instead of parking in the scheduler. See
 // the note by g_idle_waiter: on a windowed host the run thread also services
@@ -3731,6 +3745,7 @@ void sched_leave_critsec(uint32_t cs) {
         --rec;
     wr32(cs + CS_OFF_RECURSION, rec);
     wr32(cs + CS_OFF_LOCK_COUNT, rec ? rec - 1 : 0xffffffffu);
+    bool contended = false;
     if (!rec) {
         wr32(cs + CS_OFF_OWNER, 0);
         // Only a thread blocked on this very section can be released by it, and
@@ -3740,10 +3755,15 @@ void sched_leave_critsec(uint32_t cs) {
         for (GuestThread *t : threads())
             if (t->blocked && t->wait_kind == W_CRITSEC && t->wait_cs == cs) {
                 g_sched_cv.notify_all();
+                contended = true;
                 break;
             }
     }
     g_sched_m.unlock();
+    // The yield hands the section to its waiter; without it the releaser can
+    // loop back and retake it before any checkpoint, starving the waiter.
+    if (contended)
+        guest_yield();
 }
 
 // Everything a guest thread must do before it may be seen as finished, run
@@ -3786,6 +3806,9 @@ void thread_run_exit_cleanup(GuestThread *t) {
 }
 
 void *thread_host_main(void *arg) {
+    // A worker holding the baton stalls the run thread, so it needs the same
+    // scheduling class; only the baton holder runs, so this adds no load.
+    os_thread_prefer_performance();
     GuestThread *t = (GuestThread *)arg;
     t_self = t->index;
     t_is_guest = true;
@@ -3817,14 +3840,9 @@ void *thread_host_main(void *arg) {
         return nullptr;
     }
 
-    uint32_t start = 0, param = 0;
-    if (HObj *o = handle_any(t->handle)) {
-        start = o->thread_start;
-        param = o->thread_param;
-    }
     uint32_t result = 0;
     if (setjmp(t->exit_jmp) == 0)
-        result = guest_call(&t->ctx, start, param);
+        result = guest_call(&t->ctx, t->start, t->param);
     else
         result = t->exit_code;
 
@@ -4000,6 +4018,10 @@ bool thread_spawn(uint32_t h) {
     t->index = threads().size();
     t->handle = h;
     t->id = g_next_thread_id++;
+    if (HObj *o = handle_get(h, H_THREAD)) {
+        t->start = o->thread_start;
+        t->param = o->thread_param;
+    }
     if (!thread_prepare_context(t)) {
         delete t;
         return false;
@@ -4268,6 +4290,10 @@ void k_UnhandledExceptionFilter(X86 *c) {
 // continuing would run the guest past a point it never reaches on Windows, so
 // an unhandled raise aborts with the state that caused it.
 } // namespace
+
+void kernel32_exit_thread(X86 *c) {
+    k_ExitThread(c);
+}
 
 void kernel32_exit_process(uint32_t code) {
     if (request_process_exit(code))
@@ -5385,9 +5411,7 @@ void copy_file_named(X86 *c, const std::string &source, const std::string &dest)
     set_eax(c, 1);
 }
 
-void find_first_named(X86 *c, const std::string &pattern, bool wide) {
-    uint32_t data = arg(c, 1);
-
+uint32_t find_first_start(const std::string &pattern) {
     // Split the pattern into a directory and a leaf mask.
     std::string dirpart, leaf = pattern;
     size_t slash = pattern.find_last_of("\\/");
@@ -5446,8 +5470,7 @@ void find_first_named(X86 *c, const std::string &pattern, bool wide) {
         if (host_dir.empty()) {
             handles().erase(h);
             set_last_error(ERROR_PATH_NOT_FOUND_);
-            set_eax(c, INVALID_HANDLE_VALUE_);
-            return;
+            return 0;
         }
         o.find_dir = host_dir;
         for (const auto &kv : listing(host_dir))
@@ -5459,11 +5482,21 @@ void find_first_named(X86 *c, const std::string &pattern, bool wide) {
     if (o.matches.empty()) {
         handles().erase(h);
         set_last_error(ERROR_FILE_NOT_FOUND_);
+        return 0;
+    }
+    o.find_pos = 1;
+    return h;
+}
+
+void find_first_named(X86 *c, const std::string &pattern, bool wide) {
+    uint32_t data = arg(c, 1);
+    uint32_t h = find_first_start(pattern);
+    if (!h) {
         set_eax(c, INVALID_HANDLE_VALUE_);
         return;
     }
+    HObj &o = handles()[h];
     fill_find_data(data, o.match_paths[0], o.matches[0], wide);
-    o.find_pos = 1;
     set_eax(c, h);
 }
 
@@ -5477,6 +5510,54 @@ void find_next(X86 *c, bool wide) {
     fill_find_data(arg(c, 1), o->match_paths[o->find_pos], o->matches[o->find_pos], wide);
     ++o->find_pos;
     set_eax(c, 1);
+}
+
+// MSVCRT's _finddata_t is not the Win32 WIN32_FIND_DATAA layout: attributes,
+// three 32-bit times, a 32-bit size and a 260-byte name at offset 20.
+void fill_msvc_find_data(uint32_t addr, const std::string &host_path, const std::string &name) {
+    if (!addr || !gm_valid(addr, 280))
+        return;
+    memset(g_mem + addr, 0, 280);
+    OsStat st{};
+    bool dots = name == "." || name == "..";
+    bool have_stat = os_stat(host_path.c_str(), &st) == 0;
+    wr32(addr, dots        ? FILE_ATTRIBUTE_DIRECTORY_
+               : have_stat ? attrs_for(st)
+                           : FILE_ATTRIBUTE_NORMAL_);
+    if (have_stat) {
+        wr32(addr + 4, (uint32_t)st.ctime);
+        wr32(addr + 8, (uint32_t)st.atime);
+        wr32(addr + 12, (uint32_t)st.mtime);
+        if (!dots)
+            wr32(addr + 16, (uint32_t)st.size);
+    }
+    gm_put_str(addr + 20, name.c_str(), 260);
+}
+
+uint32_t win32_crt_findfirst(const std::string &pattern, uint32_t data) {
+    uint32_t h = find_first_start(pattern);
+    if (!h)
+        return 0xffffffffu;
+    HObj &o = handles()[h];
+    fill_msvc_find_data(data, o.match_paths[0], o.matches[0]);
+    return h;
+}
+
+bool win32_crt_findnext(uint32_t handle, uint32_t data) {
+    HObj *o = handle_get(handle, H_FIND);
+    if (!o || o->find_pos >= o->matches.size())
+        return false;
+    fill_msvc_find_data(data, o->match_paths[o->find_pos], o->matches[o->find_pos]);
+    ++o->find_pos;
+    return true;
+}
+
+bool win32_crt_findclose(uint32_t handle) {
+    HObj *o = handle_get(handle, H_FIND);
+    if (!o)
+        return false;
+    handles().erase(handle);
+    return true;
 }
 
 std::string full_path_named(const std::string &name) {

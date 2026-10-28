@@ -25,6 +25,9 @@
 #include <utility>
 #include <vector>
 
+extern "C" void dinput_feedback_tick();
+extern "C" void dinput_feedback_focus_lost();
+
 namespace controls {
 
 namespace {
@@ -430,6 +433,8 @@ void host_mapper_load() {
         set_mapper_status("Could not initialize controller profile: " + error);
         fprintf(stderr, "[controls] bad controller profile: %s\n", error.c_str());
     }
+    vpad().set_dinput_rumble_enabled(g_mapper.snapshot().directinput_rumble);
+    dinput_feedback_tick();
 }
 
 void host_set_screen(const Screen &s, const Rect &game, int safe_bottom) {
@@ -448,7 +453,9 @@ void host_set_focused(bool focused) {
     if (g_game_focused == focused)
         return;
     g_game_focused = focused;
+    gamepad_haptic_focus(focused);
     if (!focused) {
+        dinput_feedback_focus_lost();
         release_everything();
         g_rumble.stop();
         mods_controls_flush();
@@ -504,6 +511,8 @@ bool host_mapper_apply(const PadMapperProfile &requested, bool persist) {
         fprintf(stderr, "[controls] bad controller profile: %s\n", error.c_str());
         return false;
     }
+    vpad().set_dinput_rumble_enabled(profile.directinput_rumble);
+    dinput_feedback_tick();
     set_mapper_status({});
     host_gamepad_state(host_mapper_raw_state());
     return true;
@@ -604,6 +613,7 @@ void host_release_all() {
 }
 
 void host_pump(uint64_t now) {
+    dinput_feedback_tick();
     // The layout row means nothing until the settings are loaded (the first
     // presented frame runs mods_page_init); draw nothing before then.
     if (!mods_controls_initialized()) {
@@ -694,8 +704,9 @@ void host_pump(uint64_t now) {
         const uint64_t serial = vpad().rumble_serial();
         uint16_t low = 0, high = 0;
         vpad().rumble(&low, &high);
-        g_rumble.update(serial, low, high,
-                        rumble_sink(gamepad_connected(), platform_ui_touch_device()), now);
+        if (g_game_focused)
+            g_rumble.update(serial, low, high,
+                            rumble_sink(gamepad_connected(), platform_ui_touch_device()), now);
     }
 
     if (trace()) {

@@ -85,13 +85,23 @@ impl std::fmt::Display for Diagnostic {
         write!(f, "{}: ", Hex(self.addr))?;
         match &self.reason {
             Reason::EntryOutsideFunctions => {
-                write!(f, "entry outside every mapped function; fix Ghidra and re-export")
+                write!(
+                    f,
+                    "entry outside every mapped function; fix Ghidra and re-export"
+                )
             }
             Reason::EntryNotInstructionBoundary => {
-                write!(f, "entry is not an instruction boundary; fix Ghidra and re-export")
+                write!(
+                    f,
+                    "entry is not an instruction boundary; fix Ghidra and re-export"
+                )
             }
             Reason::OverlappingEntryDoesNotRejoin { entry } => {
-                write!(f, "overlapping entry {} does not rejoin the function", Hex(*entry))
+                write!(
+                    f,
+                    "overlapping entry {} does not rejoin the function",
+                    Hex(*entry)
+                )
             }
             Reason::DecoderCannotTile { span } => {
                 write!(f, "decoder cannot tile the mapped span at {}", Hex(*span))
@@ -106,15 +116,21 @@ impl std::fmt::Display for Diagnostic {
                 Hex(*component)
             ),
             Reason::UnsupportedX87 { detail } => write!(f, "unsupported x87: {detail}"),
-            Reason::UnsupportedDirectRam { detail } => write!(f, "unsupported direct-ram shape: {detail}"),
+            Reason::UnsupportedDirectRam { detail } => {
+                write!(f, "unsupported direct-ram shape: {detail}")
+            }
             Reason::UnsupportedReadModifyWrite { detail } => {
                 write!(f, "unsupported read-modify-write shape: {detail}")
             }
             Reason::UnsupportedArithmetic { mnemonic } => {
                 write!(f, "unsupported {mnemonic} arithmetic shape")
             }
-            Reason::UnsupportedShift { mnemonic } => write!(f, "unsupported {mnemonic} shift shape"),
-            Reason::UnsupportedDivide { mnemonic } => write!(f, "unsupported {mnemonic} divide shape"),
+            Reason::UnsupportedShift { mnemonic } => {
+                write!(f, "unsupported {mnemonic} shift shape")
+            }
+            Reason::UnsupportedDivide { mnemonic } => {
+                write!(f, "unsupported {mnemonic} divide shape")
+            }
             Reason::UnsupportedStringOp { detail } => write!(f, "unsupported string op: {detail}"),
             Reason::UnsupportedScalar { detail } => write!(f, "unsupported scalar shape: {detail}"),
             Reason::UnsupportedCall { detail } => write!(f, "unsupported call shape: {detail}"),

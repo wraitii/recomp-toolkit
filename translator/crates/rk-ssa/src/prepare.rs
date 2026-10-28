@@ -15,7 +15,6 @@ pub struct PrepareOptions<'a> {
     pub call_facts: &'a dyn CallFacts,
     pub allow_slow: bool,
     pub value_budget: usize,
-    pub stack_reload: Option<&'a dyn Fn(ValueId) -> Option<(ValueId, i32)>>,
     pub signed_sub: bool,
     pub lazy_publications: bool,
     pub fault_state: FaultState,
@@ -35,7 +34,6 @@ impl<'a> PrepareOptions<'a> {
             call_facts,
             allow_slow: true,
             value_budget: DEFAULT_VALUE_BUDGET,
-            stack_reload: None,
             signed_sub: true,
             lazy_publications: true,
             fault_state: FaultState::Relaxed,
@@ -62,7 +60,7 @@ pub fn prepare_with_publications(
         .map_err(rk_core::Error::Diagnostic)?;
     crate::validate(&ssa)?;
     canonicalize(&mut ssa, opts.signed_sub);
-    forward(&mut ssa, opts.stack_reload, Some(opts.call_facts));
+    forward(&mut ssa, Some(opts.call_facts));
     crate::flags::build_joins(&mut ssa);
     crate::coalesce::coalesce(&mut ssa, opts.coalesce_roots);
     canonicalize(&mut ssa, opts.signed_sub);
@@ -95,7 +93,12 @@ pub fn prepare_with_publications(
         })
         .flatten()
         .collect();
-    simplify(&mut ssa, plans.as_ref().map(|(_, simplify)| simplify), &flag_roots, &[]);
+    simplify(
+        &mut ssa,
+        plans.as_ref().map(|(_, simplify)| simplify),
+        &flag_roots,
+        &[],
+    );
     crate::validate(&ssa)?;
     Ok((ssa, plans.map(|(base, _)| base)))
 }
@@ -106,8 +109,16 @@ pub fn publications(s: &Ssa, call_facts: &dyn CallFacts) -> BTreeMap<ValueId, Ve
     for boundary in &s.boundaries {
         let value = &s.values[boundary.at as usize];
         let fields = match value.op {
-            Op::Call { target } => Some(call_facts.call(s.value_addr[boundary.at as usize], Some(target)).reads),
-            Op::CallInd => Some(call_facts.call(s.value_addr[boundary.at as usize], None).reads),
+            Op::Call { target } => Some(
+                call_facts
+                    .call(s.value_addr[boundary.at as usize], Some(target))
+                    .reads,
+            ),
+            Op::CallInd => Some(
+                call_facts
+                    .call(s.value_addr[boundary.at as usize], None)
+                    .reads,
+            ),
             _ => None,
         };
         let keys: Vec<StateKey> = match fields {

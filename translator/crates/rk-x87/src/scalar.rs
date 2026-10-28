@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use rk_ir::x87::{Arithmetic, ArithmeticOp, X87Condition, X87Environment, X87Legacy, X87Op, X87Unary};
+use rk_ir::x87::{
+    Arithmetic, ArithmeticOp, X87Condition, X87Environment, X87Legacy, X87Op, X87Unary,
+};
 use rk_ssa::ValueId;
 
 use crate::types::{
@@ -21,7 +23,9 @@ pub fn part_bit(part: &str) -> u8 {
 }
 
 pub fn parts(mask: u8) -> impl Iterator<Item = &'static str> {
-    PARTS.into_iter().filter(move |part| mask & part_bit(part) != 0)
+    PARTS
+        .into_iter()
+        .filter(move |part| mask & part_bit(part) != 0)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -154,7 +158,11 @@ pub fn merge_shapes(shapes: &[Shape]) -> Shape {
                     agrees = false;
                     break;
                 }
-                let found = slot.consts.iter().find(|(name, _)| *name == part).map(|(_, value)| value);
+                let found = slot
+                    .consts
+                    .iter()
+                    .find(|(name, _)| *name == part)
+                    .map(|(_, value)| value);
                 match (&value, found) {
                     (None, Some(found)) => value = Some(found.clone()),
                     (Some(value), Some(found)) if value == found => {}
@@ -170,11 +178,33 @@ pub fn merge_shapes(shapes: &[Shape]) -> Shape {
                 }
             }
         }
-        merged.push((position, SlotShape { parts: mask, narrow, consts, dirty, quiet, pending }));
+        merged.push((
+            position,
+            SlotShape {
+                parts: mask,
+                narrow,
+                consts,
+                dirty,
+                quiet,
+                pending,
+            },
+        ));
     }
-    let low = known.iter().map(|shape| if shape.active { shape.low } else { 0 }).min().unwrap_or(0);
-    let high = known.iter().map(|shape| if shape.active { shape.high } else { 0 }).max().unwrap_or(0);
-    let base = known.iter().map(|shape| if shape.active { shape.base } else { 0 }).min().unwrap_or(0);
+    let low = known
+        .iter()
+        .map(|shape| if shape.active { shape.low } else { 0 })
+        .min()
+        .unwrap_or(0);
+    let high = known
+        .iter()
+        .map(|shape| if shape.active { shape.high } else { 0 })
+        .max()
+        .unwrap_or(0);
+    let base = known
+        .iter()
+        .map(|shape| if shape.active { shape.base } else { 0 })
+        .min()
+        .unwrap_or(0);
     let positions = merged.iter().map(|(position, _)| *position);
     let min_position = positions.clone().min().unwrap_or(0);
     let max_position = positions.max().unwrap_or(0);
@@ -298,18 +328,32 @@ impl Scalar {
         (offset, self.slots.entry(offset).or_default())
     }
 
-    pub(crate) fn read(&mut self, logical: i32, part: &'static str, events: &mut Vec<Event>) -> Expr {
+    pub(crate) fn read(
+        &mut self,
+        logical: i32,
+        part: &'static str,
+        events: &mut Vec<Event>,
+    ) -> Expr {
         let offset = self.slot(logical).0;
         let slot = self.slots.get_mut(&offset).expect("slot");
         if let Some(value) = slot.get(part) {
             return value.clone();
         }
         let value = self.temp(crate::types::slot(part, self.phys(offset)), events);
-        self.slots.get_mut(&offset).expect("slot").set(part, value.clone());
+        self.slots
+            .get_mut(&offset)
+            .expect("slot")
+            .set(part, value.clone());
         value
     }
 
-    fn assign(&mut self, logical: i32, narrow: Option<bool>, quiet: Option<bool>, values: &[(&'static str, Expr)]) {
+    fn assign(
+        &mut self,
+        logical: i32,
+        narrow: Option<bool>,
+        quiet: Option<bool>,
+        values: &[(&'static str, Expr)],
+    ) {
         let (_, slot) = self.slot(logical);
         if let Some(narrow) = narrow {
             slot.narrow = narrow;
@@ -338,7 +382,9 @@ impl Scalar {
             return;
         }
         slot.pending = false;
-        let Some(value) = slot.value.clone() else { return };
+        let Some(value) = slot.value.clone() else {
+            return;
+        };
         if emit_ie {
             events.push(Event::Assign(Assign {
                 target: env("sw"),
@@ -376,7 +422,16 @@ impl Scalar {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn set(&mut self, logical: i32, value: Expr, events: &mut Vec<Event>, bits: Option<Expr>, exact: Option<Expr>, tag: Option<Expr>, narrow: bool) {
+    fn set(
+        &mut self,
+        logical: i32,
+        value: Expr,
+        events: &mut Vec<Event>,
+        bits: Option<Expr>,
+        exact: Option<Expr>,
+        tag: Option<Expr>,
+        narrow: bool,
+    ) {
         self.release(logical, events, false);
         let value = self.temp(value, events);
         let bits = bits.unwrap_or_else(|| literal(0, Type::U64));
@@ -386,7 +441,12 @@ impl Scalar {
             logical,
             Some(narrow),
             Some(false),
-            &[("value", value), ("bits", bits), ("exact", exact), ("tag", tag)],
+            &[
+                ("value", value),
+                ("bits", bits),
+                ("exact", exact),
+                ("tag", tag),
+            ],
         );
     }
 
@@ -419,7 +479,10 @@ impl Scalar {
                 for part in ["value", "exact", "bits"] {
                     if slot.dirty & part_bit(part) != 0 {
                         if let Some(value) = slot.get(part) {
-                            events.push(Event::Assign(Assign::new(crate::types::slot(part, physical.clone()), value.clone())));
+                            events.push(Event::Assign(Assign::new(
+                                crate::types::slot(part, physical.clone()),
+                                value.clone(),
+                            )));
                         }
                     }
                 }
@@ -434,7 +497,11 @@ impl Scalar {
         if !tags.is_empty() {
             events.push(Event::PublishTags(tags));
         }
-        let top_moved = if self.convention { self.position != self.base } else { self.top_dirty };
+        let top_moved = if self.convention {
+            self.position != self.base
+        } else {
+            self.top_dirty
+        };
         if top_moved || self.top_unknown {
             events.push(Event::Assign(Assign::new(
                 resident("top"),
@@ -457,7 +524,8 @@ impl Scalar {
         if !self.active {
             return Vec::new();
         }
-        let convention = self.convention && self.high < self.low + 8 && self.position < self.low + 8;
+        let convention =
+            self.convention && self.high < self.low + 8 && self.position < self.low + 8;
         if convention {
             self.convention = true;
         }
@@ -491,7 +559,17 @@ impl Scalar {
                     _ => None,
                 })
                 .collect();
-            slots.push((position, SlotShape { parts, narrow: slot.narrow, consts, dirty, quiet: slot.quiet, pending: slot.pending }));
+            slots.push((
+                position,
+                SlotShape {
+                    parts,
+                    narrow: slot.narrow,
+                    consts,
+                    dirty,
+                    quiet: slot.quiet,
+                    pending: slot.pending,
+                },
+            ));
         }
         slots.sort_by_key(|(position, _)| *position);
         Shape::Known(CarryShape {
@@ -545,7 +623,10 @@ impl Scalar {
             return;
         }
         if self.top != 0 {
-            events.push(Event::Assign(Assign::new(env("top"), self.phys(self.top as u8))));
+            events.push(Event::Assign(Assign::new(
+                env("top"),
+                self.phys(self.top as u8),
+            )));
             self.slots = self
                 .slots
                 .iter()
@@ -583,11 +664,22 @@ impl Scalar {
             bits,
             args: vec![env("sw"), self.cw(), value, exact, raw],
         };
-        events.push(Event::Store { bits, address, value: conversion, floating: false, bcd: false });
+        events.push(Event::Store {
+            bits,
+            address,
+            value: conversion,
+            floating: false,
+            bcd: false,
+        });
         self.status_dirty = true;
     }
 
-    pub fn apply(&mut self, op: X87Op, address: Option<Expr>, result: Option<ValueId>) -> Vec<Event> {
+    pub fn apply(
+        &mut self,
+        op: X87Op,
+        address: Option<Expr>,
+        result: Option<ValueId>,
+    ) -> Vec<Event> {
         let mut events = Vec::new();
         self.activate(&mut events);
         let sw = env("sw");
@@ -596,12 +688,24 @@ impl Scalar {
             X87Op::Constant(name) => {
                 self.move_top(-1);
                 let narrow = name == "FLD1" || name == "FLDZ";
-                self.set(0, constant_float(name), &mut events, None, None, None, narrow);
+                self.set(
+                    0,
+                    constant_float(name),
+                    &mut events,
+                    None,
+                    None,
+                    None,
+                    narrow,
+                );
             }
             X87Op::Push { src, bits } => {
                 if let Some(src) = src {
                     let values = self.parts(src as i32, &mut events);
-                    let slot = self.slots.get(&(((self.top + src as i32) & 7) as u8)).cloned().unwrap_or_default();
+                    let slot = self
+                        .slots
+                        .get(&(((self.top + src as i32) & 7) as u8))
+                        .cloned()
+                        .unwrap_or_default();
                     self.move_top(-1);
                     self.release(0, &mut events, false);
                     self.assign(0, Some(slot.narrow), Some(slot.quiet), &values);
@@ -627,7 +731,12 @@ impl Scalar {
                     false,
                 );
             }
-            X87Op::Store { dst, bits, pop, integer } => {
+            X87Op::Store {
+                dst,
+                bits,
+                pop,
+                integer,
+            } => {
                 if let Some(dst) = dst {
                     if dst == 0 {
                         if pop {
@@ -636,17 +745,29 @@ impl Scalar {
                         return events;
                     }
                     let values = self.parts(0, &mut events);
-                    let slot = self.slots.get(&(self.top as u8)).cloned().unwrap_or_default();
+                    let slot = self
+                        .slots
+                        .get(&(self.top as u8))
+                        .cloned()
+                        .unwrap_or_default();
                     self.release(dst as i32, &mut events, false);
                     self.assign(dst as i32, Some(slot.narrow), Some(slot.quiet), &values);
                     self.slot(dst as i32).1.pending = slot.pending;
                 } else if integer {
-                    self.store_integer(bits, address.expect("x87 integer store address"), &mut events);
+                    self.store_integer(
+                        bits,
+                        address.expect("x87 integer store address"),
+                        &mut events,
+                    );
                 } else {
                     self.fold(0, &mut events, true);
                     let address = address.expect("x87 store address");
                     let value = self.read(0, "value", &mut events);
-                    let slot = self.slots.get(&(self.top as u8)).cloned().unwrap_or_default();
+                    let slot = self
+                        .slots
+                        .get(&(self.top as u8))
+                        .cloned()
+                        .unwrap_or_default();
                     let value = if bits == 32 {
                         if slot.narrow && !self.strict {
                             if slot.quiet && self.known_mode {
@@ -662,13 +783,27 @@ impl Scalar {
                     } else {
                         value
                     };
-                    events.push(Event::Store { bits, address, value, floating: true, bcd: false });
+                    events.push(Event::Store {
+                        bits,
+                        address,
+                        value,
+                        floating: true,
+                        bcd: false,
+                    });
                 }
                 if pop {
                     self.drop_slot(&mut events, dst.is_some_and(|dst| dst != 0));
                 }
             }
-            X87Op::Arithmetic(Arithmetic { operator, integer, reverse, pops, dst, src, bits }) => {
+            X87Op::Arithmetic(Arithmetic {
+                operator,
+                integer,
+                reverse,
+                pops,
+                dst,
+                src,
+                bits,
+            }) => {
                 let narrow;
                 let (mut lhs, mut rhs);
                 if bits != 0 {
@@ -678,13 +813,24 @@ impl Scalar {
                         rhs = cast(Type::F64, rhs);
                     }
                     lhs = self.read(0, "value", &mut events);
-                    narrow = self.slots.get(&(self.top as u8)).map(|slot| slot.narrow).unwrap_or(false)
+                    narrow = self
+                        .slots
+                        .get(&(self.top as u8))
+                        .map(|slot| slot.narrow)
+                        .unwrap_or(false)
                         && !integer
                         && bits == 32;
                 } else {
-
-                    let lhs_slot = self.slots.get(&(((self.top + dst as i32) & 7) as u8)).cloned().unwrap_or_default();
-                    let rhs_slot = self.slots.get(&(((self.top + src as i32) & 7) as u8)).cloned().unwrap_or_default();
+                    let lhs_slot = self
+                        .slots
+                        .get(&(((self.top + dst as i32) & 7) as u8))
+                        .cloned()
+                        .unwrap_or_default();
+                    let rhs_slot = self
+                        .slots
+                        .get(&(((self.top + src as i32) & 7) as u8))
+                        .cloned()
+                        .unwrap_or_default();
                     lhs = self.read(dst as i32, "value", &mut events);
                     rhs = self.read(src as i32, "value", &mut events);
                     narrow = lhs_slot.narrow && rhs_slot.narrow;
@@ -719,7 +865,14 @@ impl Scalar {
                     self.drop_slot(&mut events, true);
                 }
             }
-            X87Op::Compare { quiet, integer, src, bits, pops, zero } => {
+            X87Op::Compare {
+                quiet,
+                integer,
+                src,
+                bits,
+                pops,
+                zero,
+            } => {
                 self.fold(0, &mut events, true);
                 if bits == 0 && !zero {
                     self.fold(src as i32, &mut events, true);
@@ -729,12 +882,19 @@ impl Scalar {
                 } else if bits != 0 {
                     let address = address.expect("x87 compare address");
                     let value = load(bits, address, integer);
-                    if integer { cast(Type::F64, value) } else { value }
+                    if integer {
+                        cast(Type::F64, value)
+                    } else {
+                        value
+                    }
                 } else {
                     self.read(src as i32, "value", &mut events)
                 };
                 let a = self.read(0, "value", &mut events);
-                events.push(Event::Evaluate(helper(if quiet { "fucom" } else { "fcom" }, vec![sw.clone(), a, other])));
+                events.push(Event::Evaluate(helper(
+                    if quiet { "fucom" } else { "fcom" },
+                    vec![sw.clone(), a, other],
+                )));
                 self.status_dirty = true;
                 for _ in 0..pops {
                     self.drop_slot(&mut events, false);
@@ -745,7 +905,10 @@ impl Scalar {
                 self.fold(src as i32, &mut events, true);
                 let a = self.read(0, "value", &mut events);
                 let b = self.read(src as i32, "value", &mut events);
-                let value = helper("fcomi_flags", vec![sw.clone(), a, b, literal(quiet as u64, Type::U32)]);
+                let value = helper(
+                    "fcomi_flags",
+                    vec![sw.clone(), a, b, literal(quiet as u64, Type::U32)],
+                );
                 if let Some(result) = result {
                     events.push(Event::Assign(Assign::new(external(result), value)));
                 }
@@ -761,7 +924,11 @@ impl Scalar {
                     self.release(0, &mut events, true);
                 }
                 let source = self.read(0, "value", &mut events);
-                let slot = self.slots.get(&(self.top as u8)).cloned().unwrap_or_default();
+                let slot = self
+                    .slots
+                    .get(&(self.top as u8))
+                    .cloned()
+                    .unwrap_or_default();
                 let narrow = matches!(op, X87Unary::Abs | X87Unary::Negate | X87Unary::Sqrt)
                     && (slot.narrow || matches!(op, X87Unary::Sqrt));
                 let value = unary(op, source, sw.clone(), cw.clone());
@@ -771,15 +938,26 @@ impl Scalar {
             X87Op::Remainder { ieee } => {
                 let a = self.read(0, "value", &mut events);
                 let b = self.read(1, "value", &mut events);
-                let value = helper("fprem", vec![sw.clone(), a, b, literal(ieee as u64, Type::U32)]);
+                let value = helper(
+                    "fprem",
+                    vec![sw.clone(), a, b, literal(ieee as u64, Type::U32)],
+                );
                 self.set(0, value, &mut events, None, None, None, false);
                 self.status_dirty = true;
             }
             X87Op::Exchange { src } => {
                 let a = self.parts(0, &mut events);
                 let b = self.parts(src as i32, &mut events);
-                let a_slot = self.slots.get(&(self.top as u8)).cloned().unwrap_or_default();
-                let b_slot = self.slots.get(&(((self.top + src as i32) & 7) as u8)).cloned().unwrap_or_default();
+                let a_slot = self
+                    .slots
+                    .get(&(self.top as u8))
+                    .cloned()
+                    .unwrap_or_default();
+                let b_slot = self
+                    .slots
+                    .get(&(((self.top + src as i32) & 7) as u8))
+                    .cloned()
+                    .unwrap_or_default();
                 self.assign(0, Some(b_slot.narrow), Some(b_slot.quiet), &b);
                 self.assign(src as i32, Some(a_slot.narrow), Some(a_slot.quiet), &a);
                 self.slot(0).1.pending = b_slot.pending;
@@ -790,7 +968,8 @@ impl Scalar {
             }
             X87Op::Status => {
                 self.fold_pending(&mut events);
-                let value = Expr::StatusWord(Box::new(sw.clone()), Box::new(self.phys(self.top as u8)));
+                let value =
+                    Expr::StatusWord(Box::new(sw.clone()), Box::new(self.phys(self.top as u8)));
                 if let Some(result) = result {
                     events.push(Event::Assign(Assign::new(external(result), value)));
                 }
@@ -800,13 +979,22 @@ impl Scalar {
                 match kind {
                     X87Environment::LoadCw => {
                         events.extend(self.flush());
-                        events.push(Event::Evaluate(helper("x87_set_cw", vec![Expr::Cpu, Expr::LoadWord(Box::new(address))])));
+                        events.push(Event::Evaluate(helper(
+                            "x87_set_cw",
+                            vec![Expr::Cpu, Expr::LoadWord(Box::new(address))],
+                        )));
                         events.push(Event::Reset);
                         self.reset();
                     }
                     X87Environment::StoreCw => {
                         events.extend(self.flush());
-                        events.push(Event::Store { bits: 16, address, value: resident("cw"), floating: false, bcd: false });
+                        events.push(Event::Store {
+                            bits: 16,
+                            address,
+                            value: resident("cw"),
+                            floating: false,
+                            bcd: false,
+                        });
                     }
                     X87Environment::StoreSw => {
                         events.extend(self.flush());
@@ -818,10 +1006,18 @@ impl Scalar {
                             bcd: false,
                         });
                     }
-                    X87Environment::StoreEnv => self.eager(&mut events, "x87_fnstenv", vec![Expr::Cpu, address]),
-                    X87Environment::Save => self.eager(&mut events, "x87_fnsave", vec![Expr::Cpu, address]),
-                    X87Environment::LoadEnv => self.eager(&mut events, "x87_fldenv", vec![Expr::Cpu, address]),
-                    X87Environment::Restore => self.eager(&mut events, "x87_frstor", vec![Expr::Cpu, address]),
+                    X87Environment::StoreEnv => {
+                        self.eager(&mut events, "x87_fnstenv", vec![Expr::Cpu, address])
+                    }
+                    X87Environment::Save => {
+                        self.eager(&mut events, "x87_fnsave", vec![Expr::Cpu, address])
+                    }
+                    X87Environment::LoadEnv => {
+                        self.eager(&mut events, "x87_fldenv", vec![Expr::Cpu, address])
+                    }
+                    X87Environment::Restore => {
+                        self.eager(&mut events, "x87_frstor", vec![Expr::Cpu, address])
+                    }
                     X87Environment::EmptyTags(reset_top) => {
                         events.extend(self.flush());
                         events.push(Event::EmptyTags(reset_top));
@@ -834,11 +1030,7 @@ impl Scalar {
                 self.fold_all(&mut events, false);
                 events.push(Event::Assign(Assign {
                     target: sw.clone(),
-                    value: Expr::Binary(
-                        "&",
-                        Box::new(sw),
-                        Box::new(Expr::ClearMask(0x80ff)),
-                    ),
+                    value: Expr::Binary("&", Box::new(sw), Box::new(Expr::ClearMask(0x80ff))),
                     op: "=",
                 }));
                 self.status_dirty = true;
@@ -857,11 +1049,14 @@ impl Scalar {
                 events.extend(self.flush());
                 events.push(Event::Conditional(
                     Expr::FlagCondition(condition),
-                    vec![Event::Evaluate(helper("fcopy", vec![
-                        Expr::Cpu,
-                        literal(0, Type::U32),
-                        literal(src as u64, Type::U32),
-                    ]))],
+                    vec![Event::Evaluate(helper(
+                        "fcopy",
+                        vec![
+                            Expr::Cpu,
+                            literal(0, Type::U32),
+                            literal(src as u64, Type::U32),
+                        ],
+                    ))],
                 ));
                 events.push(Event::Reset);
                 self.reset();
@@ -878,10 +1073,18 @@ impl Scalar {
             X87Op::LegacyEnvironment(kind) => {
                 let address = address.expect("x87 legacy environment address");
                 match kind {
-                    X87Legacy::Save => self.eager(&mut events, "x87_fnsave", vec![Expr::Cpu, address]),
-                    X87Legacy::Restore => self.eager(&mut events, "x87_frstor", vec![Expr::Cpu, address]),
-                    X87Legacy::StoreEnv => self.eager(&mut events, "x87_fnstenv", vec![Expr::Cpu, address]),
-                    X87Legacy::LoadEnv => self.eager(&mut events, "x87_fldenv", vec![Expr::Cpu, address]),
+                    X87Legacy::Save => {
+                        self.eager(&mut events, "x87_fnsave", vec![Expr::Cpu, address])
+                    }
+                    X87Legacy::Restore => {
+                        self.eager(&mut events, "x87_frstor", vec![Expr::Cpu, address])
+                    }
+                    X87Legacy::StoreEnv => {
+                        self.eager(&mut events, "x87_fnstenv", vec![Expr::Cpu, address])
+                    }
+                    X87Legacy::LoadEnv => {
+                        self.eager(&mut events, "x87_fldenv", vec![Expr::Cpu, address])
+                    }
                     X87Legacy::BcdStore => {
                         events.extend(self.flush());
                         events.push(Event::Store {
@@ -908,46 +1111,85 @@ impl Scalar {
                 match kind {
                     X87Eager::Fptan => {
                         events.extend(self.flush());
-                        events.push(Event::Evaluate(helper("fset", vec![
-                            Expr::Cpu,
-                            literal(0, Type::U32),
-                            helper("fx87_exact", vec![resident("sw"), helper("tan", vec![st(0)])]),
-                        ])));
-                        events.push(Event::Evaluate(helper("fpush", vec![Expr::Cpu, constant_float("FLD1")])));
+                        events.push(Event::Evaluate(helper(
+                            "fset",
+                            vec![
+                                Expr::Cpu,
+                                literal(0, Type::U32),
+                                helper(
+                                    "fx87_exact",
+                                    vec![resident("sw"), helper("tan", vec![st(0)])],
+                                ),
+                            ],
+                        )));
+                        events.push(Event::Evaluate(helper(
+                            "fpush",
+                            vec![Expr::Cpu, constant_float("FLD1")],
+                        )));
                         events.push(Event::Reset);
                         self.reset();
                     }
                     X87Eager::Fsincos => {
                         events.extend(self.flush());
                         let captured = self.temp(st(0), &mut events);
-                        events.push(Event::Evaluate(helper("fset", vec![
-                            Expr::Cpu,
-                            literal(0, Type::U32),
-                            helper("fx87_exact", vec![resident("sw"), helper("sin", vec![captured.clone()])]),
-                        ])));
-                        events.push(Event::Evaluate(helper("fpush", vec![
-                            Expr::Cpu,
-                            helper("fx87_exact", vec![resident("sw"), helper("cos", vec![captured])]),
-                        ])));
+                        events.push(Event::Evaluate(helper(
+                            "fset",
+                            vec![
+                                Expr::Cpu,
+                                literal(0, Type::U32),
+                                helper(
+                                    "fx87_exact",
+                                    vec![resident("sw"), helper("sin", vec![captured.clone()])],
+                                ),
+                            ],
+                        )));
+                        events.push(Event::Evaluate(helper(
+                            "fpush",
+                            vec![
+                                Expr::Cpu,
+                                helper(
+                                    "fx87_exact",
+                                    vec![resident("sw"), helper("cos", vec![captured])],
+                                ),
+                            ],
+                        )));
                         events.push(Event::Reset);
                         self.reset();
                     }
                     X87Eager::Fscale => {
                         events.extend(self.flush());
                         let value = helper("fscale", vec![st(0), st(1)]);
-                        self.set(0, helper("fx87_exact", vec![env("sw"), value]), &mut events, None, None, None, false);
+                        self.set(
+                            0,
+                            helper("fx87_exact", vec![env("sw"), value]),
+                            &mut events,
+                            None,
+                            None,
+                            None,
+                            false,
+                        );
                         self.status_dirty = true;
                     }
                     X87Eager::Fpatan => {
                         events.extend(self.flush());
-                        let value = helper("fx87_exact", vec![env("sw"), helper("atan2", vec![st(1), st(0)])]);
+                        let value = helper(
+                            "fx87_exact",
+                            vec![env("sw"), helper("atan2", vec![st(1), st(0)])],
+                        );
                         self.set(1, value, &mut events, None, None, None, false);
                         self.drop_slot(&mut events, true);
                         self.status_dirty = true;
                     }
                     X87Eager::Fyl2x | X87Eager::Fyl2xp1 => {
                         events.extend(self.flush());
-                        let inner = helper(if matches!(kind, X87Eager::Fyl2x) { "log2" } else { "log1p" }, vec![st(0)]);
+                        let inner = helper(
+                            if matches!(kind, X87Eager::Fyl2x) {
+                                "log2"
+                            } else {
+                                "log1p"
+                            },
+                            vec![st(0)],
+                        );
                         let mut value = binary("*", st(1), inner);
                         if matches!(kind, X87Eager::Fyl2xp1) {
                             value = binary("/", value, Expr::Ln2);
@@ -982,7 +1224,11 @@ impl Scalar {
                         self.fold_all(&mut events, false);
                         events.push(Event::Assign(Assign {
                             target: sw.clone(),
-                            value: Expr::Binary("&", Box::new(sw), Box::new(Expr::ClearMask(0x80ff))),
+                            value: Expr::Binary(
+                                "&",
+                                Box::new(sw),
+                                Box::new(Expr::ClearMask(0x80ff)),
+                            ),
                             op: "=",
                         }));
                         self.status_dirty = true;
@@ -995,7 +1241,6 @@ impl Scalar {
         events
     }
 }
-
 
 pub fn carry_values(shape: &CarryShape) -> BTreeMap<(i32, &'static str), Expr> {
     let mut values = BTreeMap::new();

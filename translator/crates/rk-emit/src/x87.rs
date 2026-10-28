@@ -8,7 +8,11 @@ pub trait External {
 }
 
 fn carry_name(position: i32, part: &str) -> String {
-    let tag = if position < 0 { format!("m{}", -position) } else { position.to_string() };
+    let tag = if position < 0 {
+        format!("m{}", -position)
+    } else {
+        position.to_string()
+    };
     format!("x87c{tag}_{part}")
 }
 
@@ -79,7 +83,11 @@ impl Printer<'_> {
             }
             Expr::Physical(top, offset) => format!("({} + {offset}u) & 7u", self.expr(top)?),
             Expr::Rotate(top, delta) => {
-                format!("({} {} 1u) & 7u", self.expr(top)?, if *delta < 0 { "-" } else { "+" })
+                format!(
+                    "({} {} 1u) & 7u",
+                    self.expr(top)?,
+                    if *delta < 0 { "-" } else { "+" }
+                )
             }
             Expr::Binary(op, lhs, rhs) => format!("{} {op} {}", self.expr(lhs)?, self.expr(rhs)?),
             Expr::Group(value) => format!("({})", self.expr(value)?),
@@ -129,7 +137,11 @@ impl Printer<'_> {
                 self.expr(sw)?,
                 self.expr(top)?
             ),
-            Expr::Load { bits, integer, address } => {
+            Expr::Load {
+                bits,
+                integer,
+                address,
+            } => {
                 let address = self.expr(address)?;
                 if *bits <= 64 {
                     let call = format!(
@@ -157,13 +169,19 @@ impl Printer<'_> {
                 format!("fist_i{bits}_sw(&{status}, {rest})")
             }
             Expr::Helper(name, args) => {
-                let args = args.iter().map(|arg| self.expr(arg)).collect::<Result<Vec<_>>>()?;
+                let args = args
+                    .iter()
+                    .map(|arg| self.expr(arg))
+                    .collect::<Result<Vec<_>>>()?;
                 let joined = args.join(", ");
                 let status = args.first().map_or(String::new(), |arg| format!("&{arg}"));
                 let rest = args.iter().skip(1).cloned().collect::<Vec<_>>().join(", ");
                 match *name {
                     "fcom" | "fucom" => {
-                        format!("recomp_fcom_({status}, {rest}, {}u)", (*name == "fucom") as u8)
+                        format!(
+                            "recomp_fcom_({status}, {rest}, {}u)",
+                            (*name == "fucom") as u8
+                        )
                     }
                     "fcomi_flags" => format!("fcomi_flags_sw({status}, {rest})"),
                     "fdivz" => format!("fdivz_sw({status}, {rest})"),
@@ -199,14 +217,17 @@ impl Printer<'_> {
                         lines.push(format!("{text};"));
                     }
                 }
-                Event::Store { bits, address, value, floating, bcd } => {
+                Event::Store {
+                    bits,
+                    address,
+                    value,
+                    floating,
+                    bcd,
+                } => {
                     let address = self.expr(address)?;
                     let value = self.expr(value)?;
                     if *bits <= 64 && !*bcd {
-                        let call = format!(
-                            "recomp_wr{}{bits}_",
-                            if *floating { "f" } else { "" }
-                        );
+                        let call = format!("recomp_wr{}{bits}_", if *floating { "f" } else { "" });
                         lines.push(format!("{call}(arena_, (uint32_t){address}, {value});"));
                     } else {
                         let call = if *bcd {
@@ -222,13 +243,19 @@ impl Printer<'_> {
                 Event::PublishTags(tags) => {
                     let masks = tags
                         .iter()
-                        .map(|(physical, _)| Ok(format!("(3u << (2u * ({})))", self.expr(physical)?)))
+                        .map(|(physical, _)| {
+                            Ok(format!("(3u << (2u * ({})))", self.expr(physical)?))
+                        })
                         .collect::<Result<Vec<_>>>()?
                         .join(" | ");
                     let values = tags
                         .iter()
                         .map(|(physical, tag)| {
-                            Ok(format!("(({}) << (2u * ({})))", self.expr(tag)?, self.expr(physical)?))
+                            Ok(format!(
+                                "(({}) << (2u * ({})))",
+                                self.expr(tag)?,
+                                self.expr(physical)?
+                            ))
                         })
                         .collect::<Result<Vec<_>>>()?
                         .join(" | ");
@@ -267,15 +294,40 @@ impl Printer<'_> {
 }
 
 pub trait PlanLines {
-    fn block_lines(&self, clone: usize, block: BlockId, external: &dyn External) -> Result<Vec<String>>;
-    fn event_lines(&self, clone: usize, value: ValueId, external: &dyn External) -> Result<Vec<String>>;
-    fn end_lines(&self, clone: usize, block: BlockId, external: &dyn External) -> Result<Vec<String>>;
-    fn default_lines(&self, clone: usize, value: ValueId, external: &dyn External) -> Result<Vec<String>>;
+    fn block_lines(
+        &self,
+        clone: usize,
+        block: BlockId,
+        external: &dyn External,
+    ) -> Result<Vec<String>>;
+    fn event_lines(
+        &self,
+        clone: usize,
+        value: ValueId,
+        external: &dyn External,
+    ) -> Result<Vec<String>>;
+    fn end_lines(
+        &self,
+        clone: usize,
+        block: BlockId,
+        external: &dyn External,
+    ) -> Result<Vec<String>>;
+    fn default_lines(
+        &self,
+        clone: usize,
+        value: ValueId,
+        external: &dyn External,
+    ) -> Result<Vec<String>>;
     fn declaration_lines(&self, external: &dyn External) -> Result<Vec<String>>;
 }
 
 impl PlanLines for Plan {
-    fn block_lines(&self, clone: usize, block: BlockId, external: &dyn External) -> Result<Vec<String>> {
+    fn block_lines(
+        &self,
+        clone: usize,
+        block: BlockId,
+        external: &dyn External,
+    ) -> Result<Vec<String>> {
         let printer = Printer { external };
         printer.events(
             self.programs[clone]
@@ -286,7 +338,12 @@ impl PlanLines for Plan {
         )
     }
 
-    fn event_lines(&self, clone: usize, value: ValueId, external: &dyn External) -> Result<Vec<String>> {
+    fn event_lines(
+        &self,
+        clone: usize,
+        value: ValueId,
+        external: &dyn External,
+    ) -> Result<Vec<String>> {
         let printer = Printer { external };
         printer.events(
             self.programs[clone]
@@ -297,7 +354,12 @@ impl PlanLines for Plan {
         )
     }
 
-    fn end_lines(&self, clone: usize, block: BlockId, external: &dyn External) -> Result<Vec<String>> {
+    fn end_lines(
+        &self,
+        clone: usize,
+        block: BlockId,
+        external: &dyn External,
+    ) -> Result<Vec<String>> {
         let printer = Printer { external };
         printer.events(
             self.programs[clone]
@@ -308,7 +370,12 @@ impl PlanLines for Plan {
         )
     }
 
-    fn default_lines(&self, clone: usize, value: ValueId, external: &dyn External) -> Result<Vec<String>> {
+    fn default_lines(
+        &self,
+        clone: usize,
+        value: ValueId,
+        external: &dyn External,
+    ) -> Result<Vec<String>> {
         let printer = Printer { external };
         printer.events(
             self.programs[clone]

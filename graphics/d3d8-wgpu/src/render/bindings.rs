@@ -1,0 +1,69 @@
+use crate::shader::interface::*;
+
+pub(crate) struct DrawParameters {
+    vertex: [f32; VERTEX_PARAMETER_BYTES / 4],
+    pixel: [u8; INTERPRETER_PARAMETER_BYTES],
+    pixel_size: usize,
+}
+
+impl DrawParameters {
+    pub(crate) fn new(
+        half_pixel: [f32; 4],
+        attribute_scales: [[f32; 4]; 16],
+        pixel_words: [u32; 12],
+    ) -> Self {
+        let mut vertex = [0.0; VERTEX_PARAMETER_BYTES / 4];
+        vertex[..4].copy_from_slice(&half_pixel);
+        for (slot, scale) in vertex[4..].chunks_exact_mut(4).zip(attribute_scales) {
+            slot.copy_from_slice(&scale);
+        }
+        let mut pixel = [0; INTERPRETER_PARAMETER_BYTES];
+        for (bytes, word) in pixel.chunks_exact_mut(4).zip(pixel_words) {
+            bytes.copy_from_slice(&word.to_le_bytes());
+        }
+        Self {
+            vertex,
+            pixel,
+            pixel_size: PIXEL_PARAMETER_BYTES,
+        }
+    }
+
+    pub(crate) fn interpreter_flags(mut self, opaque: u32, unbound: u32, tint: bool) -> Self {
+        self.pixel[48..52].copy_from_slice(&opaque.to_le_bytes());
+        self.pixel[52..56].copy_from_slice(&u32::from(tint).to_le_bytes());
+        self.pixel[56..60].copy_from_slice(&unbound.to_le_bytes());
+        self.pixel_size = INTERPRETER_PARAMETER_BYTES;
+        self
+    }
+
+    pub(crate) fn values<'a>(
+        &'a self,
+        vertex_bank: &'a [u8],
+        pixel_bank: &'a [u8],
+    ) -> [&'a [u8]; 4] {
+        [
+            vertex_bank,
+            bytemuck::cast_slice(&self.vertex),
+            pixel_bank,
+            &self.pixel[..self.pixel_size],
+        ]
+    }
+}
+
+pub(crate) fn uniform_entry(
+    binding: u32,
+    size: u64,
+    visibility: wgpu::ShaderStages,
+    dynamic: bool,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: dynamic,
+            min_binding_size: wgpu::BufferSize::new(size),
+        },
+        count: None,
+    }
+}

@@ -8,7 +8,8 @@ explains guest memory, threads and frames.
 
 ## Ground rules
 
-- Do not write tests unless asked. Check translator changes with the diff harness below.
+- Do not write tests unless asked. Check translator changes with the translator cases, then the
+  diff harness, below.
 - Avoid comments; code should read clearly without them.
 - Before adding code or documentation, check whether it can be shorter or folded
   into an existing section.
@@ -32,6 +33,13 @@ explains guest memory, threads and frames.
   `tools/format.py --write`; leave `third_party/` as vendored.
 - Never commit game files, generated code, binaries or logs.
 
+## Translator cases
+
+`tools/test.py --translator [--case NAME]` assembles `tests/translator/cases/*.s` into a
+synthetic image, translates it with the current translator, and compares every case
+function with Unicorn on 200 inputs. It needs no game and runs in seconds; run it first
+after any translator change. Case conventions are in `tests/translator/run.py`.
+
 ## Diff harness
 
 `tools/recomp/diff/run.py --game <id>` runs translated functions from the
@@ -40,6 +48,9 @@ arguments, scratch memory and uninitialized globals, then compares registers,
 flags, x87 state and writable memory. Inputs where the original faults, calls an
 import or runs too long are discarded. Select functions with `--func ADDR`,
 `--sample N`, `--all`, `--changed`, or `--suite MANIFEST`.
+The default is 25 random inputs followed by five structured seeds with zero or
+uniform memory and simple pointers. `--iterations N` changes the random count;
+`--no-structured-inputs` restores random-only runs. Suites keep their recorded schedule.
 
 `--mode specialized` (default) runs the production contract call sites,
 `--mode ordinary` forces the ordinary fallback through `recomp_hooks_ever`, and
@@ -56,8 +67,10 @@ fails on oracle or pair discrepancies; `--fail-on pair` requires paired mode.
 Run provenance and replay limits are recorded in `run.json`; see
 [testing](docs/testing.md) for artifact and input details.
 
-For a translator change: `--all --save-baseline before.json`, change and
-`--regenerate`, then `--changed --baseline before.json` (add `--mode paired`).
+For a translator change, after the translator cases pass, run at most 200-300 functions;
+`--all` is slow. Snapshot bodies with `--sample 1 --save-baseline before.json` (the baseline
+covers every body), change and `--regenerate`, then `--changed --baseline before.json` when
+few bodies changed, or `--sample 300` otherwise (add `--mode paired`).
 Inputs reset writable sections, BSS/scratch/TEB fills and the full stack window
 before the original and every variant, without redrawing random values.
 

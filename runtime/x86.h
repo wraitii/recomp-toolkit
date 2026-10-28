@@ -382,6 +382,8 @@ enum {
     X86_CCF_OF = 1u << 5,
 };
 
+enum { X86_DYNAMIC_RETURNS = 64 };
+
 struct X86 {
     uint32_t r[8]; /* EAX ECX EDX EBX ESP EBP ESI EDI */
     uint32_t eip;
@@ -394,6 +396,13 @@ struct X86 {
      * cc_res the wrapped result; cc_carry is the incoming ADC/SBB carry. */
     uint8_t cc_op, cc_size, cc_mask, cc_carry;
     uint32_t cc_a, cc_b, cc_res;
+    /* Translated calls until this guest thread's next scheduler checkpoint. */
+    uint32_t checkpoint_countdown;
+    /* MXCSR. Initialise to 0x1f80 (round to nearest, every exception masked). */
+    uint32_t mxcsr;
+    uint32_t fs_base;
+    /* CALL continuations inside code executed by the interpreter. */
+    uint32_t dynamic_return_count;
     double st[8]; /* x87 stack, physical slots */
     /* FILD integers retain all 64 mantissa bits until arithmetic replaces
      * them. The double alone cannot preserve qword copies above 2^53. */
@@ -404,9 +413,6 @@ struct X86 {
     /* x87 tag word, 2 bits per PHYSICAL register st[i]: 3 = empty, else in
      * use.  Initialise to 0xffff (the post-FINIT all-empty state). */
     uint16_t fpu_tag;
-    uint32_t fs_base;
-    /* MXCSR. Initialise to 0x1f80 (round to nearest, every exception masked). */
-    uint32_t mxcsr;
     /* Held as dwords: SSE arithmetic and moves address the register in
      * dword lanes, and on a little-endian host the byte order of a copy then
      * takes care of itself. Lane 0 is the low four bytes. */
@@ -415,8 +421,7 @@ struct X86 {
      * leaves MMX without EMMS and then uses the FPU sees its old values, not
      * the MMX ones, which no game this runtime serves relies on. */
     uint64_t mm[8];
-    /* Translated calls until this guest thread's next scheduler checkpoint. */
-    uint32_t checkpoint_countdown;
+    uint32_t dynamic_returns[X86_DYNAMIC_RETURNS];
 };
 typedef struct X86 X86;
 
@@ -426,24 +431,24 @@ typedef struct X86 X86;
  * in its low lanes is read and written through these. Scalar SSE arithmetic
  * leaves the lanes above its result alone, which is why nothing here clears
  * them. */
-static inline double xmm_f64(const X86 *c, int reg) {
+RECOMP_HOT_INLINE double xmm_f64(const X86 *c, int reg) {
     uint64_t bits = (uint64_t)c->xmm[reg][0] | ((uint64_t)c->xmm[reg][1] << 32);
     double v;
     memcpy(&v, &bits, 8);
     return v;
 }
-static inline void xmm_set_f64(X86 *c, int reg, double v) {
+RECOMP_HOT_INLINE void xmm_set_f64(X86 *c, int reg, double v) {
     uint64_t bits;
     memcpy(&bits, &v, 8);
     c->xmm[reg][0] = (uint32_t)bits;
     c->xmm[reg][1] = (uint32_t)(bits >> 32);
 }
-static inline float xmm_f32(const X86 *c, int reg) {
+RECOMP_HOT_INLINE float xmm_f32(const X86 *c, int reg) {
     float v;
     memcpy(&v, &c->xmm[reg][0], 4);
     return v;
 }
-static inline void xmm_set_f32(X86 *c, int reg, float v) {
+RECOMP_HOT_INLINE void xmm_set_f32(X86 *c, int reg, float v) {
     memcpy(&c->xmm[reg][0], &v, 4);
 }
 
@@ -454,7 +459,7 @@ static inline void xmm_set_f32(X86 *c, int reg, float v) {
  * that may assume a NaN's payload is unspecified folds the comparison away
  * and leaves the host's own sqrt to produce its own NaN - which on ARM is the
  * positive one. */
-static inline double recomp_sse_sqrt(double v) {
+RECOMP_HOT_INLINE double recomp_sse_sqrt(double v) {
     uint64_t bits;
     memcpy(&bits, &v, 8);
     if ((bits >> 63) && (bits << 1) != 0) { /* negative, and not -0.0 */
@@ -465,10 +470,10 @@ static inline double recomp_sse_sqrt(double v) {
     }
     return sqrt(v);
 }
-static inline int recomp_sse_nan_bits(uint32_t bits) {
+RECOMP_HOT_INLINE int recomp_sse_nan_bits(uint32_t bits) {
     return (bits & 0x7fffffffu) > 0x7f800000u;
 }
-static inline float recomp_sse_sqrtf(float v) {
+RECOMP_HOT_INLINE float recomp_sse_sqrtf(float v) {
     float r = sqrtf(v);
     if (RECOMP_UNLIKELY(isnan(r))) {
         uint32_t bits;
@@ -482,30 +487,30 @@ static inline float recomp_sse_sqrtf(float v) {
 /* CVTSS2SI/CVTSD2SI round according to MXCSR, which recomp_ldmxcsr holds at
  * round-to-nearest-even. Values that round outside int32 produce the
  * indefinite result. */
-static inline int32_t recomp_sse_cvtsd2si(double v) {
+RECOMP_HOT_INLINE int32_t recomp_sse_cvtsd2si(double v) {
     double rounded = nearbyint(v);
     if (!(rounded >= -2147483648.0 && rounded <= 2147483647.0))
         return INT32_MIN;
     return (int32_t)rounded;
 }
-static inline int32_t recomp_sse_cvtss2si(float v) {
+RECOMP_HOT_INLINE int32_t recomp_sse_cvtss2si(float v) {
     return recomp_sse_cvtsd2si((double)v);
 }
-static inline int32_t recomp_sse_cvttsd2si(double v) {
+RECOMP_HOT_INLINE int32_t recomp_sse_cvttsd2si(double v) {
     if (!(v >= -2147483648.0 && v < 2147483648.0))
         return INT32_MIN;
     return (int32_t)v;
 }
-static inline int32_t recomp_sse_cvttss2si(float v) {
+RECOMP_HOT_INLINE int32_t recomp_sse_cvttss2si(float v) {
     return recomp_sse_cvttsd2si((double)v);
 }
 
-static inline float recomp_sse_f32(uint32_t bits) {
+RECOMP_HOT_INLINE float recomp_sse_f32(uint32_t bits) {
     float v;
     memcpy(&v, &bits, 4);
     return v;
 }
-static inline uint32_t recomp_sse_f32_bits(float v) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_f32_bits(float v) {
     uint32_t bits;
     memcpy(&bits, &v, 4);
     return bits;
@@ -515,54 +520,180 @@ static inline uint32_t recomp_sse_f32_bits(float v) {
  * rounds up to the smallest normal can still flush; the exact value, which
  * double precision holds for these operations, scaled out of the denormal
  * range, decides it. */
-static inline uint32_t recomp_sse_result(const X86 *c, uint32_t a, uint32_t b, float r,
-                                         double exact) {
+enum {
+    RECOMP_SSE_RESULT_ADD,
+    RECOMP_SSE_RESULT_SUB,
+    RECOMP_SSE_RESULT_MUL,
+    RECOMP_SSE_RESULT_DIV,
+};
+RECOMP_COLD uint32_t recomp_sse_result_slow(const X86 *c, uint32_t a, uint32_t b, float r,
+                                            unsigned operation) {
     uint32_t bits = recomp_sse_f32_bits(r), magnitude = bits & 0x7fffffffu;
     if (RECOMP_UNLIKELY(magnitude - 1u < 0x00800000u)) {
+        double x = (double)recomp_sse_f32(a), y = (double)recomp_sse_f32(b), exact;
+        switch (operation) {
+        case RECOMP_SSE_RESULT_ADD:
+            exact = x + y;
+            break;
+        case RECOMP_SSE_RESULT_SUB:
+            exact = x - y;
+            break;
+        case RECOMP_SSE_RESULT_MUL:
+            exact = x * y;
+            break;
+        default:
+            exact = x / y;
+            break;
+        }
         if ((c->mxcsr & 0x8000u) && fabsf((float)(exact * 0x1p64)) < 0x1p-62f)
             return bits & 0x80000000u;
         return bits;
     }
-    if (!RECOMP_UNLIKELY(magnitude > 0x7f800000u))
-        return bits;
     if (recomp_sse_nan_bits(a))
         return a | 0x00400000u;
     if (recomp_sse_nan_bits(b))
         return b | 0x00400000u;
     return 0xffc00000u;
 }
-static inline uint32_t recomp_sse_addps(const X86 *c, uint32_t a, uint32_t b) {
-    float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
-    return recomp_sse_result(c, a, b, x + y, (double)x + (double)y);
+RECOMP_HOT_INLINE uint32_t recomp_sse_result(const X86 *c, uint32_t a, uint32_t b, float r,
+                                             unsigned operation) {
+    uint32_t bits = recomp_sse_f32_bits(r), magnitude = bits & 0x7fffffffu;
+    if (RECOMP_UNLIKELY(magnitude - 1u < 0x00800000u || magnitude > 0x7f800000u))
+        return recomp_sse_result_slow(c, a, b, r, operation);
+    return bits;
 }
-static inline uint32_t recomp_sse_subps(const X86 *c, uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_addps(const X86 *c, uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
-    return recomp_sse_result(c, a, b, x - y, (double)x - (double)y);
+    return recomp_sse_result(c, a, b, x + y, RECOMP_SSE_RESULT_ADD);
 }
-static inline uint32_t recomp_sse_mulps(const X86 *c, uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_subps(const X86 *c, uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
-    return recomp_sse_result(c, a, b, x * y, (double)x * (double)y);
+    return recomp_sse_result(c, a, b, x - y, RECOMP_SSE_RESULT_SUB);
 }
-static inline uint32_t recomp_sse_divps(const X86 *c, uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_mulps(const X86 *c, uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
-    return recomp_sse_result(c, a, b, x / y, (double)x / (double)y);
+    return recomp_sse_result(c, a, b, x * y, RECOMP_SSE_RESULT_MUL);
 }
-static inline uint32_t recomp_sse_minps(uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_divps(const X86 *c, uint32_t a, uint32_t b) {
+    float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
+    return recomp_sse_result(c, a, b, x / y, RECOMP_SSE_RESULT_DIV);
+}
+#if defined(__GNUC__) || defined(__clang__)
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+typedef float recomp_sse_f32x4 __attribute__((vector_size(16)));
+typedef uint32_t recomp_sse_u32x4 __attribute__((vector_size(16)));
+RECOMP_HOT_INLINE recomp_sse_u32x4 recomp_sse_bits4(recomp_sse_f32x4 v) {
+    recomp_sse_u32x4 bits;
+    memcpy(&bits, &v, sizeof bits);
+    return bits;
+}
+RECOMP_COLD recomp_sse_u32x4 recomp_sse_result4_slow(const X86 *c, recomp_sse_u32x4 a,
+                                                     recomp_sse_u32x4 b, recomp_sse_f32x4 result,
+                                                     unsigned operation) {
+    recomp_sse_u32x4 bits = recomp_sse_bits4(result);
+    for (unsigned lane = 0; lane < 4; lane++) {
+        uint32_t magnitude = bits[lane] & 0x7fffffffu;
+        if (magnitude - 1u < 0x00800000u || magnitude > 0x7f800000u)
+            bits[lane] = recomp_sse_result_slow(c, a[lane], b[lane], result[lane], operation);
+    }
+    return bits;
+}
+RECOMP_HOT_INLINE void recomp_sse_result4(const X86 *c, uint32_t a0, uint32_t b0, uint32_t a1,
+                                          uint32_t b1, uint32_t a2, uint32_t b2, uint32_t a3,
+                                          uint32_t b3, uint32_t *r0, uint32_t *r1, uint32_t *r2,
+                                          uint32_t *r3, unsigned operation) {
+    recomp_sse_f32x4 x = {recomp_sse_f32(a0), recomp_sse_f32(a1), recomp_sse_f32(a2),
+                          recomp_sse_f32(a3)};
+    recomp_sse_f32x4 y = {recomp_sse_f32(b0), recomp_sse_f32(b1), recomp_sse_f32(b2),
+                          recomp_sse_f32(b3)};
+    recomp_sse_f32x4 result;
+    switch (operation) {
+    case RECOMP_SSE_RESULT_ADD:
+        result = x + y;
+        break;
+    case RECOMP_SSE_RESULT_SUB:
+        result = x - y;
+        break;
+    case RECOMP_SSE_RESULT_MUL:
+        result = x * y;
+        break;
+    default:
+        result = x / y;
+        break;
+    }
+    recomp_sse_u32x4 bits = recomp_sse_bits4(result);
+#if defined(__aarch64__)
+    float32x4_t value = (float32x4_t)result;
+    uint32x4_t fast = vorrq_u32(vcageq_f32(value, vdupq_n_f32(0x1p-126f)), vceqzq_f32(value));
+    if (RECOMP_UNLIKELY(vminvq_u32(fast) == 0)) {
+#else
+    const recomp_sse_u32x4 one = {1u, 1u, 1u, 1u};
+    const recomp_sse_u32x4 normal = {0x00800000u, 0x00800000u, 0x00800000u, 0x00800000u};
+    const recomp_sse_u32x4 infinity = {0x7f800000u, 0x7f800000u, 0x7f800000u, 0x7f800000u};
+    const recomp_sse_u32x4 sign = {0x80000000u, 0x80000000u, 0x80000000u, 0x80000000u};
+    recomp_sse_u32x4 magnitude = bits & ~sign;
+    recomp_sse_u32x4 slow = ((magnitude - one) < normal) | (magnitude > infinity);
+    if (RECOMP_UNLIKELY(slow[0] | slow[1] | slow[2] | slow[3])) {
+#endif
+        recomp_sse_u32x4 a = {a0, a1, a2, a3}, b = {b0, b1, b2, b3};
+        bits = recomp_sse_result4_slow(c, a, b, result, operation);
+    }
+    *r0 = bits[0];
+    *r1 = bits[1];
+    *r2 = bits[2];
+    *r3 = bits[3];
+}
+#define RECOMP_SSE_PS4_PARAMS                                                                      \
+    const X86 *c, uint32_t a0, uint32_t b0, uint32_t a1, uint32_t b1, uint32_t a2, uint32_t b2,    \
+        uint32_t a3, uint32_t b3, uint32_t *r0, uint32_t *r1, uint32_t *r2, uint32_t *r3
+#define RECOMP_SSE_PS4_ARGS a0, b0, a1, b1, a2, b2, a3, b3, r0, r1, r2, r3
+#define RECOMP_SSE_PS4(name, operation)                                                            \
+    RECOMP_HOT_INLINE void name(RECOMP_SSE_PS4_PARAMS) {                                           \
+        recomp_sse_result4(c, RECOMP_SSE_PS4_ARGS, operation);                                     \
+    }
+RECOMP_SSE_PS4(recomp_sse_addps4, RECOMP_SSE_RESULT_ADD)
+RECOMP_SSE_PS4(recomp_sse_subps4, RECOMP_SSE_RESULT_SUB)
+RECOMP_SSE_PS4(recomp_sse_mulps4, RECOMP_SSE_RESULT_MUL)
+RECOMP_SSE_PS4(recomp_sse_divps4, RECOMP_SSE_RESULT_DIV)
+#undef RECOMP_SSE_PS4
+#undef RECOMP_SSE_PS4_ARGS
+#undef RECOMP_SSE_PS4_PARAMS
+#else
+#define RECOMP_SSE_PS4_PARAMS                                                                      \
+    const X86 *c, uint32_t a0, uint32_t b0, uint32_t a1, uint32_t b1, uint32_t a2, uint32_t b2,    \
+        uint32_t a3, uint32_t b3, uint32_t *r0, uint32_t *r1, uint32_t *r2, uint32_t *r3
+#define RECOMP_SSE_PS4(name, scalar)                                                               \
+    RECOMP_HOT_INLINE void name(RECOMP_SSE_PS4_PARAMS) {                                           \
+        *r0 = scalar(c, a0, b0);                                                                   \
+        *r1 = scalar(c, a1, b1);                                                                   \
+        *r2 = scalar(c, a2, b2);                                                                   \
+        *r3 = scalar(c, a3, b3);                                                                   \
+    }
+RECOMP_SSE_PS4(recomp_sse_addps4, recomp_sse_addps)
+RECOMP_SSE_PS4(recomp_sse_subps4, recomp_sse_subps)
+RECOMP_SSE_PS4(recomp_sse_mulps4, recomp_sse_mulps)
+RECOMP_SSE_PS4(recomp_sse_divps4, recomp_sse_divps)
+#undef RECOMP_SSE_PS4
+#undef RECOMP_SSE_PS4_PARAMS
+#endif
+RECOMP_HOT_INLINE uint32_t recomp_sse_minps(uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
     return x < y ? a : b;
 }
-static inline uint32_t recomp_sse_maxps(uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_maxps(uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
     return x > y ? a : b;
 }
-static inline uint32_t recomp_sse_sqrtps(uint32_t a) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_sqrtps(uint32_t a) {
     return recomp_sse_f32_bits(recomp_sse_sqrtf(recomp_sse_f32(a)));
 }
 /* The original RCPPS/RSQRTPS are approximate. These return the IEEE result,
  * which is also what the Unicorn oracle produces. DIVERGENCE(original): the
  * low bits may differ from a real x86 approximation instruction. RCPPS
  * flushes a tiny result to zero whatever MXCSR says. */
-static inline uint32_t recomp_sse_rcpps(uint32_t a) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_rcpps(uint32_t a) {
     float r = 1.0f / recomp_sse_f32(a);
     uint32_t bits = recomp_sse_f32_bits(r);
     if (RECOMP_UNLIKELY(isnan(r)))
@@ -571,19 +702,19 @@ static inline uint32_t recomp_sse_rcpps(uint32_t a) {
         return bits & 0x80000000u;
     return bits;
 }
-static inline uint32_t recomp_sse_rsqrtps(uint32_t a) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_rsqrtps(uint32_t a) {
     float r = 1.0f / recomp_sse_sqrtf(recomp_sse_f32(a));
     if (RECOMP_UNLIKELY(isnan(r)))
         return recomp_sse_nan_bits(a) ? (a | 0x00400000u) : 0xffc00000u;
     return recomp_sse_f32_bits(r);
 }
-static inline float recomp_sse_rcpss(float v) {
+RECOMP_HOT_INLINE float recomp_sse_rcpss(float v) {
     return recomp_sse_f32(recomp_sse_rcpps(recomp_sse_f32_bits(v)));
 }
-static inline float recomp_sse_rsqrtss(float v) {
+RECOMP_HOT_INLINE float recomp_sse_rsqrtss(float v) {
     return recomp_sse_f32(recomp_sse_rsqrtps(recomp_sse_f32_bits(v)));
 }
-static inline uint32_t recomp_sse_cmpps(unsigned pred, uint32_t a, uint32_t b) {
+RECOMP_HOT_INLINE uint32_t recomp_sse_cmpps(unsigned pred, uint32_t a, uint32_t b) {
     float x = recomp_sse_f32(a), y = recomp_sse_f32(b);
     int r;
     switch (pred & 7u) {
@@ -620,7 +751,7 @@ static inline uint32_t recomp_sse_cmpps(unsigned pred, uint32_t a, uint32_t b) {
  * together, and the rest of EFLAGS is cleared either way. The difference
  * between the two forms is only which NaNs raise an exception, and this kit
  * raises none. */
-static inline void recomp_comis(X86 *c, double a, double b) {
+RECOMP_HOT_INLINE void recomp_comis(X86 *c, double a, double b) {
     c->cc_op = X86_CC_NONE;
     c->eflags_of = c->eflags_af = c->eflags_sf = 0;
     if (a != a || b != b) {
@@ -706,6 +837,28 @@ __attribute__((noreturn, cold, noinline))
 void recomp_shim_call(X86 *c, uint32_t target);
 /* target is neither a translated function nor a shim.  Logs; may abort. */
 void recomp_unknown_call(X86 *c, uint32_t target);
+/* A checked return adjusted the target to an address that is not resumable. */
+void recomp_unexpected_return(X86 *c, uint32_t site, uint32_t expected, uint32_t target);
+/* CALL continuations inside code executed by the interpreter. */
+RECOMP_HOT_INLINE unsigned recomp_dynamic_return_push(X86 *c, uint32_t target) {
+    const unsigned depth = c->dynamic_return_count;
+    if (depth < X86_DYNAMIC_RETURNS)
+        c->dynamic_returns[c->dynamic_return_count++] = target;
+    return depth;
+}
+RECOMP_HOT_INLINE void recomp_dynamic_return_pop(X86 *c, unsigned depth) {
+    if (c->dynamic_return_count > depth)
+        c->dynamic_return_count = depth;
+}
+RECOMP_HOT_INLINE int recomp_dynamic_return_accept(X86 *c, uint32_t target) {
+    for (unsigned i = c->dynamic_return_count; i; --i) {
+        if (c->dynamic_returns[i - 1] != target)
+            continue;
+        c->dynamic_return_count = i - 1;
+        return 1;
+    }
+    return 0;
+}
 void recomp_region_missing(X86 *c, uint32_t target);
 /* A popped callback sentinel can bypass translated callers. The innermost
  * guest_call owns the live host return checkpoint and its guest stack range. */
@@ -877,8 +1030,8 @@ void recomp_module_jump(X86 *c, uint32_t target);
  * A CALL continuation belongs to the pending host caller, even when it is
  * also an alternate entry. Other entries are tail calls, as in interface
  * adapters that exchange a vtable method onto the guest stack before RET.
- * Delay-load adapters also RET into resolved import shims. Unknown returns
- * retain the existing EIP/host-return behaviour. */
+ * Delay-load adapters also RET into resolved import shims. An unrecognised
+ * non-continuation target is a named runtime failure. */
 static inline void recomp_return(X86 *c) {
     if (c->eip == GUEST_RETURN_SENTINEL) {
         recomp_callback_return(c);
@@ -886,9 +1039,24 @@ static inline void recomp_return(X86 *c) {
     }
     if (recomp_is_call_return(c->eip) || recomp_module_is_call_return(c->eip))
         return;
+    if (recomp_dynamic_return_accept(c, c->eip))
+        return;
     if ((c->eip >= GUEST_SHIM_BASE && c->eip < GUEST_SHIM_END) || recomp_index_of(c->eip) >= 0 ||
         recomp_module_lookup(c->eip) >= 0)
         recomp_call(c, c->eip);
+    else
+        recomp_unexpected_return(c, c->eip, 0, c->eip);
+}
+
+static inline void recomp_return_resume(X86 *c, uint32_t site, uint32_t expected, uint32_t target) {
+    if (target == expected)
+        return;
+    if ((target >= GUEST_SHIM_BASE && target < GUEST_SHIM_END) || recomp_index_of(target) >= 0 ||
+        recomp_module_lookup(target) >= 0) {
+        recomp_jump(c, target);
+        return;
+    }
+    recomp_unexpected_return(c, site, expected, target);
 }
 
 /* --------------------------------------------------------------- flags */

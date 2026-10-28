@@ -2,24 +2,24 @@
 //! This is an isolated probe implementation, with no COM or guest addresses.
 use super::{
     fixed_function::{
-        gpu_lit_layout, gpu_lit_shader_source, gpu_lit_source, lit_layout, lit_shader_source,
-        AlphaTestUniform, FogUniform, FvfLayout, StagesUniform, TransformUniform, TEXTURED_WGSL,
-        UNLIT_WGSL,
+        AlphaTestUniform, FogUniform, FvfLayout, StagesUniform, TEXTURED_WGSL, TransformUniform,
+        UNLIT_WGSL, gpu_lit_layout, gpu_lit_shader_source, gpu_lit_source, lit_layout,
+        lit_shader_source,
     },
     resource::{
-        expand_indexed_into, expand_nonindexed_into, indexed_list_into, packed_indexed_list_into,
-        IndexedDraw, VertexBuffer,
+        IndexedDraw, VertexBuffer, expand_indexed_into, expand_nonindexed_into, indexed_list_into,
+        packed_indexed_list_into,
     },
     shader::{self, Declaration, Program},
     state::{DeviceState, LightingUniform, LitInput, MAX_TEXTURE_STAGES},
     stats, survey,
     texture_cache::{TextureCache, TextureKey},
 };
-use crate::backend::native_present::{create_ready_event, signal_ready, ReadyEvent};
+use crate::backend::native_present::{ReadyEvent, create_ready_event, signal_ready};
 use crate::{
+    RenderError,
     backend::{GpuContext, OffscreenTarget},
     fast_map::FastMap,
-    RenderError,
 };
 
 #[path = "render_targets.rs"]
@@ -790,14 +790,14 @@ fn trace_shader_draw(
 fn mip_lod_range(
     stage: &crate::d3d8::state::TextureStage,
     max_written_level: u32,
-) -> (f32, f32, wgpu::FilterMode) {
+) -> (f32, f32, wgpu::MipmapFilterMode) {
     use crate::d3d8::enums::D3DTEXTUREFILTERTYPE as F;
     let base = stage.max_mip_level.min(max_written_level);
     let last = max_written_level.max(base);
     match F::from_raw(stage.mip_filter).expect("validated mip filter") {
-        F::None => (base as f32, base as f32, wgpu::FilterMode::Nearest),
-        F::Point => (base as f32, last as f32, wgpu::FilterMode::Nearest),
-        F::Linear | F::Anisotropic => (base as f32, last as f32, wgpu::FilterMode::Linear),
+        F::None => (base as f32, base as f32, wgpu::MipmapFilterMode::Nearest),
+        F::Point => (base as f32, last as f32, wgpu::MipmapFilterMode::Nearest),
+        F::Linear | F::Anisotropic => (base as f32, last as f32, wgpu::MipmapFilterMode::Linear),
         F::PyramidQuad | F::GaussianQuad => {
             unreachable!("validated: only POINT/LINEAR/NONE/ANISOTROPIC are accepted")
         }
@@ -993,8 +993,8 @@ fn native_texture_ptr(texture: &wgpu::Texture) -> Result<*const core::ffi::c_voi
         let hal = texture
             .as_hal::<wgpu::hal::api::Metal>()
             .ok_or_else(|| RenderError::new("present_handoff", "texture is not a Metal texture"))?;
-        let raw: &metal::TextureRef = hal.raw_handle();
-        Ok(raw as *const metal::TextureRef as *const core::ffi::c_void)
+        let raw = hal.raw_handle();
+        Ok(std::ptr::from_ref(raw).cast())
     }
 }
 
@@ -1146,13 +1146,13 @@ impl DrawLayouts {
         });
         let unlit = gpu.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("D3D8 unlit pipeline layout"),
-            bind_group_layouts: &[&bgl_unlit],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bgl_unlit)],
+            immediate_size: 0,
         });
         let textured = gpu.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("D3D8 textured pipeline layout"),
-            bind_group_layouts: &[&bgl_textured, &bgl_stage_textures],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bgl_textured), Some(&bgl_stage_textures)],
+            immediate_size: 0,
         });
         Self {
             unlit,
@@ -1265,8 +1265,8 @@ pub struct Device {
     /// `RECOMP_D3D8_STRICT_SCOPES=1`: restore one validation error scope per
     /// draw instead of one per frame. Debug aid only.
     strict_scopes: bool,
-    /// True while a per-frame validation error scope is open (managed mode).
-    frame_scope_open: bool,
+    /// The managed per-frame validation error scope.
+    frame_scope: Option<wgpu::ErrorScopeGuard>,
     frame_index: u64,
     draw_index: u64,
 }
@@ -1311,7 +1311,10 @@ impl Device {
             index_rebased: Vec::new(),
             lit_scratch: Vec::new(),
             draw_buffer: Default::default(),
-            draw_staging: std::cell::RefCell::new(wgpu::util::StagingBelt::new(1 << 20)),
+            draw_staging: std::cell::RefCell::new(wgpu::util::StagingBelt::new(
+                gpu.device.clone(),
+                1 << 20,
+            )),
             draw_layouts,
             uniform_groups: Default::default(),
             texture_groups: Default::default(),
@@ -1330,7 +1333,7 @@ impl Device {
             scene: false,
             survey,
             strict_scopes,
-            frame_scope_open: false,
+            frame_scope: None,
             frame_index: 0,
             draw_index: 0,
         })
@@ -1575,7 +1578,8 @@ impl Device {
         if needs_new {
             // Replacing the chain may rewrite a texture recorded draws sample.
             self.flush_draws();
-            self.gpu
+            let scope = self
+                .gpu
                 .device
                 .push_error_scope(wgpu::ErrorFilter::Validation);
             let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -1596,7 +1600,7 @@ impl Device {
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
-            if let Some(err) = pollster::block_on(self.gpu.device.pop_error_scope()) {
+            if let Some(err) = pollster::block_on(scope.pop()) {
                 return Err(RenderError::new("SetTexture", err.to_string()));
             }
             let mut level_generations = vec![0u64; level_count as usize];
@@ -1754,8 +1758,8 @@ impl Device {
         let bias = z_bias_state(self.state.z_bias());
         Some(wgpu::DepthStencilState {
             format: depth.format,
-            depth_write_enabled: write,
-            depth_compare: compare,
+            depth_write_enabled: Some(write),
+            depth_compare: Some(compare),
             stencil: wgpu::StencilState::default(),
             bias,
         })
@@ -2077,9 +2081,10 @@ impl Device {
                     self.stage_textures[stage].is_some()
                 ))
             } else if stage < 2 {
-                survey_or_skip!(self
-                    .state
-                    .resolve_texture_stage(stage as u32, self.stage_textures[stage].is_some()))
+                survey_or_skip!(
+                    self.state
+                        .resolve_texture_stage(stage as u32, self.stage_textures[stage].is_some())
+                )
             } else {
                 inactive_sampler
             };
@@ -2315,16 +2320,14 @@ impl Device {
             layout.clone()
         };
         let gpu = &self.gpu.device;
-        if self.strict_scopes {
-            gpu.push_error_scope(wgpu::ErrorFilter::Validation);
-        } else if !self.frame_scope_open {
-            // Managed mode: one validation error scope per frame. A validation
-            // error is retained until EndScene, which fails the frame loudly
-            // instead of polling the device after every draw (the per-draw
-            // pop was the main device poll / Metal fence wait in a frame).
-            gpu.push_error_scope(wgpu::ErrorFilter::Validation);
-            self.frame_scope_open = true;
-        }
+        let draw_scope = if self.strict_scopes {
+            Some(gpu.push_error_scope(wgpu::ErrorFilter::Validation))
+        } else {
+            if self.frame_scope.is_none() {
+                self.frame_scope = Some(gpu.push_error_scope(wgpu::ErrorFilter::Validation));
+            }
+            None
+        };
         let shader = if gpu_lighting && !programmable {
             self.gpu_lit_shaders
                 .entry((fvf, textured))
@@ -2512,7 +2515,7 @@ impl Device {
                         "vs_main"
                     }),
                     compilation_options: Default::default(),
-                    buffers: &[upload_layout.vertex_buffer_layout()],
+                    buffers: &[Some(upload_layout.vertex_buffer_layout())],
                 },
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu_topology(topology),
@@ -2533,7 +2536,7 @@ impl Device {
                             & self.target.color_write_mask(),
                     })],
                 }),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             })
         });
@@ -2572,8 +2575,8 @@ impl Device {
         if self.strict_scopes || self.batch.borrow().data.len() >= BATCH_FLUSH_BYTES {
             self.flush_draws();
         }
-        if self.strict_scopes {
-            if let Some(err) = pollster::block_on(gpu.pop_error_scope()) {
+        if let Some(scope) = draw_scope {
+            if let Some(err) = pollster::block_on(scope.pop()) {
                 self.pipelines.remove(&key);
                 self.shader = None;
                 self.textured_shader = None;
@@ -2653,7 +2656,6 @@ impl Device {
                 db,
                 0,
                 wgpu::BufferSize::new(needed).expect("draw batch upload is nonempty"),
-                gpu,
             )
             .copy_from_slice(&batch.data);
         {
@@ -2796,11 +2798,10 @@ impl Device {
     /// the offending draw to the frame end. A no-op under `RECOMP_D3D8_STRICT_SCOPES`,
     /// where each draw popped its own scope.
     fn finish_frame_scope(&mut self) -> Result<(), RenderError> {
-        if self.strict_scopes || !self.frame_scope_open {
+        let Some(scope) = self.frame_scope.take() else {
             return Ok(());
-        }
-        self.frame_scope_open = false;
-        if let Some(err) = pollster::block_on(self.gpu.device.pop_error_scope()) {
+        };
+        if let Some(err) = pollster::block_on(scope.pop()) {
             self.pipelines.clear();
             self.shader = None;
             self.textured_shader = None;
@@ -2917,11 +2918,10 @@ impl Device {
         depth_format: u32,
     ) -> Result<(), RenderError> {
         self.flush_draws();
-        if self.frame_scope_open {
+        if let Some(scope) = self.frame_scope.take() {
             // Drop the managed frame scope's pending diagnostics: the target
             // and its pipelines are rebuilt below.
-            let _ = pollster::block_on(self.gpu.device.pop_error_scope());
-            self.frame_scope_open = false;
+            let _ = pollster::block_on(scope.pop());
         }
         let target = self
             .gpu

@@ -21,28 +21,38 @@ pub fn reset_op(op: Op) -> bool {
     )
 }
 
-
 pub(crate) fn external_exit(s: &Ssa, value: ValueId) -> bool {
     matches!(s.value(value).op, Op::ImportTail { .. })
         || matches!(s.value(value).op, Op::Branch { .. } | Op::CBranch { .. })
             && s.boundary(value).is_some()
 }
 
-fn transfer(block: BlockId, entry: &Shape, s: &Ssa, factory: &dyn Fn() -> Scalar, fold_pending: bool) -> Shape {
+fn transfer(
+    block: BlockId,
+    entry: &Shape,
+    s: &Ssa,
+    factory: &dyn Fn() -> Scalar,
+    fold_pending: bool,
+) -> Shape {
     let mut scalar = factory();
     match entry {
         Shape::Known(shape) => scalar.seed(shape, &BTreeMap::new()),
-        _ => scalar.seed(&CarryShape {
-            active: false,
-            slots: Vec::new(),
-            base: 0,
-            low: 0,
-            high: 0,
-            top_unknown: false,
-            status_dirty: false,
-        }, &BTreeMap::new()),
+        _ => scalar.seed(
+            &CarryShape {
+                active: false,
+                slots: Vec::new(),
+                base: 0,
+                low: 0,
+                high: 0,
+                top_unknown: false,
+                status_dirty: false,
+            },
+            &BTreeMap::new(),
+        ),
     }
-    let Some(block) = s.block(block) else { return Shape::Unknown };
+    let Some(block) = s.block(block) else {
+        return Shape::Unknown;
+    };
     for &value in &block.ops {
         match s.value(value).op {
             Op::X87(op) => {
@@ -129,13 +139,17 @@ pub fn analyze(s: &Ssa, factory: &dyn Fn() -> Scalar) -> Result<BTreeMap<BlockId
     while let Some(block) = work.pop_front() {
         iterations += 1;
         if iterations > limit {
-            return Err(Reason::UnsupportedX87 { detail: "carry analysis did not converge".into() });
+            return Err(Reason::UnsupportedX87 {
+                detail: "carry analysis did not converge".into(),
+            });
         }
         queued.remove(&block);
         let merged = if matches!(entry.get(&block), Some(Shape::Unsafe)) {
             Shape::Unsafe
         } else {
-            let Some(block_ref) = s.block(block) else { continue };
+            let Some(block_ref) = s.block(block) else {
+                continue;
+            };
             let mut shapes = Vec::new();
             for &pred in &block_ref.preds {
                 if pred == DISPATCH_BLOCK {
@@ -167,7 +181,10 @@ pub fn analyze(s: &Ssa, factory: &dyn Fn() -> Scalar) -> Result<BTreeMap<BlockId
                 && s.block(targets[0]).is_some_and(|next| {
                     next.preds == vec![block] && next.start == s.blocks[block as usize].end
                 })
-                && !s.blocks[block as usize].ops.iter().any(|value| properties(s.value(*value).op).terminator)
+                && !s.blocks[block as usize]
+                    .ops
+                    .iter()
+                    .any(|value| properties(s.value(*value).op).terminator)
         });
         let result = transfer(block, &merged, s, factory, !linear);
         if exit.get(&block) != Some(&result) {
@@ -206,15 +223,20 @@ pub fn assert_covers(join: &Shape, live: &Shape, where_: &str) -> Result<(), Rea
                     detail: format!("{where_}: live x87 state at an inactive join"),
                 });
             }
-            let planned: BTreeMap<i32, &crate::scalar::SlotShape> =
-                join.slots.iter().map(|(position, slot)| (*position, slot)).collect();
+            let planned: BTreeMap<i32, &crate::scalar::SlotShape> = join
+                .slots
+                .iter()
+                .map(|(position, slot)| (*position, slot))
+                .collect();
             for (position, slot) in &live.slots {
                 let Some(planned) = planned.get(position) else {
                     if slot.dirty == 0 {
                         continue;
                     }
                     return Err(Reason::UnsupportedX87 {
-                        detail: format!("{where_}: live x87 position {position} absent from join shape"),
+                        detail: format!(
+                            "{where_}: live x87 position {position} absent from join shape"
+                        ),
                     });
                 };
                 if slot.dirty & !planned.dirty != 0 {
@@ -224,26 +246,42 @@ pub fn assert_covers(join: &Shape, live: &Shape, where_: &str) -> Result<(), Rea
                 }
                 if planned.narrow && !slot.narrow {
                     return Err(Reason::UnsupportedX87 {
-                        detail: format!("{where_}: binary32 join at {position} from unproven operands"),
+                        detail: format!(
+                            "{where_}: binary32 join at {position} from unproven operands"
+                        ),
                     });
                 }
                 if slot.pending != planned.pending {
                     return Err(Reason::UnsupportedX87 {
-                        detail: format!("{where_}: deferred x87 NaN differs from join at {position}"),
+                        detail: format!(
+                            "{where_}: deferred x87 NaN differs from join at {position}"
+                        ),
                     });
                 }
                 if planned.quiet && !slot.quiet {
                     return Err(Reason::UnsupportedX87 {
-                        detail: format!("{where_}: quiet NaN join at {position} from unproven operands"),
+                        detail: format!(
+                            "{where_}: quiet NaN join at {position} from unproven operands"
+                        ),
                     });
                 }
                 for part in parts(slot.parts & planned.parts) {
-                    let agreed = planned.consts.iter().find(|(name, _)| *name == part).map(|(_, value)| value);
-                    let live = slot.consts.iter().find(|(name, _)| *name == part).map(|(_, value)| value);
+                    let agreed = planned
+                        .consts
+                        .iter()
+                        .find(|(name, _)| *name == part)
+                        .map(|(_, value)| value);
+                    let live = slot
+                        .consts
+                        .iter()
+                        .find(|(name, _)| *name == part)
+                        .map(|(_, value)| value);
                     if let Some(agreed) = agreed {
                         if live != Some(agreed) {
                             return Err(Reason::UnsupportedX87 {
-                                detail: format!("{where_}: x87 {part} at {position} is not the joined constant"),
+                                detail: format!(
+                                    "{where_}: x87 {part} at {position} is not the joined constant"
+                                ),
                             });
                         }
                     }

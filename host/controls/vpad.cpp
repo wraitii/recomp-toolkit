@@ -144,6 +144,31 @@ void Vpad::request_rumble(uint16_t low, uint16_t high) {
     ++rumble_serial_;
 }
 
+void Vpad::request_dinput_rumble(uint16_t level) {
+    std::lock_guard lock(mutex_);
+    dinput_rumble_ = dinput_rumble_enabled_ ? level : 0;
+    ++rumble_serial_;
+}
+
+void Vpad::set_dinput_rumble_enabled(bool enabled) {
+    std::lock_guard lock(mutex_);
+    if (dinput_rumble_enabled_ == enabled)
+        return;
+    dinput_rumble_enabled_ = enabled;
+    if (!enabled)
+        dinput_rumble_ = 0;
+    ++rumble_serial_;
+}
+bool Vpad::dinput_rumble_enabled() const {
+    std::lock_guard lock(mutex_);
+    return dinput_rumble_enabled_;
+}
+
+void Vpad::refresh_rumble() {
+    std::lock_guard lock(mutex_);
+    ++rumble_serial_;
+}
+
 uint64_t Vpad::rumble_serial() const {
     std::lock_guard lock(mutex_);
     return rumble_serial_;
@@ -152,9 +177,9 @@ uint64_t Vpad::rumble_serial() const {
 void Vpad::rumble(uint16_t *low, uint16_t *high) const {
     std::lock_guard lock(mutex_);
     if (low)
-        *low = rumble_low_;
+        *low = std::max(rumble_low_, dinput_rumble_);
     if (high)
-        *high = rumble_high_;
+        *high = std::max(rumble_high_, dinput_rumble_);
 }
 
 bool Vpad::controller_connected() const {
@@ -176,7 +201,8 @@ void Vpad::reset() {
     for (PadEdge &e : ring_)
         e = PadEdge();
     edge_count_ = 0;
-    rumble_low_ = rumble_high_ = 0;
+    rumble_low_ = rumble_high_ = dinput_rumble_ = 0;
+    dinput_rumble_enabled_ = true;
     rumble_serial_ = 0;
     controller_connected_ = false;
 }

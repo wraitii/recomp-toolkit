@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
@@ -11,7 +10,7 @@ use rk_core::settings::CallEffect as ConfiguredEffect;
 use rk_core::{Addr, Diagnostic, Error, Reason, Result};
 use rk_frontend::Analysis;
 use rk_ir::x87::{MemoryEffect, X87Eager, X87Environment, X87Legacy, X87Op};
-use rk_ir::{CgFunction, Op, Registers, StateKey};
+use rk_ir::{CgFunction, Op, Registers};
 use rk_x87::Recipes;
 
 use crate::callgraph::CallGraph;
@@ -167,34 +166,21 @@ pub(crate) fn analyze(
     native: &BTreeSet<Addr>,
 ) -> Result<ContractAnalysis> {
     let lanes = LaneMap::get();
-    let stack_rows: Vec<(Addr, Option<i32>, bool, Option<Addr>)> = analysis
+    let has_tails: BTreeMap<Addr, bool> = analysis
         .ir
-        .par_iter()
+        .iter()
         .map(|(&addr, result)| {
-            result
-                .as_ref()
-                .ok()
-                .map_or((addr, None, false, None), |fir| {
-                    let info = stack_info(program, fir);
-                    let tail = fir.exits.iter().any(|(&index, _)| {
-                        fir.insns[index as usize]
-                            .mnemonic
-                            .eq_ignore_ascii_case("JMP")
-                            && fir.succ[index as usize].is_empty()
-                    });
-                    (addr, info.1, tail, tail_target(fir))
+            let tail = result.as_ref().is_ok_and(|fir| {
+                fir.exits.keys().any(|&index| {
+                    fir.insns[index as usize]
+                        .mnemonic
+                        .eq_ignore_ascii_case("JMP")
+                        && fir.succ[index as usize].is_empty()
                 })
+            });
+            (addr, tail)
         })
         .collect();
-    let mut raw_pops = BTreeMap::new();
-    let mut tail_targets = BTreeMap::new();
-    let mut has_tails = BTreeMap::new();
-    for (addr, pop, tail, target) in stack_rows {
-        raw_pops.insert(addr, pop);
-        tail_targets.insert(addr, target);
-        has_tails.insert(addr, tail);
-    }
-    let pops = resolve_pops(&raw_pops, &tail_targets);
     let prepared: Vec<(Addr, Option<Prepared>, Option<Reason>)> = analysis
         .ir
         .par_iter()
@@ -272,7 +258,6 @@ pub(crate) fn analyze(
                     &contracts,
                     indirect,
                     effects,
-                    &pops,
                     recursive,
                 )
             })
@@ -319,7 +304,6 @@ fn analyze_component(
     contracts: &BTreeMap<Addr, Contract>,
     indirect: &BTreeMap<Addr, Vec<Addr>>,
     effects: &BTreeMap<Addr, ConfiguredEffect>,
-    pop_facts: &BTreeMap<Addr, i32>,
     recursive: bool,
 ) -> Result<BTreeMap<Addr, Contract>> {
     let addresses: Vec<Addr> = members
@@ -342,7 +326,7 @@ fn analyze_component(
                     effects,
                     excluded: &excluded,
                 };
-                preserved_registers(cg, pop_facts, prep.saved, &facts)
+                preserved_registers(cg, prep.saved, &facts)
             }
             None => Fields::NONE,
         };
@@ -748,7 +732,7 @@ fn prepare(
     let raw = stack_info(program, fir);
     let calls: Vec<CallSite> = call_rows.into_values().collect();
     let entry = cg.index_of(fir.addr).unwrap();
-    let preserve = raw.0 && !has_tails && tails.is_empty() && !raw.2.is_empty();
+    let preserve = raw.0 && !has_tails && tails.is_empty() && !raw.1.is_empty();
     Ok(Prepared {
         entry,
         order,
@@ -760,7 +744,7 @@ fn prepare(
         calls,
         returns,
         cg: preserve.then_some(preservation_cg(cg)),
-        saved: raw.2,
+        saved: raw.1,
         visit_mismatch,
     })
 }
@@ -868,125 +852,7 @@ impl CallFacts for PreservationCallFacts<'_> {
     }
 }
 
-struct StackSolver<'a> {
-    ssa: &'a rk_ssa::Ssa,
-    pop_facts: &'a BTreeMap<Addr, i32>,
-    esp: &'static [StateKey],
-    ebp: &'static [StateKey],
-    frame: bool,
-    root: rk_ssa::ValueId,
-    memo: RefCell<Vec<Option<(rk_ssa::ValueId, i32)>>>,
-    active: RefCell<Vec<bool>>,
-}
-
-impl StackSolver<'_> {
-    fn get(&self, id: rk_ssa::ValueId) -> Option<(rk_ssa::ValueId, i32)> {
-        if let Some(found) = self.memo.borrow()[id as usize] {
-            return Some(found);
-        }
-        if self.active.borrow_mut()[id as usize] {
-            return Some((id, 0));
-        }
-        self.active.borrow_mut()[id as usize] = true;
-        let result = self.compute(id);
-        self.active.borrow_mut()[id as usize] = false;
-        if let Some(found) = result {
-            self.memo.borrow_mut()[id as usize] = Some(found);
-        }
-        result
-    }
-
-    fn all(
-        &self,
-        args: &[rk_ssa::ValueId],
-        skip: Option<rk_ssa::ValueId>,
-    ) -> Option<(rk_ssa::ValueId, i32)> {
-        let mut found = None;
-        for &arg in args {
-            if Some(arg) == skip {
-                continue;
-            }
-            let next = self.get(arg)?;
-            if found.is_some_and(|found| found != next) {
-                return None;
-            }
-            found = Some(next);
-        }
-        found
-    }
-
-    fn compute(&self, id: rk_ssa::ValueId) -> Option<(rk_ssa::ValueId, i32)> {
-        let value = self.ssa.value(id);
-        let args = self.ssa.args(id);
-        match value.op {
-            Op::Byte(_) => self.get(*args.first()?),
-            Op::P(OpCode::Copy) | Op::P(OpCode::IntZExt) if args.len() == 1 => self.get(args[0]),
-            Op::Pack | Op::Phi => self.all(args, (value.op == Op::Phi).then_some(id)),
-            Op::P(OpCode::IntAdd) | Op::P(OpCode::IntSub) if value.size == 4 => {
-                let (a, b) = (*args.first()?, *args.get(1)?);
-                match (self.ssa.value(a).op, self.ssa.value(b).op) {
-                    (_, Op::Const(data)) => {
-                        let (root, offset) = self.get(a)?;
-                        let delta = data as i32;
-                        Some((
-                            root,
-                            if value.op == Op::P(OpCode::IntAdd) {
-                                offset.wrapping_add(delta)
-                            } else {
-                                offset.wrapping_sub(delta)
-                            },
-                        ))
-                    }
-                    (Op::Const(data), _) if value.op == Op::P(OpCode::IntAdd) => {
-                        let (root, offset) = self.get(b)?;
-                        Some((root, offset.wrapping_add(data as i32)))
-                    }
-                    _ => None,
-                }
-            }
-            Op::StateReload(key) if self.ssa.field(key) == Some(Field::Esp) => {
-                let site = *args.first()?;
-                let Op::Call { target } = self.ssa.value(site).op else {
-                    return None;
-                };
-                let count = *self.pop_facts.get(&target)?;
-                let state = self.ssa.boundary(site)?;
-                let base = state
-                    .iter()
-                    .find(|(candidate, _)| *candidate == self.esp[0])
-                    .map(|(_, value)| *value)?;
-                let (root, offset) = self.get(base)?;
-                Some((root, offset.wrapping_add(4 + count)))
-            }
-            Op::Input(key) if self.esp.contains(&key) => Some((self.root, 0)),
-            Op::Input(key) if self.frame && self.ebp.contains(&key) => Some((self.root, -4)),
-            _ => None,
-        }
-    }
-}
-
-fn frame_pointer(cg: &CgFunction) -> bool {
-    let regs = Registers::get();
-    let (Some(ebp), Some(esp)) = (regs.register("EBP"), regs.register("ESP")) else {
-        return false;
-    };
-    let (Some(first), Some(second)) = (cg.insns.first(), cg.insns.get(1)) else {
-        return false;
-    };
-    first.ops.iter().any(|op| op.inputs.contains(&ebp))
-        && first.ops.iter().any(|op| op.output == Some(esp))
-        && second
-            .ops
-            .iter()
-            .any(|op| op.output == Some(ebp) && op.inputs.contains(&esp))
-}
-
-fn preserved_registers(
-    cg: &CgFunction,
-    pop_facts: &BTreeMap<Addr, i32>,
-    candidates: Fields,
-    call_facts: &dyn CallFacts,
-) -> Fields {
+fn preserved_registers(cg: &CgFunction, candidates: Fields, call_facts: &dyn CallFacts) -> Fields {
     let options = BuildOptions {
         policy: Policy::Optimizing,
         call_facts,
@@ -996,29 +862,7 @@ fn preserved_registers(
     let Ok(mut ssa) = rk_ssa::build(cg, &options) else {
         return Fields::NONE;
     };
-    let esp = rk_ir::lanes(Field::Esp);
-    let ebp = rk_ir::lanes(Field::Ebp);
-    let Some(root) = ssa.input(esp[0]) else {
-        return Fields::NONE;
-    };
-    let solver = StackSolver {
-        ssa: &ssa,
-        pop_facts,
-        esp,
-        ebp,
-        frame: frame_pointer(cg),
-        root,
-        memo: RefCell::new(vec![None; ssa.values.len()]),
-        active: RefCell::new(vec![false; ssa.values.len()]),
-    };
-    for id in 0..ssa.values.len() as rk_ssa::ValueId {
-        solver.get(id);
-    }
-    let offsets = solver.memo.into_inner();
-    let stack_reload = |value: rk_ssa::ValueId| -> Option<(rk_ssa::ValueId, i32)> {
-        offsets.get(value as usize).copied().flatten()
-    };
-    if !rk_ssa::forward(&mut ssa, Some(&stack_reload), None) {
+    if !rk_ssa::forward(&mut ssa, Some(call_facts)) {
         return Fields::NONE;
     }
     let returns: Vec<rk_ssa::ValueId> = ssa
@@ -1075,66 +919,10 @@ fn same_lane(ssa: &rk_ssa::Ssa, left: rk_ssa::ValueId, right: rk_ssa::ValueId) -
     false
 }
 
-fn tail_target(fir: &FunctionIr) -> Option<Addr> {
-    let mut found = None;
-    for (&index, targets) in &fir.exits {
-        let insn = &fir.insns[index as usize];
-        if !insn.mnemonic.eq_ignore_ascii_case("JMP") || !fir.succ[index as usize].is_empty() {
-            return None;
-        }
-        if targets.len() != 1 || found.is_some() {
-            return None;
-        }
-        found = Some(targets[0]);
-    }
-    found
-}
-
-fn resolve_pops(
-    raw: &BTreeMap<Addr, Option<i32>>,
-    tails: &BTreeMap<Addr, Option<Addr>>,
-) -> BTreeMap<Addr, i32> {
-    fn resolve(
-        addr: Addr,
-        raw: &BTreeMap<Addr, Option<i32>>,
-        tails: &BTreeMap<Addr, Option<Addr>>,
-        memo: &mut BTreeMap<Addr, Option<i32>>,
-        active: &mut BTreeSet<Addr>,
-    ) -> Option<i32> {
-        if let Some(found) = memo.get(&addr) {
-            return *found;
-        }
-        if !active.insert(addr) {
-            return None;
-        }
-        let found = match raw.get(&addr).copied().flatten() {
-            Some(count) => Some(count),
-            None => tails
-                .get(&addr)
-                .copied()
-                .flatten()
-                .and_then(|target| resolve(target, raw, tails, memo, active)),
-        };
-        active.remove(&addr);
-        memo.insert(addr, found);
-        found
-    }
-
-    let mut memo = BTreeMap::new();
-    let mut active = BTreeSet::new();
-    for &addr in tails.keys() {
-        resolve(addr, raw, tails, &mut memo, &mut active);
-    }
-    memo.into_iter()
-        .filter_map(|(addr, count)| count.map(|count| (addr, count)))
-        .collect()
-}
-
-fn stack_info(program: &Program, fir: &FunctionIr) -> (bool, Option<i32>, Fields) {
+fn stack_info(program: &Program, fir: &FunctionIr) -> (bool, Fields) {
     let mut pushed = Fields::NONE;
     let mut popped = Fields::NONE;
     let mut leave = false;
-    let mut pop_counts = BTreeSet::new();
     for insn in &fir.insns {
         let bytes = program
             .image
@@ -1149,27 +937,12 @@ fn stack_info(program: &Program, fir: &FunctionIr) -> (bool, Option<i32>, Fields
         if bytes.len() == 1 && bytes[0] == 0xc9 {
             leave = true;
         }
-        let raw = bytes.strip_prefix(&[0xf3]).unwrap_or(bytes);
-        if raw.first() == Some(&0xc3) {
-            pop_counts.insert(0);
-        } else if raw.first() == Some(&0xc2) && raw.len() == 3 {
-            pop_counts.insert(i32::from(u16::from_le_bytes([raw[1], raw[2]])));
-        }
     }
-    let pops = if pop_counts.len() == 1 {
-        pop_counts.first().copied()
-    } else {
-        None
-    };
     let mut saved = Fields(pushed.0 & popped.0);
     if leave && pushed.contains(Field::Ebp) {
         saved.insert(Field::Ebp);
     }
-    (
-        !pushed.is_empty() && (!popped.is_empty() || leave),
-        pops,
-        saved,
-    )
+    (!pushed.is_empty() && (!popped.is_empty() || leave), saved)
 }
 
 fn flag_free(mnemonic: &str) -> bool {

@@ -387,6 +387,12 @@ std::map<uint32_t, std::string> &regkeys() {
     static std::map<uint32_t, std::string> m;
     return m;
 }
+// Handles opened without KEY_SET_VALUE. Windows refuses value writes through
+// them, and NFS Carbon's FirstTime write through a KEY_READ handle relies on it.
+std::set<uint32_t> &regkeys_readonly() {
+    static std::set<uint32_t> s;
+    return s;
+}
 uint32_t g_next_hkey = 0x00030004;
 bool g_registry_dirty = false;
 
@@ -523,6 +529,7 @@ static void registry_load_file() {
 void registry_load() {
     regstore().clear();
     regkeys().clear();
+    regkeys_readonly().clear();
     g_reg_seq = 0;
     g_next_hkey = 0x00030004;
     g_registry_dirty = false;
@@ -653,7 +660,13 @@ bool reg_ensure_ancestors(const std::string &path) {
     return added;
 }
 
-void a_RegOpenKeyEx(X86 *c, uint32_t hkey, const std::string &sub, uint32_t presult) {
+// KEY_SET_VALUE, or a generic right that maps to it.
+bool reg_sam_can_set(uint32_t sam) {
+    return sam & (0x2u | 0x02000000u | 0x10000000u | 0x40000000u);
+}
+
+void a_RegOpenKeyEx(X86 *c, uint32_t hkey, const std::string &sub, uint32_t sam,
+                    uint32_t presult) {
     std::string path = key_path(hkey, sub);
     if (path.empty()) {
         set_eax(c, 6);
@@ -677,16 +690,18 @@ void a_RegOpenKeyEx(X86 *c, uint32_t hkey, const std::string &sub, uint32_t pres
     uint32_t h = g_next_hkey;
     g_next_hkey += 4;
     regkeys()[h] = path;
+    if (!reg_sam_can_set(sam))
+        regkeys_readonly().insert(h);
     if (presult)
         wr32(presult, h);
     set_eax(c, 0);
 }
 
 void a_RegOpenKeyA(X86 *c) {
-    a_RegOpenKeyEx(c, arg(c, 0), gm_str(arg(c, 1), 512), arg(c, 2));
+    a_RegOpenKeyEx(c, arg(c, 0), gm_str(arg(c, 1), 512), 0x02000000u, arg(c, 2));
 }
 void a_RegOpenKeyExA(X86 *c) {
-    a_RegOpenKeyEx(c, arg(c, 0), gm_str(arg(c, 1), 512), arg(c, 4));
+    a_RegOpenKeyEx(c, arg(c, 0), gm_str(arg(c, 1), 512), arg(c, 3), arg(c, 4));
 }
 
 void reg_create(X86 *c, const std::string &sub) {
@@ -704,6 +719,8 @@ void reg_create(X86 *c, const std::string &sub) {
     uint32_t h = g_next_hkey;
     g_next_hkey += 4;
     regkeys()[h] = path;
+    if (!reg_sam_can_set(arg(c, 5)))
+        regkeys_readonly().insert(h);
     if (presult)
         wr32(presult, h);
     if (pdisp)
@@ -735,6 +752,7 @@ void a_RegCreateKeyA(X86 *c) {
 
 void a_RegCloseKey(X86 *c) {
     regkeys().erase(arg(c, 0));
+    regkeys_readonly().erase(arg(c, 0));
     registry_flush();
     set_eax(c, 0);
 }
@@ -805,6 +823,10 @@ void reg_query(X86 *c, const std::string &name, bool wide) {
 void reg_set(X86 *c, const std::string &name, bool wide) {
     uint32_t hkey = arg(c, 0);
     uint32_t type = arg(c, 3), pdata = arg(c, 4), cb = arg(c, 5);
+    if (regkeys_readonly().count(hkey)) {
+        set_eax(c, 5); // ERROR_ACCESS_DENIED
+        return;
+    }
 
     auto ki = regkeys().find(hkey);
     std::string path =
@@ -852,7 +874,7 @@ void reg_set(X86 *c, const std::string &name, bool wide) {
 }
 
 void a_RegOpenKeyExW(X86 *c) {
-    a_RegOpenKeyEx(c, arg(c, 0), gm_wstr(arg(c, 1)), arg(c, 4));
+    a_RegOpenKeyEx(c, arg(c, 0), gm_wstr(arg(c, 1)), arg(c, 3), arg(c, 4));
 }
 void a_RegCreateKeyExA(X86 *c) {
     reg_create(c, gm_str(arg(c, 1), 512));
@@ -1102,6 +1124,10 @@ void a_RegDeleteValueW(X86 *c) {
     std::string path = key_path(arg(c, 0), "");
     if (path.empty()) {
         set_eax(c, 6);
+        return;
+    }
+    if (regkeys_readonly().count(arg(c, 0))) {
+        set_eax(c, 5);
         return;
     }
     auto it = regstore().find(path);
@@ -1597,33 +1623,48 @@ void w_WSARecvFrom(X86 *c) {
     wsa_call_failed(c, "WSARecvFrom", WSAENETDOWN_);
 }
 
-// Event and overlapped results are not sockets: WSACreateEvent returns
-// WSA_INVALID_EVENT and the rest report FALSE or WSA_WAIT_FAILED.
+// WS2_32 events are kernel events: manual-reset, created unsignalled. They work
+// without a network host, so a guest that waits on one times out or is woken by
+// its own WSASetEvent as on Windows. The WSA error mirrors the Win32 one.
+void wsa_event_result(X86 *c, bool ok) {
+    if (!ok)
+        g_wsa_last_error = 6; // WSA_INVALID_HANDLE
+    set_eax(c, ok);
+}
 void w_WSACreateEvent(X86 *c) {
-    log_once("WSACreateEvent",
-             "WS2_32!WSACreateEvent: no network host; WSA_INVALID_EVENT, WSAGetLastError=%d",
-             WSAENETDOWN_);
-    g_wsa_last_error = WSAENETDOWN_;
-    set_eax(c, 0);
+    set_eax(c, win32_create_event(true, false));
 }
 void w_WSACloseEvent(X86 *c) {
-    log_once("WSACloseEvent", "WS2_32!WSACloseEvent: no network host; FALSE");
-    g_wsa_last_error = WSAENETDOWN_;
-    set_eax(c, 0);
+    wsa_event_result(c, win32_close_event(arg(c, 0)));
 }
 void w_WSASetEvent(X86 *c) {
-    g_wsa_last_error = WSAENETDOWN_;
-    set_eax(c, 0);
+    wsa_event_result(c, win32_signal_event(arg(c, 0), false));
 }
 void w_WSAResetEvent(X86 *c) {
-    g_wsa_last_error = WSAENETDOWN_;
-    set_eax(c, 0);
+    wsa_event_result(c, win32_reset_event(arg(c, 0)));
 }
 void w_WSAWaitForMultipleEvents(X86 *c) {
-    log_once("WSAWaitForMultipleEvents",
-             "WS2_32!WSAWaitForMultipleEvents: no network host; WSA_WAIT_FAILED");
-    g_wsa_last_error = WSAENETDOWN_;
-    set_eax(c, 0xffffffffu); // WSA_WAIT_FAILED
+    uint32_t count = arg(c, 0), events = arg(c, 1);
+    bool wait_all = arg(c, 2) != 0;
+    uint32_t timeout = arg(c, 3);
+    bool alertable = arg(c, 4) != 0;
+    if (!count || count > 64) {
+        g_wsa_last_error = 87; // WSA_INVALID_PARAMETER
+        set_eax(c, 0xffffffffu); // WSA_WAIT_FAILED
+        return;
+    }
+    if (!events || !gm_valid(events, 4 * count)) {
+        g_wsa_last_error = WSAEFAULT_;
+        set_eax(c, 0xffffffffu);
+        return;
+    }
+    uint32_t handles[64];
+    for (uint32_t i = 0; i < count; ++i)
+        handles[i] = rd32(events + 4 * i);
+    uint32_t result = guest_wait_objects_ex(c, handles, count, wait_all, timeout, alertable);
+    if (result == 0xffffffffu)
+        g_wsa_last_error = (int)get_last_error();
+    set_eax(c, result);
 }
 void w_WSAGetOverlappedResult(X86 *c) {
     g_wsa_last_error = WSAENETDOWN_;
@@ -2891,6 +2932,80 @@ static void a_GetUserNameW(X86 *c) {
     set_eax(c, 1);
 }
 
+static void a_AllocateAndInitializeSid(X86 *c) {
+    uint32_t authority = arg(c, 0), count = arg(c, 1) & 0xff, out = arg(c, 10);
+    set_eax(c, 0);
+    if (!out || !gm_valid(out, 4) || !authority || !gm_valid(authority, 6) || !count || count > 8) {
+        set_last_error(87);
+        return;
+    }
+    uint32_t sid = heap_alloc(8 + count * 4, true);
+    if (!sid) {
+        set_last_error(8);
+        return;
+    }
+    wr8(sid, 1);
+    wr8(sid + 1, (uint8_t)count);
+    memcpy(gm_ptr(sid + 2), gm_ptr(authority), 6);
+    for (uint32_t i = 0; i < count; ++i)
+        wr32(sid + 8 + i * 4, arg(c, 2 + (int)i));
+    wr32(out, sid);
+    set_eax(c, 1);
+}
+
+static void a_FreeSid(X86 *c) {
+    uint32_t sid = arg(c, 0);
+    if (sid && heap_owns(sid))
+        heap_free(sid);
+    set_eax(c, 0);
+}
+
+// The runtime has no Windows token; report a valid token that is not a member.
+static void a_CheckTokenMembership(X86 *c) {
+    uint32_t sid = arg(c, 1), out = arg(c, 2);
+    set_eax(c, 0);
+    if (!sid || !gm_valid(sid, 8) || !out || !gm_valid(out, 4)) {
+        set_last_error(87);
+        return;
+    }
+    wr32(out, 0);
+    set_eax(c, 1);
+}
+
+static void a_CryptAcquireContextA(X86 *c) {
+    uint32_t out = arg(c, 0);
+    set_eax(c, 0);
+    if (!out || !gm_valid(out, 4)) {
+        set_last_error(87);
+        return;
+    }
+    wr32(out, 0x43525950);
+    set_eax(c, 1);
+}
+
+static void a_CryptGenRandom(X86 *c) {
+    uint32_t len = arg(c, 1), buf = arg(c, 2);
+    set_eax(c, 0);
+    if (!buf || !gm_valid(buf, len)) {
+        set_last_error(87);
+        return;
+    }
+    try {
+        std::random_device entropy;
+        for (uint32_t i = 0; i < len; ++i)
+            wr8(buf + i, (uint8_t)entropy());
+    } catch (...) {
+        set_last_error(87);
+        return;
+    }
+    set_eax(c, 1);
+}
+
+static void a_CryptReleaseContext(X86 *c) {
+    (void)c;
+    set_eax(c, 1);
+}
+
 // No AVIFile codec adapter is installed yet. Report missing codec support at
 // open instead of inventing a successful file interface and corrupting the
 // caller's stack. The game can follow its normal missing-video path.
@@ -2917,6 +3032,12 @@ const ImportShim g_misc_shims[] = {
     // ADVAPI32
     {"ADVAPI32.dll", "GetUserNameA", 2, a_GetUserNameA},
     {"ADVAPI32.dll", "GetUserNameW", 2, a_GetUserNameW},
+    {"ADVAPI32.dll", "AllocateAndInitializeSid", 11, a_AllocateAndInitializeSid},
+    {"ADVAPI32.dll", "FreeSid", 1, a_FreeSid},
+    {"ADVAPI32.dll", "CheckTokenMembership", 3, a_CheckTokenMembership},
+    {"ADVAPI32.dll", "CryptAcquireContextA", 5, a_CryptAcquireContextA},
+    {"ADVAPI32.dll", "CryptGenRandom", 3, a_CryptGenRandom},
+    {"ADVAPI32.dll", "CryptReleaseContext", 2, a_CryptReleaseContext},
     {"ADVAPI32.dll", "RegOpenKeyA", 3, a_RegOpenKeyA},
     {"ADVAPI32.dll", "RegOpenKeyExA", 5, a_RegOpenKeyExA},
     {"ADVAPI32.dll", "RegCreateKeyExA", 9, a_RegCreateKeyExA},

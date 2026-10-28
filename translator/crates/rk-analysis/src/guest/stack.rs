@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rk_core::ir::{FunctionIr, Insn, OpCode, PcodeOp, Space, Varnode};
+use rk_core::memory::{Address, Base};
 use rk_core::program::Program;
 use rk_core::Addr;
 use rk_decode::{branch_target, Decoder};
@@ -10,13 +11,6 @@ use rk_ir::Registers;
 struct StackState {
     sp: Option<i32>,
     bp: Option<i32>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Value {
-    Relative(i32),
-    Constant(i32),
-    Unknown,
 }
 
 pub fn analyze(program: &Program, analysis: &rk_frontend::Analysis) -> BTreeMap<Addr, i32> {
@@ -70,7 +64,10 @@ pub fn analyze(program: &Program, analysis: &rk_frontend::Analysis) -> BTreeMap<
     verified
 }
 
-pub fn return_immediates(program: &Program, analysis: &rk_frontend::Analysis) -> BTreeMap<Addr, i32> {
+pub fn return_immediates(
+    program: &Program,
+    analysis: &rk_frontend::Analysis,
+) -> BTreeMap<Addr, i32> {
     analysis
         .ir
         .iter()
@@ -83,7 +80,11 @@ pub fn return_immediates(program: &Program, analysis: &rk_frontend::Analysis) ->
             for index in reachable(fir) {
                 let insn = fir.insns.get(index as usize)?;
                 let successors = fir.succ.get(index as usize)?;
-                if fir.exits.get(&index).is_some_and(|targets| !targets.is_empty()) {
+                if fir
+                    .exits
+                    .get(&index)
+                    .is_some_and(|targets| !targets.is_empty())
+                {
                     return None;
                 }
                 if insn.mnemonic.eq_ignore_ascii_case("RET") {
@@ -94,7 +95,10 @@ pub fn return_immediates(program: &Program, analysis: &rk_frontend::Analysis) ->
                 } else if successors.is_empty() && !fir.noreturn.contains_key(&index) {
                     return None;
                 }
-                if successors.iter().any(|&next| next as usize >= fir.insns.len()) {
+                if successors
+                    .iter()
+                    .any(|&next| next as usize >= fir.insns.len())
+                {
                     return None;
                 }
             }
@@ -273,8 +277,16 @@ fn observe_pcode(insn: &Insn, state: &mut StackState, esp: Varnode, ebp: Varnode
         let Some(output) = op.output else {
             continue;
         };
-        if output.size != 4 && matches!(value, Value::Relative(_)) {
-            value = Value::Unknown;
+        if output.size != 4
+            && matches!(
+                value,
+                Address::Known {
+                    base: Base::Frame,
+                    ..
+                }
+            )
+        {
+            value = Address::Unknown;
         }
         if overlaps(output, esp) {
             state.sp = if output == esp { relative(value) } else { None };
@@ -289,72 +301,50 @@ fn observe_pcode(insn: &Insn, state: &mut StackState, esp: Varnode, ebp: Varnode
 fn evaluate(
     op: &PcodeOp,
     state: &StackState,
-    locals: &BTreeMap<Varnode, Value>,
+    locals: &BTreeMap<Varnode, Address>,
     esp: Varnode,
     ebp: Varnode,
-) -> Value {
+) -> Address {
     let input = |index: usize| {
         op.inputs
             .get(index)
             .map(|value| read_value(*value, state, locals, esp, ebp))
-            .unwrap_or(Value::Unknown)
+            .unwrap_or(Address::Unknown)
     };
     match op.opcode {
         OpCode::Copy | OpCode::IntZExt | OpCode::IntSExt => input(0),
-        OpCode::IntAdd => add(input(0), input(1)),
-        OpCode::IntSub => sub(input(0), input(1)),
-        _ => Value::Unknown,
+        OpCode::IntAdd => input(0).add(input(1)),
+        OpCode::IntSub => input(0).sub(input(1)),
+        _ => Address::Unknown,
     }
 }
 
 fn read_value(
     value: Varnode,
     state: &StackState,
-    locals: &BTreeMap<Varnode, Value>,
+    locals: &BTreeMap<Varnode, Address>,
     esp: Varnode,
     ebp: Varnode,
-) -> Value {
+) -> Address {
     if value.space == Space::Const {
-        return Value::Constant(constant(value));
+        return Address::exact(Base::Absolute, constant(value) as u32);
     }
     if value == esp {
-        return state.sp.map(Value::Relative).unwrap_or(Value::Unknown);
+        return state
+            .sp
+            .map(|offset| Address::exact(Base::Frame, offset as u32))
+            .unwrap_or(Address::Unknown);
     }
     if value == ebp {
-        return state.bp.map(Value::Relative).unwrap_or(Value::Unknown);
+        return state
+            .bp
+            .map(|offset| Address::exact(Base::Frame, offset as u32))
+            .unwrap_or(Address::Unknown);
     }
     if value.space == Space::Register && (overlaps(value, esp) || overlaps(value, ebp)) {
-        return Value::Unknown;
+        return Address::Unknown;
     }
-    locals.get(&value).copied().unwrap_or(Value::Unknown)
-}
-
-fn add(left: Value, right: Value) -> Value {
-    match (left, right) {
-        (Value::Relative(base), Value::Constant(delta))
-        | (Value::Constant(delta), Value::Relative(base)) => {
-            Value::Relative(base.wrapping_add(delta))
-        }
-        (Value::Constant(left), Value::Constant(right)) => {
-            Value::Constant(left.wrapping_add(right))
-        }
-        _ => Value::Unknown,
-    }
-}
-
-fn sub(left: Value, right: Value) -> Value {
-    match (left, right) {
-        (Value::Relative(base), Value::Constant(delta)) => {
-            Value::Relative(base.wrapping_sub(delta))
-        }
-        (Value::Relative(left), Value::Relative(right)) => {
-            Value::Constant(left.wrapping_sub(right))
-        }
-        (Value::Constant(left), Value::Constant(right)) => {
-            Value::Constant(left.wrapping_sub(right))
-        }
-        _ => Value::Unknown,
-    }
+    locals.get(&value).copied().unwrap_or(Address::Unknown)
 }
 
 fn constant(value: Varnode) -> i32 {
@@ -376,9 +366,13 @@ fn constant(value: Varnode) -> i32 {
     }
 }
 
-fn relative(value: Value) -> Option<i32> {
+fn relative(value: Address) -> Option<i32> {
     match value {
-        Value::Relative(offset) => Some(offset),
+        Address::Known {
+            base: Base::Frame,
+            offset,
+            span: 0,
+        } => Some(offset as i32),
         _ => None,
     }
 }

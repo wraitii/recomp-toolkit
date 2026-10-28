@@ -34,7 +34,8 @@ pub fn dump(fir: &FunctionIr, out: &mut impl Write) -> Result<()> {
         }
         if let Some(exits) = fir.exits.get(&(i as u32)) {
             let exits: Vec<String> = exits.iter().map(|a| format!("{a:08x}")).collect();
-            writeln!(out, "    exit {}", exits.join(",")).map_err(|e| Error::input(e.to_string()))?;
+            writeln!(out, "    exit {}", exits.join(","))
+                .map_err(|e| Error::input(e.to_string()))?;
         }
     }
     Ok(())

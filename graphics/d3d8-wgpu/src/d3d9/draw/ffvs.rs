@@ -253,7 +253,8 @@ pub(super) fn source(key: &[u32]) -> String {
     let mask = key[4];
     let linked = |usage: u32| mask & (1 << usage) != 0;
     let mut s = String::from(V2F);
-    s += "struct VSP { halfpix:vec4<f32>,ascale:array<vec4<f32>,16> }\n@group(0) @binding(1) var<uniform> vsp:VSP;\n";
+    s += shader_interface::VERTEX_PARAMETERS;
+    s += "@group(0) @binding(1) var<uniform> vsp:VSP;\n";
     s += &format!(
         "struct FFU {{ m:array<vec4<f32>,{UNIFORM_ROWS}> }}\n@group(0) @binding(0) var<uniform> u:FFU;\n"
     );

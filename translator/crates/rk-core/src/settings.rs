@@ -17,6 +17,8 @@ struct Input {
     code_map: Option<PathBuf>,
     image_base: Addr,
     sha256: String,
+    #[serde(default)]
+    reloc: Option<PathBuf>,
     translate: Translate,
     #[serde(default)]
     globals: BTreeMap<String, Global>,
@@ -209,7 +211,6 @@ impl X87Effect {
     }
 }
 
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct Global {
     pub addr: Addr,
@@ -275,6 +276,7 @@ pub struct Settings {
     pub fault_state: FaultState,
     pub msvc_x87_convention: bool,
     pub x87_cw_clone: bool,
+    pub reloc: Option<PathBuf>,
 }
 
 impl Settings {
@@ -291,7 +293,10 @@ impl Settings {
         let t = &input.translate;
         let unsupported = [
             ("x87_facts", module.is_none() && t.x87_facts.is_some()),
-            ("x87_mode_metadata", module.is_none() && t.x87_mode_metadata.is_some()),
+            (
+                "x87_mode_metadata",
+                module.is_none() && t.x87_mode_metadata.is_some(),
+            ),
             ("x87_entry_contracts", !t.x87_entry_contracts.is_empty()),
             ("x87_imports_preserve_pc_rc", t.x87_imports_preserve_pc_rc),
             ("allocators", !t.allocators.is_empty()),
@@ -436,6 +441,7 @@ impl Settings {
             fault_state: t.fault_state,
             msvc_x87_convention: t.msvc_x87_convention,
             x87_cw_clone: t.x87_cw_clone,
+            reloc: if main { input.reloc } else { None },
             game_dir: input.dir,
             module,
         })

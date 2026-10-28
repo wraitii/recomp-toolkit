@@ -16,6 +16,7 @@ const INDIRECT_HEADER: &str = "site\tkind\ttargets";
 #[derive(Default)]
 pub struct Facts {
     pub call_targets: BTreeMap<Addr, Vec<Addr>>,
+    pub guest_calls: BTreeSet<Addr>,
     pub jump_targets: BTreeMap<Addr, Vec<Addr>>,
     pub host_calls: BTreeSet<Addr>,
     pub site_effects: BTreeMap<Addr, CallEffect>,
@@ -53,9 +54,13 @@ fn read_analysis_facts(
     let mut call_targets = BTreeMap::new();
     let mut jump_targets = BTreeMap::new();
     let mut host_calls = BTreeSet::new();
+    let mut guest_calls = BTreeSet::new();
     let mut site_effects = BTreeMap::new();
     for (&site, row) in &loaded.sites {
         validate_site(program, analysis, path, site, row)?;
+        if row.prefer_guest || row.kind == TransferKind::Call && row.targets.is_some() {
+            guest_calls.insert(site);
+        }
         if let Some(targets) = &row.targets {
             match row.kind {
                 TransferKind::Call => {
@@ -86,6 +91,7 @@ fn read_analysis_facts(
         .collect();
     Ok(Facts {
         call_targets,
+        guest_calls,
         jump_targets,
         host_calls,
         site_effects,
@@ -104,7 +110,10 @@ fn validate_site(
     row: &SiteFacts,
 ) -> Result<()> {
     let (insn, _, indirect) = instruction_at(program, analysis, site)?;
-    let call = insn.ops.iter().any(|op| matches!(op.opcode, OpCode::Call | OpCode::CallInd));
+    let call = insn
+        .ops
+        .iter()
+        .any(|op| matches!(op.opcode, OpCode::Call | OpCode::CallInd));
     let jump = insn.mnemonic.eq_ignore_ascii_case("JMP")
         && insn.ops.iter().any(|op| op.opcode == OpCode::BranchInd);
     match row.kind {
@@ -115,9 +124,9 @@ fn validate_site(
                     path.display()
                 )));
             }
-            if row.targets.is_some() && !indirect {
+            if (row.targets.is_some() || row.prefer_guest) && !indirect {
                 return Err(Error::input(format!(
-                    "{}: site {site:08x} has a target bound but is not an indirect call",
+                    "{}: site {site:08x} has guest dispatch facts but is not an indirect call",
                     path.display()
                 )));
             }
@@ -252,6 +261,7 @@ fn read_legacy_targets(
         .map(Vec::len)
         .sum();
     Ok(Facts {
+        guest_calls: call_targets.keys().copied().collect(),
         call_targets,
         jump_targets,
         host_calls: BTreeSet::new(),
@@ -305,7 +315,11 @@ fn resolve_import_effects(
             .ok_or_else(|| Error::input(format!("import {name:?} must be dll!name")))?;
         facts.imports.insert(name, effect.clone());
     }
-    for fir in analysis.ir.values().filter_map(|result| result.as_ref().ok()) {
+    for fir in analysis
+        .ir
+        .values()
+        .filter_map(|result| result.as_ref().ok())
+    {
         for insn in &fir.insns {
             let Some(name) = called_import(program, insn) else {
                 continue;
@@ -383,7 +397,9 @@ fn runtime_call_facts(
     for (&site, found) in targets {
         let (end, indirect) = call_end(program, analysis, site)?;
         if !indirect {
-            return Err(Error::input(format!("site {site:08x} is not an indirect call")));
+            return Err(Error::input(format!(
+                "site {site:08x} is not an indirect call"
+            )));
         }
         out.insert(end, found.clone());
     }

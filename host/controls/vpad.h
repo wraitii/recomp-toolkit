@@ -95,6 +95,10 @@ class Vpad {
     bool next_edge(uint32_t after_sequence, PadEdge *out) const;
 
     void request_rumble(uint16_t low, uint16_t high);
+    void request_dinput_rumble(uint16_t level);
+    void set_dinput_rumble_enabled(bool enabled);
+    bool dinput_rumble_enabled() const;
+    void refresh_rumble();
     uint64_t rumble_serial() const;
     void rumble(uint16_t *low, uint16_t *high) const;
 
@@ -119,7 +123,8 @@ class Vpad {
     PadEdge ring_[256] = {};
     uint32_t edge_count_ = 0; // total edges ever pushed; also the last sequence
 
-    uint16_t rumble_low_ = 0, rumble_high_ = 0;
+    uint16_t rumble_low_ = 0, rumble_high_ = 0, dinput_rumble_ = 0;
+    bool dinput_rumble_enabled_ = true;
     uint64_t rumble_serial_ = 0;
     bool controller_connected_ = false;
 };

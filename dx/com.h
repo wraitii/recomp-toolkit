@@ -31,6 +31,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 static const uint32_t COM_MAGIC = 0x504f504du; // 'POPM'
@@ -82,6 +83,7 @@ enum ComIface : uint16_t {
     IF_DSNOTIFY,
     IF_DINPUT,
     IF_DINPUTDEVICE,
+    IF_DINPUTEFFECT,
     // DirectShow multimedia streaming (dshow.cpp)
     IF_MMSTREAM,         // IAMMultiMediaStream, and IMultiMediaStream as its prefix
     IF_MEDIASTREAM,      // IMediaStream
@@ -199,6 +201,7 @@ enum ComKind : uint16_t {
     K_DSBUFFER,
     K_DINPUT,
     K_DIDEVICE,
+    K_DINPUTEFFECT,
     K_MMSTREAM,         // a multimedia stream over one audio file
     K_MEDIASTREAM,      // its audio media stream
     K_AUDIODATA,        // a guest buffer wrapped for sampling
@@ -600,6 +603,30 @@ void com_set_destructor(ComKind kind, void (*fn)(ComObj *));
 uint32_t com_define(ComIface iface, const char *dll, const char *iface_name,
                     const ComMethod *methods, size_t count);
 uint32_t com_vtable_of(ComIface iface);
+void com_report_failure(X86 *c, ComIface iface, size_t slot);
+
+template <ComIface Iface, const auto &Methods, size_t Slot> void com_checked_call(X86 *c) {
+    Methods[Slot].fn(c);
+    if (__builtin_expect((c->r[R_EAX] & 0x80000000u) != 0, 0))
+        com_report_failure(c, Iface, Slot);
+}
+
+template <ComIface Iface, const auto &Methods, size_t... Slots>
+uint32_t com_define_checked(const char *dll, const char *iface_name,
+                            std::index_sequence<Slots...>) {
+    const ComMethod methods[] = {{Methods[Slots].name, Methods[Slots].argc,
+                                  Methods[Slots].fn && Methods[Slots].fn != imports_unsupported &&
+                                          strcmp(Methods[Slots].name, "GetAvailableTextureMem") != 0
+                                      ? com_checked_call<Iface, Methods, Slots>
+                                      : Methods[Slots].fn}...};
+    return com_define(Iface, dll, iface_name, methods, std::size(methods));
+}
+
+template <ComIface Iface, const auto &Methods>
+uint32_t com_define_checked(const char *dll, const char *iface_name) {
+    return com_define_checked<Iface, Methods>(dll, iface_name,
+                                              std::make_index_sequence<std::size(Methods)>{});
+}
 // Which kinds an interface may be a view of. Registering this is what makes
 // QueryInterface refuse an interface the object does not implement.
 void com_bind(ComIface iface, ComKind kind);

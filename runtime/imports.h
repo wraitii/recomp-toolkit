@@ -41,13 +41,8 @@ bool imports_is_strict_dll(const char *dll_lower);
 bool imports_has_dll(const char *dll_lower);
 
 // ---------------------------------------------------------------------------
-// Return observer. Called after every dispatched shim with the trampoline's
-// description ("DDRAW.dll!IDirect3D2::CreateDevice"), the value the shim
-// left in EAX and the guest return address. It exists so a layer that knows
-// what its own return values mean -- the DirectX shims and their HRESULTs --
-// can report a failure by name and call site, without every one of several
-// hundred failure sites having to log for itself. The observer must not touch the guest context: it is a
-// spectator, and the shim's return value has already been decided.
+// Return observer for import capture and diagnostics. Runs after the shim with
+// its description, EAX and guest return address, without changing guest state.
 // ---------------------------------------------------------------------------
 typedef void (*ImportReturnObserver)(const char *desc, uint32_t eax, uint32_t caller);
 void imports_set_return_observer(ImportReturnObserver fn);
@@ -83,6 +78,7 @@ void oleaut32_reset();
 void oleaut32_thread_exit(X86 *c);
 void misc_dlls_register();
 void msvcr90_register();
+void msvcr71_register();
 void steam_api_register();
 // Fills the CRT's data imports once the image is mapped and the IAT is bound.
 void msvcr90_init();

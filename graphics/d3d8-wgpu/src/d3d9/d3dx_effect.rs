@@ -12,6 +12,7 @@ use crate::d3d9::D3d9Device;
 use crate::d3d9::d3dx_shader;
 use crate::d3d9::resource::D3DPOOL_DEFAULT;
 use crate::d3d9::state::{EffectKeys, EffectSnapshot};
+use crate::d3d9::stats;
 use crate::fast_map::FastMap;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -56,6 +57,7 @@ const K_PASS: u32 = 2;
 const K_ANNOT: u32 = 3;
 const K_ELEM: u32 = 4;
 
+const FXS_FVF: u32 = 122;
 const FXS_VERTEXSHADER: u32 = 146;
 const FXS_PIXELSHADER: u32 = 147;
 const FXS_SAMPLER_TEXTURE: u32 = 164;
@@ -235,6 +237,7 @@ struct EfxParam {
     flags: u32,
     annotations: Vec<u32>,
     version: u64,
+    pool_slot: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -256,42 +259,42 @@ struct EfxObject {
     data: Vec<u8>,
     param: Vec<u8>,
     ctab: OnceLock<Result<Vec<CtabConst>, RenderError>>,
+    saved_outputs: OnceLock<Result<Vec<u32>, RenderError>>,
     ctab_params: OnceLock<Result<Vec<usize>, RenderError>>,
     preshader: OnceLock<Result<Option<Arc<CompiledPreshader>>, RenderError>>,
     const_version: Cell<u64>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
 struct ParamShape {
+    name: Vec<u8>,
     type_: u32,
     class: u32,
     rows: u32,
     cols: u32,
     elements: u32,
-    semantic: Vec<u8>,
     members: Vec<ParamShape>,
 }
 
 impl ParamShape {
     fn of(t: &EfxType) -> Self {
         Self {
+            name: t.name.clone(),
             type_: t.type_,
             class: t.class,
             rows: t.rows,
             cols: t.cols,
             elements: t.elements,
-            semantic: t.semantic.clone(),
             members: t.members.iter().map(ParamShape::of).collect(),
         }
     }
 
     fn matches(&self, t: &EfxType) -> bool {
-        self.type_ == t.type_
+        self.name == t.name
+            && self.type_ == t.type_
             && self.class == t.class
             && self.rows == t.rows
             && self.cols == t.cols
             && self.elements == t.elements
-            && self.semantic == t.semantic
             && self.members.len() == t.members.len()
             && self
                 .members
@@ -309,10 +312,86 @@ struct PoolEntry {
     version: u64,
 }
 
+// Parameters sharing a name but not a shape get separate pool entries.
 #[derive(Default)]
 struct PoolState {
     device_id: Option<u32>,
-    entries: BTreeMap<Vec<u8>, PoolEntry>,
+    entries: Vec<Option<PoolEntry>>,
+    names: BTreeMap<Vec<u8>, Vec<usize>>,
+    free: Vec<usize>,
+}
+
+impl PoolState {
+    fn slot(&self, slot: usize) -> Option<&PoolEntry> {
+        self.entries.get(slot)?.as_ref()
+    }
+
+    fn slot_mut(&mut self, slot: usize) -> Option<&mut PoolEntry> {
+        self.entries.get_mut(slot)?.as_mut()
+    }
+
+    fn find_slot(&self, t: &EfxType) -> Option<usize> {
+        self.names
+            .get(&t.name)?
+            .iter()
+            .copied()
+            .find(|&slot| self.slot(slot).is_some_and(|entry| entry.shape.matches(t)))
+    }
+
+    fn insert(
+        &mut self,
+        t: &EfxType,
+        value: Vec<u8>,
+        objects: Vec<u32>,
+        member: u32,
+        version: u64,
+    ) -> usize {
+        let entry = PoolEntry {
+            shape: ParamShape::of(t),
+            value,
+            objects,
+            members: BTreeSet::from([member]),
+            version,
+        };
+        let slot = if let Some(slot) = self.free.pop() {
+            self.entries[slot] = Some(entry);
+            slot
+        } else {
+            self.entries.push(Some(entry));
+            self.entries.len() - 1
+        };
+        self.names.entry(t.name.clone()).or_default().push(slot);
+        slot
+    }
+
+    fn remove_member(&mut self, id: u32) {
+        for slot in 0..self.entries.len() {
+            let Some(entry) = self.entries[slot].as_mut() else {
+                continue;
+            };
+            entry.members.remove(&id);
+            if !entry.members.is_empty() {
+                continue;
+            }
+            let name = entry.shape.name.clone();
+            self.entries[slot] = None;
+            self.free.push(slot);
+            if let Some(slots) = self.names.get_mut(&name) {
+                slots.retain(|&candidate| candidate != slot);
+                if slots.is_empty() {
+                    self.names.remove(&name);
+                }
+            }
+        }
+    }
+
+    fn values(&self) -> impl Iterator<Item = &PoolEntry> {
+        self.entries.iter().flatten()
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut PoolEntry> {
+        self.entries.iter_mut().flatten()
+    }
 }
 
 pub struct D3dxEffectPool {
@@ -364,6 +443,7 @@ pub struct D3dxEffect {
     pass_version: u64,
     spare_commands: Vec<D3dxEffectCommand>,
     spare_values: Vec<f32>,
+    preshader_inputs: RefCell<Vec<[f32; 4]>>,
     targets: RefCell<FastMap<u32, ParamTarget>>,
 }
 
@@ -393,6 +473,7 @@ impl Default for D3dxEffect {
             pass_version: 0,
             spare_commands: Vec::new(),
             spare_values: Vec::new(),
+            preshader_inputs: RefCell::default(),
             targets: RefCell::default(),
         }
     }
@@ -592,6 +673,7 @@ fn read_annotations(
             flags: 0,
             annotations: Vec::new(),
             version: 0,
+            pool_slot: None,
         });
     }
     Ok(())
@@ -642,6 +724,7 @@ fn parse_effect(blob: &[u8]) -> Result<D3dxEffect, RenderError> {
             flags,
             annotations: param_annotations,
             version: 0,
+            pool_slot: None,
         });
     }
     for _ in 0..ntech {
@@ -714,6 +797,7 @@ fn parse_effect(blob: &[u8]) -> Result<D3dxEffect, RenderError> {
                 data: body[at..end].to_vec(),
                 param: Vec::new(),
                 ctab: OnceLock::new(),
+                saved_outputs: OnceLock::new(),
                 ctab_params: OnceLock::new(),
                 preshader: OnceLock::new(),
                 const_version: Cell::new(0),
@@ -828,6 +912,7 @@ fn parse_effect(blob: &[u8]) -> Result<D3dxEffect, RenderError> {
             data: Vec::new(),
             param: Vec::new(),
             ctab: OnceLock::new(),
+            saved_outputs: OnceLock::new(),
             ctab_params: OnceLock::new(),
             preshader: OnceLock::new(),
             const_version: Cell::new(0),
@@ -870,6 +955,10 @@ struct CtabConst {
 }
 
 fn parse_ctab(code: &[u8]) -> Result<Vec<CtabConst>, RenderError> {
+    stats::record(|s| {
+        s.ctab_parses += 1;
+        s.ctab_input_bytes += code.len() as u64;
+    });
     let constants = d3dx_shader::ctab_constants(code)?;
     Ok(constants
         .into_iter()
@@ -886,10 +975,15 @@ fn parse_ctab(code: &[u8]) -> Result<Vec<CtabConst>, RenderError> {
         .collect())
 }
 
-fn object_ctab(object: &EfxObject) -> Result<&[CtabConst], RenderError> {
+fn object_ctab(object: &EfxObject, saved: bool) -> Result<&[CtabConst], RenderError> {
     object
         .ctab
-        .get_or_init(|| parse_ctab(&object.data))
+        .get_or_init(|| {
+            if saved {
+                stats::record(|s| s.saved_ctab_parses += 1);
+            }
+            parse_ctab(&object.data)
+        })
         .as_ref()
         .map(Vec::as_slice)
         .map_err(Clone::clone)
@@ -1164,9 +1258,9 @@ impl D3dxEffect {
     fn param_version(&self, index: usize) -> u64 {
         let param = &self.params[index];
         let mut version = param.version;
-        if param.flags & FX_PARAM_SHARED != 0 {
+        if let Some(slot) = param.pool_slot {
             if let Some(pool) = &self.pool {
-                if let Some(entry) = pool.lock().unwrap().entries.get(&param.type_.name) {
+                if let Some(entry) = pool.lock().unwrap().slot(slot) {
                     version = version.max(entry.version);
                 }
             }
@@ -1179,13 +1273,9 @@ impl D3dxEffect {
         if !self.shared(index) {
             return None;
         }
+        let slot = param.pool_slot?;
         let state = self.pool.as_ref()?.lock().unwrap();
-        let entry = state.entries.get(&param.type_.name)?;
-        if entry.shape.matches(&param.type_) {
-            Some(f(entry))
-        } else {
-            None
-        }
+        state.slot(slot).map(f)
     }
 
     fn with_numeric<R>(&self, index: usize, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
@@ -1253,13 +1343,14 @@ impl D3dxEffect {
             EfxValue::Numeric(_) => {
                 let Some(pool) = &self.pool else { return };
                 let param = &mut self.params[index];
-                let state = pool.lock().unwrap();
-                let Some(entry) = state.entries.get(&param.type_.name) else {
+                let Some(slot) = param.pool_slot else {
                     return;
                 };
-                if !entry.shape.matches(&param.type_)
-                    || (param.version != 0 && entry.version == param.version)
-                {
+                let state = pool.lock().unwrap();
+                let Some(entry) = state.slot(slot) else {
+                    return;
+                };
+                if param.version != 0 && entry.version == param.version {
                     return;
                 }
                 if let EfxValue::Numeric(bytes) = &mut param.value {
@@ -1287,10 +1378,11 @@ impl D3dxEffect {
         };
         let id = self.id;
         let param = &self.params[index];
+        let Some(slot) = param.pool_slot else {
+            return;
+        };
         let mut state = pool.lock().unwrap();
-        if let Some(entry) = state.entries.get_mut(&param.type_.name)
-            && entry.shape.matches(&param.type_)
-        {
+        if let Some(entry) = state.slot_mut(slot) {
             if let EfxValue::Numeric(bytes) = &param.value {
                 let copy = entry.value.len().min(bytes.len());
                 entry.value[..copy].copy_from_slice(&bytes[..copy]);
@@ -1302,25 +1394,12 @@ impl D3dxEffect {
             entry.members.insert(id);
             return;
         }
-        let name = param.type_.name.clone();
-        let shape = ParamShape::of(&param.type_);
         let (value, objects) = match &param.value {
             EfxValue::Numeric(bytes) => (bytes.clone(), Vec::new()),
             EfxValue::Object(ids) => (Vec::new(), ids.clone()),
             EfxValue::Sampler(_) => (Vec::new(), Vec::new()),
         };
-        let mut members = BTreeSet::new();
-        members.insert(id);
-        state.entries.insert(
-            name,
-            PoolEntry {
-                shape,
-                value,
-                objects,
-                members,
-                version: param.version,
-            },
-        );
+        state.insert(&param.type_, value, objects, id, param.version);
     }
 
     fn target_numeric(&self, target: &ParamTarget) -> Option<Vec<u8>> {
@@ -1452,16 +1531,10 @@ pub fn d3dx_effect_join_pool(
                 ),
             );
         }
-        let name = effect.params[index].type_.name.clone();
-        let shape = ParamShape::of(&effect.params[index].type_);
-        if let Some(entry) = state.entries.get_mut(&name) {
-            if entry.shape != shape {
-                return status(
-                    StatusCode::InvalidArgument,
-                    "shared parameter shape does not match the pool",
-                );
-            }
-            match &mut effect.params[index].value {
+        let param = &mut effect.params[index];
+        let slot = if let Some(slot) = state.find_slot(&param.type_) {
+            let entry = state.slot_mut(slot).expect("pool slot is live");
+            match &mut param.value {
                 EfxValue::Numeric(bytes) => {
                     let copy = entry.value.len().min(bytes.len());
                     bytes[..copy].copy_from_slice(&entry.value[..copy]);
@@ -1470,25 +1543,16 @@ pub fn d3dx_effect_join_pool(
                 EfxValue::Sampler(_) => {}
             }
             entry.members.insert(id);
+            slot
         } else {
-            let (value, objects) = match &effect.params[index].value {
+            let (value, objects) = match &param.value {
                 EfxValue::Numeric(bytes) => (bytes.clone(), Vec::new()),
                 EfxValue::Object(ids) => (Vec::new(), ids.clone()),
                 EfxValue::Sampler(_) => (Vec::new(), Vec::new()),
             };
-            let mut members = BTreeSet::new();
-            members.insert(id);
-            state.entries.insert(
-                name,
-                PoolEntry {
-                    shape,
-                    value,
-                    objects,
-                    members,
-                    version: 0,
-                },
-            );
-        }
+            state.insert(&param.type_, value, objects, id, 0)
+        };
+        param.pool_slot = Some(slot);
     }
     ok()
 }
@@ -1499,10 +1563,7 @@ pub fn d3dx_effect_release(effect: &mut D3dxEffect) {
     };
     let id = effect.id;
     let mut state = pool.lock().unwrap();
-    state.entries.retain(|_, entry| {
-        entry.members.remove(&id);
-        !entry.members.is_empty()
-    });
+    state.remove_member(id);
 }
 
 pub fn d3dx_effect_texture_refs(effect: &D3dxEffect) -> Vec<u32> {
@@ -1525,7 +1586,7 @@ pub fn d3dx_effect_texture_refs(effect: &D3dxEffect) -> Vec<u32> {
 pub fn d3dx_effect_pool_texture_refs(pool: &D3dxEffectPool) -> Vec<u32> {
     let state = pool.state.lock().unwrap();
     let mut refs = BTreeSet::new();
-    for entry in state.entries.values() {
+    for entry in state.values() {
         if entry.members.is_empty() || !texture_type(entry.shape.type_) {
             continue;
         }
@@ -1553,6 +1614,7 @@ pub fn d3dx_effect_saved_bindings(effect: &D3dxEffect) -> D3d9BindingsResult {
 }
 
 pub fn d3dx_effect_set(effect: &mut D3dxEffect, handle: u32, setter: u32, data: &[u8]) -> Status {
+    stats::record(|s| s.effect_setters += 1);
     if setter > SET_LAST {
         return invalid_call("ID3DXEffect::SetValue");
     }
@@ -1898,22 +1960,38 @@ fn get_string(effect: &D3dxEffect, target: &ParamTarget) -> D3dxBytesResult {
     }
 }
 
-pub fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) -> Status {
+pub fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) -> ValueResult {
+    stats::record(|s| s.effect_texture_setters += 1);
     let Some(target) = effect.target(handle) else {
-        return invalid_call("ID3DXEffect::SetTexture");
+        return ValueResult {
+            status: invalid_call("ID3DXEffect::SetTexture"),
+            value: 0,
+        };
     };
     if !target.ty.texture() {
-        return invalid_call("ID3DXEffect::SetTexture");
+        return ValueResult {
+            status: invalid_call("ID3DXEffect::SetTexture"),
+            value: 0,
+        };
     }
     let Some(root) = target.root else {
-        return invalid_call("ID3DXEffect::SetTexture");
+        return ValueResult {
+            status: invalid_call("ID3DXEffect::SetTexture"),
+            value: 0,
+        };
     };
     effect.sync_shared(target.root);
+    let previous = effect.target_object(&target);
     match target.object {
         Some(index) => match &mut effect.params[root].value {
             EfxValue::Object(ids) if index < ids.len() => ids[index] = id,
             EfxValue::Object(ids) => ids.push(id),
-            _ => return invalid_call("ID3DXEffect::SetTexture"),
+            _ => {
+                return ValueResult {
+                    status: invalid_call("ID3DXEffect::SetTexture"),
+                    value: 0,
+                };
+            }
         },
         None => match &mut effect.params[root].value {
             EfxValue::Object(ids) => {
@@ -1923,11 +2001,58 @@ pub fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) ->
                     ids[0] = id;
                 }
             }
-            _ => return invalid_call("ID3DXEffect::SetTexture"),
+            _ => {
+                return ValueResult {
+                    status: invalid_call("ID3DXEffect::SetTexture"),
+                    value: 0,
+                };
+            }
         },
     }
     effect.touch(target.root);
-    ok()
+    ValueResult {
+        status: ok(),
+        value: previous,
+    }
+}
+
+pub fn d3dx_effect_texture_shared(effect: &D3dxEffect, handle: u32) -> bool {
+    effect
+        .target(handle)
+        .and_then(|target| target.root)
+        .is_some_and(|root| effect.shared(root))
+}
+
+pub fn d3dx_effect_texture_ref_count(effect: &D3dxEffect, id: u32) -> u32 {
+    if id == 0 {
+        return 0;
+    }
+    let pooled = effect.pool.is_some();
+    effect
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(index, param)| !(effect.shared(*index) && pooled) && param.type_.texture())
+        .filter_map(|(_, param)| match &param.value {
+            EfxValue::Object(ids) => Some(ids),
+            _ => None,
+        })
+        .flatten()
+        .filter(|&&candidate| candidate == id)
+        .count() as u32
+}
+
+pub fn d3dx_effect_pool_texture_ref_count(pool: &D3dxEffectPool, id: u32) -> u32 {
+    if id == 0 {
+        return 0;
+    }
+    let state = pool.state.lock().unwrap();
+    state
+        .values()
+        .filter(|entry| texture_type(entry.shape.type_))
+        .flat_map(|entry| &entry.objects)
+        .filter(|&&candidate| candidate == id)
+        .count() as u32
 }
 
 pub fn d3dx_effect_texture(effect: &D3dxEffect, handle: u32) -> ValueResult {
@@ -2417,6 +2542,9 @@ fn technique_supported(effect: &D3dxEffect, technique: &EfxTechnique) -> Result<
                 validate_state_references(effect, state, technique)?;
                 continue;
             }
+            if state.op == FXS_FVF {
+                continue;
+            }
             return Err(unsupported(
                 "ValidateTechnique",
                 format!("effect state operation {} is unsupported", state.op),
@@ -2860,7 +2988,8 @@ fn run_preshader<'a>(
         .get_or_init(|| compile_preshader(effect, code))
         .as_ref()
         .map_err(Clone::clone)?;
-    let inputs = ctab_inputs_with(effect, &compiled.constants, &compiled.params)?;
+    let mut inputs = effect.preshader_inputs.borrow_mut();
+    ctab_inputs_with(effect, &compiled.constants, &compiled.params, &mut inputs)?;
     preshader::evaluate(&compiled.program, &inputs)
 }
 
@@ -2868,8 +2997,10 @@ fn ctab_inputs_with(
     effect: &D3dxEffect,
     ctab: &[CtabConst],
     params: &[usize],
-) -> Result<Vec<[f32; 4]>, RenderError> {
-    let mut inputs = vec![[0.0f32; 4]; 256];
+    inputs: &mut Vec<[f32; 4]>,
+) -> Result<(), RenderError> {
+    inputs.clear();
+    inputs.resize(256, [0.0f32; 4]);
     for (constant, &index) in ctab.iter().zip(params) {
         if constant.set != D3DXRS_FLOAT4 {
             return Err(unsupported(
@@ -2887,7 +3018,7 @@ fn ctab_inputs_with(
         }
         constant_registers_into(effect, index, constant, &mut flat[range])?;
     }
-    Ok(inputs)
+    Ok(())
 }
 
 fn sampler_state_parameter(effect: &D3dxEffect, state: &EfxState) -> Result<usize, RenderError> {
@@ -2987,6 +3118,29 @@ impl StateSink<'_> {
         }
     }
 
+    fn fvf(&mut self, format: u32) -> Result<(), RenderError> {
+        match self {
+            StateSink::Device(device) => {
+                if format == 0 {
+                    return Ok(());
+                }
+                let result = crate::d3d9::d3d9_create_fvf_declaration(device, format);
+                if result.status.code != StatusCode::Ok {
+                    return Err(invalid_data(result.status.message));
+                }
+                let status = crate::d3d9::d3d9_set_fvf_binding(device, result.value, format);
+                if status.code != StatusCode::Ok {
+                    return Err(invalid_data(status.message));
+                }
+                Ok(())
+            }
+            StateSink::Commands(commands, values_out) => {
+                commands.push(effect_command(D3dxEffectCommandKind::SetFVF, 0, 0, format));
+                Ok(())
+            }
+        }
+    }
+
     fn transform(&mut self, state: u32, matrix: [f32; 16]) -> Result<(), RenderError> {
         match self {
             StateSink::Device(device) => device
@@ -3075,8 +3229,13 @@ impl StateSink<'_> {
         fill: impl FnOnce(&mut [f32]) -> Result<(), RenderError>,
     ) -> Result<(), RenderError> {
         let len = count as usize * 4;
+        stats::record(|s| {
+            s.constant_updates += 1;
+            s.constant_registers += u64::from(count);
+        });
         match self {
             StateSink::Device(_) => {
+                stats::record(|s| s.constant_temp_bytes += (len * size_of::<f32>()) as u64);
                 let mut values = vec![0.0f32; len];
                 fill(&mut values)?;
                 self.shader_constants(pixel, start, Cow::Owned(values))
@@ -3357,7 +3516,7 @@ fn apply_shader_constants(
     ctx: Apply,
     changed: Option<u64>,
 ) -> Result<(), RenderError> {
-    let ctab = object_ctab(object)?;
+    let ctab = object_ctab(object, false)?;
     let params = object
         .ctab_params
         .get_or_init(|| ctab_params(effect, ctab, "shader constant"))
@@ -3413,7 +3572,8 @@ fn apply_shader_constants(
         .map_err(Clone::clone)?;
     if let Some(compiled) = compiled {
         if compiled.params.iter().any(|&index| stale(index)) {
-            let inputs = ctab_inputs_with(effect, &compiled.constants, &compiled.params)?;
+            let mut inputs = effect.preshader_inputs.borrow_mut();
+            ctab_inputs_with(effect, &compiled.constants, &compiled.params, &mut inputs)?;
             let values = preshader::evaluate(&compiled.program, &inputs)?;
             for &register in &compiled.outputs {
                 let start = register as usize * 4;
@@ -3536,6 +3696,7 @@ fn apply_state(
             let value = numeric_value(effect, state)?;
             sink.texture_stage_state(state.index, tss, value)?;
         }
+        FXS_FVF => sink.fvf(numeric_value(effect, state)?)?,
         126 => {
             let matrix = transform_value(effect, state)?;
             sink.transform(D3DTS_TEXTURE0 + state.index, matrix)?;
@@ -3593,21 +3754,27 @@ fn shader_constant_keys(
     effect: &D3dxEffect,
     keys: &mut EffectKeys,
     pixel: bool,
-    code: &[u8],
+    object: &EfxObject,
     save_shader: bool,
 ) -> Result<(), RenderError> {
     if save_shader {
-        if let Some(code) = preshader::shader_preshader(code)? {
-            for register in preshader::parse(code)?.output_registers() {
-                if pixel {
-                    keys.ps_const_f.push((register, 1));
-                } else {
-                    keys.vs_const_f.push((register, 1));
-                }
+        let outputs = object
+            .saved_outputs
+            .get_or_init(|| match preshader::shader_preshader(&object.data)? {
+                Some(code) => Ok(preshader::parse(code)?.output_registers()),
+                None => Ok(Vec::new()),
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
+        for &register in outputs {
+            if pixel {
+                keys.ps_const_f.push((register, 1));
+            } else {
+                keys.vs_const_f.push((register, 1));
             }
         }
     }
-    for constant in parse_ctab(code)? {
+    for constant in object_ctab(object, true)? {
         match constant.set {
             D3DXRS_FLOAT4 => {
                 if !save_shader {
@@ -3654,7 +3821,7 @@ fn shader_state_keys(
                 .get(id)
                 .ok_or_else(|| invalid_data("array selector shader object is missing"))?;
             if !object.data.is_empty() {
-                shader_constant_keys(effect, keys, pixel, &object.data, save_shader)?;
+                shader_constant_keys(effect, keys, pixel, object, save_shader)?;
             }
         }
         return Ok(());
@@ -3662,7 +3829,7 @@ fn shader_state_keys(
     if let Some(id) = D3dxEffect::state_shader_object(effect, state) {
         if let Some(object) = effect.objects.get(&id) {
             if !object.data.is_empty() {
-                shader_constant_keys(effect, keys, pixel, &object.data, save_shader)?;
+                shader_constant_keys(effect, keys, pixel, object, save_shader)?;
             }
         }
     }
@@ -3670,6 +3837,7 @@ fn shader_state_keys(
 }
 
 fn touched_keys(effect: &D3dxEffect, skip_shader: bool) -> Result<EffectKeys, RenderError> {
+    stats::record(|s| s.saved_key_builds += 1);
     let mut keys = EffectKeys::default();
     let Some(technique) = effect.techniques.get(effect.technique as usize) else {
         return Ok(keys);
@@ -3726,6 +3894,7 @@ pub fn d3dx_effect_begin(
     device: &mut D3d9Device,
     flags: u32,
 ) -> ValueResult {
+    stats::record(|s| s.effect_begins += 1);
     if effect.lost {
         return ValueResult {
             status: invalid_call("ID3DXEffect::Begin"),
@@ -3795,6 +3964,7 @@ pub fn d3dx_effect_begin_pass(
     device: &mut D3d9Device,
     index: u32,
 ) -> D3dxEffectRunResult {
+    stats::record(|s| s.effect_begin_passes += 1);
     if effect.lost {
         return run_result(invalid_call("ID3DXEffect::BeginPass"));
     }
@@ -3815,6 +3985,7 @@ pub fn d3dx_effect_begin_pass(
 }
 
 pub fn d3dx_effect_commit(effect: &mut D3dxEffect, device: &mut D3d9Device) -> D3dxEffectRunResult {
+    stats::record(|s| s.effect_commits += 1);
     if effect.lost {
         return run_result(invalid_call("ID3DXEffect::CommitChanges"));
     }
@@ -3993,7 +4164,7 @@ fn clear_lost_textures(effect: &mut D3dxEffect, device: &D3d9Device) {
     }
     if let Some(pool) = &effect.pool {
         let mut state = pool.lock().unwrap();
-        for entry in state.entries.values_mut() {
+        for entry in state.values_mut() {
             for id in &mut entry.objects {
                 if *id != 0 && device.resource_pool(*id) == Some(D3DPOOL_DEFAULT) {
                     *id = 0;

@@ -4,6 +4,7 @@
 | --- | --- | --- |
 | `tools/test.py --native` | Native CTest suites (runtime, DirectX, Metal, controls) | `game`-labelled suites only |
 | `tools/test.py --compile-only` | Native test binaries build | No |
+| `tools/test.py --translator` | Synthetic assembly cases translated and compared with Unicorn | No |
 | `tools/test.py --mods` | Mod loader, hooks and replay against the translated archive | Yes |
 | `tools/test.py --d3d8-wgpu test\|probe` | Rust D3D8 renderer tests or offscreen probe | Yes, plus a GPU |
 | `tools/format.py` | Native code formatting | No |

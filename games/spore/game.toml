@@ -25,7 +25,8 @@ source_notes = "Choose the collection folder containing SporebinEP1, Data, DataE
 
 [translate]
 code_map = "metadata"
-native = { header = "native/video.h", sources = ["native/video.cpp"] }
+analysis_facts = "metadata/analysis-facts.json"
+native = { header = "native/native.h", sources = ["native/video.cpp", "native/combat.cpp"] }
 
 [modules.aux.goggame]
 name = "goggame-1948823323.dll"
@@ -65,3 +66,10 @@ DataDir = 'C:\Program Files\Electronic Arts\SPORE\DataEP1\'
 AddOnID = 1
 PackID = 116700625
 DataDir = 'C:\Program Files\Electronic Arts\SPORE\bp1content\'
+
+[analysis]
+method_catalog = "../../dx/metadata/com-methods.json"
+effect_catalog = "../../dx/metadata/method-effects.json"
+families = ["d3d9.dll!*::*", "dsound.dll!*::*"]
+assert_effect_coverage = true
+guest_bounds = true
