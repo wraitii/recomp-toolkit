@@ -1,7 +1,7 @@
 //! Prints a `PlannedFunction` as C: the body (blocks, phi moves, publications, flag descriptors,
 //! calls, dynamic dispatch, x87 clones) plus its entry, alternate-entry and direct-variant
-//! wrappers. Bodies return without checking the guest return; `fn_` wrappers check it for generic
-//! callers, and direct call sites check it themselves unless the target's return slot is proved.
+//! wrappers. Guest return instructions validate their destination; entry wrappers preserve tail
+//! calls across guest jumps. Direct call sites also check their expected continuation.
 //! Unrepresentable forms return a diagnostic, and the driver then emits a trap body. Individual
 //! unsupported instructions become named runtime traps listed in `EmitReport`. It owns all
 //! translated C text: `x87` prints x87 clone events, `helpers` holds the generated C preludes and
@@ -520,6 +520,7 @@ impl<'a> Emitter<'a> {
         args.join(", ")
     }
 
+    // Keep wrappers tail-callable: post-call work retains a host frame on every guest loop iteration.
     fn wrappers(&mut self, body: &str) {
         let addr = self.s.addr;
         if self.direct.is_some() {
@@ -537,7 +538,7 @@ impl<'a> Emitter<'a> {
                 let args = self.call_args(Some(addr)).replace(&primary, "target");
                 let _ = writeln!(
                     self.out,
-                    "void region_{addr:08x}(X86 *c{base_param}, uint32_t target) {{ {body}({args}); recomp_return_fast_(c); }}"
+                    "void region_{addr:08x}(X86 *c{base_param}, uint32_t target) {{ {body}({args}); }}"
                 );
             }
             for entry in &self.s.entries {
@@ -565,7 +566,7 @@ impl<'a> Emitter<'a> {
             }
             let _ = writeln!(
                 self.out,
-                "void fn_{entry:08x}(X86 *c{base_param}) {{ raw_{entry:08x}(c{base_arg}); recomp_return_fast_(c); }}"
+                "void fn_{entry:08x}(X86 *c{base_param}) {{ raw_{entry:08x}(c{base_arg}); }}"
             );
         }
     }
@@ -2189,11 +2190,11 @@ impl<'a> Emitter<'a> {
                     let _ = writeln!(self.out, "case {target_addr}:");
                     self.edge(Some(current), target)?;
                 }
-                self.out.push_str("default:\nreturn;\n}\n");
+                self.out.push_str("default:\nrecomp_return_fast_(c);\nreturn;\n}\n");
                 return Ok(());
             }
         }
-        self.out.push_str("return;\n");
+        self.out.push_str("recomp_return_fast_(c);\nreturn;\n");
         Ok(())
     }
 
