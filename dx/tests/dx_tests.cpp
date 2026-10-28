@@ -7255,14 +7255,14 @@ static void test_enum_display_modes() {
     g_enum_count = 0;
     uint32_t hr = call_method(dd, DD_EnumDisplayModes, {0, 0, 0, cb});
     CHECK_EQ(hr, DD_OK);
-    CHECK_EQ(g_enum_count, 21);
+    CHECK_EQ(g_enum_count, 53);
     CHECK_EQ(g_enum_modes[0][0], 640);
     CHECK_EQ(g_enum_modes[0][1], 480);
     CHECK_EQ(g_enum_modes[0][2], 8);
     CHECK_EQ(g_enum_modes[5][0], 1024);
     CHECK_EQ(g_enum_modes[5][2], 16);
-    CHECK_EQ(g_enum_modes[11][0], 3840);
-    CHECK_EQ(g_enum_modes[11][1], 2160);
+    CHECK_EQ(g_enum_modes[11][0], 1366);
+    CHECK_EQ(g_enum_modes[11][1], 768);
     CHECK_EQ(g_enum_modes[11][2], 16);
     CHECK_EQ(call_method(dd, DD_SetDisplayMode, {800, 600, 8}), DD_OK);
     CHECK(ddraw_display_mode(&mw, &mh, &mbpp));
@@ -7556,7 +7556,7 @@ static void test_configurable_display_modes() {
     };
 
     // A list of two, one of which the built-in table does not contain.
-    os_setenv("RECOMP_DDRAW_MODES", "640x480x8,1280x960x16");
+    os_setenv("RECOMP_DDRAW_MODES", "640x480x8,1234x777x16");
     ddraw_reset_modes();
     uint32_t dd = fresh_dd();
     enum_modes_now(dd, cb);
@@ -7564,11 +7564,11 @@ static void test_configurable_display_modes() {
     CHECK_EQ(g_enum_modes[0][0], 640u);
     CHECK_EQ(g_enum_modes[0][1], 480u);
     CHECK_EQ(g_enum_modes[0][2], 8u);
-    CHECK_EQ(g_enum_modes[1][0], 1280u);
-    CHECK_EQ(g_enum_modes[1][1], 960u);
+    CHECK_EQ(g_enum_modes[1][0], 1234u);
+    CHECK_EQ(g_enum_modes[1][1], 777u);
     CHECK_EQ(g_enum_modes[1][2], 16u);
     // Accepted because it is offered...
-    CHECK_EQ(call_method(dd, DD_SetDisplayMode, {1280, 960, 16}), DD_OK);
+    CHECK_EQ(call_method(dd, DD_SetDisplayMode, {1234, 777, 16}), DD_OK);
     // ...and 800x600, which the built-in table has and this list does not, is
     // now refused. This is the assertion that proves one table and not two.
     CHECK_EQ(call_method(dd, DD_SetDisplayMode, {800, 600, 16}), DDERR_INVALIDPARAMS);
@@ -7589,7 +7589,7 @@ static void test_configurable_display_modes() {
         "",                      // set to nothing is the same as unset
         "640x480",               // a mode needs a depth
         "640x480x8,",            // a trailing comma is a missing mode
-        "640x480x8 1280x960x16", // a space is not a separator
+        "640x480x8 1234x777x16", // a space is not a separator
         "640x480x24",            // a depth the enumeration cannot describe
         "640x480x0",             // nor can it describe none
         "0x480x8",               // a mode with no width is not a mode
@@ -7601,10 +7601,10 @@ static void test_configurable_display_modes() {
         ddraw_reset_modes();
         dd = fresh_dd();
         enum_modes_now(dd, cb);
-        if (g_enum_count != 21)
-            printf("  RECOMP_DDRAW_MODES=\"%s\" gave %u modes, wanted the built-in 21\n", spec,
+        if (g_enum_count != 53)
+            printf("  RECOMP_DDRAW_MODES=\"%s\" gave %u modes, wanted the built-in 53\n", spec,
                    g_enum_count);
-        CHECK_EQ(g_enum_count, 21u);
+        CHECK_EQ(g_enum_count, 53u);
         CHECK_EQ(call_method(dd, DD_SetDisplayMode, {800, 600, 16}), DD_OK);
     }
 
@@ -7617,23 +7617,23 @@ static void test_configurable_display_modes() {
     ddraw_reset_modes();
     dd = fresh_dd();
     CHECK_EQ(call_method(dd, DD_SetDisplayMode, {640, 480, 8}), DD_OK);
-    CHECK_EQ(ddraw_set_modes("1280x960x16"), 1);
+    CHECK_EQ(ddraw_set_modes("1234x777x16"), 1);
     enum_modes_now(dd, cb);
     CHECK_EQ(g_enum_count, 1u);
-    CHECK_EQ(g_enum_modes[0][0], 1280u);
-    CHECK_EQ(call_method(dd, DD_SetDisplayMode, {1280, 960, 16}), DD_OK);
+    CHECK_EQ(g_enum_modes[0][0], 1234u);
+    CHECK_EQ(call_method(dd, DD_SetDisplayMode, {1234, 777, 16}), DD_OK);
 
     // A malformed runtime spec changes nothing at all, so a typo cannot
     // narrow the offered set behind the script's back.
-    CHECK_EQ(ddraw_set_modes("1280x960"), 0);
+    CHECK_EQ(ddraw_set_modes("1234x777"), 0);
     enum_modes_now(dd, cb);
     CHECK_EQ(g_enum_count, 1u);
-    CHECK_EQ(g_enum_modes[0][0], 1280u);
+    CHECK_EQ(g_enum_modes[0][0], 1234u);
 
     // And an empty spec puts the built-in list back.
     CHECK_EQ(ddraw_set_modes(nullptr), 1);
     enum_modes_now(dd, cb);
-    CHECK_EQ(g_enum_count, 21u);
+    CHECK_EQ(g_enum_count, 53u);
 
     // Unset is the same list as well, which is the state every other test runs in -
     // so this one has to leave it that way.
@@ -7641,15 +7641,15 @@ static void test_configurable_display_modes() {
     ddraw_reset_modes();
     dd = fresh_dd();
     enum_modes_now(dd, cb);
-    CHECK_EQ(g_enum_count, 21u);
+    CHECK_EQ(g_enum_count, 53u);
     CHECK_EQ(g_enum_modes[5][0], 1024u);
-    CHECK_EQ(call_method(dd, DD_SetDisplayMode, {1366, 768, 16}), DDERR_INVALIDPARAMS);
-    CHECK_EQ(ddraw_add_mode(1366, 768, 16), 1);
-    CHECK_EQ(ddraw_add_mode(1366, 768, 16), 1); // duplicate request adds no duplicate row
+    CHECK_EQ(call_method(dd, DD_SetDisplayMode, {1234, 777, 16}), DDERR_INVALIDPARAMS);
+    CHECK_EQ(ddraw_add_mode(1234, 777, 16), 1);
+    CHECK_EQ(ddraw_add_mode(1234, 777, 16), 1); // duplicate request adds no duplicate row
     CHECK_EQ(ddraw_add_mode(1920, 1080, 32), 1);
     enum_modes_now(dd, cb);
-    CHECK_EQ(g_enum_count, 22u);
-    CHECK_EQ(call_method(dd, DD_SetDisplayMode, {1366, 768, 16}), DD_OK);
+    CHECK_EQ(g_enum_count, 54u);
+    CHECK_EQ(call_method(dd, DD_SetDisplayMode, {1234, 777, 16}), DD_OK);
     CHECK_EQ(call_method(dd, DD_SetDisplayMode, {3840, 2160, 16}), DD_OK);
     ddraw_reset_modes();
 }
