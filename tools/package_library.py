@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tomllib
 from sign_macos import sign_bundle
-from build import rust_translator
+from build import rust_pcode_library, rust_translator
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -116,6 +116,8 @@ def package(bundle, build_root, python_root):
     dependencies.mkdir()
     (dependencies / "bin").mkdir()
     shutil.copy2(translator, dependencies / "bin/recomp-translate")
+    pcode = rust_pcode_library(dependency_build)
+    shutil.copy2(pcode, dependencies / "bin" / pcode.name)
     cmake_build = dependency_build / "cmake/macos-stub"
     subprocess.run([str(python / "bin/cmake"), "--install", str(cmake_build / "_deps/sdl3-build"),
                     "--prefix", str(dependencies / "sdl")], check=True)

@@ -366,13 +366,18 @@ def translation_input(cfg):
 
 
 def rust_pcode_library(build_root):
-    """Build the shared p-code evaluator library for this desktop host."""
+    """Return the bundled p-code evaluator library or build it for this desktop host."""
+    names = {"Darwin": "librk_pcode_ffi.dylib", "Windows": "rk_pcode_ffi.dll"}
+    name = names.get(platform.system(), "librk_pcode_ffi.so")
+    bundled = ROOT.parent / "dependencies/bin" / name
+    if (ROOT.parent / "dependencies/manifest.json").is_file():
+        if not bundled.is_file():
+            raise ValueError("Bundled p-code library is missing; reinstall Recomp Toolkit")
+        return bundled
     target = Path(build_root) / "recomp/cargo"
     subprocess.run(["cargo", "build", "--release", "--quiet", "--locked", "-p", "rk-pcode-ffi",
                     "--manifest-path", str(ROOT / "translator/Cargo.toml"), "--target-dir", str(target)],
                    check=True)
-    names = {"Darwin": "librk_pcode_ffi.dylib", "Windows": "rk_pcode_ffi.dll"}
-    name = names.get(platform.system(), "librk_pcode_ffi.so")
     source = target / "release" / name
     if platform.system() == "Darwin":
         staged = Path(build_root) / "recomp/pcode" / name
