@@ -6,6 +6,7 @@
 
 mod facts;
 mod reloc;
+mod stack_policy;
 mod stack_returns;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -277,6 +278,10 @@ struct BodyContext<'a> {
     fault_state: rk_core::settings::FaultState,
     assume_private_stack: bool,
     lazy_stack_writes: bool,
+    return_stack_inputs: &'a serde_json::Value,
+    return_stack_policy: rk_core::settings::ReturnStackPolicy,
+    return_stack_functions: &'a BTreeSet<Addr>,
+    return_stack_opt_out: &'a BTreeSet<Addr>,
     assume_stack_pointer_bases: bool,
     call_hooks: bool,
     exposed_stack_functions: &'a BTreeSet<Addr>,
@@ -341,7 +346,27 @@ fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::
         &rk_x87::Recipes,
         ctx.reloc.is_some(),
     )?;
-    rk_plan::plan_function(&cg, &ctx.plan_options(ir.addr))
+    let options = ctx.plan_options(ir.addr);
+    let mut view = None;
+    let planned = rk_plan::plan_function_with_view(
+        &cg,
+        &options,
+        Some(&mut |ssa| view = Some(rk_ssa::memory::ReturnStackSummary::new(ssa, &ctx.facts))),
+    )?;
+    let Some(view) = view else { return Ok(planned) };
+    let omissions = stack_returns::omission_plan(&planned, &view);
+    let enabled = match ctx.return_stack_policy {
+        rk_core::settings::ReturnStackPolicy::Off => false,
+        rk_core::settings::ReturnStackPolicy::NormalCLifetime => {
+            ctx.return_stack_functions.contains(&ir.addr)
+        }
+        rk_core::settings::ReturnStackPolicy::Yolo => true,
+    };
+    if enabled && !ctx.return_stack_opt_out.contains(&ir.addr) && options.assume_private_stack {
+        rk_plan::omit_return_stack(planned, omissions, &options)
+    } else {
+        Ok(planned)
+    }
 }
 
 fn error_reason(error: &rk_core::Error) -> (String, Option<String>) {
@@ -583,6 +608,20 @@ fn build_bodies(
         .filter(|(_, arguments)| arguments.st0)
         .map(|(&addr, _)| addr)
         .collect();
+    let mut return_stack_inputs = if stack_return_report.is_some()
+        || settings.return_stack_policy == rk_core::settings::ReturnStackPolicy::NormalCLifetime
+    {
+        stack_policy::fingerprint(settings)?
+    } else {
+        serde_json::Value::Null
+    };
+    if !return_stack_inputs.is_null() {
+        return_stack_inputs["planning"] = serde_json::json!({"direct": switches.direct, "descriptors": switches.descriptors,
+            "coalesce_roots": switches.coalesce_roots, "x87_dynamic": switches.x87_dynamic, "x87_mode": x87_mode as u8});
+    }
+    if stack_return_report.is_none() {
+        stack_policy::validate(settings, &return_stack_inputs)?;
+    }
     let make_ctx = |proven_returns, direct_arguments| BodyContext {
         program,
         facts: global.call_facts(),
@@ -601,6 +640,10 @@ fn build_bodies(
         fault_state: settings.fault_state,
         assume_private_stack: settings.assume_private_stack,
         lazy_stack_writes: settings.lazy_stack_writes,
+        return_stack_inputs: &return_stack_inputs,
+        return_stack_policy: settings.return_stack_policy,
+        return_stack_functions: &settings.return_stack_functions,
+        return_stack_opt_out: &settings.return_stack_opt_out,
         assume_stack_pointer_bases: settings.assume_stack_pointer_bases,
         call_hooks: settings.call_hooks,
         exposed_stack_functions: &settings.exposed_stack_functions,
@@ -638,6 +681,7 @@ fn build_bodies(
             })
             .collect(),
     };
+    let planning_started = std::time::Instant::now();
     let prepared: Vec<Prepared> = sources
         .into_par_iter()
         .map(|(addr, ir)| {
@@ -674,6 +718,10 @@ fn build_bodies(
         })
         .collect();
     if let Some(path) = stack_return_report {
+        eprintln!(
+            "stack-return planning/capture: {:.3}s",
+            planning_started.elapsed().as_secs_f64()
+        );
         stack_returns::write(
             &ctx,
             prepared,

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use rk_core::contract::Field;
 use rk_core::ir::OpCode;
 use rk_core::memory::{Address, Base, Effects, Footprint, Range};
-use rk_core::{Lookup, LookupSet};
+use rk_core::{Addr, Lookup, LookupSet};
 use rk_ir::x87::MemoryEffect;
 use rk_ir::Op;
 
@@ -1184,6 +1184,55 @@ pub fn dependencies(s: &Ssa, effect: ValueId) -> Vec<ValueId> {
     result.sort_unstable();
     result.dedup();
     result
+}
+
+pub struct ReturnStackSummary {
+    frame: Frame,
+    enabled: bool,
+    returns: BTreeMap<Addr, Address>,
+}
+
+impl ReturnStackSummary {
+    pub fn new(s: &Ssa, facts: &dyn CallFacts) -> Self {
+        let mut addresses = Addresses::local_with_parameters(s);
+        let returns = s.boundaries.iter().filter_map(|boundary| {
+            if s.value(boundary.at).op != Op::Return { return None; }
+            let returned_pointer = Field::ALL.into_iter().take(8).filter(|&field| field != Field::Esp).any(|field| {
+                let address = addresses.state(boundary.at, field);
+                matches!(addresses.relations.bounds(address), Address::Known { base: Base::Frame, offset, .. } if (offset as i32) < 0)
+            });
+            let esp = addresses.state(boundary.at, Field::Esp);
+            (!returned_pointer).then_some((s.value_addr[boundary.at as usize], addresses.relations.bounds(esp)))
+        }).collect();
+        Self {
+            frame: Frame::new(s, Some(facts)),
+            enabled: s.assume_private_stack && s.entries.len() == 1 && s.entries[0].addr == s.addr,
+            returns,
+        }
+    }
+
+    pub fn eligible(&self, site: Addr, range: Range) -> bool {
+        if !self.enabled || !self.frame.unexposed(range) {
+            return false;
+        }
+        match (
+            self.frame.relations.bounds(range.address),
+            self.returns.get(&site),
+        ) {
+            (
+                Address::Known { base, offset, span },
+                Some(Address::Known {
+                    base: own,
+                    offset: top,
+                    span: 0,
+                }),
+            ) if base == *own => {
+                i64::from(offset as i32) + i64::from(span) + i64::from(range.size)
+                    <= i64::from(*top as i32)
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

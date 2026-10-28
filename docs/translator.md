@@ -128,7 +128,26 @@ outcomes and sites where every covered return/slot qualifies, so a site can
 belong to several categories without treating one matching query as site-wide
 coverage. Indirect callers, unavailable code, unknown addresses,
 loops and search limits restrict coverage. `--only`/`--selection` filters callees
-while retaining their callers. The report never changes generated code.
+while retaining their callers. The report never changes generated code. Its sibling
+`*.facts.json` persists versioned nominations separately from proven call facts,
+with executable, producer, configuration and input-file fingerprints. Per-function
+plans retain frontier categories, partial-overwrite and completed-call progress,
+and each lifetime scenario's support; unresolved totals are not positive evidence.
+Complete proofs cover only listed call/return/slot queries; neither percentages nor
+sample minimums apply. Open caller coverage prevents a function-wide proof.
+
+`[translate] return_stack_policy` defaults to `"off"`. `"normal-c-lifetime"` consumes
+`return_stack_facts` for explicitly accepted `return_stack_functions`; stale facts,
+missing support or definite-read counterexamples reject consumption. No automatic
+percentage or sample threshold is selected. `"yolo"` skips caller evidence for
+profiling. `return_stack_opt_out` overrides either mode. DIVERGENCE(original): both
+modes assume eligible private slots below restored ESP dead on return, including
+unqueried callers. They omit final return publications only, retaining earlier
+writes, computation, x87 effects and publications when `recomp_hooks_ever` is set.
+Shared planning applies to raw and existing direct bodies without new variants.
+A lightweight pre-promotion frame summary plans eligible slots independently of
+consumption; full continuation searches remain offline. Facts and reports include
+no claim that unread-at-caller-return or a tracking failure proves permanent death.
 
 There is no emission cache or `--regen-function`. `build.py` fingerprints each
 image from the input JSON, the translator binary, the code-map files and

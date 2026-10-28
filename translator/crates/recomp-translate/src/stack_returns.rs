@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
@@ -8,6 +9,7 @@ use rk_core::memory::{Address, Base, Range};
 use rk_core::Addr;
 use rk_ir::{Op, StateKey};
 use rk_ssa::address::{Addresses, Relations};
+use rk_ssa::initialization::Initialization;
 use rk_ssa::{CallEffect, CallFacts, CallSummary, Ssa, ValueId};
 use serde_json::{json, Value};
 
@@ -67,11 +69,6 @@ struct Event {
 struct Block {
     events: Vec<Event>,
     next: Vec<usize>,
-}
-
-struct Initialization {
-    writes: Vec<Addr>,
-    entry_return_address: bool,
 }
 
 pub(super) struct Body {
@@ -165,57 +162,13 @@ fn mapped_in(address: Address, cursor: Cursor, body: &Body) -> Address {
 }
 
 fn address_origins(s: &Ssa, roots: &[ValueId], facts: &dyn CallFacts) -> Value {
-    let mut pending = roots.to_vec();
-    let mut seen = BTreeSet::new();
-    let mut inputs = BTreeSet::new();
-    let mut reloads = BTreeMap::new();
-    let mut loads = BTreeSet::new();
-    let mut unresolved = BTreeSet::new();
-    let mut limited = false;
-    while let Some(id) = pending.pop() {
-        if seen.len() >= 256 {
-            limited = true;
-            break;
-        }
-        if !seen.insert(id) {
-            continue;
-        }
-        match s.value(id).op {
-            Op::Input(key) => {
-                if let Some(field) = s.field(key) {
-                    inputs.insert(field.name());
-                } else {
-                    unresolved.insert(format!("{:?}", s.value(id).op));
-                }
-            }
-            Op::StateKeep(_) => pending.extend(s.args(id).get(1).copied()),
-            Op::StateReload(key) => {
-                if let Some(field) = s.field(key) {
-                    let call = s.args(id)[0];
-                    let site = s.value_addr[call as usize];
-                    let target = match s.value(call).op {
-                        Op::Call { target } => Some(target),
-                        _ => None,
-                    };
-                    reloads.insert((field, site), json!({"field": field.name(), "site": format!("{site:08x}"),
-                        "target": target.map(|target| format!("{target:08x}")), "cleanup": facts.summary(site, target).cleanup}));
-                }
-            }
-            Op::P(rk_core::ir::OpCode::Load) => {
-                loads.insert(format!("{:08x}", s.value_addr[id as usize]));
-            }
-            Op::Const(_) | Op::Target(_) | Op::CcKind(_) => {}
-            op if rk_ir::properties(op).pure && !s.args(id).is_empty() => {
-                pending.extend(s.args(id))
-            }
-            op => {
-                unresolved.insert(format!("{op:?}"));
-            }
-        }
-    }
-    json!({"value": roots.first(), "operation": roots.first().map(|&root| format!("{:?}", s.value(root).op)),
-        "inputs": inputs, "reloads": reloads.into_values().collect::<Vec<_>>(),
-        "pointer_loads": loads, "walk_limited": limited, "unresolved_operations": unresolved})
+    let origins = rk_ssa::origin::origins(s, roots, facts);
+    json!({"value": origins.value, "operation": origins.operation,
+        "inputs": origins.inputs.iter().map(|field| field.name()).collect::<BTreeSet<_>>(),
+        "reloads": origins.reloads.iter().map(|reload| json!({"field": reload.field.name(), "site": format!("{:08x}", reload.site),
+            "target": reload.target.map(|addr| format!("{addr:08x}")), "cleanup": reload.cleanup})).collect::<Vec<_>>(),
+        "pointer_loads": origins.pointer_loads.iter().map(|addr| format!("{addr:08x}")).collect::<Vec<_>>(),
+        "walk_limited": origins.walk_limited, "unresolved_operations": origins.unresolved_operations})
 }
 
 fn address_origin(s: &Ssa, root: ValueId, facts: &dyn CallFacts) -> Value {
@@ -406,6 +359,31 @@ fn stores(planned: &rk_plan::PlannedFunction) -> Vec<Store> {
     result
 }
 
+pub(super) fn omission_plan(
+    planned: &rk_plan::PlannedFunction,
+    summary: &rk_ssa::memory::ReturnStackSummary,
+) -> BTreeMap<ValueId, Vec<StateKey>> {
+    let mut result = BTreeMap::new();
+    if planned.ssa.return_slot.is_err() {
+        return result;
+    }
+    for store in stores(planned) {
+        if !summary.eligible(store.site, store.range) {
+            continue;
+        }
+        if let Some(boundary) = planned.ssa.boundaries.iter().find(|boundary| {
+            planned.ssa.value(boundary.at).op == Op::Return
+                && planned.ssa.value_addr[boundary.at as usize] == store.site
+        }) {
+            result
+                .entry(boundary.at)
+                .or_insert_with(Vec::new)
+                .push(store.key);
+        }
+    }
+    result
+}
+
 fn body(s: &Ssa, facts: &dyn CallFacts) -> Result<Body> {
     anyhow::ensure!(
         s.entries.len() == 1 && s.entries[0].addr == s.addr,
@@ -531,117 +509,34 @@ fn body(s: &Ssa, facts: &dyn CallFacts) -> Result<Body> {
 }
 
 fn initialized_reads(body: &Body) -> BTreeMap<(usize, usize), Initialization> {
-    let mut predecessors = vec![Vec::new(); body.blocks.len()];
-    for (index, block) in body.blocks.iter().enumerate() {
-        for &next in &block.next {
-            predecessors[next].push(index);
-        }
-    }
-    let prove = |block: usize, index: usize, read: Range| -> Option<Initialization> {
-        if !matches!(
-            read.address,
-            Address::Known {
-                base: Base::Frame | Base::Stack(_),
-                span: 0,
-                ..
-            }
-        ) || read.size == 0
-            || read.size > BYTE_LIMIT
-        {
-            return None;
-        }
-        let mut pending = vec![(block, index, (0..read.size).collect::<BTreeSet<_>>(), false)];
-        let mut seen = BTreeSet::new();
-        let mut active = BTreeSet::new();
-        let mut writes = BTreeSet::new();
-        let mut entry_return_address = false;
-        while let Some((block, index, mut remaining, finished)) = pending.pop() {
-            let key = (block, index, remaining.clone());
-            if finished {
-                active.remove(&key);
-                seen.insert(key);
-                continue;
-            }
-            if seen.contains(&key) {
-                continue;
-            }
-            if seen.len() + active.len() >= STEP_LIMIT || !active.insert(key) {
-                return None;
-            }
-            pending.push((block, index, remaining.clone(), true));
-            if index == 0 {
-                if block == body.entry {
-                    if body.return_slot_proven {
-                        let slot = Range::new(Address::exact(Base::Frame, 0), 4);
-                        let before = remaining.len();
-                        remaining.retain(|&byte| {
-                            body.relations
-                                .offset_of(slot, Range::new(read.address.offset(byte), 1))
-                                .is_none()
-                        });
-                        entry_return_address |= remaining.len() != before;
-                        if remaining.is_empty() {
-                            continue;
-                        }
-                    }
-                    return None;
-                }
-                if predecessors[block].is_empty() {
-                    return None;
-                }
-                pending.extend(predecessors[block].iter().map(|&pred| {
-                    (
-                        pred,
-                        body.blocks[pred].events.len(),
-                        remaining.clone(),
-                        false,
-                    )
-                }));
-                continue;
-            }
-            let event = &body.blocks[block].events[index - 1];
-            match event.effect {
-                Effect::Write(write) => {
-                    let before = remaining.len();
-                    remaining.retain(|&byte| {
-                        body.relations
-                            .offset_of(write, Range::new(read.address.offset(byte), 1))
-                            .is_none()
-                    });
-                    if remaining.len() != before {
-                        writes.insert(event.site);
-                    }
-                }
-                Effect::Call { .. } | Effect::Barrier(_) | Effect::Return => return None,
-                Effect::Read(_) => {}
-            }
-            if !remaining.is_empty() {
-                pending.push((block, index - 1, remaining, false));
-            }
-        }
-        Some(Initialization {
-            writes: writes.into_iter().collect(),
-            entry_return_address,
-        })
+    use rk_ssa::initialization as init;
+    let graph = init::InitializationGraph {
+        entry: body.entry,
+        relations: &body.relations,
+        return_slot_proven: body.return_slot_proven,
+        step_limit: STEP_LIMIT,
+        byte_limit: BYTE_LIMIT,
+        blocks: body
+            .blocks
+            .iter()
+            .map(|block| init::Block {
+                next: block.next.clone(),
+                events: block
+                    .events
+                    .iter()
+                    .map(|event| init::Event {
+                        site: event.site,
+                        effect: match event.effect {
+                            Effect::Read(range) => init::Effect::Read(range),
+                            Effect::Write(range) => init::Effect::Write(range),
+                            _ => init::Effect::Barrier,
+                        },
+                    })
+                    .collect(),
+            })
+            .collect(),
     };
-    body.blocks
-        .iter()
-        .enumerate()
-        .flat_map(|(block, body)| {
-            body.events
-                .iter()
-                .enumerate()
-                .filter_map(move |(index, event)| {
-                    let Effect::Read(read) = event.effect else {
-                        return None;
-                    };
-                    Some(((block, index), read))
-                })
-        })
-        .filter_map(|(location, read)| {
-            prove(location.0, location.1, read).map(|writes| (location, writes))
-        })
-        .collect()
+    init::initialized_reads(&graph)
 }
 
 fn nonstack_reload(
@@ -1517,6 +1412,7 @@ pub(super) fn write(
     opaque: &BTreeSet<Addr>,
     path: &Path,
 ) -> Result<()> {
+    let summary_started = Instant::now();
     let results: Vec<_> = prepared
         .into_par_iter()
         .map(|prepared| {
@@ -1661,6 +1557,8 @@ pub(super) fn write(
             (addr, body)
         })
         .collect();
+    let summary_seconds = summary_started.elapsed().as_secs_f64();
+    let search_started = Instant::now();
     let mut rows = Vec::new();
     let mut counts = BTreeMap::<String, usize>::new();
     let mut site_coverage = BTreeMap::<String, usize>::new();
@@ -1959,6 +1857,8 @@ pub(super) fn write(
             }
         }
     }
+    let search_seconds = search_started.elapsed().as_secs_f64();
+    let reporting_started = Instant::now();
     let publications: usize = bodies.values().map(|body| body.stores.len()).sum();
     let queried_stores = &queried_stores;
     let inventory: Vec<_> = bodies
@@ -2181,7 +2081,44 @@ pub(super) fn write(
                 .insert(field.name(), summary);
         }
     }
-    let report = json!({"format": "recomp-stack-return-report-v1", "read_only": true,
+    let function_plans: BTreeMap<_, _> = bodies.iter().filter(|(_, body)| !body.stores.is_empty()).map(|(&addr, body)| {
+        let function = format!("{addr:08x}");
+        let queries: Vec<_> = rows.iter().filter(|row| row["callee"] == function).collect();
+        let overwritten = queries.iter().filter(|row| row["stack_evidence"]["outcome"] == "overwritten-before-read").count();
+        let counterexamples: Vec<_> = queries.iter().filter(|row| row["stack_evidence"]["outcome"] == "definite-read-before-overwrite")
+            .map(|row| json!({"caller": row["caller"], "call": row["call"], "return": row["return"], "slot": row["slot"]})).collect();
+        let supported = queries.iter().filter(|row| matches!(row["stack_evidence"]["after_one_unread_call"]["outcome"].as_str(), Some("overwritten-before-read" | "candidate-under-assumption"))).count();
+        let unresolved_support: BTreeMap<_, _> = [("supports-cutoff", true), ("does-not-support-cutoff", false)].into_iter().map(|(name, supports)| {
+            let matching: Vec<_> = queries.iter().copied().filter(|row| row["stack_evidence"]["outcome"] == "unresolved"
+                && (row["stack_evidence"]["after_one_unread_call"]["outcome"] == "candidate-under-assumption") == supports).collect();
+            let mut frontiers = BTreeMap::<&str, usize>::new();
+            for row in &matching {
+                let categories: BTreeSet<_> = row["stack_evidence"]["terminals"].as_array().into_iter().flatten()
+                    .filter_map(|terminal| terminal["tracking_category"].as_str()).collect();
+                for category in categories { *frontiers.entry(category).or_default() += 1; }
+            }
+            (name, json!({"queries": matching.len(), "frontier_queries": frontiers, "progress": unresolved_progress(&matching)}))
+        }).collect();
+        let eligible = body.stores.iter().filter(|store| body.return_slot_proven && store.private_frame && !store.returned_pointer && store.return_position == "below-esp").count();
+        let unqueried = body.stores.iter().filter(|store| !queried_stores.contains(&(addr, store.site, store.key))).count();
+        let mut calls: BTreeMap<(&str, &str), Vec<&Value>> = BTreeMap::new();
+        for row in &queries { calls.entry((row["caller"].as_str().unwrap(), row["call"].as_str().unwrap())).or_default().push(row); }
+        let complete_calls: Vec<_> = calls.values().filter(|rows| rows.len() == body.stores.len() && rows.iter().all(|row| row["stack_evidence"]["outcome"] == "overwritten-before-read"))
+            .map(|rows| json!({"caller": rows[0]["caller"], "call": rows[0]["call"]})).collect();
+        (function.clone(), json!({"return_publications": body.stores.len(), "eligible_publications": eligible,
+            "queries": queries.len(), "queried_call_sites": calls.len(), "unqueried_publications": unqueried,
+            "overwrite_queries": overwritten, "supporting_queries": supported, "counterexample_queries": counterexamples.len(), "counterexamples": counterexamples,
+            "complete_overwrite_call_sites": complete_calls, "function_wide_proven": false,
+            "all_queried_publications_proven": !queries.is_empty() && overwritten == queries.len() && unqueried == 0,
+            "heuristic_evidence": by_callee.get(function.as_str()), "unresolved_support": unresolved_support,
+            "support_rule": "complete overwrite or dead after one additional completed unread call, every path; definite continued reads reject",
+            "support_fraction": (!queries.is_empty()).then(|| supported as f64 / queries.len() as f64),
+            "nomination_requires": ["normal-c-lifetime", "explicit-function-acceptance", "private-stack", "observer-fallback"],
+            "unqueried_callers": "open: indirect, unavailable, external and tail callers are not closed by this report"}))
+    }).collect();
+    let mut report = json!({"format": "recomp-stack-return-report-v1", "read_only": true,
+        "inputs": ctx.return_stack_inputs, "function_plans": function_plans,
+        "proof_coverage": "Complete overwrite is a proof only for the listed call/return/slot queries under the recorded stack assumptions. No percentage or minimum sample size applies. Unresolved or unqueried queries block extending that proof. Function-wide consumption generalizes to unqueried callers under an explicitly accepted normal-C lifetime assumption; this report does not close the caller set. Support counts nominate, never prove; any definite read rejects nomination. No threshold is selected.",
         "executable_sha256": ctx.program.sha256, "image_base": format!("{:08x}", ctx.program.image.base), "image_size": ctx.program.image.size,
         "scope": "Normal continuations of ordinary planned return publications; pre-promotion SSA uses per-function production assumptions and retains every original store. Production forwarding removes reads proven to consume prior writes. Stack evidence uses private-frame exposure and general address relations. Candidates require runtime observer guards and return/entry contracts before optimization. Indirect and external callers prevent global elimination from these counts alone.",
         "limits": {"steps_per_query": STEP_LIMIT, "nested_calls": CALL_LIMIT, "caller_unwinds": 0, "bytes_per_query": BYTE_LIMIT},
@@ -2222,7 +2159,22 @@ pub(super) fn write(
         "initialized_reads_forwarded": forwarded,
         "blocker_counting": "Queries can contain several classes. Sole-blocker counts describe current terminal frontiers, not proofs that bypassing one class would finish a query.",
         "publications": inventory, "counts": counts, "rows": rows});
+    report["timing_seconds"] = json!({"summary_refresh_and_initialization": summary_seconds,
+        "continuation_searches_and_witnesses": search_seconds, "report_aggregation": reporting_started.elapsed().as_secs_f64(),
+        "scope": "Initial SSA capture is included in planning, measured separately; searches include witness JSON construction. Serialization and disk write are logged separately."});
+    let serialization_started = Instant::now();
+    let nominations = rk_core::facts::StackLifetimeNominations {
+        format: rk_core::facts::STACK_LIFETIME_FORMAT.into(),
+        inputs: report["inputs"].clone(),
+        coverage: report["proof_coverage"].as_str().unwrap().into(),
+        functions: serde_json::from_value(report["function_plans"].clone())?,
+    };
+    std::fs::write(
+        path.with_extension("facts.json"),
+        serde_json::to_string_pretty(&nominations)? + "\n",
+    )?;
     std::fs::write(path, serde_json::to_string_pretty(&report)? + "\n")?;
+    eprintln!("stack-return phases: summary={summary_seconds:.3}s searches={search_seconds:.3}s aggregation={}s serialization/write={:.3}s", report["timing_seconds"]["report_aggregation"], serialization_started.elapsed().as_secs_f64());
     eprintln!("stack-return report: {} functions, {publications} publications, {} call/publication queries; stack evidence {:?}", bodies.len(), report["rows"].as_array().unwrap().len(), report["stack_evidence_counts"]);
     Ok(())
 }

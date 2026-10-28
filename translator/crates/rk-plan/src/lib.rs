@@ -37,6 +37,7 @@ pub struct PlanOptions<'a> {
 pub struct PlannedFunction {
     pub ssa: Ssa,
     base: BTreeMap<ValueId, Vec<StateKey>>,
+    return_stack_guards: BTreeMap<ValueId, Vec<StateKey>>,
     pub publish: BTreeMap<ValueId, Vec<StateKey>>,
     pub guard: BTreeMap<ValueId, Vec<StateKey>>,
     pub live: LookupSet<ValueId>,
@@ -85,7 +86,7 @@ pub fn plan_function_with_view(
         .iter()
         .map(|block| cg.insns[block.start as usize].addr)
         .collect();
-    plan_prepared(ssa, base, return_addr, block_addrs, opts)
+    plan_prepared(ssa, base, BTreeMap::new(), return_addr, block_addrs, opts)
 }
 
 pub fn replan_function(
@@ -95,10 +96,33 @@ pub fn replan_function(
     plan_prepared(
         planned.ssa,
         planned.base,
+        planned.return_stack_guards,
         planned.return_addr,
         planned.block_addrs,
         opts,
     )
+}
+
+pub fn omit_return_stack(
+    mut planned: PlannedFunction,
+    omissions: BTreeMap<ValueId, Vec<StateKey>>,
+    opts: &PlanOptions<'_>,
+) -> Result<PlannedFunction> {
+    for (site, keys) in omissions {
+        if planned.ssa.value(site).op != rk_ir::Op::Return {
+            continue;
+        }
+        if let Some(base) = planned.base.get_mut(&site) {
+            let removed: Vec<_> = base
+                .iter()
+                .copied()
+                .filter(|key| matches!(key, StateKey::Frame { .. }) && keys.contains(key))
+                .collect();
+            base.retain(|key| !removed.contains(key));
+            planned.return_stack_guards.insert(site, removed);
+        }
+    }
+    replan_function(planned, opts)
 }
 
 pub fn defer_return_eip(
@@ -154,6 +178,7 @@ pub fn defer_return_eip(
 fn plan_prepared(
     ssa: Ssa,
     base: BTreeMap<ValueId, Vec<StateKey>>,
+    return_stack_guards: BTreeMap<ValueId, Vec<StateKey>>,
     return_addr: BTreeMap<ValueId, Addr>,
     block_addrs: Vec<Addr>,
     opts: &PlanOptions<'_>,
@@ -165,8 +190,11 @@ fn plan_prepared(
             published.retain(|key| !keys.contains(key));
         }
     }
-    let (publish, guard) =
+    let (publish, mut guard) =
         reduce_publications(&ssa, &passed, &arguments, opts.call_facts, opts.call_hooks);
+    for (&site, keys) in &return_stack_guards {
+        guard.entry(site).or_default().extend(keys.iter().copied());
+    }
     let flag_plan = ssa.flag_plan();
     let mut flag_publish = BTreeMap::new();
     let mut descriptor_roots = Vec::new();
@@ -246,6 +274,7 @@ fn plan_prepared(
     Ok(PlannedFunction {
         ssa,
         base,
+        return_stack_guards,
         publish,
         guard,
         live,

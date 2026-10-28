@@ -778,3 +778,23 @@ fn digest_hex(value: &str, path: &Path, name: &str) -> Result<String> {
     }
     Ok(value.to_ascii_lowercase())
 }
+
+pub const STACK_LIFETIME_FORMAT: &str = "recomp-stack-lifetime-nominations-v1";
+
+#[derive(serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StackLifetimeNominations {
+    pub format: String,
+    pub inputs: serde_json::Value,
+    pub coverage: String,
+    pub functions: BTreeMap<String, StackLifetimeNomination>,
+}
+
+#[derive(serde::Serialize, Deserialize)]
+pub struct StackLifetimeNomination {
+    pub eligible_publications: usize,
+    pub counterexample_queries: usize,
+    pub supporting_queries: usize,
+    #[serde(flatten)]
+    pub evidence: BTreeMap<String, serde_json::Value>,
+}

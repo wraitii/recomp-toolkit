@@ -45,6 +45,15 @@ pub struct StackCleanup {
     pub evidence: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReturnStackPolicy {
+    #[default]
+    Off,
+    NormalCLifetime,
+    Yolo,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Translate {
@@ -55,6 +64,10 @@ pub struct Translate {
     pub stack_memory: bool,
     pub assume: BTreeSet<Assumption>,
     pub lazy_stack_writes: Option<bool>,
+    pub return_stack_policy: ReturnStackPolicy,
+    pub return_stack_facts: Option<String>,
+    pub return_stack_functions: Vec<Addr>,
+    pub return_stack_opt_out: Vec<Addr>,
     pub exposed_stack_functions: Vec<Addr>,
     pub stack_helpers: Vec<Addr>,
     pub stack_probes: Vec<Addr>,
@@ -306,6 +319,11 @@ pub struct Settings {
     pub stack_memory: bool,
     pub assume_private_stack: bool,
     pub lazy_stack_writes: bool,
+    pub return_stack_policy: ReturnStackPolicy,
+    pub return_stack_facts: Option<PathBuf>,
+    pub input_path: PathBuf,
+    pub return_stack_functions: BTreeSet<Addr>,
+    pub return_stack_opt_out: BTreeSet<Addr>,
     pub assume_stack_pointer_bases: bool,
     pub exposed_stack_functions: BTreeSet<Addr>,
     pub stack_helpers: BTreeSet<Addr>,
@@ -352,10 +370,10 @@ impl Settings {
                 path.display()
             )));
         }
-        Self::resolve(input, module)
+        Self::resolve(input, module, path)
     }
 
-    fn resolve(input: Input, module: Option<&str>) -> Result<Self> {
+    fn resolve(input: Input, module: Option<&str>, path: &Path) -> Result<Self> {
         let t = input.translate;
         let code_map = input
             .code_map
@@ -509,6 +527,15 @@ impl Settings {
             stack_memory: t.stack_memory,
             assume_private_stack,
             lazy_stack_writes,
+            return_stack_policy: if main {
+                t.return_stack_policy
+            } else {
+                ReturnStackPolicy::Off
+            },
+            input_path: path.to_path_buf(),
+            return_stack_facts: resolve(&t.return_stack_facts),
+            return_stack_functions: only_main(&t.return_stack_functions),
+            return_stack_opt_out: only_main(&t.return_stack_opt_out),
             assume_stack_pointer_bases: t.assume.contains(&Assumption::StackPointerBases),
             exposed_stack_functions: only_main(&t.exposed_stack_functions),
             stack_helpers: only_main(&t.stack_helpers),

@@ -485,7 +485,7 @@ def rust_translation_dependencies(cfg, key):
     translate = cfg["translate"]
     digest = hashlib.sha256()
     if key == "main":
-        for name in ("x87_facts", "x87_mode_metadata", "analysis_facts", "indirect_targets", "discovery_evidence"):
+        for name in ("x87_facts", "x87_mode_metadata", "analysis_facts", "indirect_targets", "discovery_evidence", "return_stack_facts"):
             value = translate.get(name)
             digest.update(name.encode() + b"\0")
             if value:

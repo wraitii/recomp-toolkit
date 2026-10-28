@@ -464,6 +464,7 @@ dependencies = [
  "rk-ssa",
  "rk-x87",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

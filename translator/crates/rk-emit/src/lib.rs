@@ -2201,9 +2201,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn publish_direct_return(&mut self, value: ValueId) -> Result<()> {
-        let keys = self.plan.publish.get(&value).cloned().unwrap_or_default();
-        let keys = self.entry_keys(value, keys);
-        self.publish_state(value, &keys, true)
+        self.publish(value)
     }
 
     fn publish_arguments(&mut self, value: ValueId) -> Result<()> {
@@ -2332,7 +2330,10 @@ impl<'a> Emitter<'a> {
     }
 
     fn publish(&mut self, value: ValueId) -> Result<()> {
-        let keys = self.plan.publish.get(&value).cloned().unwrap_or_default();
+        let mut keys = self.plan.publish.get(&value).cloned().unwrap_or_default();
+        if self.s.value(value).op == Op::Return {
+            keys.extend(self.plan.guard.get(&value).into_iter().flatten().copied());
+        }
         self.publish_keys(value, &keys, true)
     }
 
@@ -2414,8 +2415,29 @@ impl<'a> Emitter<'a> {
                 |location| !matches!(location, Location::Flag(field) if forwarded.contains(*field)),
             );
         }
+        let mut guarded_locations = BTreeSet::new();
+        if self.s.value(value).op == Op::Return {
+            for key in self.plan.guard.get(&value).into_iter().flatten() {
+                if let Some(Some(location)) = self.key_location.get(key) {
+                    guarded_locations.insert(*location);
+                }
+            }
+            for key in self.plan.publish.get(&value).into_iter().flatten() {
+                if let Some(Some(location)) = self.key_location.get(key) {
+                    guarded_locations.remove(location);
+                }
+            }
+        }
         for location in locations {
+            let guarded = guarded_locations.contains(&location);
+            if guarded {
+                self.out
+                    .push_str("if (RECOMP_UNLIKELY(recomp_hooks_ever)) {\n");
+            }
             self.publish_location(location, &state, keys)?;
+            if guarded {
+                self.out.push_str("}\n");
+            }
         }
         if let Some((descriptor, mask)) = descriptor {
             self.publish_descriptor(&descriptor, mask)?;

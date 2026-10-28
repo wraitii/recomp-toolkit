@@ -513,7 +513,7 @@ def load(game_dir, build_root=None):
         raise ValueError("%s: [translate] assume must list unique names from %s" % (source, ", ".join(sorted(ASSUMPTIONS))))
     if type(translate.setdefault("lazy_stack_writes", TRANSLATE_DEFAULTS["lazy_stack_writes"])) is not bool:
         raise ValueError("%s: [translate] lazy_stack_writes must be a boolean" % source)
-    for key in ("exposed_stack_functions", "stack_helpers", "stack_probes"):
+    for key in ("exposed_stack_functions", "stack_helpers", "stack_probes", "return_stack_functions", "return_stack_opt_out"):
         listed = translate.setdefault(key, [])
         if (not isinstance(listed, list)
                 or any(type(v) is not int or not 0 <= v <= 0xffffffff for v in listed)
