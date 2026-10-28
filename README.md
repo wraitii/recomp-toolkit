@@ -43,9 +43,7 @@ The app includes the other build dependencies; GOG installer imports also need
 ## Games
 
 The testing labels below describe single-player gameplay testing coverage.
-Spore reaches the menus,
-but in-game play is largely untested and some quirks remain. Networking is
-currently unsupported across the toolkit. Each game's page lists the required
+Networking is currently unsupported across the toolkit. Each game's page lists the required
 release and preparation steps.
 
 | Game | Status | Required version |
@@ -55,7 +53,7 @@ release and preparation steps.
 | [Civilization IV: Beyond the Sword](games/civ4-bts/README.md) | Playable (lightly tested) | GOG 3.19; additional DLL required |
 | [4x4 Evolution 2](games/4x4-evo2/README.md) | Playable (lightly tested) | PC 1.00.139 with matching renderer DLLs |
 | [Railroad Tycoon 3](games/railroad-tycoon-3/README.md) | Playable (well tested) | GOG 1.05 |
-| [Spore](games/spore/README.md) | Work in progress | GOG Collection, Galactic Adventures 3.1.0.22 |
+| [Spore](games/spore/README.md) | Playable (lightly tested) | GOG Collection, Galactic Adventures 3.1.0.22 |
 
 Performance is generally good, with occasional slowdowns still being worked on,
 mostly in Civilization IV and Spore. Game execution is currently single-threaded:
