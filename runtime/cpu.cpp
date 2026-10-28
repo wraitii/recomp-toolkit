@@ -223,10 +223,20 @@ void recomp_module_invoke(X86 *c, const RecompModule *m, int32_t i) {
 }
 
 void recomp_module_jump(X86 *c, uint32_t target) {
+    // Keep dispatch exits tail-callable: guest loops can cross module entries.
     ModuleEntry e = module_entry(target);
     if (!e.module || e.index < 0) {
-        if (module_region_enter(c, target))
+        const RecompRegion *region =
+            e.module ? recomp_region_find(e.module->regions, e.module->region_count, target)
+                     : nullptr;
+        if (region) {
+            recomp_region_invoke(c, region, target);
             return;
+        }
+        if (recomp_module_is_call_return(target)) {
+            c->eip = target;
+            return;
+        }
         recomp_unknown_jump(c, target);
         return;
     }

@@ -994,6 +994,9 @@ typedef struct RecompRegion {
     void (*fn)(X86 *, uint32_t);
     const uint8_t *boundaries;
 } RecompRegion;
+const RecompRegion *recomp_region_find(const RecompRegion *regions, uint32_t count,
+                                       uint32_t target);
+void recomp_region_invoke(X86 *c, const RecompRegion *region, uint32_t target);
 int recomp_region_call(X86 *c, const RecompRegion *regions, uint32_t count, uint32_t target);
 int recomp_region_has_target(const RecompRegion *regions, uint32_t count, uint32_t target);
 int recomp_module_region_has_target(uint32_t target);

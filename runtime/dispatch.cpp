@@ -63,8 +63,8 @@ const RecompDispatchEntry *recomp_dispatch_lookup(const RecompDispatchTable *tab
     }
     return nullptr;
 }
-static const RecompRegion *recomp_region_find(const RecompRegion *regions, uint32_t count,
-                                              uint32_t target) {
+const RecompRegion *recomp_region_find(const RecompRegion *regions, uint32_t count,
+                                       uint32_t target) {
     uint32_t lo = 0, hi = count;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2;
@@ -84,10 +84,13 @@ int recomp_region_has_target(const RecompRegion *regions, uint32_t count, uint32
     return (r->boundaries[offset >> 3] >> (offset & 7u)) & 1u;
 }
 
-int recomp_region_call(X86 *c, const RecompRegion *regions, uint32_t count, uint32_t target) {
-    const RecompRegion *r = recomp_region_find(regions, count, target);
-    if (!r)
-        return 0;
+void recomp_region_invoke(X86 *c, const RecompRegion *r, uint32_t target) {
+    if (!recomp_profile_enabled && !recomp_frame_watch) {
+        recomp_execution_checkpoint(c);
+        // No post-call work: guest loops may re-enter through this tail jump.
+        r->fn(c, target);
+        return;
+    }
     RecompSaved saved;
     recomp_save(c, &saved);
     recomp_execution_checkpoint(c);
@@ -98,5 +101,12 @@ int recomp_region_call(X86 *c, const RecompRegion *regions, uint32_t count, uint
         recomp_profile_pop();
     if (recomp_frame_watch)
         recomp_check_saved(c, target, &saved);
+}
+
+int recomp_region_call(X86 *c, const RecompRegion *regions, uint32_t count, uint32_t target) {
+    const RecompRegion *r = recomp_region_find(regions, count, target);
+    if (!r)
+        return 0;
+    recomp_region_invoke(c, r, target);
     return 1;
 }

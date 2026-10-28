@@ -540,7 +540,8 @@ void recomp_jump(X86 *c, uint32_t target)
         if (recomp_profile_enabled) recomp_profile_pop();
         return;
     }
-    if (recomp_module_lookup(target) >= 0) {
+    if (recomp_module_containing(target)) {
+        /* Preserve the void tail jump; a status-returning call grows the host stack. */
         recomp_module_jump(c, target);
         return;
     }
@@ -548,7 +549,12 @@ void recomp_jump(X86 *c, uint32_t target)
         if (RECOMP_UNLIKELY(!imports_dispatch(c, target))) recomp_shim_call(c, target);
         return;
     }
-    if (recomp_region_enter(c, target)) return;
+    const RecompRegion *region = recomp_region_find(recomp_regions, recomp_region_count, target);
+    if (region) {
+        /* Keep this tail-callable: guest loops can cross region boundaries. */
+        recomp_region_invoke(c, region, target);
+        return;
+    }
     if (recomp_is_call_return(target) || recomp_module_is_call_return(target)) { c->eip = target; return; }
     recomp_unknown_jump(c, target);
 }
