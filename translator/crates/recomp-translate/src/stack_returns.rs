@@ -22,6 +22,7 @@ struct Store {
     key: StateKey,
     range: Range,
     returned_pointer: bool,
+    private_frame: bool,
 }
 
 enum Effect {
@@ -58,6 +59,7 @@ pub(super) struct Body {
     forwarded_reads: Vec<Value>,
     relations: Relations,
     returned_pointer_sites: BTreeSet<Addr>,
+    frame: rk_ssa::memory::Frame,
 }
 
 #[derive(Clone, Copy)]
@@ -302,6 +304,7 @@ fn stores(planned: &rk_plan::PlannedFunction) -> Vec<Store> {
                 key,
                 range: Range::new(base.offset(offset as u32), u32::from(s.value(value).size)),
                 returned_pointer: false,
+                private_frame: false,
             });
         }
     }
@@ -414,6 +417,7 @@ fn body(s: &Ssa, facts: &dyn CallFacts) -> Result<Body> {
         forwarded_reads: Vec::new(),
         relations: addresses.relations,
         returned_pointer_sites,
+        frame: rk_ssa::memory::Frame::new(s, Some(facts)),
     })
 }
 
@@ -435,6 +439,7 @@ fn investigate(
     start: Cursor,
     range: Range,
     image_guard: Option<(u32, u32)>,
+    dead_frame: bool,
 ) -> Vec<Value> {
     if image_guard.is_some_and(|image| in_image(range, image)) {
         return vec![json!({"reason": "image-guard-impossible"})];
@@ -506,6 +511,21 @@ fn investigate(
             };
             Range::new(Address::exact(base, offset), 1)
         };
+        let below_stack =
+            |esp: Address| match (relations.bounds(range.address), relations.bounds(esp)) {
+                (
+                    Address::Known { base, offset, span },
+                    Address::Known {
+                        base: own,
+                        offset: top,
+                        span: 0,
+                    },
+                ) if base == own => {
+                    i64::from(offset as i32) + i64::from(span) + i64::from(range.size)
+                        <= i64::from(top as i32)
+                }
+                _ => false,
+            };
         match &event.effect {
             Effect::Read(read) => {
                 let raw = *read;
@@ -526,6 +546,43 @@ fn investigate(
                     let definite = touched
                         .iter()
                         .any(|&i| relations.offset_of(read, byte(i)).is_some());
+                    let stack_derived = matches!(
+                        read.address,
+                        Address::Known {
+                            base: Base::Frame | Base::Stack(_),
+                            ..
+                        }
+                    ) || event.address_origin["inputs"].as_array().is_none_or(
+                        |inputs| {
+                            inputs.iter().any(|input| {
+                                input == "ESP"
+                                    || (!cursor.original
+                                        && Field::ALL.iter().take(8).enumerate().any(
+                                            |(index, field)| {
+                                                input == field.name()
+                                                    && matches!(
+                                                        cursor.registers[index],
+                                                        Address::Known {
+                                                            base: Base::Frame | Base::Stack(_),
+                                                            ..
+                                                        }
+                                                    )
+                                            },
+                                        ))
+                            })
+                        },
+                    ) || event.address_origin["reloads"].as_array().is_none_or(
+                        |reloads| reloads.iter().any(|reload| reload["field"] == "ESP"),
+                    ) || event.address_origin["walk_limited"] != false;
+                    if dead_frame
+                        && !definite
+                        && !stack_derived
+                        && below_stack(mapped_in(event.esp, cursor, current))
+                    {
+                        search.trace.push(json!({"assumption": "unrelated-pointer-does-not-read-returned-private-frame-below-esp", "function": format!("{:08x}", cursor.function), "site": format!("{:08x}", event.site), "read": describe(read)}));
+                        pending.push(search);
+                        continue;
+                    }
                     let below_esp = touched.iter().any(|&i| {
                         match (mapped_in(event.esp, cursor, current), byte(i).address) {
                             (
@@ -649,6 +706,14 @@ fn investigate(
                 }
                 if let Some(resume) = search.resumes.pop() {
                     search.cursor = resume;
+                } else if dead_frame && below_stack(mapped_in(event.esp, cursor, current)) {
+                    terminals.push(terminal(
+                        "assumed-dead-at-caller-return",
+                        &search,
+                        event.site,
+                        json!({"assumption": "returned-private-frame-below-esp-is-dead"}),
+                    ));
+                    continue;
                 } else {
                     terminals.push(terminal("caller-return", &search, event.site,
                         json!({"caller_unwind_not_analyzed": true, "assume_dead_after_caller_return_candidate": true})));
@@ -731,6 +796,7 @@ pub(super) fn write(
                     .map(|mut store| {
                         store.returned_pointer =
                             result.returned_pointer_sites.contains(&store.site);
+                        store.private_frame = result.frame.unexposed(store.range);
                         store
                     })
                     .collect();
@@ -769,6 +835,9 @@ pub(super) fn write(
     let mut guarded_calls = BTreeSet::new();
     let mut guarded_slots = BTreeSet::new();
     let mut guarded_queries = 0;
+    let mut dead_queries = 0;
+    let mut dead_calls = BTreeSet::new();
+    let mut dead_slots = BTreeSet::new();
     let image = (ctx.program.image.base, ctx.program.image.end());
     for (&caller, body) in &bodies {
         for (block, item) in body.blocks.iter().enumerate() {
@@ -821,7 +890,7 @@ pub(super) fn write(
                             json!({"reason": "returned-frame-pointer", "function": format!("{target:08x}"), "site": format!("{:08x}", store.site)}),
                         ]
                     } else {
-                        investigate(&bodies, cursor, range, None)
+                        investigate(&bodies, cursor, range, None, false)
                     };
                     for diagnostic in &mut terminals {
                         let function = diagnostic["function"].as_str().and_then(rk_core::parse_hex);
@@ -851,7 +920,7 @@ pub(super) fn write(
                             terminal["reason"] == "read-may-alias"
                                 && terminal["detail"]["read"]["base"] == "Absolute"
                         }) {
-                        let terminals = investigate(&bodies, cursor, range, Some(image));
+                        let terminals = investigate(&bodies, cursor, range, Some(image), false);
                         let candidate = terminals
                             .iter()
                             .all(|terminal| terminal["reason"] == "overwritten");
@@ -863,6 +932,26 @@ pub(super) fn write(
                         json!({"outcome": if candidate { "guarded-overwrite-candidate" } else { "unresolved" },
                             "required_guard": "actual omitted slot lies completely outside the loaded image",
                             "image_start": format!("{:08x}", image.0), "image_end": format!("{:08x}", image.1), "terminals": terminals})
+                    } else {
+                        Value::Null
+                    };
+                    let dead_frame = if outcome == "unresolved"
+                        && store.private_frame
+                        && !store.returned_pointer
+                    {
+                        let terminals = investigate(&bodies, cursor, range, None, true);
+                        let candidate = terminals.iter().all(|terminal| {
+                            matches!(
+                                terminal["reason"].as_str(),
+                                Some("overwritten" | "assumed-dead-at-caller-return")
+                            )
+                        });
+                        if candidate {
+                            dead_queries += 1;
+                            dead_calls.insert(event.site);
+                            dead_slots.insert((event.site, target, store.key));
+                        }
+                        json!({"outcome": if candidate { "assumed-dead-frame-candidate" } else { "unresolved" }, "terminals": terminals})
                     } else {
                         Value::Null
                     };
@@ -879,7 +968,7 @@ pub(super) fn write(
                         "slot": format!("{:?}", store.key), "callee_range": describe(store.range),
                         "caller_range": describe(range), "existing_direct_variant": ctx.direct_targets.contains(&target),
                         "origin_return_slot_proven": callee.return_slot_proven,
-                        "outcome": outcome, "terminals": terminals, "slot_outside_image": guarded}));
+                        "outcome": outcome, "terminals": terminals, "slot_outside_image": guarded, "private_frame": store.private_frame, "assume_dead_private_frame": dead_frame}));
                 }
             }
         }
@@ -892,7 +981,7 @@ pub(super) fn write(
             body.stores.iter().map(move |store| {
         json!({"function": format!("{function:08x}"), "return": format!("{:08x}", store.site),
             "slot": format!("{:?}", store.key), "range": describe(store.range),
-            "returned_frame_pointer": store.returned_pointer,
+            "returned_frame_pointer": store.returned_pointer, "private_frame": store.private_frame,
             "queried": queried_stores.contains(&(function, store.site, store.key))})
     })
         })
@@ -957,6 +1046,8 @@ pub(super) fn write(
             "indirect_call_sites_not_queried": indirect_calls, "unavailable_functions": unavailable},
         "candidate_call_sites": candidate_calls.len(), "candidate_call_slots": candidate_slots.len(),
         "additional_candidates_with_slot_outside_image_guard": {"queries": guarded_queries, "call_sites": guarded_calls.len(), "call_slots": guarded_slots.len()},
+        "additional_candidates_assuming_dead_private_frame": {"queries": dead_queries, "call_sites": dead_calls.len(), "call_slots": dead_slots.len()},
+        "dead_private_frame_assumption": "DIVERGENCE(original): For a production-unexposed returned slot proved wholly below current ESP, unrelated-pointer reads cannot observe old bytes and old bytes are dead at the first caller return. Definite or ESP-derived reads, uncertain ESP, opaque calls, and other search limits remain unresolved. This is a heuristic, not a proof or a production optimization.",
         "assumption_only_upper_bounds": assumption_bounds,
         "assumption_scope": "Stack-call bounds use syntactic stack writes, not proof that every path writes. First-caller-return is more aggressive than a two- or three-caller cutoff; those are not measured.",
         "blocker_classes": blockers,

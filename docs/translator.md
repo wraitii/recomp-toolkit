@@ -99,6 +99,11 @@ Unknown aliases, opaque/native code, loops, caller returns and search limits sta
 unresolved. Counts distinguish return publications from distinct call sites/slots;
 indirect callers and unavailable functions are explicit coverage gaps. The translator's
 `--only`/`--selection` filters callees while retaining their callers for this report.
+A separate conditional search uses the production exposure model for the returned
+slot and assumes an unexposed returned frame below ESP cannot be read through an
+unrelated pointer and is dead at the first caller return. DIVERGENCE(original):
+dangling reads can observe those bytes; this is a heuristic, not a proof or a code
+change. Stack-derived reads and uncertain stack positions remain conservative.
 Assumption-only upper bounds separately count stopping at a stack-using call or the
 first caller return; neither assumption changes the baseline or generated code.
 

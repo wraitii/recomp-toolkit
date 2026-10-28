@@ -230,7 +230,7 @@ pub(crate) enum Link<'a> {
 }
 
 #[derive(Default)]
-pub(crate) struct Frame {
+pub struct Frame {
     pub(crate) accesses: BTreeMap<ValueId, Access>,
     pub(crate) relations: Relations,
     pub(crate) esp: Lookup<ValueId, Address>,
@@ -279,7 +279,7 @@ impl Frame {
         None
     }
 
-    pub(crate) fn new(s: &Ssa, facts: Option<&dyn CallFacts>) -> Self {
+    pub fn new(s: &Ssa, facts: Option<&dyn CallFacts>) -> Self {
         let mut addresses = Addresses::local(s);
         let mut accesses = BTreeMap::new();
         let mut esp = Lookup::default();
@@ -575,7 +575,7 @@ impl Frame {
         self.rejection.is_none()
     }
 
-    pub(crate) fn unexposed(&self, range: Range) -> bool {
+    pub fn unexposed(&self, range: Range) -> bool {
         self.eligible()
             && self
                 .exposed
