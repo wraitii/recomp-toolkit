@@ -13,11 +13,14 @@ host_arena_base = 0
 entry_point = 0x008f47fa
 guest_root = 'C:\Civilization IV\Beyond the Sword'
 store_hooks = false
+call_hooks = false
 
 [environment]
 passthrough = ["PYTHONVERBOSE"]
 
 [translate]
+stack_memory = true
+assume = ["private-stack"]
 dispatch = { shift = 2, max_probe = 2 }
 code_map = "metadata"
 analysis_facts = "metadata/analysis-facts.json"
