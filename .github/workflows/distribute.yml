@@ -118,7 +118,7 @@ jobs:
   notarize:
     needs: source
     if: needs.source.outputs.enabled == 'true'
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
     outputs:
       ready: ${{ steps.finish.outputs.ready }}

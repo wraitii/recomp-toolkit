@@ -36,13 +36,13 @@ jobs:
     # every test binary it has and runs the suites that need no game files;
     # macOS (Metal) and Linux (lavapipe) also run the GPU suites. Nothing is
     # uploaded.
-    continue-on-error: ${{ matrix.os != 'macos-15' }}
+    continue-on-error: ${{ matrix.os != 'macos-26' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15
+          - os: macos-26
             preset: macos-stub
             labels: "nogame|gpu"
           - os: ubuntu-24.04
