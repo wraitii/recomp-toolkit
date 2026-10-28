@@ -27,6 +27,9 @@ jobs:
           persist-credentials: false
       - name: Install parser generators
         run: brew install bison flex
+      - name: Identify runner image
+        id: image
+        run: echo "image=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
       - name: Restore native dependency caches
         id: cache
         uses: actions/cache/restore@v4
@@ -38,10 +41,10 @@ jobs:
             build/toolkit/source-archives
             ~/.cargo/registry
             ~/.cargo/git
-          key: toolkit-arm64-macos14-${{ hashFiles('cmake/Dependencies.cmake', 'dx/CMakeLists.txt', 'graphics/d3d8-wgpu/**', 'desktop/library/Cargo.lock', 'desktop/library/Cargo.toml', 'tools/build_d3d8_wgpu.py', 'tools/extractors/**', 'third_party/unshield/**') }}-${{ github.sha }}
+          key: toolkit-arm64-macos14-${{ steps.image.outputs.image }}-${{ hashFiles('cmake/Dependencies.cmake', 'dx/CMakeLists.txt', 'graphics/d3d8-wgpu/**', 'desktop/library/Cargo.lock', 'desktop/library/Cargo.toml', 'tools/build_d3d8_wgpu.py', 'tools/extractors/**', 'third_party/unshield/**') }}-${{ github.sha }}
           restore-keys: |
-            toolkit-arm64-macos14-${{ hashFiles('cmake/Dependencies.cmake', 'dx/CMakeLists.txt', 'graphics/d3d8-wgpu/**', 'desktop/library/Cargo.lock', 'desktop/library/Cargo.toml', 'tools/build_d3d8_wgpu.py', 'tools/extractors/**', 'third_party/unshield/**') }}-
-            toolkit-arm64-macos14-
+            toolkit-arm64-macos14-${{ steps.image.outputs.image }}-${{ hashFiles('cmake/Dependencies.cmake', 'dx/CMakeLists.txt', 'graphics/d3d8-wgpu/**', 'desktop/library/Cargo.lock', 'desktop/library/Cargo.toml', 'tools/build_d3d8_wgpu.py', 'tools/extractors/**', 'third_party/unshield/**') }}-
+            toolkit-arm64-macos14-${{ steps.image.outputs.image }}-
       - name: Prepare pinned standalone Python
         run: |
           curl --fail --location --retry 3 -o "$RUNNER_TEMP/python.tar.gz" 'https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.14.8%2B20261013-aarch64-apple-darwin-install_only_stripped.tar.gz'
