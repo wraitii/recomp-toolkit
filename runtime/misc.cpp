@@ -694,8 +694,7 @@ bool reg_sam_can_set(uint32_t sam) {
     return sam & (0x2u | 0x02000000u | 0x10000000u | 0x40000000u);
 }
 
-void a_RegOpenKeyEx(X86 *c, uint32_t hkey, const std::string &sub, uint32_t sam,
-                    uint32_t presult) {
+void a_RegOpenKeyEx(X86 *c, uint32_t hkey, const std::string &sub, uint32_t sam, uint32_t presult) {
     std::string path = key_path(hkey, sub);
     if (path.empty()) {
         set_eax(c, 6);
@@ -1678,7 +1677,7 @@ void w_WSAWaitForMultipleEvents(X86 *c) {
     uint32_t timeout = arg(c, 3);
     bool alertable = arg(c, 4) != 0;
     if (!count || count > 64) {
-        g_wsa_last_error = 87; // WSA_INVALID_PARAMETER
+        g_wsa_last_error = 87;   // WSA_INVALID_PARAMETER
         set_eax(c, 0xffffffffu); // WSA_WAIT_FAILED
         return;
     }

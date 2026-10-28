@@ -170,7 +170,8 @@ InstallationManifest installation_manifest_for_process() {
             : std::string("app/") + RECOMP_APP_NAME +
                   (strcmp(os_platform_name(), "windows") == 0 ? ".exe" : "");
     std::string sidecar_name = RECOMP_GAME_NAME;
-    sidecar_name.erase(std::remove(sidecar_name.begin(), sidecar_name.end(), ':'), sidecar_name.end());
+    sidecar_name.erase(std::remove(sidecar_name.begin(), sidecar_name.end(), ':'),
+                       sidecar_name.end());
     const std::string expected_configure =
         "Configure " + sidecar_name + ".app/Contents/MacOS/ConfigureLauncher";
     if (launch_paths->str("game", "") != expected_game ||

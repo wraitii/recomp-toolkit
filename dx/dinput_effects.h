@@ -400,8 +400,8 @@ void Effect_SetParameters(X86 *c) {
         if (e.native)
             result = effect_host(next, HOST_HAPTIC_START, 1);
         if (result > 0) {
-            next.started = os_monotonic_ns() +
-                           (next.native ? 0 : uint64_t(next.loaded.start_delay) * 1000);
+            next.started =
+                os_monotonic_ns() + (next.native ? 0 : uint64_t(next.loaded.start_delay) * 1000);
             next.ends = next.params.duration == 0xffffffffu
                             ? UINT64_MAX
                             : next.started + uint64_t(next.params.duration) * 1000;
