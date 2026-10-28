@@ -137,7 +137,7 @@ enum Region {
 }
 
 #[derive(Clone)]
-struct LevelState {
+pub struct LevelState {
     bytes: Vec<u8>,
     width: u32,
     height: u32,

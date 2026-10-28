@@ -4223,31 +4223,31 @@ mod tests {
         // MIPFILTER=NONE collapses to a single level even with more written.
         assert_eq!(
             mip_lod_range(&stage_with_mips(0, 0), 3),
-            (0.0, 0.0, wgpu::FilterMode::Nearest)
+            (0.0, 0.0, wgpu::MipmapFilterMode::Nearest)
         );
         // POINT spans the written chain with nearest mip selection.
         assert_eq!(
             mip_lod_range(&stage_with_mips(1, 0), 3),
-            (0.0, 3.0, wgpu::FilterMode::Nearest)
+            (0.0, 3.0, wgpu::MipmapFilterMode::Nearest)
         );
         // LINEAR is trilinear across the written chain.
         assert_eq!(
             mip_lod_range(&stage_with_mips(2, 0), 3),
-            (0.0, 3.0, wgpu::FilterMode::Linear)
+            (0.0, 3.0, wgpu::MipmapFilterMode::Linear)
         );
         // MAXMIPLEVEL shifts the base; it is clamped to the written chain.
         assert_eq!(
             mip_lod_range(&stage_with_mips(2, 2), 3),
-            (2.0, 3.0, wgpu::FilterMode::Linear)
+            (2.0, 3.0, wgpu::MipmapFilterMode::Linear)
         );
         assert_eq!(
             mip_lod_range(&stage_with_mips(2, 9), 3),
-            (3.0, 3.0, wgpu::FilterMode::Linear)
+            (3.0, 3.0, wgpu::MipmapFilterMode::Linear)
         );
         // Only level 0 written: no filter may reach an unwritten level.
         assert_eq!(
             mip_lod_range(&stage_with_mips(1, 0), 0),
-            (0.0, 0.0, wgpu::FilterMode::Nearest)
+            (0.0, 0.0, wgpu::MipmapFilterMode::Nearest)
         );
     }
 

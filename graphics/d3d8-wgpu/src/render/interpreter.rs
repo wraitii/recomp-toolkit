@@ -293,7 +293,9 @@ impl FamilyKey {
 
 impl PreparedInterpreter {
     pub(crate) fn find(&self, descriptor: &PipelineDescriptor) -> Option<&PreparedFamily> {
-        self.index.get(descriptor).map(|&index| &self.families[index])
+        self.index
+            .get(descriptor)
+            .map(|&index| &self.families[index])
     }
 
     pub(crate) fn for_pipeline(&self, pipeline: &wgpu::RenderPipeline) -> Option<&PreparedFamily> {
@@ -396,7 +398,9 @@ impl PreparedInterpreter {
         let unused_sampler = device.create_sampler(&Default::default());
         let mut index = FastMap::default();
         for (position, family) in families.iter().enumerate() {
-            index.entry(family.key.descriptor.clone()).or_insert(position);
+            index
+                .entry(family.key.descriptor.clone())
+                .or_insert(position);
         }
         Ok(Self {
             index,

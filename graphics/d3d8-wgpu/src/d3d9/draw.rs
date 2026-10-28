@@ -2012,10 +2012,16 @@ impl D3d9DrawState {
     }
 
     pub fn drop_texture(&mut self, texture: &wgpu::Texture) {
-        self.bind_groups
-            .retain(|key, _| !key.textures.iter().any(|entry| entry.1.as_ref() == Some(texture)));
-        self.bind_groups_previous
-            .retain(|key, _| !key.textures.iter().any(|entry| entry.1.as_ref() == Some(texture)));
+        self.bind_groups.retain(|key, _| {
+            !key.textures
+                .iter()
+                .any(|entry| entry.1.as_ref() == Some(texture))
+        });
+        self.bind_groups_previous.retain(|key, _| {
+            !key.textures
+                .iter()
+                .any(|entry| entry.1.as_ref() == Some(texture))
+        });
     }
 
     fn source(
@@ -3674,7 +3680,12 @@ pub(crate) fn execute(
     Ok(())
 }
 
-type FeedbackShape = (wgpu::Extent3d, u32, wgpu::TextureFormat, wgpu::TextureDimension);
+type FeedbackShape = (
+    wgpu::Extent3d,
+    u32,
+    wgpu::TextureFormat,
+    wgpu::TextureDimension,
+);
 
 /// D3D9 lets a draw sample its own color target; wgpu rejects that usage conflict, so the
 /// bound target is replaced by a copy taken after every earlier draw has been flushed.

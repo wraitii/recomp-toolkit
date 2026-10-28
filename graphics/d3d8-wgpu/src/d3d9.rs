@@ -238,7 +238,6 @@ pub(crate) struct SurfaceView {
     pub format: u32,
     pub width: u32,
     pub height: u32,
-    pub depth: u32,
     pub cube: bool,
     pub volume: bool,
     pub subresource: (u32, u32, u32),
@@ -256,8 +255,6 @@ pub(crate) enum GpuRegistryEntry {
         format: u32,
         width: u32,
         height: u32,
-        depth: u32,
-        levels: u32,
         pool: u32,
         usage: u32,
         lod: Arc<AtomicU32>,
@@ -270,8 +267,6 @@ pub(crate) enum GpuRegistryEntry {
         format: u32,
         width: u32,
         height: u32,
-        depth: u32,
-        levels: u32,
         face: u32,
         level: u32,
         volume: bool,
@@ -285,7 +280,6 @@ pub(crate) enum GpuRegistryEntry {
         format: u32,
         width: u32,
         height: u32,
-        depth: bool,
         pool: u32,
         usage: u32,
         discard: bool,
@@ -306,7 +300,6 @@ struct DrawTextures {
 
 struct CachedBinding {
     id: u32,
-    texture: wgpu::Texture,
     lod: Option<Arc<AtomicU32>>,
     binding: draw::BoundTexture,
 }
@@ -1841,8 +1834,6 @@ fn gpu_entry_from_staged(
             format: t.format,
             width: t.width,
             height: t.height,
-            depth: t.depth,
-            levels: t.levels,
             pool: t.pool,
             usage: t.usage,
             lod: resource.lod.clone(),
@@ -1853,7 +1844,6 @@ fn gpu_entry_from_staged(
             format: s.format,
             width: s.width,
             height: s.height,
-            depth: s.depth,
             pool: s.pool,
             usage: s.usage,
             discard: s.discard,
@@ -1884,10 +1874,10 @@ fn gpu_entry_from_resource(resource: &D3d9Resource) -> Option<GpuRegistryEntry> 
     if let Some(resource::ResourceState::Buffer(b)) = resource.state.as_ref() {
         return Some(buffer_entry(b));
     }
-    if let Some((texture, kind, format, width, height, levels)) = resource.texture_gpu() {
-        let (depth, pool, usage) = match resource.state.as_ref() {
-            Some(resource::ResourceState::Texture(t)) => (t.depth, t.pool, t.usage),
-            _ => (1, 0, 0),
+    if let Some((texture, kind, format, width, height, _)) = resource.texture_gpu() {
+        let (pool, usage) = match resource.state.as_ref() {
+            Some(resource::ResourceState::Texture(t)) => (t.pool, t.usage),
+            _ => (0, 0),
         };
         return Some(GpuRegistryEntry::Texture {
             texture,
@@ -1895,35 +1885,30 @@ fn gpu_entry_from_resource(resource: &D3d9Resource) -> Option<GpuRegistryEntry> 
             format,
             width,
             height,
-            depth,
-            levels,
             pool,
             usage,
             lod: resource.lod.clone(),
             fresh: fresh_or_new(resource.level_freshness(0, 0)),
         });
     }
-    resource
-        .surface_gpu()
-        .map(
-            |(texture, format, width, height, depth)| GpuRegistryEntry::Surface {
-                texture,
-                format,
-                width,
-                height,
-                depth,
-                pool: resource.pool().unwrap_or(resource::D3DPOOL_DEFAULT),
-                usage: match resource.state.as_ref() {
-                    Some(resource::ResourceState::Surface(s)) => s.usage,
-                    _ => 0,
-                },
-                discard: match resource.state.as_ref() {
-                    Some(resource::ResourceState::Surface(s)) => s.discard,
-                    _ => false,
-                },
-                fresh: fresh_or_new(resource.level_freshness(0, 0)),
+    resource.surface_gpu().map(
+        |(texture, format, width, height, _)| GpuRegistryEntry::Surface {
+            texture,
+            format,
+            width,
+            height,
+            pool: resource.pool().unwrap_or(resource::D3DPOOL_DEFAULT),
+            usage: match resource.state.as_ref() {
+                Some(resource::ResourceState::Surface(s)) => s.usage,
+                _ => 0,
             },
-        )
+            discard: match resource.state.as_ref() {
+                Some(resource::ResourceState::Surface(s)) => s.discard,
+                _ => false,
+            },
+            fresh: fresh_or_new(resource.level_freshness(0, 0)),
+        },
+    )
 }
 
 pub fn d3d9_register_resource_view(
@@ -1952,7 +1937,6 @@ pub fn d3d9_register_resource_view(
     let usage = t.usage;
     let width = (t.width >> level).max(1);
     let height = (t.height >> level).max(1);
-    let depth = if volume { (t.depth >> level).max(1) } else { 1 };
     let gpu = resource
         .texture_gpu()
         .map(|(texture, _, _, _, _, _)| texture);
@@ -1970,8 +1954,6 @@ pub fn d3d9_register_resource_view(
             format,
             width,
             height,
-            depth,
-            levels: 1,
             face,
             level,
             volume,
@@ -2513,7 +2495,6 @@ fn target_surface(target: &OffscreenTarget, format: u32) -> SurfaceView {
         format,
         width: target.width,
         height: target.height,
-        depth: 1,
         cube: false,
         volume: false,
         subresource: (0, 0, 0),
@@ -4469,7 +4450,6 @@ fn resolve_target_view(
             format: targets.format,
             width: targets.target.width,
             height: targets.target.height,
-            depth: 1,
             cube: false,
             volume: false,
             subresource: (0, 0, 0),
@@ -4491,7 +4471,6 @@ fn resolve_target_view(
             format: targets.depth_format,
             width: targets.target.width,
             height: targets.target.height,
-            depth: 1,
             cube: false,
             volume: false,
             subresource: (0, 0, 0),
@@ -4504,36 +4483,30 @@ fn resolve_target_view(
             format,
             width,
             height,
-            levels,
             ..
-        }) => {
-            let _ = levels;
-            Ok(SurfaceView {
-                texture: texture.clone(),
-                view: texture_view(
-                    &device.view_cache,
-                    texture,
-                    face,
-                    level,
-                    *kind == resource::TextureKind::Volume,
-                    *kind == resource::TextureKind::Cube,
-                ),
-                format: *format,
-                width: (*width >> level).max(1),
-                height: (*height >> level).max(1),
-                depth: 1,
-                cube: *kind == resource::TextureKind::Cube,
-                volume: *kind == resource::TextureKind::Volume,
-                subresource: (face, level, 0),
-            })
-        }
+        }) => Ok(SurfaceView {
+            texture: texture.clone(),
+            view: texture_view(
+                &device.view_cache,
+                texture,
+                face,
+                level,
+                *kind == resource::TextureKind::Volume,
+                *kind == resource::TextureKind::Cube,
+            ),
+            format: *format,
+            width: (*width >> level).max(1),
+            height: (*height >> level).max(1),
+            cube: *kind == resource::TextureKind::Cube,
+            volume: *kind == resource::TextureKind::Volume,
+            subresource: (face, level, 0),
+        }),
         Some(GpuRegistryEntry::TextureAlias {
             gpu,
             kind,
             format,
             width,
             height,
-            depth,
             face: alias_face,
             level: alias_level,
             volume: alias_volume,
@@ -4557,7 +4530,6 @@ fn resolve_target_view(
                 format: *format,
                 width: *width,
                 height: *height,
-                depth: *depth,
                 cube: *kind == resource::TextureKind::Cube,
                 volume: *alias_volume,
                 subresource: (*alias_face, *alias_level, 0),
@@ -4579,7 +4551,6 @@ fn resolve_target_view(
             format: *format,
             width: *width,
             height: *height,
-            depth: 1,
             cube: false,
             volume: false,
             subresource: (0, 0, 0),
@@ -4660,12 +4631,7 @@ fn resolve_binding(device: &D3d9Device, id: u32, stage: u32) -> Result<CachedBin
         lod: lod.as_ref().map_or(0, |lod| lod.load(Ordering::Acquire)),
         levels: texture.mip_level_count(),
     };
-    Ok(CachedBinding {
-        id,
-        texture,
-        lod,
-        binding,
-    })
+    Ok(CachedBinding { id, lod, binding })
 }
 
 fn bound_textures_cached(

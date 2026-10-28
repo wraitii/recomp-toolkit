@@ -109,38 +109,6 @@ fn clamp_rect(
     })
 }
 
-fn fit_rect(
-    rect: Option<TargetRect>,
-    width: u32,
-    height: u32,
-    op: &'static str,
-) -> Result<Rect, RenderError> {
-    let (left, top, right, bottom) = match rect {
-        Some(rect) => (
-            rect.left as i64,
-            rect.top as i64,
-            rect.right as i64,
-            rect.bottom as i64,
-        ),
-        None => (0, 0, width as i64, height as i64),
-    };
-    if left < 0
-        || top < 0
-        || right < left
-        || bottom < top
-        || right > width as i64
-        || bottom > height as i64
-    {
-        return Err(RenderError::invalid(op, "rectangle is outside the surface"));
-    }
-    Ok(Rect {
-        left: left as u32,
-        top: top as u32,
-        right: right as u32,
-        bottom: bottom as u32,
-    })
-}
-
 fn overlaps(a: Rect, b: Rect) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
@@ -586,52 +554,6 @@ pub(crate) fn stretch_rect(
         ));
     }
     blit(gpu, src, src_rect, dst, dst_rect, filter, OP)
-}
-
-pub(crate) fn update_surface(
-    gpu: &D3d9Gpu,
-    src: &SurfaceView,
-    src_rect: Option<TargetRect>,
-    dst: &SurfaceView,
-    dst_point: (i32, i32),
-) -> Result<(), RenderError> {
-    const OP: &str = "UpdateSurface";
-    reject_depth(src, dst, OP)?;
-    reject_volume(src, Some(dst), OP)?;
-    reject_block(src, dst, OP)?;
-    if src.format != dst.format {
-        return Err(RenderError::new(
-            OP,
-            "format conversion is not supported by UpdateSurface",
-        ));
-    }
-    let src_rect = fit_rect(src_rect, src.width, src.height, OP)?;
-    if src_rect.is_empty() {
-        return Ok(());
-    }
-    let (x, y) = dst_point;
-    if x < 0 || y < 0 {
-        return Err(RenderError::invalid(OP, "negative destination point"));
-    }
-    let dst_rect = Rect {
-        left: x as u32,
-        top: y as u32,
-        right: x as u32 + src_rect.width(),
-        bottom: y as u32 + src_rect.height(),
-    };
-    if dst_rect.right > dst.width || dst_rect.bottom > dst.height {
-        return Err(RenderError::invalid(
-            OP,
-            "destination rectangle is outside the surface",
-        ));
-    }
-    if same_subresource(src, dst) && overlaps(src_rect, dst_rect) {
-        return Err(RenderError::invalid(
-            OP,
-            "source and destination rectangles overlap on the same surface",
-        ));
-    }
-    raw_copy(gpu, src, src_rect, dst, dst_rect, OP)
 }
 
 pub(crate) fn copy_to_cpu(

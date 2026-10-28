@@ -5,6 +5,7 @@ use std::path::Path;
 mod opcodes;
 #[path = "src/shader/interface.rs"]
 mod shader_interface;
+#[allow(dead_code)]
 #[path = "src/shader/uber/abi.rs"]
 mod uber_abi;
 #[path = "src/shader/uber/source.rs"]

@@ -3065,7 +3065,7 @@ impl StateSink<'_> {
                 .state
                 .set_render_state(state, value)
                 .map_err(|_| invalid_data("render state is out of bounds")),
-            StateSink::Commands(commands, values_out) => {
+            StateSink::Commands(commands, _) => {
                 commands.push(effect_command(
                     D3dxEffectCommandKind::SetRenderState,
                     0,
@@ -3088,7 +3088,7 @@ impl StateSink<'_> {
                 .state
                 .set_texture_stage_state(stage, state, value)
                 .map_err(|_| invalid_data("texture stage state is out of bounds")),
-            StateSink::Commands(commands, values_out) => {
+            StateSink::Commands(commands, _) => {
                 commands.push(effect_command(
                     D3dxEffectCommandKind::SetTextureStageState,
                     stage,
@@ -3106,7 +3106,7 @@ impl StateSink<'_> {
                 .state
                 .set_sampler_state(sampler, state, value)
                 .map_err(|_| invalid_data("sampler state is out of bounds")),
-            StateSink::Commands(commands, values_out) => {
+            StateSink::Commands(commands, _) => {
                 commands.push(effect_command(
                     D3dxEffectCommandKind::SetSamplerState,
                     sampler,
@@ -3134,7 +3134,7 @@ impl StateSink<'_> {
                 }
                 Ok(())
             }
-            StateSink::Commands(commands, values_out) => {
+            StateSink::Commands(commands, _) => {
                 commands.push(effect_command(D3dxEffectCommandKind::SetFVF, 0, 0, format));
                 Ok(())
             }
@@ -3164,7 +3164,7 @@ impl StateSink<'_> {
                 .state
                 .set_texture(stage, id)
                 .map_err(|_| invalid_data("texture stage is out of bounds")),
-            StateSink::Commands(commands, values_out) => {
+            StateSink::Commands(commands, _) => {
                 commands.push(effect_command(
                     D3dxEffectCommandKind::SetTexture,
                     stage,
@@ -3182,7 +3182,7 @@ impl StateSink<'_> {
                 device.state.set_shader(pixel, handle);
                 Ok(())
             }
-            StateSink::Commands(commands, values_out) => {
+            StateSink::Commands(commands, _) => {
                 let kind = if pixel {
                     D3dxEffectCommandKind::SetPixelShader
                 } else {

@@ -23,7 +23,7 @@ const D3DX_FROM_FILE: u32 = 0xFFFF_FFFD;
 const D3DFMT_L6V5U5: u32 = 61;
 const D3DFMT_X8L8V8U8: u32 = 62;
 const D3DFMT_A2W10V10U10: u32 = 67;
-const D3DFMT_CxV8U8: u32 = 117;
+const D3DFMT_CXV8U8: u32 = 117;
 
 const D3DXIFF_BMP: u32 = 0;
 const D3DXIFF_JPG: u32 = 1;
@@ -186,8 +186,8 @@ fn classify_dds_format(
             114 => Some(format::D3DFMT_R32F),
             115 => Some(format::D3DFMT_G32R32F),
             116 => Some(format::D3DFMT_A32B32G32R32F),
-            117 => Some(D3DFMT_CxV8U8),
-            0x3856_5843 => Some(D3DFMT_CxV8U8),
+            117 => Some(D3DFMT_CXV8U8),
+            0x3856_5843 => Some(D3DFMT_CXV8U8),
             _ => None,
         };
     }
@@ -1007,15 +1007,7 @@ fn validate_color_level(
     Ok(())
 }
 
-fn crop_pixels(
-    pixels: &[[f32; 4]],
-    w: u32,
-    h: u32,
-    x0: u32,
-    y0: u32,
-    cw: u32,
-    ch: u32,
-) -> Vec<[f32; 4]> {
+fn crop_pixels(pixels: &[[f32; 4]], w: u32, x0: u32, y0: u32, cw: u32, ch: u32) -> Vec<[f32; 4]> {
     let mut out = Vec::with_capacity((cw as usize) * (ch as usize));
     for y in 0..ch {
         let row = ((y0 + y) * w + x0) as usize;
@@ -1408,7 +1400,7 @@ pub fn d3d9_d3dx_surface_read(
             Ok(pixels) => pixels,
             Err(error) => return fail_surface_read(error),
         };
-        let mut cropped = crop_pixels(&pixels, w, h, x0, y0, cw, ch);
+        let mut cropped = crop_pixels(&pixels, w, x0, y0, cw, ch);
         apply_color_key(&mut cropped, color_key);
         snapshot.pixels = Some(cropped);
     }
@@ -1852,7 +1844,7 @@ pub fn d3d9_d3dx_save_surface(
                     Ok(pixels) => pixels,
                     Err(error) => return fail_bytes(error),
                 };
-                let cropped = crop_pixels(&pixels, w, h, x0, y0, cw, ch);
+                let cropped = crop_pixels(&pixels, w, x0, y0, cw, ch);
                 match encode_level_f32(source_format, cw, ch, 1, &cropped, false) {
                     Ok(encoded) => encoded,
                     Err(error) => return fail_bytes(error),
@@ -1881,7 +1873,7 @@ pub fn d3d9_d3dx_save_surface(
         Ok(pixels) => pixels,
         Err(error) => return fail_bytes(error),
     };
-    let cropped = crop_pixels(&pixels, w, h, x0, y0, cw, ch);
+    let cropped = crop_pixels(&pixels, w, x0, y0, cw, ch);
     match encode_image(format, cw, ch, &cropped) {
         Ok(bytes) => D3dxBytesResult {
             status: ok_status(),
