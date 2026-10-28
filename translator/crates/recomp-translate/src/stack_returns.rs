@@ -551,6 +551,180 @@ fn in_image(range: Range, image: (u32, u32)) -> bool {
         if offset >= image.0 && u64::from(offset) + u64::from(span) + u64::from(range.size) <= u64::from(image.1))
 }
 
+fn frontier_category(terminal: &Value, range: Range) -> String {
+    let reason = terminal["reason"].as_str().unwrap_or("unknown");
+    let detail = &terminal["detail"];
+    let origin = &detail["address_origin"];
+    let reloads: BTreeSet<_> = origin["reloads"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|reload| reload["field"].as_str())
+        .collect();
+    let class = detail["blocker_class"].as_str().unwrap_or("unknown");
+    let cause = match reason {
+        "stack-read-may-alias" if reloads.contains("ESP") => {
+            if origin["reloads"].as_array().is_some_and(|reloads| {
+                reloads
+                    .iter()
+                    .any(|reload| reload["field"] == "ESP" && reload["cleanup"].is_null())
+            }) {
+                "esp-reload-missing-cleanup".into()
+            } else {
+                "esp-reload-known-cleanup".into()
+            }
+        }
+        "stack-read-may-alias" if class == "bounded-stack-ranges-overlap" => {
+            let bounded_slot = matches!(range.address, Address::Known { span, .. } if span != 0);
+            let bounded_read = detail["read"]["span"]
+                .as_u64()
+                .is_some_and(|span| span != 0);
+            let expanded_read = detail["raw_read"]["span"] == 0 && bounded_read;
+            match (bounded_slot, bounded_read) {
+                (true, false) => "slot-position-range",
+                (false, true) if expanded_read => "mapped-read-range",
+                (true, true) if expanded_read => "slot-and-mapped-read-ranges",
+                (false, true) => "read-address-range",
+                (true, true) => "slot-and-read-ranges",
+                _ => "stack-range-overlap",
+            }
+            .into()
+        }
+        "read-origin-call-reload" => reloads.into_iter().collect::<Vec<_>>().join("+"),
+        "read-origin-walk-limit" if !reloads.is_empty() => "register-reloads-seen".into(),
+        "read-origin-walk-limit"
+            if origin["pointer_loads"]
+                .as_array()
+                .is_some_and(|loads| !loads.is_empty()) =>
+        {
+            "pointer-loads-seen".into()
+        }
+        "read-origin-walk-limit" => "no-root-recovered".into(),
+        "stack-read-may-alias"
+        | "pointer-read-slot-not-below-esp"
+        | "pointer-read-stack-position-unknown"
+        | "callee-register-binding-unknown" => {
+            if detail["raw_read"]["base"] == "Frame" && detail["read"]["base"] != "Frame" {
+                "callee-frame-relationship-lost".into()
+            } else {
+                class.into()
+            }
+        }
+        "call-depth-limit" => match (
+            detail["target"].is_string(),
+            detail["next_callee_has_stack_writes"] == true,
+        ) {
+            (false, _) => "indirect-target",
+            (true, true) => "available-target-with-stack-writes",
+            _ => "other-direct-target",
+        }
+        .into(),
+        _ => return reason.into(),
+    };
+    format!("{reason}/{cause}")
+}
+
+fn query_counts(rows: &[&Value]) -> Value {
+    let calls: BTreeSet<_> = rows.iter().filter_map(|row| row["call"].as_str()).collect();
+    let slots: BTreeSet<_> = rows
+        .iter()
+        .map(|row| {
+            (
+                row["call"].as_str(),
+                row["callee"].as_str(),
+                row["slot"].as_str(),
+            )
+        })
+        .collect();
+    json!({"queries": rows.len(), "call_sites": calls.len(), "call_slots": slots.len()})
+}
+
+fn unresolved_progress(rows: &[&Value]) -> BTreeMap<&'static str, Value> {
+    [
+        "unread-through-analyzed-call",
+        "partial-overwrite-every-path",
+        "no-additional-progress-evidence",
+    ]
+    .into_iter()
+    .map(|name| {
+        let matching: Vec<_> = rows
+            .iter()
+            .copied()
+            .filter(|row| {
+                let evidence = &row["stack_evidence"];
+                let through_call = evidence["unread_through_analyzed_call"] == true;
+                let partial = evidence["partial_overwrite"]["every_path_at_least_one_byte"] == true;
+                evidence["outcome"] == "unresolved"
+                    && match name {
+                        "unread-through-analyzed-call" => through_call,
+                        "partial-overwrite-every-path" => partial,
+                        _ => !through_call && !partial,
+                    }
+            })
+            .collect();
+        (name, query_counts(&matching))
+    })
+    .collect()
+}
+
+fn evidence_breakdown(rows: &[&Value]) -> Value {
+    let mut outcomes: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    let mut categories: BTreeMap<&str, Vec<(&Value, &Value)>> = BTreeMap::new();
+    for &row in rows {
+        let evidence = &row["stack_evidence"];
+        outcomes
+            .entry(evidence["outcome"].as_str().unwrap())
+            .or_default()
+            .push(row);
+        if evidence["outcome"] != "unresolved" {
+            continue;
+        }
+        for terminal in evidence["terminals"].as_array().into_iter().flatten() {
+            if let Some(category) = terminal["tracking_category"].as_str() {
+                categories
+                    .entry(category)
+                    .or_default()
+                    .push((row, terminal));
+            }
+        }
+    }
+    let frontiers: BTreeMap<_, _> = categories.into_iter().map(|(category, entries)| {
+        let mut matching: Vec<_> = entries.iter().map(|&(row, _)| row).collect();
+        matching.dedup_by(|a, b| std::ptr::eq(*a, *b));
+        let sole = matching.iter().filter(|row| row["stack_evidence"]["terminals"].as_array().is_some_and(|terminals| {
+            terminals.iter().all(|terminal| terminal["reason"] == "overwritten" || terminal["reason"] == "caller-return"
+                || terminal["tracking_category"] == category)
+        })).count();
+        let mut instructions = BTreeSet::new();
+        let mut examples = Vec::new();
+        for &(row, terminal) in &entries {
+            if instructions.insert((terminal["function"].as_str(), terminal["site"].as_str())) && examples.len() < 3 {
+                examples.push(json!({"caller": row["caller"], "call": row["call"], "return": row["return"],
+                    "function": terminal["function"], "site": terminal["site"], "instruction": terminal["instruction"],
+                    "detail": terminal["detail"]}));
+            }
+        }
+        let positions: BTreeMap<_, _> = [("below-esp", Value::Bool(true)), ("not-wholly-below-esp", Value::Bool(false)), ("unknown", Value::Null)]
+            .into_iter().map(|(name, position)| {
+                let mut rows: Vec<_> = entries.iter().filter(|(_, terminal)| terminal["detail"]["whole_slot_below_esp"] == position)
+                    .map(|&(row, _)| row).collect();
+                rows.dedup_by(|a, b| std::ptr::eq(*a, *b));
+                (name, query_counts(&rows))
+            }).collect();
+        let mut counts = query_counts(&matching);
+        counts["terminal_paths"] = json!(entries.len());
+        counts["blocking_instructions"] = json!(instructions.len());
+        counts["sole_frontier_queries"] = json!(sole);
+        counts["stack_positions"] = json!(positions);
+        counts["unresolved_progress"] = json!(unresolved_progress(&matching));
+        counts["examples"] = json!(examples);
+        (category, counts)
+    }).collect();
+    json!({"outcomes": outcomes.into_iter().map(|(name, rows)| (name, query_counts(&rows))).collect::<BTreeMap<_, _>>(),
+        "unresolved_progress": unresolved_progress(rows),
+        "frontiers": frontiers})
+}
+
 fn investigate(
     bodies: &BTreeMap<Addr, Body>,
     start: Cursor,
@@ -1205,7 +1379,7 @@ pub(super) fn write(
                     } else {
                         Value::Null
                     };
-                    let evidence = if store.return_position != "below-esp" {
+                    let mut evidence = if store.return_position != "below-esp" {
                         json!({"outcome": "outside-scope", "reason": store.return_position})
                     } else if !store.private_frame {
                         json!({"outcome": "unresolved", "terminals": [{"reason": "private-frame-not-proven"}]})
@@ -1315,6 +1489,18 @@ pub(super) fn write(
                         json!({"outcome": outcome, "unread_through_analyzed_call": unread_through_call,
                             "partial_overwrite": {"some_paths": some_partial, "every_path_at_least_one_byte": all_touched, "minimum_bytes_every_path": min_all_paths}, "terminals": frontier})
                     };
+                    if evidence["outcome"] == "unresolved" {
+                        if let Some(terminals) = evidence["terminals"].as_array_mut() {
+                            for terminal in terminals {
+                                if terminal["reason"] != "overwritten"
+                                    && terminal["reason"] != "caller-return"
+                                {
+                                    terminal["tracking_category"] =
+                                        json!(frontier_category(terminal, range));
+                                }
+                            }
+                        }
+                    }
                     *counts.entry(outcome.into()).or_default() += 1;
                     for reason in terminals
                         .iter()
@@ -1487,6 +1673,18 @@ pub(super) fn write(
         .filter(|(_, body)| !body.forwarded_reads.is_empty())
         .map(|(&function, body)| (format!("{function:08x}"), &body.forwarded_reads))
         .collect();
+    let mut callee_rows: BTreeMap<&str, Vec<&Value>> = BTreeMap::new();
+    for row in &rows {
+        callee_rows
+            .entry(row["callee"].as_str().unwrap())
+            .or_default()
+            .push(row);
+    }
+    let breakdown = evidence_breakdown(&rows.iter().collect::<Vec<_>>());
+    let by_callee: BTreeMap<_, _> = callee_rows
+        .into_iter()
+        .map(|(callee, rows)| (callee, evidence_breakdown(&rows)))
+        .collect();
     let report = json!({"format": "recomp-stack-return-report-v1", "read_only": true,
         "executable_sha256": ctx.program.sha256, "image_base": format!("{:08x}", ctx.program.image.base), "image_size": ctx.program.image.size,
         "scope": "Normal continuations of ordinary planned return publications; pre-promotion SSA uses per-function production assumptions and retains every original store. Production forwarding removes reads proven to consume prior writes. Stack evidence uses private-frame exposure and general address relations. Candidates require runtime observer guards and return/entry contracts before optimization. Indirect and external callers prevent global elimination from these counts alone.",
@@ -1504,6 +1702,9 @@ pub(super) fn write(
         "partial_overwrite_evidence": {"counts": partial_summary, "scope": "Some paths proves at least one actual slot byte overwritten while bytes might survive; every path requires at least one actual slot byte overwritten on all paths, allowing complete overwrites. Aligned slots use the minimum overlap over every possible slot position. Queries with a definite read before complete overwrite are excluded. Possible reads and later effects remain unresolved. Counts overlap other categories."},
         "unread_through_analyzed_call": {"queries": through_call.len(), "call_sites": through_call_sites.len(), "call_slots": through_call_slots.len(), "later_outcomes": through_call_outcomes, "scope": "Every explored path overwrites all tracked bytes or completes a subsequent analyzed call with bytes surviving and no stack read; at least one path completes such a call. Later reads or unresolved behavior remain possible. Query counts overlap the main outcome categories."},
         "stack_evidence_unresolved_frontiers": evidence_frontiers,
+        "stack_evidence_breakdown": breakdown,
+        "stack_evidence_by_callee": by_callee,
+        "stack_evidence_breakdown_scope": "Frontier categories refine terminal reasons without changing the search or outcomes. Query/call counts overlap across categories and stack positions; call-site counts mean at least one query, not every return/slot. Sole-frontier queries may also overwrite or return unread. Examples use distinct blocking instructions. Missing stack positions are unknown. Unresolved progress signals overlap: completing an analyzed call unread or overwriting some actual bytes on every path is bounded evidence only; surviving bytes and later reads remain unresolved. No-additional-progress-evidence is absence of those signals, not proof of a live slot. Register reloads, lost frame relationships, loops, opaque operations and search limits alone provide no additional evidence of death. A bounded slot/read overlap is a possible read, not a definite read. Syntactic stack writes in a depth-limited target are not proof of overwrite. All findings retain the report assumptions; no new death assumption or emission change.",
         "stack_evidence_frontier_counting": "Each unresolved query is counted once per terminal reason; queries can have multiple reasons; overwritten and caller-return paths are not counted as unresolved frontiers.",
         "stack_evidence_scope": "Only publications proved wholly below restored ESP. Production private-stack excludes unrelated pointer reads of unexposed returned slots while below current ESP. Definite reads take precedence over unresolved paths. Unread-at-caller-return requires all paths to overwrite or reach the first caller return unread; it does not prove the bytes dead afterward. No emission changes.",
         "assumption_only_upper_bounds": assumption_bounds,

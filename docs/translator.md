@@ -93,7 +93,16 @@ slots and a consistent exact restored ESP, and records the gap below restored ES
 It reports definite reads before overwrite, complete overwrites,
 paths unread at the first caller return, and queries unread through a subsequent
 analyzed call, and partial overwrites, along with distinct unresolved frontiers and
-witnesses. A definite read or partial overwrite must cover an actual surviving slot
+witnesses. Default global and per-callee breakdowns split register reloads by field,
+ESP reloads by missing cleanup, uncertain slot/read ranges (including exact reads
+expanded into ranges when mapping callees), lost callee frames,
+pointer origins and search boundaries. Each category counts queries, call sites,
+distinct blocking instructions and sole-frontier queries, with stack positions,
+examples and overlapping unread-through-call/partial-overwrite progress counts.
+Call-site counts mean at least one query, not every return/slot at that call.
+Lost tracking alone adds no evidence of death; completed unread calls and partial
+overwrites support only the explored prefix and leave later reads unresolved.
+A definite read or partial overwrite must cover an actual surviving slot
 byte at every possible aligned position; definite reads exclude partial candidates. The call measure
 requires every explored path to overwrite the bytes or complete such a call unread;
 it does not rule out a later read. A caller return is not proof the bytes are dead; assuming
