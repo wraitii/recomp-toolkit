@@ -80,6 +80,10 @@ void recomp_register_host_call(uint32_t fn, uint32_t nargs, RecompHostCall call)
     (void)call;
 }
 /* No auxiliary modules in the synthetic image. */
+const RecompModule *recomp_module_containing(uint32_t target) {
+    (void)target;
+    return NULL;
+}
 int32_t recomp_module_lookup(uint32_t target) {
     (void)target;
     return -1;
