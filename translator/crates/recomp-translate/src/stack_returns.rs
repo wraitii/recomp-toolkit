@@ -1038,6 +1038,61 @@ pub(super) fn write(
                         } else {
                             "unresolved"
                         };
+                        let progress = |terminal: &Value| -> Option<(usize, usize)> {
+                            let Address::Known { span, .. } = range.address else {
+                                return None;
+                            };
+                            let width = span.checked_add(range.size)?;
+                            if width > BYTE_LIMIT || range.size == 0 {
+                                return None;
+                            }
+                            let remaining = terminal["remaining_bytes"].as_array()?;
+                            let mut alive = BTreeSet::new();
+                            for byte in remaining {
+                                let byte = u32::try_from(byte.as_u64()?).ok()?;
+                                if byte >= width || !alive.insert(byte) {
+                                    return None;
+                                }
+                            }
+                            let minimum = (0..=span)
+                                .map(|start| {
+                                    (start..start + range.size)
+                                        .filter(|byte| !alive.contains(byte))
+                                        .count()
+                                })
+                                .min()?;
+                            Some((minimum, alive.len()))
+                        };
+                        let progresses: Vec<_> = frontier.iter().map(progress).collect();
+                        let no_definite_read = outcome != "definite-read-before-overwrite";
+                        let some_partial = no_definite_read
+                            && progresses
+                                .iter()
+                                .flatten()
+                                .any(|&(written, remaining)| written > 0 && remaining > 0);
+                        let all_touched = some_partial
+                            && frontier
+                                .iter()
+                                .zip(&progresses)
+                                .all(|(terminal, progress)| {
+                                    terminal["reason"] != "step-budget"
+                                        && progress.is_some_and(|(written, _)| written > 0)
+                                });
+                        let min_all_paths = all_touched
+                            .then(|| {
+                                progresses
+                                    .iter()
+                                    .flatten()
+                                    .map(|&(written, _)| written)
+                                    .min()
+                            })
+                            .flatten();
+                        for (terminal, progress) in frontier.iter_mut().zip(&progresses) {
+                            if let Some((written, remaining)) = progress {
+                                terminal["guaranteed_overwritten_bytes"] = json!(written);
+                                terminal["possible_remaining_bytes"] = json!(remaining);
+                            }
+                        }
                         let reached_call = |terminal: &Value| {
                             terminal["trace"].as_array().is_some_and(|trace| {
                                 trace
@@ -1051,7 +1106,8 @@ pub(super) fn write(
                                     && (terminal["reason"] == "overwritten"
                                         || reached_call(terminal))
                             });
-                        json!({"outcome": outcome, "unread_through_analyzed_call": unread_through_call, "terminals": frontier})
+                        json!({"outcome": outcome, "unread_through_analyzed_call": unread_through_call,
+                            "partial_overwrite": {"some_paths": some_partial, "every_path_at_least_one_byte": all_touched, "minimum_bytes_every_path": min_all_paths}, "terminals": frontier})
                     };
                     *counts.entry(outcome.into()).or_default() += 1;
                     for reason in terminals
@@ -1208,6 +1264,15 @@ pub(super) fn write(
         )
     })
     .collect();
+    let partial_summary: BTreeMap<_, _> = ["some_paths", "every_path_at_least_one_byte"].into_iter().map(|category| {
+        let matching: Vec<_> = rows.iter().filter(|row| row["stack_evidence"]["partial_overwrite"][category] == true).collect();
+        let calls: BTreeSet<_> = matching.iter().filter_map(|row| row["call"].as_str()).collect();
+        let slots: BTreeSet<_> = matching.iter().map(|row| (row["call"].as_str(), row["callee"].as_str(), row["slot"].as_str())).collect();
+        let outcomes: BTreeMap<_, _> = ["overwritten-before-read", "unread-at-caller-return", "unresolved"].into_iter().map(|outcome| {
+            (outcome, matching.iter().filter(|row| row["stack_evidence"]["outcome"] == outcome).count())
+        }).collect();
+        (category, json!({"queries": matching.len(), "call_sites": calls.len(), "call_slots": slots.len(), "outcomes": outcomes}))
+    }).collect();
     let forwarded: BTreeMap<_, _> = bodies
         .iter()
         .filter(|(_, body)| !body.forwarded_reads.is_empty())
@@ -1224,6 +1289,7 @@ pub(super) fn write(
         "candidate_call_sites": candidate_calls.len(), "candidate_call_slots": candidate_slots.len(),
         "additional_candidates_with_slot_outside_image_guard": {"queries": guarded_queries, "call_sites": guarded_calls.len(), "call_slots": guarded_slots.len()},
         "stack_evidence_counts": evidence_outcomes,
+        "partial_overwrite_evidence": {"counts": partial_summary, "scope": "Some paths proves at least one actual slot byte overwritten while bytes might survive; every path requires at least one actual slot byte overwritten on all paths, allowing complete overwrites. Aligned slots use the minimum overlap over every possible slot position. Queries with a definite read before complete overwrite are excluded. Possible reads and later effects remain unresolved. Counts overlap other categories."},
         "unread_through_analyzed_call": {"queries": through_call.len(), "call_sites": through_call_sites.len(), "call_slots": through_call_slots.len(), "later_outcomes": through_call_outcomes, "scope": "Every explored path overwrites all tracked bytes or completes a subsequent analyzed call with bytes surviving and no stack read; at least one path completes such a call. Later reads or unresolved behavior remain possible. Query counts overlap the main outcome categories."},
         "stack_evidence_unresolved_frontiers": evidence_frontiers,
         "stack_evidence_frontier_counting": "Each unresolved query is counted once per terminal reason; queries can have multiple reasons; overwritten and caller-return paths are not counted as unresolved frontiers.",
