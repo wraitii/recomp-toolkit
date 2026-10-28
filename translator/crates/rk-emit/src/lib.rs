@@ -428,9 +428,6 @@ impl<'a> Emitter<'a> {
         let signature = self.signature(&body_name);
         self.out.push_str(&signature);
         self.out.push_str(" {\n");
-        if self.checked && self.private.is_none() {
-            self.out.push_str("(void)expected_return_; (void)checked_return_;\n");
-        }
         self.write_declarations();
         self.write_x87_declarations()?;
         if self
