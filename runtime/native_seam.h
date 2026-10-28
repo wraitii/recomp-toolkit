@@ -4,6 +4,7 @@
  * so everything here has C linkage and C types. None of it names a game.
  */
 #pragma once
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 /* Same typedef as x86.h; repeating it is valid in C11 and C++. */
@@ -57,6 +58,10 @@ int recomp_temp_file(const char *suffix, const void *data, size_t len, char *out
 
 /* Offer a DirectDraw display mode, as the host does for its own modes. */
 int ddraw_add_mode(int w, int h, int bpp);
+
+int recomp_registry_dword(const char *key, const char *name, uint32_t *value);
+void recomp_registry_set_dword(const char *key, const char *name, uint32_t value);
+bool ddraw_enum_display_mode(uint32_t index, uint32_t *w, uint32_t *h, uint32_t *bpp);
 
 /* The guest has finished drawing its 3D scene and is about to draw its overlay.
  * Mode 0 only marks the boundary (a draw trace prints it); mode 1 filters the

@@ -554,6 +554,35 @@ void registry_load() {
     }
 }
 
+extern "C" int recomp_registry_dword(const char *key, const char *name, uint32_t *value) {
+    auto k = regstore().find(key);
+    if (k == regstore().end())
+        return 0;
+    auto v = k->second.find(name);
+    if (v == k->second.end() || v->second.type != 4)
+        return 0;
+    *value = v->second.dword;
+    return 1;
+}
+
+extern "C" void recomp_registry_set_dword(const char *key, const char *name, uint32_t value) {
+    reg_ensure_ancestors(key);
+    auto &values = regstore()[key];
+    auto &v = values[name];
+    v.type = 4;
+    v.dword = value;
+    if (!v.seq)
+        v.seq = ++g_reg_seq;
+    auto ordered = reg_in_order(values);
+    std::stable_sort(ordered.begin(), ordered.end(), [](const auto *a, const auto *b) {
+        return a->second.type == 4 && b->second.type != 4;
+    });
+    for (const auto *entry : ordered)
+        values[entry->first].seq = ++g_reg_seq;
+    g_registry_dirty = true;
+    registry_flush();
+}
+
 // Persist the registry when changed, creating the destination directories as needed.
 // An open failure leaves the dirty flag set so a later flush can retry.
 void registry_flush() {

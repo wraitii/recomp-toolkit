@@ -45,6 +45,7 @@ native = { header = "native/bw_native.h", sources = [
     "native/terrain/terrain_cells.c",
     "native/terrain/terrain_render_cell.c",
     "native/lod/lod_override.c",
+    "native/display/display_options.c",
 ] }
 
 [render]
