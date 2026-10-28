@@ -5,6 +5,7 @@
 #include "loader.h"
 #include "game_config.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -168,8 +169,10 @@ InstallationManifest installation_manifest_for_process() {
             ? std::string(RECOMP_APP_NAME) + ".app/Contents/MacOS/" + RECOMP_APP_NAME
             : std::string("app/") + RECOMP_APP_NAME +
                   (strcmp(os_platform_name(), "windows") == 0 ? ".exe" : "");
+    std::string sidecar_name = RECOMP_GAME_NAME;
+    sidecar_name.erase(std::remove(sidecar_name.begin(), sidecar_name.end(), ':'), sidecar_name.end());
     const std::string expected_configure =
-        std::string("Configure ") + RECOMP_GAME_NAME + ".app/Contents/MacOS/ConfigureLauncher";
+        "Configure " + sidecar_name + ".app/Contents/MacOS/ConfigureLauncher";
     if (launch_paths->str("game", "") != expected_game ||
         launch_paths->str("configure", "") != expected_configure) {
         result.error = "manifest launch roles differ from this build";

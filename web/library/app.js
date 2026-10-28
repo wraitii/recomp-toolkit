@@ -728,7 +728,7 @@ function jobEvent(event) {
       message("");
     } else {
       if (lastAction === "install") Object.assign(selected, {
-        state: "ready", updateAvailable: false, installation: destination, managedSource: `${destination}/original`,
+        state: "ready", updateAvailable: false, installation: destination, managedSource: `${destination}/Game Data`,
       });
       step(3);
       if (lastAction === "play") element("installer").close();

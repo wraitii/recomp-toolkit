@@ -167,6 +167,27 @@ def validate_installation_hints(cfg, source):
         candidates.insert(0, game["executable"])
 
     setup = cfg["setup"]
+    downloads = setup.setdefault("downloads", [])
+    if not isinstance(downloads, list):
+        raise ValueError("%s: setup.downloads must be an array of tables" % source)
+    destinations = set()
+    for item in downloads:
+        if (not isinstance(item, dict)
+                or any(not isinstance(item.get(key), str) or not item[key]
+                       for key in ("label", "path", "member", "url"))
+                or not item["url"].startswith("https://")
+                or any(type(item.get(key)) is not int or not 0 < item[key] <= 64 * 1024 * 1024
+                       for key in ("size", "archive_size"))
+                or any(not isinstance(item.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", item[key])
+                       for key in ("sha256", "archive_sha256"))):
+            raise ValueError("%s: setup.downloads requires a label, HTTPS url, member, path, sizes and SHA-256 hashes" % source)
+        path = relative_game_path(item["path"], source, "setup.downloads.path")
+        if "/" in path or path == "." or path.casefold() in destinations:
+            raise ValueError("%s: setup.downloads.path must be a unique filename beside the executable" % source)
+        if item["member"][0] in "-@" or any(ord(c) < 32 for c in item["member"]):
+            raise ValueError("%s: setup.downloads.member must be an archive member name" % source)
+        item["path"] = path
+        destinations.add(path.casefold())
     for key in ("supported_version", "source_notes"):
         value = setup.setdefault(key, "")
         if not isinstance(value, str):

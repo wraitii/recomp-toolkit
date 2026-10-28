@@ -9,8 +9,9 @@ import unicodedata
 
 
 SCHEMA = {"major": 1, "minor": 0}
-MAX_DEPTH = 8
+MAX_DEPTH = 16
 MAX_ENTRIES = 20000
+MAX_FOLDER_ENTRIES = 250000
 MAX_CANDIDATES = 64
 MAX_HASH_BYTES = 512 * 1024 * 1024
 HASH_CHUNK = 1024 * 1024
@@ -191,7 +192,7 @@ def _scan(root, cancel, diagnostics, discovery_budget=None):
                 for entry in iterator:
                     _cancelled(cancel)
                     entries_seen += 1
-                    if (entries_seen > MAX_ENTRIES or
+                    if (entries_seen > MAX_FOLDER_ENTRIES or
                             discovery_budget is not None and discovery_budget[0] >= MAX_DISCOVERY_ENTRIES):
                         overflow = True
                         break
@@ -206,7 +207,7 @@ def _scan(root, cancel, diagnostics, discovery_budget=None):
         if overflow:
             diagnostics.append(_diag("search_limit", directory.relative_to(root).as_posix() or ".",
                                      "The source entry limit was reached.",
-                                     {"maxEntries": MAX_ENTRIES,
+                                     {"maxEntries": MAX_FOLDER_ENTRIES,
                                       "maxDiscoveryEntries": MAX_DISCOVERY_ENTRIES,
                                       "entriesSeen": entries_seen},
                                      ["Choose a smaller source folder."]))
@@ -459,10 +460,14 @@ def _candidate(cfg, root, selected_relative, cancel, byte_budget, diagnostics, d
 def inspect_folder(cfg, selected_path, cancel=None, selected_executable=None, discovery_budget=None,
                    archive_entries=None, include_installers=False):
     selected = Path(selected_path).expanduser().resolve(strict=True)
+    expected = tuple(part for part in _relative(cfg["setup"]["layout"]["executable_dir"]).split("/")
+                     if part not in ("", "."))
+    if (selected.is_dir() and expected and len(selected.parts) >= len(expected)
+            and tuple(_fold(part) for part in selected.parts[-len(expected):]) == tuple(_fold(part) for part in expected)
+            and (selected / cfg["game"]["executable"]).is_file()):
+        selected = (selected / cfg["game"]["executable"]).resolve(strict=True)
     if selected.is_file():
         selected_root = selected.parent
-        expected = tuple(part for part in _relative(cfg["setup"]["layout"]["executable_dir"]).split("/")
-                         if part not in ("", "."))
         parent_parts = selected_root.parts
         if expected and len(parent_parts) >= len(expected) and tuple(
                 _fold(part) for part in parent_parts[-len(expected):]) == tuple(_fold(part) for part in expected):
@@ -540,7 +545,7 @@ def inspect_folder(cfg, selected_path, cancel=None, selected_executable=None, di
             "identity": {"payload": "pending",
                          "reason": "Full payload fingerprinting is performed after candidate selection."}},
             "candidates": inspected, "diagnostics": diagnostics,
-            "limits": {"maxDepth": MAX_DEPTH, "maxEntries": MAX_ENTRIES,
+            "limits": {"maxDepth": MAX_DEPTH, "maxEntries": MAX_FOLDER_ENTRIES,
                        "maxCandidates": MAX_CANDIDATES, "maxHashBytes": byte_budget[1],
                        "entriesSeen": entries_seen, "hashBytes": byte_budget[0]},
             "scanComplete": scan_complete}

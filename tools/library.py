@@ -30,6 +30,7 @@ from source_inspection import (MAX_DISCOVERY_CANDIDATES, MAX_DISCOVERY_ENTRIES,
                                expand_discovery_roots, inspect_folder, probe_bytes,
                                sibling_payload_facts)
 import zip_adapter
+from sevenzip import DependencyError, acquire_dependencies
 from zip_adapter import ZipError
 from inno_adapter import InnoAdapter, InnoError
 from unshield_adapter import UnshieldAdapter, library as unshield_library
@@ -38,6 +39,9 @@ CANCEL_FILE = None
 KIT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(KIT / "tools/recomp"))
 import install_jobs
+
+
+DATA_DIR = "Game Data"
 
 
 class SourceError(ValueError):
@@ -360,19 +364,19 @@ def installed_manifest(cfg, game_id, job_id, executable_relative, data_root_rela
     app_name = cfg["game"]["app_name"]
     app_path = artifact(cfg, Path())
     app_bundle = app_path.parents[2] if platform.system() == "Darwin" else Path("app")
-    sidecar = f"Configure {cfg['game']['name']}.app"
-    executable_file = Path("original") / executable_relative
+    sidecar = sidecar_bundle(cfg)
+    executable_file = Path(DATA_DIR) / executable_relative
     return {"schema": install_jobs.SCHEMA, "gameId": game_id, "jobId": job_id,
             "profileId": app_name,
             "profile": {"relativeRoot": ""},
-            "paths": {"dataRoot": (Path("original") / data_root_relative).as_posix(),
-                      "executable": (Path("original") / executable_relative).as_posix()},
+            "paths": {"dataRoot": (Path(DATA_DIR) / data_root_relative).as_posix(),
+                      "executable": (Path(DATA_DIR) / executable_relative).as_posix()},
             "launchPaths": {"game": app_path.as_posix(), "configure": f"{sidecar}/Contents/MacOS/ConfigureLauncher"},
             "fingerprints": {"executable": {"path": executable_file.as_posix(),
                                                 "size": executable_size,
                                                 "sha256": cfg["game"]["sha256"]},
                              "auxiliaries": [{"name": module["name"],
-                                              "path": (Path("original") / auxiliary_paths[module["name"]]).as_posix(),
+                                              "path": (Path(DATA_DIR) / auxiliary_paths[module["name"]]).as_posix(),
                                               "sha256": module["sha256"],
                                               "size": (staged_data / auxiliary_paths[module["name"]]).stat().st_size}
                                              for module in cfg["aux_modules"]],
@@ -380,7 +384,7 @@ def installed_manifest(cfg, game_id, job_id, executable_relative, data_root_rela
                              "apps": app_identities, "original": original_identity},
             "sidecars": [{"id": "configure", "role": "configure", "target": "configure",
                            "profileId": app_name}],
-            "ownedArtifacts": [app_bundle.as_posix(), sidecar, "original", ".recomp-toolkit/logs"],
+            "ownedArtifacts": [app_bundle.as_posix(), sidecar, DATA_DIR, ".recomp-toolkit/logs"],
             "log": log_path, "recipeIdentity": {"algorithm": recipe_identity["algorithm"],
                 "sha256": recipe_identity["sha256"], "platform": recipe_identity["platform"]},
             "launch": {"executable": str(executable_relative),
@@ -389,10 +393,14 @@ def installed_manifest(cfg, game_id, job_id, executable_relative, data_root_rela
             "committedAt": int(time.time())}
 
 
+def sidecar_bundle(cfg):
+    return f"Configure {cfg['game']['name'].replace(':', '')}.app"
+
+
 def installed_app_identities(cfg, root):
     if platform.system() == "Darwin":
         paths = [root / f"{cfg['game']['app_name']}.app",
-                 root / f"Configure {cfg['game']['name']}.app"]
+                 root / sidecar_bundle(cfg)]
     else:
         paths = [root / "app"]
     return {path.name: install_jobs.owned_tree_identity(path) for path in paths}
@@ -447,7 +455,7 @@ def validate_installed_manifest(cfg, root, manifest):
         raise install_jobs.JobError("installation_manifest_invalid", "The installed launch declarations are invalid.")
     app_bundle = Path(f"{cfg['game']['app_name']}.app") if platform.system() == "Darwin" else Path("app")
     expected_game = artifact(cfg, root).relative_to(root)
-    expected_configure = f"Configure {cfg['game']['name']}.app/Contents/MacOS/ConfigureLauncher"
+    expected_configure = f"{sidecar_bundle(cfg)}/Contents/MacOS/ConfigureLauncher"
     for relative in [launch_paths.get("game"), launch_paths.get("configure"), *owned]:
         if (not isinstance(relative, str) or not relative or Path(relative).is_absolute() or "\\" in relative
                 or any(part in ("", ".", "..") for part in relative.split("/"))):
@@ -457,7 +465,7 @@ def validate_installed_manifest(cfg, root, manifest):
             or sidecars[0] != {"id": "configure", "role": "configure", "target": "configure",
                                "profileId": manifest["profileId"]}
             or set(owned) != {app_bundle.as_posix(),
-                              f"Configure {cfg['game']['name']}.app", "original", ".recomp-toolkit/logs"}):
+                              sidecar_bundle(cfg), DATA_DIR, ".recomp-toolkit/logs"}):
         raise install_jobs.JobError("installation_manifest_invalid", "The installed launch roles differ from this build.")
     paths = manifest.get("paths", {})
     executable = paths.get("executable")
@@ -471,9 +479,9 @@ def validate_installed_manifest(cfg, root, manifest):
     if not image.is_relative_to(root) or not image.is_file() or not data.is_relative_to(root) or not data.is_dir():
         raise install_jobs.JobError("installation_manifest_invalid", "The installed executable or data root escapes the game folder.")
     launch = manifest.get("launch", {})
-    if not isinstance(launch.get("executable"), str) or executable != (Path("original") / launch["executable"]).as_posix():
+    if not isinstance(launch.get("executable"), str) or executable != (Path(DATA_DIR) / launch["executable"]).as_posix():
         raise install_jobs.JobError("installation_manifest_invalid", "The installed executable paths do not agree.")
-    validate_game(root / "original", launch["executable"], cfg["game"]["sha256"],
+    validate_game(root / DATA_DIR, launch["executable"], cfg["game"]["sha256"],
                   cfg.get("setup", {}).get("required_dirs", []))
     image_fact = manifest.get("fingerprints", {}).get("executable", {})
     if (image_fact.get("path") != executable or image_fact.get("size") != image.stat().st_size
@@ -618,8 +626,8 @@ def recover_publication(root, identifier):
         return journal
     if publication.get("artifacts"):
         cfg = game_config.load(KIT / "games" / journal.get("gameId", ""), root)
-        expected = ({f"{cfg['game']['app_name']}.app", f"Configure {cfg['game']['name']}.app", "original"}
-                    if platform.system() == "Darwin" else {"app", "original"})
+        expected = ({f"{cfg['game']['app_name']}.app", sidecar_bundle(cfg), DATA_DIR}
+                    if platform.system() == "Darwin" else {"app", DATA_DIR})
         if not isinstance(publication.get("artifacts"), list) or any(
                 not isinstance(item, dict) or item.get("destination") not in expected
                 or item.get("backup") != item.get("destination")
@@ -636,7 +644,7 @@ def recover_publication(root, identifier):
                 raise install_jobs.JobError("publication_commit_mismatch", "The installed manifest belongs to another game.")
             validate_installed_manifest(cfg, root, manifest)
             for artifact in publication["artifacts"]:
-                if artifact["destination"] == "original":
+                if artifact["destination"] == DATA_DIR:
                     continue
                 destination = root / artifact["destination"]
                 identity = install_jobs.owned_tree_identity(destination).get("sha256")
@@ -652,7 +660,7 @@ def recover_publication(root, identifier):
                                 if (not artifact.get("hadPrevious") or
                                         not install_jobs.matches_directory_token(backup, artifact.get("previousToken", {}))):
                                     raise install_jobs.JobError("publication_backup_mismatch", f"Backup changed: {artifact['backup']}")
-                                previous = (install_jobs.payload_identity(backup).get("sha256") if artifact["destination"] == "original"
+                                previous = (install_jobs.payload_identity(backup).get("sha256") if artifact["destination"] == DATA_DIR
                                             else install_jobs.owned_tree_identity(backup).get("sha256"))
                                 if previous != artifact.get("previousIdentity", {}).get("sha256"):
                                     raise install_jobs.JobError("publication_backup_mismatch", f"Backup identity changed: {artifact['backup']}")
@@ -682,7 +690,7 @@ def recover_publication(root, identifier):
             if destination.exists() or destination.is_symlink():
                 if install_jobs.matches_directory_token(destination, artifact.get("stagedToken", {})):
                     identity = (install_jobs.payload_identity(destination).get("sha256")
-                                if artifact["destination"] == "original"
+                                if artifact["destination"] == DATA_DIR
                                 else install_jobs.owned_tree_identity(destination).get("sha256"))
                     if identity != artifact.get("stagedIdentity", {}).get("sha256"):
                         raise install_jobs.JobError("publication_artifact_mismatch", f"Published artifact changed during recovery: {artifact['destination']}")
@@ -694,7 +702,7 @@ def recover_publication(root, identifier):
             if backup.exists() or backup.is_symlink():
                 if not artifact.get("hadPrevious") or not install_jobs.matches_directory_token(backup, artifact.get("previousToken", {})):
                     raise install_jobs.JobError("publication_backup_mismatch", f"Backup changed during recovery: {artifact['backup']}")
-                identity = (install_jobs.payload_identity(backup).get("sha256") if artifact["destination"] == "original"
+                identity = (install_jobs.payload_identity(backup).get("sha256") if artifact["destination"] == DATA_DIR
                             else install_jobs.owned_tree_identity(backup).get("sha256"))
                 if identity != artifact.get("previousIdentity", {}).get("sha256"):
                     raise install_jobs.JobError("publication_backup_mismatch", f"Backup identity changed: {artifact['backup']}")
@@ -768,7 +776,7 @@ def catalog(storage, repair=False):
                             raise install_jobs.JobError("installed_identity_mismatch", "Installed manifest belongs to another game.")
                         executable_relative = facts.get("launch", {}).get("executable", cfg["game"]["executable"])
                         if (facts and artifact(cfg, root).is_file()
-                                and (root / "original" / executable_relative).is_file()):
+                                and (root / DATA_DIR / executable_relative).is_file()):
                             validate_installed_manifest(cfg, root, facts)
                             item["state"] = "ready"
                 except install_jobs.JobError as error:
@@ -779,7 +787,7 @@ def catalog(storage, repair=False):
                         raise
             if item["state"] == "ready":
                 try:
-                    item["managedSource"] = str(root / "original")
+                    item["managedSource"] = str(root / DATA_DIR)
                     item["buildLog"] = str(root / facts.get("log", f".recomp-toolkit/logs/{facts.get('jobId', '')}.log"))
                     item["updateAvailable"] = facts.get("recipeIdentity", {}).get("sha256") != recipe(directory).get("sha256")
                 except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
@@ -1254,7 +1262,7 @@ def prepare_install(request, storage):
     if cfg["game"].get("developer_exe"):
         raise ValueError("Library installation requires a recipe without a fixed developer_exe")
     source_root = Path(selected["contentRoot"]) if source_kind in ("folder", "executable") else None
-    data = root / "original"
+    data = root / DATA_DIR
     if source_root is not None:
         if Path(storage).expanduser().resolve().is_relative_to(source_root.resolve()):
             raise SourceError("storage_source_overlap",
@@ -1325,7 +1333,7 @@ def install(request, storage, prepared=None):
     bind_selected_auxiliary_paths(cfg, selected, root)
     executable_relative = Path(*selected["executable"]["path"].split("/"))
     exclude_paths = prepared.get("excludePaths", [])
-    data = root / "original"
+    data = root / DATA_DIR
     emit("stage", stage="checking", message="Checking build prerequisites")
     checks = prerequisites(True, source_kind == "inno", source_kind == "installshield")
     if not checks["ready"]:
@@ -1523,7 +1531,7 @@ def install(request, storage, prepared=None):
             emit("stage", stage="fingerprinting", message="Checking the copied files")
             copied = install_jobs.payload_identity(staged_data, check_cancel,
                                                    progress=file_progress(source_facts["bytes"]))
-        if copied["sha256"] != source_facts["sha256"]:
+        if not reusable_copy and copied["sha256"] != source_facts["sha256"]:
             raise SourceError("copy_validation_failed", "The staged game copy differs from its source.",
                               ["Check storage space and source permissions."], str(source))
         if source_kind in ("zip", "inno", "installshield") and not reusable_copy:
@@ -1533,6 +1541,19 @@ def install(request, storage, prepared=None):
             image = staged_data / selected["auxiliaryPaths"][module["name"]]
             if not image.is_file() or hashlib.sha256(image.read_bytes()).hexdigest() != module["sha256"]:
                 raise ValueError(f"Missing or unsupported auxiliary module: {module['name']}")
+        if cfg["setup"].get("downloads"):
+            stage = "validating"
+            install_jobs.update_job(job_paths, journal, stage)
+            try:
+                downloaded = acquire_dependencies(cfg, staged_data / executable_relative, staging / "downloads",
+                                                  check_cancel, lambda message: emit("stage", stage=stage, message=message))
+            except DependencyError as error:
+                raise SourceError("dependency_download_failed", str(error),
+                                  ["Check your internet connection and retry, or place the file beside "
+                                   "Civ4BeyondSword.exe yourself."], str(source),
+                                  {"dependency": error.label, "reason": error.reason}) from error
+            if downloaded:
+                copied = install_jobs.payload_identity(staged_data, check_cancel, progress=file_progress())
         journal["validatedInputs"] = {"source": source_facts, "stagedOriginal": copied,
                                       "executableSha256": cfg["game"]["sha256"]}
         log_event(log_path, "copying", "staged original validated",
@@ -1576,7 +1597,7 @@ def install(request, storage, prepared=None):
         if platform.system() == "Darwin":
             staged_app = publish_root
             built.replace(publish_root / built.name)
-            configure_name = f"Configure {cfg['game']['name']}.app"
+            configure_name = sidecar_bundle(cfg)
             configure_contents = publish_root / configure_name / "Contents"
             configure_binary = build_root / "recomp" / "ConfigureLauncher"
             if not configure_binary.is_file():
@@ -1631,7 +1652,7 @@ def install(request, storage, prepared=None):
             if not image.is_file() or hashlib.sha256(image.read_bytes()).hexdigest() != module["sha256"]:
                 raise ValueError(f"Missing or unsupported auxiliary module before publication: {module['name']}")
         if platform.system() == "Darwin":
-            app_names = [f"{cfg['game']['app_name']}.app", f"Configure {cfg['game']['name']}.app"]
+            app_names = [f"{cfg['game']['app_name']}.app", sidecar_bundle(cfg)]
             staged_apps = [publish_root / name for name in app_names]
         else:
             app_names = ["app"]
@@ -1650,14 +1671,14 @@ def install(request, storage, prepared=None):
                 "staged": source_bundle.relative_to(root).as_posix(), "backup": name,
                 "hadPrevious": had_previous,
                 "previousToken": install_jobs.directory_token(destination) if had_previous else None,
-                "previousIdentity": ((install_jobs.payload_identity(destination) if name == "original"
+                "previousIdentity": ((install_jobs.payload_identity(destination) if name == DATA_DIR
                                       else install_jobs.owned_tree_identity(destination)) if had_previous else None),
                 "stagedToken": install_jobs.directory_token(source_bundle),
                 "stagedIdentity": install_jobs.owned_tree_identity(source_bundle, check_cancel)})
         staged_data_token = install_jobs.directory_token(staged_data)
         if not data.exists():
-            artifact_specs.append({"destination": "original", "staged": staged_data.relative_to(root).as_posix(),
-                "backup": "original", "hadPrevious": False, "previousToken": None,
+            artifact_specs.append({"destination": DATA_DIR, "staged": staged_data.relative_to(root).as_posix(),
+                "backup": DATA_DIR, "hadPrevious": False, "previousToken": None,
                 "previousIdentity": None,
                 "stagedToken": staged_data_token, "stagedIdentity": copied})
         stage = "publishing"
@@ -1985,7 +2006,7 @@ def play(request, storage):
     expected_launch = saved["launch"]
     binary = artifact(cfg, root)
     log = root / "game.log"
-    data_root = root / saved.get("paths", {}).get("dataRoot", "original")
+    data_root = root / saved.get("paths", {}).get("dataRoot", DATA_DIR)
     return {"game": game_id, "log": str(log), "binary": str(binary), "cwd": str(data_root)}
 
 

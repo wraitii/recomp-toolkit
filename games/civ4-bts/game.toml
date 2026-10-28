@@ -26,9 +26,6 @@ native = { header = "native/civ4_native.h", sources = ["native/effect_state_mana
 [analysis]
 guest_bounds = true
 
-[settings]
-presentation_filter = "nearest"
-
 [input]
 relative_mouse_capture = false
 
@@ -47,13 +44,23 @@ mobile_control = "mobile-only"
 
 [setup]
 supported_version = "GOG Beyond the Sword 3.19"
-source_notes = "Choose the Civilization IV folder containing Beyond the Sword and the shared game assets. The required msxml3.dll must also be supplied."
+source_notes = "Choose the Civilization IV folder containing Beyond the Sword and the shared game assets. The required msxml3.dll must also be supplied; msxml3r.dll is downloaded automatically when missing."
 required_dirs = ["Assets"]
 
 [setup.layout]
 executable_dir = "Beyond the Sword"
 data_root = "Beyond the Sword"
 required_dirs = ["Assets", "Beyond the Sword/Assets"]
+
+[[setup.downloads]]
+label = "MSXML 3 resource library"
+path = "msxml3r.dll"
+size = 44032
+sha256 = "b604ab2b27598de28a5ed89626c41e6ea551eae362e83ec421a52f426b31f551"
+url = "https://media.codeweavers.com/pub/other/msxml3.msi"
+archive_size = 1070592
+archive_sha256 = "f9c678f8217e9d4f9647e8a1f6d89a7c26a57b9e9e00d39f7487493dd7b4e36c"
+member = "msxml3r.dll.C8C0673E_50E5_4AC4_817B_C0E4C4466990"
 
 [modules.aux.msvcr71]
 name = "msvcr71.dll"

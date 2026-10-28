@@ -14,8 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def bundle_extractors(resources, build_root):
+    from sevenzip import provision, VERSION, URL, SHA256, SOURCE_URL, SOURCE_SHA256
+    provision(build_root)
     build = Path(build_root) / "toolkit/extractors"
     tools = [(build / "install/bin/innoextract", resources / "python/bin/innoextract"),
+             (build / "sevenzip/7zz", resources / "python/bin/7zz"),
              (build / "unshield/lib/libunshield.dylib", resources / "python/bin/libunshield.dylib")]
     for source, target in tools:
         if not source.is_file():
@@ -36,6 +39,7 @@ def bundle_extractors(resources, build_root):
             subprocess.run(["install_name_tool", "-id", "@loader_path/" + target.name, str(target)], check=True)
     sources = build / "sources"
     for name, files in (
+            ("sevenzip", [build / "sevenzip/License.txt", build / "sevenzip/7z2605-src.tar.xz"]),
             ("innoextract", [sources / "innoextract/LICENSE"]),
             ("boost", [sources / "boost/LICENSE_1_0.txt"]),
             ("xz", [sources / "xz/COPYING", sources / "xz/COPYING.0BSD"]),
@@ -45,6 +49,8 @@ def bundle_extractors(resources, build_root):
         for source in files:
             shutil.copy2(source, destination / source.name)
     return {"macosMinimum": "14.0", "innoextract": "1.9", "boost": "1.82.0", "xz": "5.8.1",
+            "sevenzip": {"version": VERSION, "url": URL, "sha256": SHA256,
+                         "sourceUrl": SOURCE_URL, "sourceSha256": SOURCE_SHA256},
             "unshield": {"version": "1.6.2", "source": "https://github.com/twogood/unshield/tree/1.6.2",
                          "sourceSha256": "a937ef596ad94d16e7ed2c8553ad7be305798dcdcfd65ae60210b1e54ab51a2f"},
             "inputs": {target.relative_to(resources).as_posix(): hashlib.sha256(source.read_bytes()).hexdigest()
