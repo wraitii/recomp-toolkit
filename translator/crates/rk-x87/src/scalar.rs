@@ -623,7 +623,7 @@ impl Scalar {
         self.base = shape.base;
         self.low = shape.low;
         self.high = shape.high;
-        self.top_unknown = shape.top_unknown;
+        self.top_unknown = shape.top_unknown || shape.base != 0;
         self.status_dirty = shape.status_dirty;
         for (position, slot_shape) in &shape.slots {
             let mut slot = Slot {
