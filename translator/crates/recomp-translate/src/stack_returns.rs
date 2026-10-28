@@ -772,6 +772,13 @@ fn investigate(
                     continue;
                 }
                 if let Some(resume) = search.resumes.pop() {
+                    if private_evidence {
+                        let call = bodies[&resume.function].blocks[resume.block]
+                            .events
+                            .get(resume.index - 1)
+                            .map(|event| format!("{:08x}", event.site));
+                        search.trace.push(json!({"completed_call": call, "caller": format!("{:08x}", resume.function), "callee": format!("{:08x}", cursor.function), "return": format!("{:08x}", event.site), "remaining_bytes": search.remaining}));
+                    }
                     search.cursor = resume;
                 } else {
                     terminals.push(terminal("caller-return", &search, event.site,
@@ -1031,7 +1038,20 @@ pub(super) fn write(
                         } else {
                             "unresolved"
                         };
-                        json!({"outcome": outcome, "terminals": frontier})
+                        let reached_call = |terminal: &Value| {
+                            terminal["trace"].as_array().is_some_and(|trace| {
+                                trace
+                                    .iter()
+                                    .any(|step| step.get("completed_call").is_some())
+                            })
+                        };
+                        let unread_through_call = frontier.iter().any(reached_call)
+                            && frontier.iter().all(|terminal| {
+                                terminal["reason"] != "step-budget"
+                                    && (terminal["reason"] == "overwritten"
+                                        || reached_call(terminal))
+                            });
+                        json!({"outcome": outcome, "unread_through_analyzed_call": unread_through_call, "terminals": frontier})
                     };
                     *counts.entry(outcome.into()).or_default() += 1;
                     for reason in terminals
@@ -1153,6 +1173,41 @@ pub(super) fn write(
             )
         })
         .collect();
+    let through_call: Vec<_> = rows
+        .iter()
+        .filter(|row| row["stack_evidence"]["unread_through_analyzed_call"] == true)
+        .collect();
+    let through_call_sites: BTreeSet<_> = through_call
+        .iter()
+        .filter_map(|row| row["call"].as_str())
+        .collect();
+    let through_call_slots: BTreeSet<_> = through_call
+        .iter()
+        .map(|row| {
+            (
+                row["call"].as_str(),
+                row["callee"].as_str(),
+                row["slot"].as_str(),
+            )
+        })
+        .collect();
+    let through_call_outcomes: BTreeMap<_, _> = [
+        "definite-read-before-overwrite",
+        "overwritten-before-read",
+        "unread-at-caller-return",
+        "unresolved",
+    ]
+    .into_iter()
+    .map(|outcome| {
+        (
+            outcome,
+            through_call
+                .iter()
+                .filter(|row| row["stack_evidence"]["outcome"] == outcome)
+                .count(),
+        )
+    })
+    .collect();
     let forwarded: BTreeMap<_, _> = bodies
         .iter()
         .filter(|(_, body)| !body.forwarded_reads.is_empty())
@@ -1169,6 +1224,7 @@ pub(super) fn write(
         "candidate_call_sites": candidate_calls.len(), "candidate_call_slots": candidate_slots.len(),
         "additional_candidates_with_slot_outside_image_guard": {"queries": guarded_queries, "call_sites": guarded_calls.len(), "call_slots": guarded_slots.len()},
         "stack_evidence_counts": evidence_outcomes,
+        "unread_through_analyzed_call": {"queries": through_call.len(), "call_sites": through_call_sites.len(), "call_slots": through_call_slots.len(), "later_outcomes": through_call_outcomes, "scope": "Every explored path overwrites all tracked bytes or completes a subsequent analyzed call with bytes surviving and no stack read; at least one path completes such a call. Later reads or unresolved behavior remain possible. Query counts overlap the main outcome categories."},
         "stack_evidence_unresolved_frontiers": evidence_frontiers,
         "stack_evidence_frontier_counting": "Each unresolved query is counted once per terminal reason; queries can have multiple reasons; overwritten and caller-return paths are not counted as unresolved frontiers.",
         "stack_evidence_scope": "Only publications proved wholly below restored ESP. Production private-stack excludes unrelated pointer reads of unexposed returned slots while below current ESP. Definite reads take precedence over unresolved paths. Unread-at-caller-return requires all paths to overwrite or reach the first caller return unread; it does not prove the bytes dead afterward. No emission changes.",

@@ -88,8 +88,10 @@ initialized reads. For return publications wholly below restored ESP, the report
 tracks remaining bytes across each direct caller and one nested call. Under
 `private-stack`, it discounts unrelated pointer reads while the slot is unexposed
 and below ESP. It reports definite reads before overwrite, complete overwrites,
-and paths unread at the first caller return, along with distinct unresolved
-frontiers and witnesses. A caller return is not proof the bytes are dead; assuming
+paths unread at the first caller return, and queries unread through a subsequent
+analyzed call, along with distinct unresolved frontiers and witnesses. The latter
+requires every explored path to overwrite the bytes or complete such a call unread;
+it does not rule out a later read. A caller return is not proof the bytes are dead; assuming
 below-ESP bytes are dead can change behavior for dangling or uninitialized reads
 (`DIVERGENCE(original):`). Indirect callers, unavailable code, unknown addresses,
 loops and search limits restrict coverage. `--only`/`--selection` filters callees
