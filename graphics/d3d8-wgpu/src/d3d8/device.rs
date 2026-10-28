@@ -1853,11 +1853,6 @@ impl Device {
 
     /// Resolve the D3D8 table/pixel fog uniform for the current state.
     ///
-    /// The D3D8 rule for additive blending adjusts the fog colour to black;
-    /// `validate_unlit` has already refused the blend combinations whose
-    /// adjustment is not implemented, so the cases handled here (opaque, the
-    /// standard INVSRCALPHA destination, and DESTBLEND=ONE) are the only ones a
-    /// validated draw can hold.
     fn fog_uniform(&self) -> FogUniform {
         use crate::d3d8::enums::D3DBLEND;
         let enable = self.state.fog_enable();

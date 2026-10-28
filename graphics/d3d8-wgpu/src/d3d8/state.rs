@@ -1362,17 +1362,12 @@ impl DeviceState {
                     "D3DRS_RANGEFOGENABLE must be FALSE with table fog (range-based table fog is not implemented)",
                 ));
             }
-            // Pixel/table fog is applied by the shader. D3D8 adjusts the fog
-            // colour for some destination blends; only the normal
-            // INVSRCALPHA case (unadjusted) and additive DESTBLEND=ONE
-            // (adjusted to black, any source factor) are implemented, anything else fails by name.
             if s.alpha_blend_enable {
                 match s.dest_blend {
-                    D3DBLEND::InvSrcAlpha => {}
-                    D3DBLEND::One => {}
+                    D3DBLEND::Zero | D3DBLEND::InvSrcAlpha | D3DBLEND::One => {}
                     other => {
                         return Err(unsupported(&format!(
-                            "fog with D3DRS_DESTBLEND={other:?} needs the D3D8 fog-colour adjustment, which is not implemented (only INVSRCALPHA and DESTBLEND=ONE are)"
+                            "fog with D3DRS_DESTBLEND={other:?} needs the D3D8 fog-colour adjustment, which is not implemented (only ZERO, INVSRCALPHA and ONE are)"
                         )));
                     }
                 }
