@@ -8,18 +8,9 @@
 #include "../../platform/os.h"
 #include <algorithm>
 #include <cstdio>
-#include <cstdlib>
 #include <cstdarg>
 #include <cstring>
 #include <vector>
-void dx_report_failure(const char *desc, uint32_t hr, uint32_t caller) {
-    if (!(hr & 0x80000000u))
-        return;
-    fprintf(stderr, "Unexpected COM failure: %s (0x%08x) at 0x%08x\n", desc ? desc : "unknown", hr,
-            caller);
-    abort();
-}
-
 static int g_checks = 0, g_failures = 0;
 static bool check(bool ok, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static bool check(bool ok, const char *fmt, ...) {

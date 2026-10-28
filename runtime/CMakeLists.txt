@@ -141,7 +141,7 @@ add_test(NAME runtime_tests COMMAND runtime_tests WORKING_DIRECTORY ${RECOMP_ROO
 # code through the interpreter. It takes two seconds when that returns.
 set_tests_properties(runtime_tests PROPERTIES LABELS game TIMEOUT 600
                      ENVIRONMENT RECOMP_PYTHON=${Python3_EXECUTABLE})
-add_executable(gdi_tests tests/gdi_tests.cpp tests/stub_recomp_call.cpp ${RECOMP_ROOT}/dx/com.cpp)
+add_executable(gdi_tests tests/gdi_tests.cpp tests/stub_recomp_call.cpp tests/stub_dx_report_failure.cpp ${RECOMP_ROOT}/dx/com.cpp)
 target_link_libraries(gdi_tests PRIVATE recomp_platform recomp_runtime)
 target_compile_options(gdi_tests PRIVATE ${RECOMP_WARN_HOST})
 recomp_optimize(gdi_tests 1)

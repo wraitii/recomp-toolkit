@@ -302,6 +302,7 @@ if(NOT IOS AND NOT ANDROID)
 recomp_host(host_tests UI_LAYER
   SOURCES ${HOST}/tests/host_tests.cpp ${HOST}/tests/test_frame_builder.cpp
           ${RECOMP_ROOT}/runtime/tests/stub_recomp_call.cpp
+          ${RECOMP_ROOT}/runtime/tests/stub_dx_report_failure.cpp
           ${HOST}/report_lock.cpp ${HOST}/script.cpp ${HOST}/present.cpp
           ${RECOMP_ROOT}/mods/font6x8.cpp
           ${HOST}/game_path.cpp
