@@ -652,7 +652,7 @@ impl<'a> Emitter<'a> {
                     }
                 }
             }
-            let expr = self.field_expr(key, self.s.value(id).size)?;
+            let expr = self.field_expr(key, self.s.value(id).size, true)?;
             let _ = writeln!(self.out, "{}", self.assignment(id, &expr));
         }
         Ok(())
@@ -705,7 +705,7 @@ impl<'a> Emitter<'a> {
                 if fast {
                     self.expr(self.s.args(id)[1])?
                 } else {
-                    self.field_expr(key, self.s.value(id).size)?
+                    self.field_expr(key, self.s.value(id).size, false)?
                 }
             };
             let _ = writeln!(self.out, "{}", self.assignment(id, &expr));
@@ -2255,7 +2255,7 @@ impl<'a> Emitter<'a> {
             }
         }
         let (base, _, _) = self
-            .lane_origin(rk_ir::lanes(field)[0])
+            .lane_origin(rk_ir::lanes(field)[0], false)
             .ok_or_else(|| self.error(0, "argument register has no origin"))?;
         let mut parts = Vec::new();
         for (lane, value) in lanes.into_iter().enumerate() {
@@ -2842,7 +2842,8 @@ impl<'a> Emitter<'a> {
         let item = *self.s.value(value);
         match item.op {
             Op::Const(data) => Ok(const_expr(data, item.size)),
-            Op::Input(key) | Op::StateReload(key) => self.field_expr(key, item.size),
+            Op::Input(key) => self.field_expr(key, item.size, true),
+            Op::StateReload(key) => self.field_expr(key, item.size, false),
             Op::CcKind(kind) => Ok(cc_kind_name(kind).to_string()),
             Op::Target(addr) => Ok(self.guest_addr(addr)),
             Op::Memory => Ok("0u".to_string()),
@@ -2869,7 +2870,7 @@ impl<'a> Emitter<'a> {
                         .get(1)
                         .ok_or_else(|| self.error(0, "missing argument"))?,
                 )?;
-                let loaded = self.field_expr(key, item.size)?;
+                let loaded = self.field_expr(key, item.size, false)?;
                 let loaded =
                     if field_lane(key).is_some_and(|(field, _)| Fields::FLAGS.contains(field)) {
                         format!("(x86_cc_settle(c), {loaded})")
@@ -3105,7 +3106,7 @@ impl<'a> Emitter<'a> {
         }
         let result = match item.op {
             Op::Const(data) => const_expr(data, item.size),
-            Op::Input(key) => self.field_expr(key, item.size)?,
+            Op::Input(key) => self.field_expr(key, item.size, true)?,
             Op::CcKind(kind) => cc_kind_name(kind).to_string(),
             Op::Target(addr) => self.guest_addr(addr),
             Op::Byte(index) => format!("(({}) >> {})", a(0)?, index as u32 * 8),
@@ -3113,10 +3114,10 @@ impl<'a> Emitter<'a> {
                 Some(text) => text,
                 None => self.pack_bytes(args, item.size > 4)?,
             },
-            Op::StateReload(key) => self.field_expr(key, item.size)?,
+            Op::StateReload(key) => self.field_expr(key, item.size, false)?,
             Op::StateKeep(key) => {
                 let old = a(1)?;
-                let loaded = self.field_expr(key, item.size)?;
+                let loaded = self.field_expr(key, item.size, false)?;
                 let loaded =
                     if field_lane(key).is_some_and(|(field, _)| Fields::FLAGS.contains(field)) {
                         format!("(x86_cc_settle(c), {loaded})")
@@ -3359,7 +3360,7 @@ impl<'a> Emitter<'a> {
         ))
     }
 
-    fn field_expr(&self, key: StateKey, size: u8) -> Result<String> {
+    fn field_expr(&self, key: StateKey, size: u8, input: bool) -> Result<String> {
         if matches!(key, StateKey::Frame { .. }) {
             return Ok(format!(
                 "recomp_rd{}_(arena_, {})",
@@ -3368,10 +3369,10 @@ impl<'a> Emitter<'a> {
             ));
         }
         if size <= 1 {
-            return self.lane_expr(key);
+            return self.lane_expr(key, input);
         }
         let (base, lane, width) = self
-            .lane_origin(key)
+            .lane_origin(key, input)
             .ok_or_else(|| self.error(0, &format!("unsupported register lane {key:?}")))?;
         let size = size as u32;
         if lane + size > width {
@@ -3393,9 +3394,9 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn lane_expr(&self, key: StateKey) -> Result<String> {
+    fn lane_expr(&self, key: StateKey, input: bool) -> Result<String> {
         let (base, lane, width) = self
-            .lane_origin(key)
+            .lane_origin(key, input)
             .ok_or_else(|| self.error(0, &format!("unsupported register lane {key:?}")))?;
         if width == 1 {
             Ok(format!("({base} & 0xffu)"))
@@ -3404,11 +3405,11 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    fn lane_origin(&self, key: StateKey) -> Option<(String, u32, u32)> {
+    fn lane_origin(&self, key: StateKey, input: bool) -> Option<(String, u32, u32)> {
         if let Some((field, lane)) = field_lane(key) {
             if (field as usize) < 8 {
                 if let Some(direct) = self.direct {
-                    if direct.input_arguments.registers.contains(field) {
+                    if input && direct.input_arguments.registers.contains(field) {
                         return Some((format!("{}_", field.name().to_lowercase()), lane as u32, 4));
                     }
                 }
@@ -3515,21 +3516,23 @@ impl<'a> Emitter<'a> {
         for (index, arg) in args.iter().enumerate() {
             let value = *arg;
             let item = *self.s.value(value);
-            let (key, offset) = match item.op {
-                Op::Input(key) | Op::StateReload(key) => (key, 0),
+            let (key, offset, input) = match item.op {
+                Op::Input(key) => (key, 0, true),
+                Op::StateReload(key) => (key, 0, false),
                 Op::Byte(byte) => {
                     if byte as usize != index {
                         return None;
                     }
                     let inner = *self.s.args(value).first()?;
                     match self.s.value(inner).op {
-                        Op::Input(key) | Op::StateReload(key) => (key, byte as u32),
+                        Op::Input(key) => (key, byte as u32, true),
+                        Op::StateReload(key) => (key, byte as u32, false),
                         _ => return None,
                     }
                 }
                 _ => return None,
             };
-            let (base, lane, width) = self.lane_origin(key)?;
+            let (base, lane, width) = self.lane_origin(key, input)?;
             let lane = lane + offset;
             if lane >= width {
                 return None;
