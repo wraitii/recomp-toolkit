@@ -484,17 +484,31 @@ RECOMP_HOT_INLINE float recomp_sse_sqrtf(float v) {
     return r;
 }
 
-/* CVTSS2SI/CVTSD2SI round according to MXCSR, which recomp_ldmxcsr holds at
- * round-to-nearest-even. Values that round outside int32 produce the
+/* CVTSS2SI/CVTSD2SI round per MXCSR.RC (bits 13..14), computed explicitly as
+ * fround_rc does for x87. Values that round outside int32 produce the
  * indefinite result. */
-RECOMP_HOT_INLINE int32_t recomp_sse_cvtsd2si(double v) {
-    double rounded = nearbyint(v);
+RECOMP_HOT_INLINE int32_t recomp_sse_cvtsd2si(const X86 *c, double v) {
+    double rounded;
+    switch ((c->mxcsr >> 13) & 3u) {
+    case 1:
+        rounded = floor(v);
+        break;
+    case 2:
+        rounded = ceil(v);
+        break;
+    case 3:
+        rounded = trunc(v);
+        break;
+    default:
+        rounded = __builtin_roundeven(v);
+        break;
+    }
     if (!(rounded >= -2147483648.0 && rounded <= 2147483647.0))
         return INT32_MIN;
     return (int32_t)rounded;
 }
-RECOMP_HOT_INLINE int32_t recomp_sse_cvtss2si(float v) {
-    return recomp_sse_cvtsd2si((double)v);
+RECOMP_HOT_INLINE int32_t recomp_sse_cvtss2si(const X86 *c, float v) {
+    return recomp_sse_cvtsd2si(c, (double)v);
 }
 RECOMP_HOT_INLINE int32_t recomp_sse_cvttsd2si(double v) {
     if (!(v >= -2147483648.0 && v < 2147483648.0))

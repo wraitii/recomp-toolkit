@@ -2332,11 +2332,13 @@ void DirectSoundGetDeviceID(X86 *c) {
     set_eax(c, DS_OK);
 }
 
-// CLSID_DirectSound, for a game built against the DirectX 7 era SDK that
-// creates its DirectSound through CoCreateInstance rather than
-// DirectSoundCreate. Both make the same host object.
+// CLSID_DirectSound and CLSID_DirectSound8, for a game that creates its
+// DirectSound through CoCreateInstance rather than DirectSoundCreate(8). All
+// make the same host object.
 static const uint8_t CLSID_DirectSound_[16] =
     IID_BYTES(0x47D4D946, 0x62E8, 0x11CF, 0x93, 0xBC, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+static const uint8_t CLSID_DirectSound8_[16] =
+    IID_BYTES(0x3901CC3F, 0x84B5, 0x4FA4, 0xBA, 0x35, 0xAA, 0x81, 0x72, 0xB8, 0xA0, 0x9B);
 
 static ComObj *dsound_create() {
     return com_new(K_DSOUND);
@@ -2474,5 +2476,6 @@ void dsound_register() {
     com_set_qi_hook(K_DSBUFFER, dsbuffer_qi);
 
     com_register_class(CLSID_DirectSound_, "DirectSound", IF_DSOUND, dsound_create);
+    com_register_class(CLSID_DirectSound8_, "DirectSound8", IF_DSOUND8, dsound_create);
     imports_register(g_dsound_exports, std::size(g_dsound_exports));
 }

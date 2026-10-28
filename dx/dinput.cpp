@@ -324,15 +324,52 @@ void Device_GetCapabilities(X86 *c) {
     com_ret(c, DI_OK);
 }
 
-// EnumObjects(callback, ref, dwFlags). Only the joystick lists its objects;
-// the mouse and keyboard keep the old silent success.
+// The keyboard lists one push button per key DIPROP_KEYNAME names, at its DIK
+// offset. A game may size its key table from the highest code it is shown.
+uint32_t keyboard_enum_objects(X86 *c, ComObj *d, uint32_t cb, uint32_t ref, uint32_t flags) {
+    static const uint8_t GUID_Key_[16] =
+        IID_BYTES(0x55728220, 0xD33C, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+    if (!cb)
+        return DIERR_INVALIDPARAM;
+    uint32_t bits = flags & DIDFT_TYPEMASK;
+    if ((bits && !(bits & DIDFT_PSHBUTTON)) || (flags & 0x1F000000u))
+        return DI_OK;
+    uint32_t size = d->di_wide ? DIDEVICEOBJECTINSTANCEW_SIZE : DIDEVICEOBJECTINSTANCEA_SIZE;
+    for (uint32_t dik = 1; dik < 256; ++dik) {
+        const std::string name = guest_key_name(dik);
+        if (name.empty())
+            continue;
+        uint32_t a = di_scratch(size);
+        if (!a)
+            return E_OUTOFMEMORY;
+        gm_zero(a, size);
+        wr32(a, size);
+        memcpy(gm_ptr(a + DIDOI_OFF_guidType), GUID_Key_, 16);
+        wr32(a + DIDOI_OFF_dwOfs, dik);
+        wr32(a + DIDOI_OFF_dwType, DIDFT_PSHBUTTON | (dik << 8));
+        if (d->di_wide)
+            di_put_wide(a + DIDOI_OFF_tszName, name.c_str(), DIDOI_NAME_CHARS);
+        else
+            gm_put_str(a + DIDOI_OFF_tszName, name.c_str(), DIDOI_NAME_CHARS);
+        if (guest_call(c, cb, a, ref) != 1 /* DIENUM_CONTINUE */)
+            break;
+    }
+    return DI_OK;
+}
+
+// EnumObjects(callback, ref, dwFlags). The mouse keeps the old silent success.
 void Device_EnumObjects(X86 *c) {
     ComObj *d = this_device(c);
     if (d && is_joystick(d)) {
         com_ret(c, joy_enum_objects(c, d, arg(c, 1), arg(c, 2), arg(c, 3)));
         return;
     }
-    log_once("dx.Device_EnumObjects", "dx: Device_EnumObjects is not implemented; returning DI_OK");
+    if (d && d->dev_type == DIDEVTYPE_KEYBOARD) {
+        com_ret(c, keyboard_enum_objects(c, d, arg(c, 1), arg(c, 2), arg(c, 3)));
+        return;
+    }
+    log_once("dx.Device_EnumObjects",
+             "dx: Device_EnumObjects on the mouse is not implemented; returning DI_OK");
     com_ret(c, DI_OK);
 }
 

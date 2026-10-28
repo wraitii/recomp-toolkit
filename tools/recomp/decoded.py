@@ -959,7 +959,7 @@ class Translator(ControlFlow):
                 L.append(write_op(dst, 32, "(uint32_t)%s" % value))
             elif m in ("CVTSS2SI", "CVTSD2SI"):
                 helper = "recomp_sse_cvtss2si" if single else "recomp_sse_cvtsd2si"
-                L.append(write_op(dst, 32, "(uint32_t)%s(%s)" % (helper, scalar(src, single))))
+                L.append(write_op(dst, 32, "(uint32_t)%s(c, %s)" % (helper, scalar(src, single))))
             elif m == "CVTSD2SS":
                 L.append(store_scalar(dst, "(float)%s" % scalar(src, False), True))
             elif m == "CVTSS2SD":
@@ -999,8 +999,8 @@ class Translator(ControlFlow):
                 lo, hi = "rd32(%s)" % addr_expr(src), "rd32(%s + 4u)" % addr_expr(src)
             else:
                 raise TranslateError("CVTPS2PI source is not XMM or memory")
-            L.append("c->mm[%d] = (uint64_t)(uint32_t)recomp_sse_cvtss2si(recomp_sse_f32(%s))"
-                     " | ((uint64_t)(uint32_t)recomp_sse_cvtss2si(recomp_sse_f32(%s)) << 32);"
+            L.append("c->mm[%d] = (uint64_t)(uint32_t)recomp_sse_cvtss2si(c, recomp_sse_f32(%s))"
+                     " | ((uint64_t)(uint32_t)recomp_sse_cvtss2si(c, recomp_sse_f32(%s)) << 32);"
                      % (dst.reg, lo, hi))
             return L
 

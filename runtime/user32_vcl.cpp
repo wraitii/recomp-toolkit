@@ -777,7 +777,7 @@ void wait_message(X86 *c) {
     for (;;) {
         pump_once(c);
         pump_mouse_input(c);
-        if (!queue().empty() || paint_pending() || !g_message_waiter)
+        if (messages_pending_here() || paint_pending() || !g_message_waiter)
             break;
         if (!host_guest_yield())
             guest_sleep_ms(1);
@@ -814,14 +814,15 @@ void message_wait(X86 *c, bool ex) {
         set_eax(c, result);
         return;
     }
-    if (!queue().empty()) {
+    if (messages_pending_here()) {
         set_eax(c, n);
         return;
     }
     // Let everything else run - the thread being waited for among it - and
     // look again.
+    guest_poll_objects_begin(list.data(), uint32_t(list.size()), wait_all);
     pump_once(c);
-    if (signalled(&result)) {
+    if (guest_poll_objects_end(&result) || signalled(&result)) {
         set_eax(c, result);
         return;
     }

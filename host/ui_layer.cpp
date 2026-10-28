@@ -263,11 +263,30 @@ void ui_layer_extract(HostFrameHandle f, int guest_w, int guest_h, const UiFrame
     };
     // Union the ORIGINAL rectangles, not growing bounding boxes, which can
     // contain empty space and would merge disconnected text/icon islands.
-    for (size_t i = 0; i < records.size(); ++i) {
-        for (size_t j = 0; j < i; ++j) {
-            if (records[i]->src.surface == records[j]->src.surface &&
-                connected(rect(*records[i]), rect(*records[j])))
-                parent[root(i)] = root(j);
+    // Per source surface, a left-edge sweep tests only rectangles still
+    // reaching the current left edge: menus carry hundreds of blits a frame.
+    std::map<HostSurfaceId, std::vector<size_t>> by_surface;
+    for (size_t i = 0; i < records.size(); ++i)
+        by_surface[records[i]->src.surface].push_back(i);
+    std::vector<size_t> active;
+    for (auto &[surface, order] : by_surface) {
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            return rect(*records[a]).x < rect(*records[b]).x;
+        });
+        active.clear();
+        for (size_t i : order) {
+            const Rect ri = rect(*records[i]);
+            size_t kept = 0;
+            for (size_t j : active) {
+                const Rect rj = rect(*records[j]);
+                if (rj.right < ri.x)
+                    continue;
+                active[kept++] = j;
+                if (connected(ri, rj))
+                    parent[root(i)] = root(j);
+            }
+            active.resize(kept);
+            active.push_back(i);
         }
     }
     std::vector<std::vector<const HostBlitRecord *>> groups;

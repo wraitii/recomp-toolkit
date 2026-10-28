@@ -56,6 +56,11 @@ bool (*g_message_waiter)() = nullptr;
 void (*g_window_shown)(uint32_t) = nullptr;
 uint8_t g_key_state[256] = {0};
 
+void post_thread_message(uint32_t tid, uint32_t msg, uint32_t wparam, uint32_t lparam) {
+    thread_queues()[tid].push_back(
+        Msg{0, msg, wparam, lparam, host_millis(), uint32_t(g_cursor_x), uint32_t(g_cursor_y)});
+}
+
 bool trace_pointer() {
     static const bool on = recomp_env("TRACE_POINTER") != nullptr;
     return on;
@@ -865,6 +870,8 @@ void u_CreateDialogParamA(X86 *c) {
 bool msg_matches(const Msg &m, uint32_t filter_hwnd, uint32_t min_msg, uint32_t max_msg) {
     if (m.message == 0x0012)
         return true; // WM_QUIT is never filtered out
+    if (filter_hwnd == 0xffffffffu)
+        return !m.hwnd; // only messages posted to the thread itself
     if (filter_hwnd && m.hwnd != filter_hwnd)
         return false;
     if (min_msg == 0 && max_msg == 0)
@@ -878,9 +885,10 @@ bool msg_matches(const Msg &m, uint32_t filter_hwnd, uint32_t min_msg, uint32_t 
 // queued item consumed by PM_REMOVE. Only validation (normally BeginPaint)
 // makes it disappear. Hidden child hierarchies never receive synthesized paint.
 static bool pending_paint(uint32_t p, uint32_t hwnd, uint32_t min_msg, uint32_t max_msg) {
+    const uint32_t thread = guest_current_thread_id();
     for (const auto &kv : windows()) {
         const Window *w = &kv.second;
-        if (!w->update_pending || !w->visible || w->w <= 0 || w->h <= 0)
+        if (!w->update_pending || !w->visible || w->w <= 0 || w->h <= 0 || w->thread != thread)
             continue;
         const Window *ancestor = w;
         size_t hops = 0;
@@ -894,14 +902,37 @@ static bool pending_paint(uint32_t p, uint32_t hwnd, uint32_t min_msg, uint32_t 
             continue;
         if (!p)
             return true; // only asked whether there is one
-        last_message = m;
+        last_message() = m;
         store_msg(p, m);
         return true;
     }
     return false;
 }
 
-Msg last_message{};
+// GetMessagePos/GetMessageTime answer for the calling thread's last retrieved
+// message.
+Msg &last_message() {
+    static std::map<uint32_t, Msg> by_thread;
+    return by_thread[guest_current_thread_id()];
+}
+
+// A window's messages belong to the thread that created it. A host message with
+// no window, or one whose window is gone, goes to the main window's thread.
+bool queued_for_this_thread(const Msg &m) {
+    const Window *w = m.hwnd ? find_window(m.hwnd) : nullptr;
+    if (!w)
+        w = find_window(g_main_hwnd);
+    return !w || w->thread == guest_current_thread_id();
+}
+
+bool messages_pending_here() {
+    if (!thread_queues()[guest_current_thread_id()].empty())
+        return true;
+    for (const Msg &m : queue())
+        if (queued_for_this_thread(m))
+            return true;
+    return false;
+}
 
 bool paint_pending() {
     return pending_paint(0, 0, 0, 0);
@@ -925,7 +956,7 @@ void peek_message(X86 *c) {
         for (auto it = tq.begin(); it != tq.end(); ++it) {
             if (!msg_matches(*it, filter_hwnd, min_msg, max_msg))
                 continue;
-            last_message = *it;
+            last_message() = *it;
             store_msg(p, *it);
             if (flags & 1)
                 tq.erase(it); // PM_REMOVE
@@ -934,9 +965,9 @@ void peek_message(X86 *c) {
         }
     }
     for (auto it = queue().begin(); it != queue().end(); ++it) {
-        if (!msg_matches(*it, filter_hwnd, min_msg, max_msg))
+        if (!queued_for_this_thread(*it) || !msg_matches(*it, filter_hwnd, min_msg, max_msg))
             continue;
-        last_message = *it;
+        last_message() = *it;
         store_msg(p, *it);
         if (flags & 1)
             queue().erase(it); // PM_REMOVE
@@ -960,7 +991,7 @@ void u_GetMessageA(X86 *c) {
     uint32_t p = arg(c, 0), filter_hwnd = arg(c, 1);
     uint32_t min_msg = arg(c, 2), max_msg = arg(c, 3);
 
-    if (filter_hwnd && !find_window(filter_hwnd)) {
+    if (filter_hwnd && filter_hwnd != 0xffffffffu && !find_window(filter_hwnd)) {
         set_last_error(1400); // ERROR_INVALID_WINDOW_HANDLE
         set_eax(c, 0xffffffffu);
         return;
@@ -976,17 +1007,17 @@ void u_GetMessageA(X86 *c) {
                 continue;
             Msg m = *it;
             tq.erase(it);
-            last_message = m;
+            last_message() = m;
             store_msg(p, m);
             set_eax(c, m.message == 0x0012 ? 0 : 1);
             return;
         }
         for (auto it = queue().begin(); it != queue().end(); ++it) {
-            if (!msg_matches(*it, filter_hwnd, min_msg, max_msg))
+            if (!queued_for_this_thread(*it) || !msg_matches(*it, filter_hwnd, min_msg, max_msg))
                 continue;
             Msg m = *it;
             queue().erase(it);
-            last_message = m;
+            last_message() = m;
             store_msg(p, m);
             set_eax(c, m.message == 0x0012 ? 0 : 1); // WM_QUIT ends the loop
             return;
@@ -1096,7 +1127,10 @@ void u_PostMessageA(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    host_post_message(arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3));
+    if (!arg(c, 0))
+        post_thread_message(guest_current_thread_id(), arg(c, 1), arg(c, 2), arg(c, 3));
+    else
+        host_post_message(arg(c, 0), arg(c, 1), arg(c, 2), arg(c, 3));
     set_eax(c, 1);
 }
 
@@ -1117,8 +1151,7 @@ void u_PostThreadMessageA(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    thread_queues()[tid].push_back(Msg{0, arg(c, 1), arg(c, 2), arg(c, 3), host_millis(),
-                                       uint32_t(g_cursor_x), uint32_t(g_cursor_y)});
+    post_thread_message(tid, arg(c, 1), arg(c, 2), arg(c, 3));
     set_eax(c, 1);
 }
 
@@ -1143,18 +1176,11 @@ void u_GetQueueStatus(X86 *c) {
     uint32_t bits = 0;
     for (const Msg &m : thread_queues()[guest_current_thread_id()])
         bits |= queue_status_bits(m);
-    // The window queue belongs to the thread that owns the window; a message
-    // with no window (PostQuitMessage) belongs to the main window's thread.
-    for (const Msg &m : queue()) {
-        const Window *w = find_window(m.hwnd ? m.hwnd : g_main_hwnd);
-        if (!w || w->thread == guest_current_thread_id())
+    for (const Msg &m : queue())
+        if (queued_for_this_thread(m))
             bits |= queue_status_bits(m);
-    }
-    if (paint_pending()) {
-        const Window *w = find_window(g_main_hwnd);
-        if (!w || w->thread == guest_current_thread_id())
-            bits |= 0x0020; // QS_PAINT
-    }
+    if (paint_pending())
+        bits |= 0x0020; // QS_PAINT
     bits &= arg(c, 0);
     set_eax(c, (bits << 16) | bits);
 }
@@ -1231,7 +1257,7 @@ void u_DefWindowProcA(X86 *c) {
 }
 
 void u_PostQuitMessage(X86 *c) {
-    host_post_message(0, 0x0012, arg(c, 0), 0);
+    post_thread_message(guest_current_thread_id(), 0x0012, arg(c, 0), 0);
     set_eax(c, 0);
 }
 
@@ -1527,10 +1553,10 @@ void u_GetCursorPos(X86 *c) {
     set_eax(c, 1);
 }
 void u_GetMessagePos(X86 *c) {
-    set_eax(c, (last_message.pty << 16) | (last_message.ptx & 0xffff));
+    set_eax(c, (last_message().pty << 16) | (last_message().ptx & 0xffff));
 }
 void u_GetMessageTime(X86 *c) {
-    set_eax(c, last_message.time);
+    set_eax(c, last_message().time);
 }
 void u_GetAsyncKeyState(X86 *c) {
     uint32_t vk = arg(c, 0);
@@ -2115,6 +2141,27 @@ void u_ToAsciiEx(X86 *c) {
     u_ToAscii(c);
 }
 
+// ToUnicode(wVirtKey, wScanCode, lpKeyState, pwszBuff, cchBuff, wFlags): the
+// same en-US character as ToAscii, NUL-terminated when the buffer has room.
+void u_ToUnicode(X86 *c) {
+    const uint32_t state = arg(c, 2), out = arg(c, 3), cch = arg(c, 4);
+    if (!state || !gm_valid(state, 256) || !out || !cch || !gm_valid(out, cch > 1 ? 4 : 2)) {
+        set_eax(c, 0);
+        return;
+    }
+    uint8_t ks[256];
+    memcpy(ks, g_mem + state, sizeof ks);
+    const int ch = to_ascii_char(arg(c, 0) & 0xff, ks);
+    if (ch < 0) {
+        set_eax(c, 0);
+        return;
+    }
+    wr16(out, (uint16_t)ch);
+    if (cch > 1)
+        wr16(out + 2, 0);
+    set_eax(c, 1);
+}
+
 const ImportShim g_user32_shims[] = {
     {"USER32.dll", "ChangeDisplaySettingsA", 2, imports_unsupported},
     // Published Win32 stdcall signatures; unsupported calls retain named faults.
@@ -2206,7 +2253,7 @@ const ImportShim g_user32_shims[] = {
     {"USER32.dll", "MapVirtualKeyExA", 3, u_MapVirtualKeyA},
     {"USER32.dll", "ToAscii", 5, u_ToAscii},
     {"USER32.dll", "ToAsciiEx", 6, u_ToAsciiEx},
-    {"USER32.dll", "ToUnicode", 6, nullptr},
+    {"USER32.dll", "ToUnicode", 6, u_ToUnicode},
     {"USER32.dll", "SendInput", 3, nullptr},
     {"USER32.dll", "PostThreadMessageA", 4, u_PostThreadMessageA},
     {"USER32.dll", "GetQueueStatus", 1, u_GetQueueStatus},

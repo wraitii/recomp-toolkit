@@ -1346,7 +1346,8 @@ impl<'a> Emitter<'a> {
             "CVTPI2PS" => return self.slow_cvtpi2ps(dst, operands.get(1), addr),
             "CVTPS2PI" => return self.slow_cvtps2pi(dst, operands.get(1), addr),
             "CVTTPS2DQ" => return self.slow_cvttps2dq(dst, operands.get(1), addr),
-            "CVTTSD2SI" => return self.slow_cvttsd2si(dst, operands.get(1), addr),
+            "CVTSD2SI" => return self.slow_cvtsd2si(dst, operands.get(1), addr, false),
+            "CVTTSD2SI" => return self.slow_cvtsd2si(dst, operands.get(1), addr, true),
             "PEXTRW" => return self.slow_pextrw(dst, operands.get(1), operands.get(2), addr),
             "MOVDQ2Q" => return self.slow_movdq2q(dst, operands.get(1), addr),
             "MOVNTQ" => {
@@ -1556,11 +1557,11 @@ impl<'a> Emitter<'a> {
         let _ = writeln!(self.out, "uint64_t v_ = {source};");
         let _ = writeln!(
             self.out,
-            "uint32_t a_ = (uint32_t)recomp_sse_cvtss2si(recomp_sse_f32((uint32_t)v_));"
+            "uint32_t a_ = (uint32_t)recomp_sse_cvtss2si(c, recomp_sse_f32((uint32_t)v_));"
         );
         let _ = writeln!(
             self.out,
-            "uint32_t b_ = (uint32_t)recomp_sse_cvtss2si(recomp_sse_f32((uint32_t)(v_ >> 32)));"
+            "uint32_t b_ = (uint32_t)recomp_sse_cvtss2si(c, recomp_sse_f32((uint32_t)(v_ >> 32)));"
         );
         let _ = writeln!(
             self.out,
@@ -1594,26 +1595,28 @@ impl<'a> Emitter<'a> {
         Ok(true)
     }
 
-    fn slow_cvttsd2si(
+    fn slow_cvtsd2si(
         &mut self,
         dst: &SlowOperand,
         src: Option<&SlowOperand>,
         addr: Addr,
+        truncate: bool,
     ) -> Result<bool> {
+        let mnemonic = if truncate { "CVTTSD2SI" } else { "CVTSD2SI" };
         let (SlowOperand::Gpr { index, shift, mask }, Some(source)) = (dst, src) else {
-            return self.unsupported(addr, "CVTTSD2SI form");
+            return self.unsupported(addr, &format!("{mnemonic} form"));
         };
         let source = match source {
             SlowOperand::Xmm(register) => format!("xmm_f64(c, {register})"),
             SlowOperand::Mem(address) => format!("rdf64((uint32_t)({address}))"),
-            _ => return self.unsupported(addr, "CVTTSD2SI source"),
+            _ => return self.unsupported(addr, &format!("{mnemonic} source")),
         };
-        let line = write_gpr(
-            *index,
-            *shift,
-            *mask,
-            &format!("(uint32_t)recomp_sse_cvttsd2si({source})"),
-        );
+        let call = if truncate {
+            format!("recomp_sse_cvttsd2si({source})")
+        } else {
+            format!("recomp_sse_cvtsd2si(c, {source})")
+        };
+        let line = write_gpr(*index, *shift, *mask, &format!("(uint32_t){call}"));
         let _ = writeln!(self.out, "{line}");
         Ok(true)
     }
@@ -2190,7 +2193,8 @@ impl<'a> Emitter<'a> {
                     let _ = writeln!(self.out, "case {target_addr}:");
                     self.edge(Some(current), target)?;
                 }
-                self.out.push_str("default:\nrecomp_return_fast_(c);\nreturn;\n}\n");
+                self.out
+                    .push_str("default:\nrecomp_return_fast_(c);\nreturn;\n}\n");
                 return Ok(());
             }
         }
@@ -2994,7 +2998,9 @@ impl<'a> Emitter<'a> {
             let args = self.s.args(value);
             let lane_ok = item.op == Op::P(code)
                 && self.plan.live.contains(&value)
-                && args.get(1).is_some_and(|&address| self.lane_address(base, address, lane))
+                && args
+                    .get(1)
+                    .is_some_and(|&address| self.lane_address(base, address, lane))
                 && match code {
                     OpCode::Load => item.size == 4 && self.materialized[value as usize],
                     _ => args.get(2).is_some_and(|&stored| {
@@ -3183,14 +3189,15 @@ impl<'a> Emitter<'a> {
                         a(1)?
                     )
                 }
-                OpCode::Cvtss2si | OpCode::Cvttss2si => {
-                    let helper = if code == OpCode::Cvtss2si {
-                        "cvtss2si"
-                    } else {
-                        "cvttss2si"
-                    };
+                OpCode::Cvtss2si => {
                     format!(
-                        "(uint32_t)recomp_sse_{helper}(recomp_sse_f32((uint32_t)({})))",
+                        "(uint32_t)recomp_sse_cvtss2si(c, recomp_sse_f32((uint32_t)({})))",
+                        a(0)?
+                    )
+                }
+                OpCode::Cvttss2si => {
+                    format!(
+                        "(uint32_t)recomp_sse_cvttss2si(recomp_sse_f32((uint32_t)({})))",
                         a(0)?
                     )
                 }

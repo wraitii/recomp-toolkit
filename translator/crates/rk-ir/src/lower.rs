@@ -339,6 +339,7 @@ fn is_media(mnemonic: &str) -> bool {
             | "CVTPI2PS"
             | "CVTPS2PI"
             | "CVTTPS2DQ"
+            | "CVTSD2SI"
             | "CVTTSD2SI"
             | "PEXTRW"
             | "MOVDQ2Q"

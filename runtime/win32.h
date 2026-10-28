@@ -44,8 +44,8 @@ std::string shell_folder_guest_path(uint32_t csidl, bool create);
 uint32_t tls_reserve_slot();
 
 void set_last_error(uint32_t code);
-// Signals a kernel event object by handle (pulse = signal then immediately
-// reset). False when the handle is not an event. Used by WINMM's event-mode
+// Signals a kernel event object by handle (pulse releases only the threads
+// already waiting). False when the handle is not an event. Used by WINMM's event-mode
 // multimedia timers.
 bool win32_signal_event(uint32_t handle, bool pulse);
 // A kernel event object made by a shim on the guest's behalf (a DirectShow
@@ -440,6 +440,10 @@ uint32_t guest_wait_objects(const uint32_t *handles, uint32_t count, bool wait_a
 // APCs and reports WAIT_IO_COMPLETION (0xc0).
 uint32_t guest_wait_objects_ex(X86 *c, const uint32_t *handles, uint32_t count, bool wait_all,
                                uint32_t timeout_ms, bool alertable);
+// Brackets a MsgWaitForMultipleObjects poll: a PulseEvent of one of the
+// handles in between is delivered as the wait's result, which end reports.
+void guest_poll_objects_begin(const uint32_t *handles, uint32_t count, bool wait_all);
+bool guest_poll_objects_end(uint32_t *result);
 // Hands the baton to whatever else can run and takes it back; false means
 // nothing else could have run. A host that blocks inside a callback the guest
 // made - a message waiter, most obviously - must yield rather than spin or

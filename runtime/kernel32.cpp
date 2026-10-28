@@ -220,6 +220,7 @@ void sched_enter_critsec(uint32_t cs);
 bool sched_try_critsec(uint32_t cs);
 void sched_leave_critsec(uint32_t cs);
 void sched_wake_all();
+void sched_pulse_event(HObj *o);
 
 struct VmRegion {
     uint32_t size = 0;
@@ -656,7 +657,10 @@ bool win32_signal_event(uint32_t handle, bool pulse) {
     HObj *o = handle_get(handle, H_EVENT);
     if (!o)
         return false;
-    o->signalled = !pulse; // a pulse releases a waiter and leaves it unsignalled
+    if (pulse)
+        sched_pulse_event(o);
+    else
+        o->signalled = true;
     return true;
 }
 
@@ -2436,6 +2440,17 @@ void k_SetEvent(X86 *c) {
     set_eax(c, o ? 1 : 0);
 }
 
+// Only threads already waiting are released: all of them for a manual-reset
+// event, one for an auto-reset event, whose take resets it.
+void k_PulseEvent(X86 *c) {
+    HObj *o = handle_get(arg(c, 0), H_EVENT);
+    if (o)
+        sched_pulse_event(o);
+    else
+        set_last_error(ERROR_INVALID_HANDLE_);
+    set_eax(c, o ? 1 : 0);
+}
+
 void k_WaitForSingleObject(X86 *c) {
     uint32_t h = arg(c, 0);
     set_eax(c, sched_wait_objects(&h, 1, false, arg(c, 1)));
@@ -2527,6 +2542,12 @@ struct GuestThread {
     bool has_deadline = false;
     double deadline = 0.0;    // monotonic seconds
     uint32_t wait_result = 0; // what the wait returns once released
+    // MsgWaitForMultipleObjects polls these between yields, so a pulse while it
+    // does is taken for it into poll_result.
+    std::vector<uint32_t> poll_h;
+    bool poll_all = false;
+    bool poll_hit = false;
+    uint32_t poll_result = 0;
     std::vector<GuestApc> apcs;
     bool alertable = false;
     double slice_started = 0.0;
@@ -3087,6 +3108,26 @@ void critsec_take(uint32_t cs, uint32_t tid) {
 // Caller holds g_sched_m.  Can this blocked thread's wait complete now?  If it
 // can, the wait is taken here and the thread becomes runnable, so one signal
 // releases exactly one waiter.
+bool take_objects_locked(GuestThread *t, const uint32_t *h, uint32_t n, bool all,
+                         uint32_t *result) {
+    if (all) {
+        for (uint32_t i = 0; i < n; ++i)
+            if (!object_available(h[i], t->id))
+                return false;
+        bool ab = false;
+        for (uint32_t i = 0; i < n; ++i)
+            ab |= object_take(h[i], t->id);
+        *result = ab ? 0x80u : 0u; // WAIT_ABANDONED_0
+        return true;
+    }
+    for (uint32_t i = 0; i < n; ++i)
+        if (object_available(h[i], t->id)) {
+            *result = (object_take(h[i], t->id) ? 0x80u : 0u) + i;
+            return true;
+        }
+    return false;
+}
+
 bool sched_satisfy_locked(GuestThread *t) {
     if (!t->blocked)
         return true;
@@ -3099,26 +3140,8 @@ bool sched_satisfy_locked(GuestThread *t) {
         return true;
     }
     if (t->wait_kind == W_OBJECTS) {
-        if (t->wait_all) {
-            for (uint32_t i = 0; i < t->wait_n; ++i)
-                if (!object_available(t->wait_h[i], t->id))
-                    return false;
-            bool ab = false;
-            for (uint32_t i = 0; i < t->wait_n; ++i)
-                ab |= object_take(t->wait_h[i], t->id);
-            t->wait_result = ab ? 0x80u : 0u; // WAIT_ABANDONED_0
-        } else {
-            uint32_t hit = t->wait_n;
-            for (uint32_t i = 0; i < t->wait_n; ++i)
-                if (object_available(t->wait_h[i], t->id)) {
-                    hit = i;
-                    break;
-                }
-            if (hit == t->wait_n)
-                return false;
-            bool ab = object_take(t->wait_h[hit], t->id);
-            t->wait_result = (ab ? 0x80u : 0u) + hit;
-        }
+        if (!take_objects_locked(t, t->wait_h, t->wait_n, t->wait_all, &t->wait_result))
+            return false;
     } else if (t->wait_kind == W_CRITSEC) {
         if (!critsec_available(t->wait_cs, t->id))
             return false;
@@ -3400,6 +3423,25 @@ uint32_t guest_wait_objects(const uint32_t *handles, uint32_t count, bool wait_a
                             uint32_t timeout_ms) {
     return sched_wait_objects(handles, count, wait_all, timeout_ms);
 }
+void guest_poll_objects_begin(const uint32_t *handles, uint32_t count, bool wait_all) {
+    GuestThread *me = cur_thread();
+    g_sched_m.lock();
+    me->poll_h.assign(handles, handles + count);
+    me->poll_all = wait_all;
+    me->poll_hit = false;
+    g_sched_m.unlock();
+}
+bool guest_poll_objects_end(uint32_t *result) {
+    GuestThread *me = cur_thread();
+    g_sched_m.lock();
+    const bool hit = me->poll_hit;
+    if (hit)
+        *result = me->poll_result;
+    me->poll_h.clear();
+    me->poll_hit = false;
+    g_sched_m.unlock();
+    return hit;
+}
 uint32_t guest_wait_objects_ex(X86 *c, const uint32_t *handles, uint32_t count, bool wait_all,
                                uint32_t timeout_ms, bool alertable) {
     return sched_wait_objects_ex(c, handles, count, wait_all, timeout_ms, alertable);
@@ -3540,6 +3582,21 @@ namespace {
 // whole timeout.
 void sched_wake_all() {
     g_sched_m.lock();
+    g_sched_cv.notify_all();
+    g_sched_m.unlock();
+}
+
+void sched_pulse_event(HObj *o) {
+    g_sched_m.lock();
+    o->signalled = true;
+    for (GuestThread *t : threads()) {
+        if (t->blocked && t->wait_kind == W_OBJECTS)
+            sched_satisfy_locked(t);
+        else if (!t->poll_h.empty() && !t->poll_hit)
+            t->poll_hit = take_objects_locked(t, t->poll_h.data(), uint32_t(t->poll_h.size()),
+                                              t->poll_all, &t->poll_result);
+    }
+    o->signalled = false;
     g_sched_cv.notify_all();
     g_sched_m.unlock();
 }
@@ -6216,6 +6273,7 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "SuspendThread", 1, k_SuspendThread},
     {"KERNEL32.dll", "ReleaseMutex", 1, k_ReleaseMutex},
     {"KERNEL32.dll", "SetEvent", 1, k_SetEvent},
+    {"KERNEL32.dll", "PulseEvent", 1, k_PulseEvent},
     {"KERNEL32.dll", "TryEnterCriticalSection", 1, k_TryEnterCriticalSection},
     {"KERNEL32.dll", "GetCurrentThread", 0, k_GetCurrentThread},
     {"KERNEL32.dll", "GetCurrentThreadId", 0, k_GetCurrentThreadId},

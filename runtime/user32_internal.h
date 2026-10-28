@@ -73,6 +73,9 @@ std::map<std::string, WndClass> &classes();
 std::map<uint32_t, Window> &windows();
 std::deque<Msg> &queue();
 std::map<uint32_t, std::deque<Msg>> &thread_queues();
+void post_thread_message(uint32_t tid, uint32_t msg, uint32_t wparam, uint32_t lparam);
+bool queued_for_this_thread(const Msg &m);
+bool messages_pending_here();
 Window *find_window(uint32_t hwnd);
 std::string class_key(uint32_t p, bool wide = false);
 uint32_t put_text(uint32_t out, uint32_t cap, const std::string &text, bool wide);
@@ -87,7 +90,7 @@ extern uint32_t g_main_hwnd, g_cursor;
 extern int32_t g_cursor_x, g_cursor_y;
 extern uint8_t g_key_state[256];
 extern bool (*g_message_waiter)();
-extern Msg last_message;
+Msg &last_message();
 constexpr uint32_t desktop_handle = 0x00020000;
 void pump_window_timers();
 // Whether some visible window has an update region a paint would answer.

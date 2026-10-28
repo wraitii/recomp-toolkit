@@ -553,18 +553,21 @@ void recomp_rdtsc(X86 *c) {
     c->r[R_EDX] = (uint32_t)(tsc >> 32);
 }
 
-// LDMXCSR. The translated SSE arithmetic honours FTZ only, so another rounding
-// mode, DAZ (absent from the modelled CPU) or an unmasked exception stops here
-// rather than computing under the wrong mode. DIVERGENCE(original): the sticky
-// exception flags in bits 0-5 keep what the guest wrote and are never raised.
+// LDMXCSR. DAZ (absent from the modelled CPU) or an unmasked exception stops
+// here. The rounding mode reaches CVTSS2SI/CVTSD2SI/CVTPS2PI, which is what
+// floor/ceil helpers set it for. DIVERGENCE(original): SSE arithmetic and the
+// other conversions still round to nearest, and the sticky exception flags in
+// bits 0-5 keep what the guest wrote and are never raised.
 void recomp_ldmxcsr(X86 *c, uint32_t addr, uint32_t a) {
     uint32_t value = rd32(a);
-    if ((value & ~0xffbfu) || (value & 0x7f80u) != 0x1f80u) {
-        LOGW("LDMXCSR %08x at %08x: only round-to-nearest with every exception masked and "
-             "no DAZ is modelled",
-             value, addr);
+    if ((value & ~0xffbfu) || (value & 0x1f80u) != 0x1f80u) {
+        LOGW("LDMXCSR %08x at %08x: only masked exceptions without DAZ are modelled", value, addr);
         abort();
     }
+    if (value & 0x6000u)
+        log_once("ldmxcsr-rounding",
+                 "LDMXCSR %08x at %08x: rounding mode %u applies to integer conversions only",
+                 value, addr, (value >> 13) & 3u);
     c->mxcsr = value;
 }
 
