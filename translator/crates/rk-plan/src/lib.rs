@@ -103,6 +103,58 @@ pub fn replan_function(
     )
 }
 
+pub fn return_stack_omissions(
+    planned: &PlannedFunction,
+    summary: &rk_ssa::memory::ReturnStackSummary,
+) -> BTreeMap<ValueId, Vec<StateKey>> {
+    use rk_core::memory::{Address, Base, Range};
+
+    let s = &planned.ssa;
+    let mut result = BTreeMap::new();
+    if s.return_slot.is_err() {
+        return result;
+    }
+    let frame = s
+        .frame
+        .map_or(Address::Unknown, |_| Address::exact(Base::Frame, 0));
+    for boundary in &s.boundaries {
+        if s.value(boundary.at).op != rk_ir::Op::Return {
+            continue;
+        }
+        for &key in planned.publish.get(&boundary.at).into_iter().flatten() {
+            let StateKey::Frame { offset, aligned } = key else {
+                continue;
+            };
+            let Some(&(_, value)) = s
+                .boundary(boundary.at)
+                .unwrap_or_default()
+                .iter()
+                .find(|&&(k, _)| k == key)
+            else {
+                continue;
+            };
+            let base = if aligned {
+                s.aligned.map_or(Address::Unknown, |(start, mask)| {
+                    frame.offset(start).bounded(!mask, 0)
+                })
+            } else {
+                frame
+            };
+            let range = Range::new(base.offset(offset as u32), u32::from(s.value(value).size));
+            let site = s.value_addr[boundary.at as usize];
+            if summary.eligible(site, range) {
+                if let Some(first) = s.boundaries.iter().find(|candidate| {
+                    s.value(candidate.at).op == rk_ir::Op::Return
+                        && s.value_addr[candidate.at as usize] == site
+                }) {
+                    result.entry(first.at).or_insert_with(Vec::new).push(key);
+                }
+            }
+        }
+    }
+    result
+}
+
 pub fn omit_return_stack(
     mut planned: PlannedFunction,
     omissions: BTreeMap<ValueId, Vec<StateKey>>,

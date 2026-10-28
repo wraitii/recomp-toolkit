@@ -359,31 +359,6 @@ fn stores(planned: &rk_plan::PlannedFunction) -> Vec<Store> {
     result
 }
 
-pub(super) fn omission_plan(
-    planned: &rk_plan::PlannedFunction,
-    summary: &rk_ssa::memory::ReturnStackSummary,
-) -> BTreeMap<ValueId, Vec<StateKey>> {
-    let mut result = BTreeMap::new();
-    if planned.ssa.return_slot.is_err() {
-        return result;
-    }
-    for store in stores(planned) {
-        if !summary.eligible(store.site, store.range) {
-            continue;
-        }
-        if let Some(boundary) = planned.ssa.boundaries.iter().find(|boundary| {
-            planned.ssa.value(boundary.at).op == Op::Return
-                && planned.ssa.value_addr[boundary.at as usize] == store.site
-        }) {
-            result
-                .entry(boundary.at)
-                .or_insert_with(Vec::new)
-                .push(store.key);
-        }
-    }
-    result
-}
-
 fn body(s: &Ssa, facts: &dyn CallFacts) -> Result<Body> {
     anyhow::ensure!(
         s.entries.len() == 1 && s.entries[0].addr == s.addr,

@@ -347,6 +347,17 @@ fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::
         ctx.reloc.is_some(),
     )?;
     let options = ctx.plan_options(ir.addr);
+    let enabled = match ctx.return_stack_policy {
+        rk_core::settings::ReturnStackPolicy::Off => false,
+        rk_core::settings::ReturnStackPolicy::NormalCLifetime => {
+            ctx.return_stack_functions.contains(&ir.addr)
+        }
+        rk_core::settings::ReturnStackPolicy::Yolo => true,
+    } && !ctx.return_stack_opt_out.contains(&ir.addr)
+        && options.assume_private_stack;
+    if !enabled {
+        return rk_plan::plan_function_with_view(&cg, &options, None);
+    }
     let mut view = None;
     let planned = rk_plan::plan_function_with_view(
         &cg,
@@ -354,19 +365,8 @@ fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::
         Some(&mut |ssa| view = Some(rk_ssa::memory::ReturnStackSummary::new(ssa, &ctx.facts))),
     )?;
     let Some(view) = view else { return Ok(planned) };
-    let omissions = stack_returns::omission_plan(&planned, &view);
-    let enabled = match ctx.return_stack_policy {
-        rk_core::settings::ReturnStackPolicy::Off => false,
-        rk_core::settings::ReturnStackPolicy::NormalCLifetime => {
-            ctx.return_stack_functions.contains(&ir.addr)
-        }
-        rk_core::settings::ReturnStackPolicy::Yolo => true,
-    };
-    if enabled && !ctx.return_stack_opt_out.contains(&ir.addr) && options.assume_private_stack {
-        rk_plan::omit_return_stack(planned, omissions, &options)
-    } else {
-        Ok(planned)
-    }
+    let omissions = rk_plan::return_stack_omissions(&planned, &view);
+    rk_plan::omit_return_stack(planned, omissions, &options)
 }
 
 fn error_reason(error: &rk_core::Error) -> (String, Option<String>) {
