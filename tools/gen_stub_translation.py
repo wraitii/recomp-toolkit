@@ -38,6 +38,7 @@ uint32_t recomp_override_count(void) { return 0; }
 uint64_t recomp_override_hash(void) { return 0; }
 static int32_t recomp_lookup(uint32_t target) { (void)target; return -1; }
 int32_t recomp_index_of(uint32_t addr) { return recomp_lookup(addr); }
+int recomp_is_call_return(uint32_t target) { (void)target; return 0; }
 int recomp_region_enter(X86 *c, uint32_t target) { (void)c; (void)target; return 0; }
 
 static void stub_trap(X86 *c, const char *what, uint32_t target)
