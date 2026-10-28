@@ -351,6 +351,22 @@ impl Frame {
                 expose(&mut exposed, addresses.relations.bounds(address));
             }
         }
+        for &id in s.blocks.iter().flat_map(|block| &block.ops) {
+            for &(key, value) in s.boundary(id).unwrap_or_default() {
+                if let rk_ir::StateKey::Frame { offset, aligned } = key {
+                    if derived[value as usize] {
+                        stored_frame_ranges.push((!aligned).then(|| {
+                            Range::new(
+                                Address::exact(Base::Frame, offset as u32),
+                                s.value(value).size.into(),
+                            )
+                        }));
+                        let address = addresses.get(value);
+                        expose(&mut exposed, addresses.relations.bounds(address));
+                    }
+                }
+            }
+        }
         let stored_frame = !stored_frame_ranges.is_empty();
         let mut independent = Lookup::default();
         let mut calls = Lookup::default();

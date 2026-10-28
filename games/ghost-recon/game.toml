@@ -10,6 +10,7 @@ host_arena_base = 0
 entry_point = 0x006f3d14
 guest_root = 'C:\Ghost Recon'
 store_hooks = false
+call_hooks = false
 
 [audio]
 midi = false
@@ -31,7 +32,8 @@ dispatch = { shift = 3, max_probe = 6 }
 code_map = "metadata"
 analysis_facts = "metadata/analysis-facts.json"
 direct_variants = true
-stack_memory = false
+stack_memory = true
+assume = ["private-stack", "stack-pointer-bases"]
 private_input_arguments = false
 direct_arguments = { "00755990" = ["ECX"], "007b80e0" = ["ECX"], "0052f200" = ["ECX"], "00569150" = ["ECX"], "00538240" = ["ECX"] }
 # MOV EAX,label; RET in Catch@ funclets hand these continuations to the C++ EH runtime.
