@@ -1707,6 +1707,14 @@ def install(request, storage, prepared=None):
         log_event(log_path, "publishing", "installation manifest committed",
                   {"jobId": job_identifier, "gameId": game_id})
         try:
+            readme = (directory / "README.md").read_bytes()
+            with (root / "RECOMP-README.md").open("xb") as destination:
+                destination.write(readme)
+        except FileExistsError:
+            emit("log", text="Existing RECOMP-README.md was kept.")
+        except OSError as error:
+            emit("log", text=f"Installed, but could not copy RECOMP-README.md: {error}")
+        try:
             registry_dir = install_jobs.registry_game_dir(storage, game_id)
             registry_dir.mkdir(parents=True, exist_ok=True)
             registry_path = registry_dir / "registry.json"

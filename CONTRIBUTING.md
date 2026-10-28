@@ -124,7 +124,7 @@ We use [Ghidra 12.1.3](https://github.com/NationalSecurityAgency/ghidra/releases
 with a matching JDK to produce richer maps with reviewed function boundaries,
 jump tables, interior entries and non-returning calls. Ghidra is optional.
 Adapt a game's export script from its research repository; the
-[Ghost Recon workflow](games/ghost-recon/README.md#code-map) gives an example.
+[Ghost Recon workflow](games/ghost-recon/DEVELOPMENT.md#code-map) gives an example.
 Pack the resulting `recomp-code-map-v3-export` directory against the executable:
 
 ```sh
