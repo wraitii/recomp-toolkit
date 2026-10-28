@@ -4,6 +4,6 @@ program=msxml3.dll
 executable_sha256=100a15f4ee73e99cc1828ecf6e8f3d3b538fa40abe5a1872e8b800165955d540
 language=x86:LE:32:default
 image_base=10a00000
-functions=8045
+functions=8026
 instructions=234488
 instruction_bytes=649677
