@@ -8,7 +8,7 @@ use rk_core::memory::{Address, Base, Range};
 use rk_core::Addr;
 use rk_ir::{Op, StateKey};
 use rk_ssa::address::{Addresses, Relations};
-use rk_ssa::{CallFacts, Ssa, ValueId};
+use rk_ssa::{CallEffect, CallFacts, CallSummary, Ssa, ValueId};
 use serde_json::{json, Value};
 
 use super::{BodyContext, Prepared};
@@ -16,6 +16,25 @@ use super::{BodyContext, Prepared};
 const STEP_LIMIT: usize = 4096;
 const CALL_LIMIT: usize = 1;
 const BYTE_LIMIT: u32 = 256;
+
+struct ReportFacts<'a> {
+    base: &'a dyn CallFacts,
+    cleanup: &'a BTreeMap<Addr, i32>,
+}
+
+impl CallFacts for ReportFacts<'_> {
+    fn call(&self, site: Addr, target: Option<Addr>) -> CallEffect {
+        self.base.call(site, target)
+    }
+
+    fn summary(&self, site: Addr, target: Option<Addr>) -> CallSummary<'_> {
+        let mut result = self.base.summary(site, target);
+        if result.cleanup.is_none() {
+            result.cleanup = target.and_then(|target| self.cleanup.get(&target).copied());
+        }
+        result
+    }
+}
 
 struct Store {
     site: Addr,
@@ -423,6 +442,74 @@ fn body(s: &Ssa, facts: &dyn CallFacts) -> Result<Body> {
     })
 }
 
+fn inferred_cleanup(body: &Body) -> Option<i32> {
+    if !body.return_slot_proven
+        || body
+            .blocks
+            .iter()
+            .flat_map(|block| &block.events)
+            .any(|event| matches!(event.effect, Effect::Barrier(_)))
+    {
+        return None;
+    }
+    let mut cleanup = None;
+    for block in &body.blocks {
+        if block.next.is_empty()
+            && !block
+                .events
+                .last()
+                .is_some_and(|event| matches!(event.effect, Effect::Return))
+        {
+            return None;
+        }
+        for event in &block.events {
+            if !matches!(event.effect, Effect::Return) {
+                continue;
+            }
+            let Address::Known {
+                base: Base::Frame,
+                offset,
+                span: 0,
+            } = body.relations.bounds(event.esp)
+            else {
+                return None;
+            };
+            let value = (offset as i32).checked_sub(4)?;
+            if cleanup.is_some_and(|prior| prior != value) {
+                return None;
+            }
+            cleanup = Some(value);
+        }
+    }
+    cleanup
+}
+
+fn return_gap(body: &Body, store: &Store) -> Option<(i64, i64)> {
+    let esp = body
+        .blocks
+        .iter()
+        .flat_map(|block| &block.events)
+        .find(|event| event.site == store.site && matches!(event.effect, Effect::Return))
+        .map(|event| body.relations.bounds(event.esp));
+    match (body.relations.bounds(store.range.address), esp) {
+        (
+            Address::Known { base, offset, span },
+            Some(Address::Known {
+                base: own,
+                offset: top,
+                span: 0,
+            }),
+        ) if base == own => {
+            let latest_end =
+                i64::from(offset as i32) + i64::from(span) + i64::from(store.range.size);
+            let earliest_end = i64::from(offset as i32) + i64::from(store.range.size);
+            let top = i64::from(top as i32);
+            (latest_end <= top).then_some((top - latest_end, top - earliest_end))
+        }
+        _ => None,
+    }
+}
+
 fn return_position(body: &Body, store: &Store) -> &'static str {
     let esp = body
         .blocks
@@ -573,9 +660,12 @@ fn investigate(
                     .filter(|&i| !relations.disjoint(read, byte(i)))
                     .collect();
                 if !touched.is_empty() {
-                    let definite = touched
-                        .iter()
-                        .any(|&i| relations.offset_of(read, byte(i)).is_some());
+                    let definite = (0..=span).all(|start| {
+                        (start..start + range.size).any(|index| {
+                            search.remaining.contains(&index)
+                                && relations.offset_of(read, byte(index)).is_some()
+                        })
+                    });
                     let stack_derived = matches!(
                         read.address,
                         Address::Known {
@@ -620,6 +710,36 @@ fn investigate(
                                 })
                             });
                     let unknown_origin = walk_limited || register_reloaded || unknown_binding;
+                    if private_evidence
+                        && !definite
+                        && matches!(
+                            read.address,
+                            Address::Known {
+                                base: Base::Absolute,
+                                ..
+                            }
+                        )
+                    {
+                        search.trace.push(json!({"assumption": "private-stack-excludes-fixed-address-read", "function": format!("{:08x}", cursor.function), "site": format!("{:08x}", event.site), "read": describe(read)}));
+                        pending.push(search);
+                        continue;
+                    }
+                    if private_evidence
+                        && !definite
+                        && !stack_derived
+                        && !unknown_origin
+                        && matches!(
+                            read.address,
+                            Address::Known {
+                                base: Base::Parameter(_) | Base::Argument(_),
+                                ..
+                            }
+                        )
+                    {
+                        search.trace.push(json!({"assumption": "private-stack-excludes-incoming-pointer-read", "function": format!("{:08x}", cursor.function), "site": format!("{:08x}", event.site), "read": describe(read)}));
+                        pending.push(search);
+                        continue;
+                    }
                     if private_evidence
                         && !definite
                         && !stack_derived
@@ -876,22 +996,108 @@ pub(super) fn write(
                 Ok(result)
             })();
             result
-                .map(|body| (addr, body))
+                .map(|body| (addr, body, ir))
                 .map_err(|error| (addr, error.to_string()))
         })
         .collect();
     let mut bodies = BTreeMap::new();
+    let mut irs = BTreeMap::new();
     let mut unavailable = Vec::new();
     for result in results {
         match result {
-            Ok((addr, body)) => {
+            Ok((addr, body, ir)) => {
                 bodies.insert(addr, body);
+                irs.insert(addr, ir);
             }
             Err((addr, reason)) => {
                 unavailable.push(json!({"function": format!("{addr:08x}"), "reason": reason}))
             }
         }
     }
+    let recovered_cleanup: BTreeMap<_, _> = bodies
+        .iter()
+        .filter_map(|(&addr, body)| inferred_cleanup(body).map(|cleanup| (addr, cleanup)))
+        .collect();
+    let mut cleanup_fallback_sites = BTreeSet::new();
+    for (&caller, body) in &bodies {
+        for event in body.blocks.iter().flat_map(|block| &block.events) {
+            if let Effect::Call {
+                target: Some(target),
+                ..
+            } = event.effect
+            {
+                if recovered_cleanup.contains_key(&target)
+                    && ctx
+                        .facts
+                        .summary(event.site, Some(target))
+                        .cleanup
+                        .is_none()
+                {
+                    cleanup_fallback_sites.insert((caller, event.site, target));
+                }
+            }
+        }
+    }
+    let cleanup_fallback_callers: BTreeSet<_> = cleanup_fallback_sites
+        .iter()
+        .map(|&(caller, _, _)| caller)
+        .collect();
+    let facts = ReportFacts {
+        base: &ctx.facts,
+        cleanup: &recovered_cleanup,
+    };
+    let refreshed: Vec<_> = bodies
+        .into_par_iter()
+        .map(|(addr, mut prior)| {
+            if !cleanup_fallback_callers.contains(&addr) {
+                return (addr, prior, false);
+            }
+            let Some(ir) = irs.get(&addr) else {
+                return (addr, prior, false);
+            };
+            let attempt = (|| -> rk_core::Result<Option<anyhow::Result<Body>>> {
+                let cg = rk_ir::lower_with(
+                    ir,
+                    &ctx.program.image,
+                    &rk_x87::Recipes,
+                    ctx.reloc.is_some(),
+                )?;
+                let mut view = None;
+                let mut options = ctx.plan_options(addr);
+                options.call_facts = &facts;
+                rk_plan::plan_function_with_view(
+                    &cg,
+                    &options,
+                    Some(&mut |ssa| view = Some(capture(ssa, &facts))),
+                )?;
+                Ok(view)
+            })();
+            if let Ok(Some(Ok(mut fresh))) = attempt {
+                fresh.stores = std::mem::take(&mut prior.stores)
+                    .into_iter()
+                    .map(|mut store| {
+                        store.returned_pointer = fresh.returned_pointer_sites.contains(&store.site);
+                        store.private_frame = fresh.frame.unexposed(store.range);
+                        store.return_position = return_position(&fresh, &store);
+                        store
+                    })
+                    .collect();
+                fresh.return_slot_proven = prior.return_slot_proven;
+                fresh.instructions = prior.instructions;
+                (addr, fresh, true)
+            } else {
+                (addr, prior, false)
+            }
+        })
+        .collect();
+    let refreshed_count = refreshed
+        .iter()
+        .filter(|(_, _, refreshed)| *refreshed)
+        .count();
+    let bodies: BTreeMap<_, _> = refreshed
+        .into_iter()
+        .map(|(addr, body, _)| (addr, body))
+        .collect();
     let mut rows = Vec::new();
     let mut counts = BTreeMap::<String, usize>::new();
     let mut site_coverage = BTreeMap::<String, usize>::new();
@@ -1122,6 +1328,9 @@ pub(super) fn write(
                         "slot": format!("{:?}", store.key), "callee_range": describe(store.range),
                         "caller_range": describe(range), "existing_direct_variant": ctx.direct_targets.contains(&target),
                         "origin_return_slot_proven": callee.return_slot_proven,
+                        "production_call_cleanup": ctx.facts.summary(event.site, Some(target)).cleanup,
+                        "report_call_cleanup": facts.summary(event.site, Some(target)).cleanup,
+                        "gap_below_restored_esp": return_gap(callee, store).map(|(min, max)| json!({"minimum_bytes": min, "maximum_bytes": max})),
                         "outcome": outcome, "terminals": terminals, "slot_outside_image": guarded, "private_frame": store.private_frame, "return_position": store.return_position, "stack_evidence": evidence}));
                 }
             }
@@ -1135,7 +1344,7 @@ pub(super) fn write(
             body.stores.iter().map(move |store| {
         json!({"function": format!("{function:08x}"), "return": format!("{:08x}", store.site),
             "slot": format!("{:?}", store.key), "range": describe(store.range),
-            "returned_frame_pointer": store.returned_pointer, "private_frame": store.private_frame, "return_position": store.return_position,
+            "returned_frame_pointer": store.returned_pointer, "private_frame": store.private_frame, "return_position": store.return_position, "gap_below_restored_esp": return_gap(body, store).map(|(min, max)| json!({"minimum_bytes": min, "maximum_bytes": max})),
             "queried": queried_stores.contains(&(function, store.site, store.key))})
     })
         })
@@ -1288,6 +1497,9 @@ pub(super) fn write(
             "indirect_call_sites_not_queried": indirect_calls, "unavailable_functions": unavailable},
         "candidate_call_sites": candidate_calls.len(), "candidate_call_slots": candidate_slots.len(),
         "additional_candidates_with_slot_outside_image_guard": {"queries": guarded_queries, "call_sites": guarded_calls.len(), "call_slots": guarded_slots.len()},
+        "report_cleanup_recovery": {"callee_proofs": recovered_cleanup.len(), "fallback_call_sites": cleanup_fallback_sites.len(), "fallback_targets": cleanup_fallback_sites.iter().map(|&(_, _, target)| target).collect::<BTreeSet<_>>().len(), "affected_callers": cleanup_fallback_callers.len(), "refreshed_functions": refreshed_count,
+            "cleanup": recovered_cleanup.iter().map(|(addr, cleanup)| (format!("{addr:08x}"), *cleanup)).collect::<BTreeMap<_, _>>(),
+            "scope": "Report-only fallback when production call cleanup is unavailable. Each callee has a proven return slot, no opaque/external exits, and a single exact entry-ESP-relative restored ESP on every return. Existing per-site cleanup takes precedence; native replacements are excluded."},
         "stack_evidence_counts": evidence_outcomes,
         "partial_overwrite_evidence": {"counts": partial_summary, "scope": "Some paths proves at least one actual slot byte overwritten while bytes might survive; every path requires at least one actual slot byte overwritten on all paths, allowing complete overwrites. Aligned slots use the minimum overlap over every possible slot position. Queries with a definite read before complete overwrite are excluded. Possible reads and later effects remain unresolved. Counts overlap other categories."},
         "unread_through_analyzed_call": {"queries": through_call.len(), "call_sites": through_call_sites.len(), "call_slots": through_call_slots.len(), "later_outcomes": through_call_outcomes, "scope": "Every explored path overwrites all tracked bytes or completes a subsequent analyzed call with bytes surviving and no stack read; at least one path completes such a call. Later reads or unresolved behavior remain possible. Query counts overlap the main outcome categories."},

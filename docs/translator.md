@@ -86,12 +86,15 @@ read-only report without emitting C or building the app. It captures an unpromot
 SSA view with production stack assumptions, preserving stores while forwarding
 initialized reads. For return publications wholly below restored ESP, the report
 tracks remaining bytes across each direct caller and one nested call. Under
-`private-stack`, it discounts unrelated pointer reads while the slot is unexposed
-and below ESP. It reports definite reads before overwrite, complete overwrites,
+`private-stack`, it discounts fixed-address and incoming-pointer reads of an
+unexposed returned slot, and other unrelated pointer reads while it is below ESP.
+It recovers missing call cleanup for the report from callees with proved return
+slots and a consistent exact restored ESP, and records the gap below restored ESP.
+It reports definite reads before overwrite, complete overwrites,
 paths unread at the first caller return, and queries unread through a subsequent
 analyzed call, and partial overwrites, along with distinct unresolved frontiers and
-witnesses. Partial overlap must cover an actual slot byte at every possible aligned
-position; definite reads exclude the query. The call measure
+witnesses. A definite read or partial overwrite must cover an actual surviving slot
+byte at every possible aligned position; definite reads exclude partial candidates. The call measure
 requires every explored path to overwrite the bytes or complete such a call unread;
 it does not rule out a later read. A caller return is not proof the bytes are dead; assuming
 below-ESP bytes are dead can change behavior for dangling or uninitialized reads
