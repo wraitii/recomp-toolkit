@@ -31,7 +31,6 @@ pub mod d3dx_effect;
 pub mod d3dx_math;
 pub mod d3dx_shader;
 pub mod draw;
-pub mod flat;
 pub mod format;
 pub mod gpu;
 mod present;
@@ -365,7 +364,6 @@ pub struct D3d9Device {
     in_scene: bool,
     implicit_backbuffer_id: u32,
     implicit_depthbuffer_id: u32,
-    last_error: Option<Status>,
 }
 
 impl D3d9Device {
@@ -1369,7 +1367,6 @@ pub fn d3d9_format_autogen_capable(format: u32) -> ValueResult {
 impl Default for D3d9Device {
     fn default() -> Self {
         Self {
-            last_error: None,
             gpu: None,
             d3d9_gpu: None,
             reservation: None,
