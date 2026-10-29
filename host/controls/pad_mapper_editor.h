@@ -34,7 +34,7 @@ class PadMapperEditor {
   private:
     enum class Page { Overview, Mapping, Calibration };
     enum class Popup { None, Axis, Button, NegativeButton, PositiveButton, Preset, Discard };
-    enum class Capture { None, Identify };
+    enum class Capture { None, Identify, Key };
     void changed();
     void activate(int id);
     void select(int source);

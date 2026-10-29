@@ -240,7 +240,7 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
     if (capture_ == Capture::Identify)
         message = "Move one stick or trigger, or press a button. Esc stops identifying.";
     else if (capture_ != Capture::None)
-        message = "Press the keyboard key to assign. Esc cancels; Delete clears the assignment.";
+        message = "Press the keyboard key to assign. Esc cancels.";
     else if (center_capture_)
         message = "Keep this input at rest. Recording its resting position...";
     else if (sweep_)
@@ -350,6 +350,13 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
             } else {
                 const ButtonBinding &b = button();
                 line("Controller output", button_name(b), 205);
+                const char *key = scancode_name(b.guest_key);
+                line("Keyboard output",
+                     capture_ == Capture::Key ? "Press a key..."
+                     : key                    ? key
+                                              : "None",
+                     206);
+                line("", "Clear keyboard output", 207);
             }
             if (selected_ < 6) {
                 const int y = detail_top + (index++ - detail_scroll_) * px(35);
@@ -566,6 +573,10 @@ void PadMapperEditor::activate(int id) {
     } else if (id == 205) {
         popup_ = Popup::Button;
         focus_ = 400;
+    } else if (id == 206) {
+        capture_ = Capture::Key;
+    } else if (id == 207) {
+        button().guest_key = 0;
     } else if (id >= 210 && id <= 215) {
         AxisBinding &b = profile_.axis_bindings[size_t(selected_)];
         if (id == 210 || id == 211)
@@ -732,7 +743,14 @@ void PadMapperEditor::key(int scancode, bool down) {
         return;
     if (!down)
         return;
-    if (scancode == kScanEscape)
+    if (capture_ == Capture::Key && scancode != kScanEscape) {
+        if (scancode_name(scancode)) {
+            button().guest_key = scancode;
+            capture_ = Capture::None;
+            validation_error_.clear();
+        } else
+            validation_error_ = "This keyboard key is not supported.";
+    } else if (scancode == kScanEscape)
         escape();
     else if (scancode == kScanTab || scancode == kScanDown || scancode == kScanUp ||
              scancode == kScanLeft || scancode == kScanRight) {

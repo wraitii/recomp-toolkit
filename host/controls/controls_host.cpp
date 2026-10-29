@@ -19,6 +19,7 @@
 #include "vpad.h"
 
 #include <filesystem>
+#include <set>
 #include <mutex>
 #include <stdio.h>
 #include <string>
@@ -59,6 +60,7 @@ bool trace() {
 PadMapper g_mapper;
 std::mutex g_mapper_view_mutex;
 PadState g_mapper_raw;
+std::set<int> g_mapper_keys, g_touch_keys;
 std::string g_mapper_status;
 
 void set_mapper_status(std::string status) {
@@ -202,7 +204,11 @@ class HostSink : public ControlsSink {
     void key(int scancode, bool down) override {
         if (trace())
             fprintf(stderr, "[controls] key %d %s\n", scancode, down ? "down" : "up");
-        if (g_hooks.key)
+        if (down)
+            g_touch_keys.insert(scancode);
+        else
+            g_touch_keys.erase(scancode);
+        if (g_hooks.key && !g_mapper_keys.count(scancode))
             g_hooks.key(scancode, down);
     }
     void action(const std::string &name) override {
@@ -336,10 +342,18 @@ class HostEditorHost : public EditorHost {
 
 HostEditorHost g_editor_host;
 
+void release_mapper_keys() {
+    for (int key : g_mapper_keys)
+        if (g_hooks.key && !g_touch_keys.count(key))
+            g_hooks.key(key, false);
+    g_mapper_keys.clear();
+}
+
 // Lets go of everything the guest is being told is held: the router's keys
 // and pad buttons, and any finger the editor is tracking. Nothing else would
 // ever lift them.
 void release_everything() {
+    release_mapper_keys();
     if (g_editor.is_open())
         g_editor.cancel_fingers();
     g_router.cancel_all(g_sink);
@@ -467,16 +481,32 @@ void host_set_focused(bool focused) {
 }
 
 void host_gamepad_state(const PadState &raw) {
-    PadState mapped;
-    g_mapper.process(raw, nullptr, &mapped);
+    PadState calibrated, mapped;
+    g_mapper.process(raw, &calibrated, &mapped);
     {
         std::lock_guard<std::mutex> lock(g_mapper_view_mutex);
         g_mapper_raw = raw;
     }
     if (!g_game_focused || g_editor.is_open()) {
+        release_mapper_keys();
         vpad().set_source(kPadSourceController, PadState{});
         return;
     }
+    std::set<int> keys;
+    const PadMapperProfile profile = g_mapper.snapshot();
+    for (size_t i = 0; i < profile.buttons.size(); ++i)
+        if ((calibrated.buttons & (1u << i)) && profile.buttons[i].guest_key)
+            keys.insert(profile.buttons[i].guest_key);
+    for (size_t i = 0; i < profile.hat.size(); ++i)
+        if ((calibrated.hat & (1u << i)) && profile.hat[i].guest_key)
+            keys.insert(profile.hat[i].guest_key);
+    for (int key : g_mapper_keys)
+        if (g_hooks.key && !keys.count(key) && !g_touch_keys.count(key))
+            g_hooks.key(key, false);
+    for (int key : keys)
+        if (g_hooks.key && !g_mapper_keys.count(key) && !g_touch_keys.count(key))
+            g_hooks.key(key, true);
+    g_mapper_keys = std::move(keys);
     vpad().set_source(kPadSourceController, mapped);
 }
 

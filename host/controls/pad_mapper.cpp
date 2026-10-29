@@ -1,5 +1,7 @@
 #include "pad_mapper.h"
 
+#include "layout.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -260,6 +262,8 @@ bool parse_field(const std::string &key, const std::string &value, PadMapperProf
                 b.guest_buttons = uint16_t(v);
                 return true;
             }
+            if (field == "guest_key")
+                return parse_int(value, &b.guest_key);
             if (field == "guest_hat") {
                 if (!parse_int(value, &v))
                     return false;
@@ -283,6 +287,8 @@ bool parse_field(const std::string &key, const std::string &value, PadMapperProf
                 b.guest_buttons = uint16_t(v);
                 return true;
             }
+            if (field == "guest_key")
+                return parse_int(value, &b.guest_key);
             if (field == "guest_hat") {
                 if (!parse_int(value, &v))
                     return false;
@@ -383,6 +389,8 @@ bool validate_pad_mapper_profile(const PadMapperProfile &p, std::string *error) 
         const ButtonBinding &b = p.buttons[size_t(i)];
         if (b.guest_buttons & ~uint16_t(0x1fff))
             return fail("button " + std::to_string(i) + " has invalid guest button bits");
+        if (b.guest_key && !scancode_name(b.guest_key))
+            return fail("invalid keyboard output");
         if (b.guest_hat & ~uint8_t(0x0f))
             return fail("button " + std::to_string(i) + " has invalid guest hat bits");
     }
@@ -390,6 +398,8 @@ bool validate_pad_mapper_profile(const PadMapperProfile &p, std::string *error) 
         const ButtonBinding &b = p.hat[size_t(i)];
         if (b.guest_buttons & ~uint16_t(0x1fff))
             return fail("hat direction " + std::to_string(i) + " has invalid guest button bits");
+        if (b.guest_key && !scancode_name(b.guest_key))
+            return fail("invalid keyboard output");
         if (b.guest_hat & ~uint8_t(0x0f))
             return fail("hat direction " + std::to_string(i) + " has invalid guest hat bits");
     }
@@ -431,12 +441,14 @@ std::string serialize_pad_mapper_profile(const PadMapperProfile &p, std::string 
         const std::string x = "button." + std::to_string(i) + ".";
         out += x + "guest_buttons=" + std::to_string(b.guest_buttons) + "\n";
         out += x + "guest_hat=" + std::to_string(b.guest_hat) + "\n";
+        out += x + "guest_key=" + std::to_string(b.guest_key) + "\n";
     }
     for (int i = 0; i < 4; ++i) {
         const ButtonBinding &b = p.hat[size_t(i)];
         const std::string x = "hat." + std::to_string(i) + ".";
         out += x + "guest_buttons=" + std::to_string(b.guest_buttons) + "\n";
         out += x + "guest_hat=" + std::to_string(b.guest_hat) + "\n";
+        out += x + "guest_key=" + std::to_string(b.guest_key) + "\n";
     }
     return out;
 }

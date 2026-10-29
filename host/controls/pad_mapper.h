@@ -34,6 +34,7 @@ struct AxisBinding {
 struct ButtonBinding {
     uint16_t guest_buttons = 0;
     uint8_t guest_hat = 0;
+    int guest_key = 0;
 };
 
 struct PadMapperProfile {
