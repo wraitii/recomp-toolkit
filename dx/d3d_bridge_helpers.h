@@ -400,7 +400,7 @@ struct D3d9HostDevice {
     recomp::d3d::D3d9BlockBindingsResult state_block_bindings(uint32_t handle) const {
         return recomp::d3d::d3d9_state_block_bindings(*value, handle);
     }
-    recomp::d3d::D3d9BindingsResult current_bindings() const {
+    recomp::d3d::D3d9BindingSnapshot current_bindings() const {
         return recomp::d3d::d3d9_current_bindings(*value);
     }
 

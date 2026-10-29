@@ -240,10 +240,10 @@ static void d3d9_reconcile(std::set<uint32_t> &current, const std::set<uint32_t>
             d3d9_ref_add(id);
     current = desired;
 }
-static void d3d9_reconcile_bindings(std::array<uint32_t, 38> &snapshot,
+static bool d3d9_reconcile_bindings(std::array<uint32_t, 38> &snapshot,
                                     const std::array<uint32_t, 38> &ids) {
     if (snapshot == ids)
-        return;
+        return true;
     std::array<uint32_t, 38> released;
     size_t count = 0;
     for (size_t i = 0; i < ids.size(); ++i) {
@@ -257,26 +257,34 @@ static void d3d9_reconcile_bindings(std::array<uint32_t, 38> &snapshot,
     for (size_t i = 0; i < count; ++i)
         d3d9_ref_del(released[i]);
     snapshot = ids;
+    return false;
 }
-static void d3d9_refresh_bindings(ComObj *dev) {
+static bool d3d9_fvf_decl_view(ComObj *dev, uint32_t handle);
+
+static void d3d9_refresh_bindings(ComObj *dev, bool effect_pass = false) {
     if (!dev || !dev->d3d9_device)
         return;
-    recomp::d3d::D3d9BindingsResult result = dev->d3d9_device->current_bindings();
-    if (result.status.code != recomp::d3d::StatusCode::Ok)
-        return;
+    recomp::d3d::D3d9BindingSnapshot result = dev->d3d9_device->current_bindings();
+    if (effect_pass && result.live.declaration)
+        d3d9_fvf_decl_view(dev, result.live.declaration);
     auto *host = dev->d3d9_device.get();
     auto live = d3d9_binding_ids(dev, result.live);
     size_t slot = 36;
-    for (const auto &target : {host->render_target(), host->depth_stencil()}) {
-        if (target.status.code == recomp::d3d::StatusCode::Ok && target.value &&
-            target.value != 0xffffffffu)
-            live[slot] = target.value;
+    for (uint32_t target : {result.render_target, result.depth_stencil}) {
+        if (target && target != 0xffffffffu)
+            live[slot] = target;
         ++slot;
     }
     auto recording = result.recording_active ? d3d9_binding_ids(dev, result.recording)
                                              : std::array<uint32_t, 38>{};
-    d3d9_reconcile_bindings(host->live_bindings, live);
-    d3d9_reconcile_bindings(host->recording_bindings, recording);
+    const bool live_unchanged = d3d9_reconcile_bindings(host->live_bindings, live);
+    const bool recording_unchanged = d3d9_reconcile_bindings(host->recording_bindings, recording);
+    static const bool count_refreshes = [] {
+        const char *value = os_getenv("RECOMP_D3D9_STATS");
+        return value && strcmp(value, "1") == 0;
+    }();
+    if (count_refreshes)
+        recomp::d3d::d3d9_note_binding_refresh(live_unchanged && recording_unchanged, effect_pass);
 }
 static void d3d9_bind_slot(ComObj *dev, size_t slot, uint32_t id) {
     D3d9HostDevice *host = dev->d3d9_device.get();
@@ -3814,12 +3822,8 @@ static uint32_t efx_run(X86 *c, ComObj *fx, ComObj *dev, recomp::d3d::D3dxEffect
         hr = efx_dispatch_commands(c, fx, dev, result.commands, result.values);
         if (result.reserved)
             recomp::d3d::d3dx_effect_batch_finish(*host->value, !efx_hr_failed(hr));
-        else {
-            recomp::d3d::ValueResult decl = dev->d3d9_device->vertex_declaration();
-            if (d3d_bridge_ok(decl.status) && decl.value)
-                d3d9_fvf_decl_view(dev, decl.value);
-            d3d9_refresh_bindings(dev);
-        }
+        else
+            d3d9_refresh_bindings(dev, true);
     }
     recomp::d3d::d3dx_effect_recycle(*host->value, std::move(result.commands),
                                      std::move(result.values));

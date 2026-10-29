@@ -1,7 +1,7 @@
 use crate::RenderError;
 use crate::backend::{DepthAttachment, GpuContext, OffscreenTarget};
 use crate::bridge::{
-    D3d9AdapterIdentifierResult, D3d9Bindings as BridgeBindings, D3d9BindingsResult,
+    D3d9AdapterIdentifierResult, D3d9BindingSnapshot, D3d9Bindings as BridgeBindings,
     D3d9BlockBindingsResult, D3d9BufferDescriptor, D3d9BufferDescriptorResult, D3d9BufferKind,
     D3d9BufferLockRequest, D3d9BufferLockResult, D3d9BufferRequest, D3d9BufferUnlockResult,
     D3d9CapsResult, D3d9CheckDepthStencilRequest, D3d9CheckDeviceFormatRequest,
@@ -679,7 +679,10 @@ fn merge_staged_writes(b: &mut resource::BufferState, bytes: &[u8], default_pool
 
 pub fn d3d9_buffer_sync_locked(resource: &mut D3d9Resource, bytes: &[u8]) -> Status {
     let Some(resource::ResourceState::Buffer(b)) = resource.state.as_mut() else {
-        return status(StatusCode::InvalidArgument, "D3D9 buffer is not initialized");
+        return status(
+            StatusCode::InvalidArgument,
+            "D3D9 buffer is not initialized",
+        );
     };
     if b.lock_count.load(Ordering::Acquire) == 0 || b.writable.is_empty() {
         return status(StatusCode::Ok, "");
@@ -4195,14 +4198,30 @@ pub fn d3d9_state_block_bindings(device: &D3d9Device, handle: u32) -> D3d9BlockB
     }
 }
 
-pub fn d3d9_current_bindings(device: &D3d9Device) -> D3d9BindingsResult {
+pub fn d3d9_current_bindings(device: &D3d9Device) -> D3d9BindingSnapshot {
     let (recording, recording_active) = device.state.recording_bindings();
-    D3d9BindingsResult {
-        status: status(StatusCode::Ok, ""),
+    D3d9BindingSnapshot {
         live: bridge_bindings(device.state.bindings()),
         recording: bridge_bindings(recording),
         recording_active,
+        render_target: device.render_target_id,
+        depth_stencil: if device.depth_target_id != 0
+            && device.depth_target_id == device.implicit_depthbuffer_id
+        {
+            u32::MAX
+        } else {
+            device.depth_target_id
+        },
     }
+}
+
+pub fn d3d9_note_binding_refresh(unchanged: bool, effect_pass: bool) {
+    stats::record(|s| {
+        s.binding_refreshes += 1;
+        s.binding_refreshes_unchanged += u64::from(unchanged);
+        s.effect_pass_binding_refreshes += u64::from(effect_pass);
+        s.effect_pass_binding_refreshes_unchanged += u64::from(effect_pass && unchanged);
+    });
 }
 
 fn bridge_gpu(device: &D3d9Device) -> Result<D3d9Gpu, RenderError> {

@@ -5,6 +5,10 @@ use std::time::Instant;
 #[derive(Debug, Default)]
 pub(super) struct Counters {
     pub draws: u64,
+    pub binding_refreshes: u64,
+    pub binding_refreshes_unchanged: u64,
+    pub effect_pass_binding_refreshes: u64,
+    pub effect_pass_binding_refreshes_unchanged: u64,
     pub memo_lookups: u64,
     pub memo_hits: u64,
     pub memo_misses: u64,
