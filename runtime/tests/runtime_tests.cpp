@@ -7376,6 +7376,7 @@ static void test_dll_lifetime() {
                                         hooked,
                                         nullptr,
                                         0,
+                                        0,
                                         nullptr};
     recomp_module_register(&module);
     mapped->entry = entry;

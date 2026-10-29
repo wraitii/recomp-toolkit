@@ -45,9 +45,8 @@ static uint8_t g_mod_hooked[2] = {0, 0};
 static const uint32_t g_mod_call_returns[] = {0};
 static const char *const g_mod_profile_names[] = {"modfn", "modfn2"};
 static const RecompModule g_test_module = {
-    "TestMod.dll",       0x20000000u,     0x20001000u,  g_mod_addrs,        2,
-    g_mod_base_ptrs,     g_mod_hook_ptrs, g_mod_hooked, g_mod_call_returns, 0,
-    g_mod_profile_names,
+    "TestMod.dll",   0x20000000u,  0x20001000u,        g_mod_addrs, 2, g_mod_base_ptrs,
+    g_mod_hook_ptrs, g_mod_hooked, g_mod_call_returns, 0,           0, g_mod_profile_names,
 };
 
 static int g_checks = 0, g_failures = 0;

@@ -261,7 +261,7 @@ next(c);\n}\n",
         let prefix = module.map_or("recomp_".to_string(), |key| format!("recomp_{key}_"));
         s.push_str(
             &t.preludes
-                .return_helpers
+                .table_return_helpers
                 .replace("recomp_call_return_", &format!("{prefix}call_return_")),
         );
     }

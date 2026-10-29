@@ -1036,8 +1036,8 @@ typedef struct RecompModule {
     void (*const *base_ptrs)(X86 *c);
     RecompHookFn *hook_ptrs;
     uint8_t *hooked;
-    const uint32_t *call_returns;
-    uint32_t call_return_count;
+    const uint32_t *call_return_bits;
+    uint32_t call_return_min, call_return_span;
     const char *const *profile_names;
     const RecompRegion *regions;
     uint32_t region_count;

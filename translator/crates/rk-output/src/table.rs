@@ -14,7 +14,7 @@ fn json_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_default()
 }
 
-fn call_return_bitmap(s: &mut String, call_returns: &[Addr], prefix: &str) {
+fn call_return_bitmap(s: &mut String, call_returns: &[Addr], prefix: &str) -> (Addr, usize) {
     let (first, words) = match (call_returns.first(), call_returns.last()) {
         (Some(&first), Some(&last)) => {
             let mut words = vec![0u32; (((last - first) >> 5) + 1) as usize];
@@ -36,10 +36,11 @@ fn call_return_bitmap(s: &mut String, call_returns: &[Addr], prefix: &str) {
         words.len() * 32
     );
     let _ = writeln!(s, "const uint32_t {prefix}call_return_bits[] = {{");
-    for word in words {
+    for word in &words {
         let _ = writeln!(s, "    0x{word:08x}u,");
     }
     s.push_str("};\n");
+    (first, words.len() * 32)
 }
 
 fn entry_dispatch(signature: &str, base_call: &str) -> String {
@@ -274,17 +275,8 @@ pub fn module_table(
     s.push_str("#include \"funcs.h\"\n#include \"thunks.h\"\n\n");
     let _ = writeln!(s, "static const uint32_t {p}addrs[] = {{");
     addr_rows(&mut s, entry_names);
-    let _ = writeln!(s, "}};\nstatic const uint32_t {p}returns[] = {{");
-    addr_rows(
-        &mut s,
-        if call_returns.is_empty() {
-            &[0]
-        } else {
-            call_returns
-        },
-    );
     s.push_str("};\n");
-    call_return_bitmap(&mut s, call_returns, &p);
+    let (return_min, return_span) = call_return_bitmap(&mut s, call_returns, &p);
     let _ = writeln!(s, "static const char *const {p}names[] = {{");
     for row in symbols {
         let _ = writeln!(s, "    {},", json_string(&row.name));
@@ -339,8 +331,7 @@ pub fn module_table(
     let _ = writeln!(s, "    {p}addrs, {n}, {p}base, {p}hooks, {p}hooked,");
     let _ = writeln!(
         s,
-        "    {p}returns, {}, {p}names, {p}regions, {region_count}u, &{p}dispatch\n}};",
-        call_returns.len()
+        "    {p}call_return_bits, 0x{return_min:08x}u, {return_span}u, {p}names, {p}regions, {region_count}u, &{p}dispatch\n}};"
     );
     let _ = writeln!(
         s,
