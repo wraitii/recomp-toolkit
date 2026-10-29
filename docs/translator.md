@@ -408,7 +408,15 @@ of the matching `dx/CMakeLists.txt` rule plus `--dll` and `--catalog-output`
 (`--check` checks freshness). Each run replaces only that DLL's rows and records its
 reference hash under `references`; `reference_sha256` hashes those entries. The
 D3D8, D3D9 and D3DX9_33 rows are generated; the DirectSound rows predate the merge
-and have no recorded reference. Audited
+and have no recorded reference. A main-image CALL site with a method fact and a catalog
+`argc` emits `recomp_icall_method`, a direct call to the shim entry
+`rk_host_<dll stem>_<Interface>_<Method>` guarded by `recomp_host_slots`.
+`tools/gen_com_host_slots.py` turns the catalog into per-interface slot lists that
+`COM_HOST_SLOTS` (`dx/com.h`) expands beside each registration, so the vtable and the
+direct call share one function. `runtime/imports.cpp` arms a slot only while its
+trampoline would take the fast path to that function with the catalog pop; observers,
+frame watch and import tracing disarm it, and a disarmed or mismatched target falls
+back to `recomp_icall_host`. Tail JMP sites and relocated modules keep the generic helper. Audited
 shim effects live in `dx/metadata/method-effects.json`; the current D3D8 handlers
 preserve guest arithmetic flags and GPRs other than EAX/ESP. Reads remain conservative.
 CreateDevice preserves only the CW bits outside `0x0f3f`: its preserve flag and early

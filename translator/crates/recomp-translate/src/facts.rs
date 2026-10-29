@@ -6,6 +6,7 @@ use rk_core::ir::{OpCode, Space};
 use rk_core::program::Program;
 use rk_core::settings::{CallEffect, CallEffects, Settings};
 use rk_core::{Addr, Diagnostic, Error, Reason, Result};
+use rk_emit::{HostCalls, HostMethod};
 use rk_frontend::Analysis;
 
 use crate::parse_addr8;
@@ -18,7 +19,7 @@ pub struct Facts {
     pub call_targets: BTreeMap<Addr, Vec<Addr>>,
     pub guest_calls: BTreeSet<Addr>,
     pub jump_targets: BTreeMap<Addr, Vec<Addr>>,
-    pub host_calls: BTreeSet<Addr>,
+    pub host_calls: HostCalls,
     pub site_effects: BTreeMap<Addr, CallEffect>,
     pub imports: BTreeMap<String, CallEffect>,
     pub runtime_call_facts: BTreeMap<Addr, Vec<Addr>>,
@@ -53,7 +54,8 @@ fn read_analysis_facts(
     let loaded = AnalysisFacts::load(path, &settings.sha256)?;
     let mut call_targets = BTreeMap::new();
     let mut jump_targets = BTreeMap::new();
-    let mut host_calls = BTreeSet::new();
+    let mut host_calls = HostCalls::default();
+    let mut host_slots = BTreeMap::new();
     let mut guest_calls = BTreeSet::new();
     let mut site_effects = BTreeMap::new();
     for (&site, row) in &loaded.sites {
@@ -80,8 +82,28 @@ fn read_analysis_facts(
             }
             site_effects.insert(site, effect.clone());
         }
-        if row.method.is_some() {
-            host_calls.insert(site);
+        if let Some(id) = row.method {
+            let method = loaded
+                .methods
+                .get(&id)
+                .filter(|_| settings.module.is_none());
+            let slot = method.and_then(|method| {
+                let symbol = host_symbol(&method.identity)?;
+                let pop = 4 + 4 * method.argc?;
+                Some(
+                    *host_slots
+                        .entry(method.identity.clone())
+                        .or_insert_with(|| {
+                            host_calls.methods.push(HostMethod {
+                                identity: method.identity.clone(),
+                                symbol,
+                                pop,
+                            });
+                            host_calls.methods.len() as u32 - 1
+                        }),
+                )
+            });
+            host_calls.sites.insert(site, slot);
         }
     }
     let imports: BTreeMap<String, CallEffect> = loaded
@@ -100,6 +122,18 @@ fn read_analysis_facts(
         cw_effects: BTreeMap::new(),
         summary: loaded.summary,
     })
+}
+
+fn host_symbol(identity: &str) -> Option<String> {
+    let (dll, method) = identity.split_once('!')?;
+    let (interface, method) = method.split_once("::")?;
+    let stem = dll.to_ascii_lowercase();
+    let stem = stem.strip_suffix(".dll")?;
+    let symbol = format!("rk_host_{stem}_{interface}_{method}");
+    symbol
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        .then_some(symbol)
 }
 
 fn validate_site(
@@ -264,7 +298,7 @@ fn read_legacy_targets(
         guest_calls: call_targets.keys().copied().collect(),
         call_targets,
         jump_targets,
-        host_calls: BTreeSet::new(),
+        host_calls: HostCalls::default(),
         site_effects: BTreeMap::new(),
         imports: BTreeMap::new(),
         runtime_call_facts: BTreeMap::new(),

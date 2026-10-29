@@ -41,6 +41,23 @@ pub struct RelocEmit {
     pub local_size: u32,
 }
 
+/// A COM method a guarded direct call can reach: the catalog identity, the
+/// named shim entry from `tools/gen_com_host_slots.py` and the stdcall pop.
+#[derive(Clone, Debug)]
+pub struct HostMethod {
+    pub identity: String,
+    pub symbol: String,
+    pub pop: u32,
+}
+
+/// Sites with a method fact, each with its slot in `methods` when it can take
+/// a guarded direct call.
+#[derive(Clone, Debug, Default)]
+pub struct HostCalls {
+    pub sites: BTreeMap<Addr, Option<u32>>,
+    pub methods: Vec<HostMethod>,
+}
+
 pub struct EmitContext<'a> {
     pub ir: &'a FunctionIr,
     pub effect_returns: &'a BTreeSet<Addr>,
@@ -52,7 +69,7 @@ pub struct EmitContext<'a> {
     pub region_entries: &'a BTreeMap<Addr, Addr>,
     pub setjmp_targets: &'a BTreeSet<Addr>,
     pub guest_calls: &'a BTreeSet<Addr>,
-    pub host_calls: &'a BTreeSet<Addr>,
+    pub host_calls: &'a HostCalls,
     pub direct: Option<&'a DirectEmit>,
     pub reloc: Option<RelocEmit>,
     pub call_hooks: bool,
@@ -1933,15 +1950,32 @@ impl<'a> Emitter<'a> {
             .copied()
             .ok_or_else(|| self.error(addr, "indirect call without target"))?;
         let target = self.expr(target)?;
-        let helper = if self.ctx.guest_calls.contains(&addr) {
-            "recomp_icall_guest"
-        } else if self.ctx.host_calls.contains(&addr) {
-            "recomp_icall_host"
-        } else {
-            "recomp_icall"
-        };
         let at = self.guest_addr(addr);
-        let _ = writeln!(self.out, "{helper}(c, (uint32_t)({target}), {at});");
+        let host = self.ctx.host_calls.sites.get(&addr);
+        if let (Some(&Some(slot)), None) = (host, self.ctx.reloc) {
+            let method = &self.ctx.host_calls.methods[slot as usize];
+            let returned = self
+                .plan
+                .return_addr
+                .get(&value)
+                .copied()
+                .ok_or_else(|| self.error(addr, "call without return address"))?;
+            let returned = self.guest_addr(returned);
+            let _ = writeln!(
+                self.out,
+                "recomp_icall_method(c, (uint32_t)({target}), {at}, {returned}, {slot}u, {}u, {});",
+                method.pop, method.symbol
+            );
+        } else {
+            let helper = if self.ctx.guest_calls.contains(&addr) {
+                "recomp_icall_guest"
+            } else if host.is_some() {
+                "recomp_icall_host"
+            } else {
+                "recomp_icall"
+            };
+            let _ = writeln!(self.out, "{helper}(c, (uint32_t)({target}), {at});");
+        }
         if self.plan.settle_sites.contains(&value) {
             self.out.push_str("x86_cc_settle(c);\n");
         }

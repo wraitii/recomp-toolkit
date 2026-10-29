@@ -1004,6 +1004,23 @@ typedef struct RecompCwEffect {
 } RecompCwEffect;
 extern const RecompCwEffect recomp_cw_effects[];
 extern const uint32_t recomp_cw_effect_count;
+/* Guarded direct calls to COM shim entries at sites with a method fact.
+ * runtime/imports.cpp arms a slot with its trampoline address only while that
+ * trampoline dispatches to `fn` on the fast path; otherwise it holds 1. */
+typedef struct RecompHostMethod {
+    const char *identity;
+    uint32_t pop;
+    void (*fn)(X86 *);
+} RecompHostMethod;
+typedef struct RecompHostSlot {
+    uint32_t tramp;
+    uint32_t *calls;
+} RecompHostSlot;
+extern const RecompHostMethod recomp_host_methods[];
+extern const uint32_t recomp_host_method_count;
+extern RecompHostSlot recomp_host_slots[];
+extern uint64_t recomp_import_calls;
+#define RECOMP_IMPORT_CHECKPOINT_COST 8u
 #ifdef RECOMP_CHECK_CALL_FACTS
 void recomp_call_fact_violation(uint32_t ret, uint32_t target);
 void recomp_import_cw_violation(const char *name, uint16_t before, uint16_t after);
@@ -1279,6 +1296,26 @@ static inline void recomp_icall_host(X86 *c, uint32_t target, uint32_t site) {
     }
 #endif
     recomp_icall_slow(c, target, site);
+}
+
+static inline void recomp_icall_method(X86 *c, uint32_t target, uint32_t site, uint32_t ret,
+                                       uint32_t slot, uint32_t pop, void (*fn)(X86 *)) {
+#ifndef RECOMP_CHECK_CALL_FACTS
+    RecompHostSlot *s = &recomp_host_slots[slot];
+    if (!RECOMP_UNLIKELY(target != s->tramp)) {
+        recomp_execution_checkpoint_charge(c, RECOMP_IMPORT_CHECKPOINT_COST);
+        ++*s->calls;
+        ++recomp_import_calls;
+        c->eip = ret;
+        fn(c);
+        c->r[R_ESP] += pop;
+        c->eip = ret;
+        return;
+    }
+#else
+    (void)ret, (void)slot, (void)pop, (void)fn;
+#endif
+    recomp_icall_host(c, target, site);
 }
 
 static inline void recomp_icall_guest(X86 *c, uint32_t target, uint32_t site) {

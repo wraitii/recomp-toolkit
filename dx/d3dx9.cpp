@@ -409,19 +409,24 @@ void d3dx9_reset() {
     d3dx_shader_helpers_reset();
 }
 
+#include "com_host_slots.inc"
+
+COM_HOST_SLOTS(d3dx9_33_ID3DXEffect, IF_D3DXEFFECT33, g_effect_33, false)
+COM_HOST_SLOTS(d3dx9_33_ID3DXEffectPool, IF_D3DXEFFECTPOOL33, g_effect_pool_33, false)
+COM_HOST_SLOTS(d3dx9_33_ID3DXBuffer, IF_D3DXBUFFER, g_buffer_33, false)
+COM_HOST_SLOTS(d3dx9_33_ID3DXConstantTable, IF_D3DXCONSTANTTABLE, g_constant_table_33, false)
+COM_HOST_SLOTS(d3dx9_33_ID3DXEffectCompiler, IF_D3DXEFFECTCOMPILER, g_effect_compiler_33, false)
+
 void d3dx9_register() {
     static bool done = false;
     if (done)
         return;
     done = true;
-    com_define(IF_D3DXEFFECT33, "d3dx9_33.dll", "ID3DXEffect", g_effect_33, std::size(g_effect_33));
-    com_define(IF_D3DXEFFECTPOOL33, "d3dx9_33.dll", "ID3DXEffectPool", g_effect_pool_33,
-               std::size(g_effect_pool_33));
-    com_define(IF_D3DXBUFFER, "d3dx9_33.dll", "ID3DXBuffer", g_buffer_33, std::size(g_buffer_33));
-    com_define(IF_D3DXCONSTANTTABLE, "d3dx9_33.dll", "ID3DXConstantTable", g_constant_table_33,
-               std::size(g_constant_table_33));
-    com_define(IF_D3DXEFFECTCOMPILER, "d3dx9_33.dll", "ID3DXEffectCompiler", g_effect_compiler_33,
-               std::size(g_effect_compiler_33));
+    d3dx9_33_ID3DXEffect_host::define("d3dx9_33.dll", "ID3DXEffect");
+    d3dx9_33_ID3DXEffectPool_host::define("d3dx9_33.dll", "ID3DXEffectPool");
+    d3dx9_33_ID3DXBuffer_host::define("d3dx9_33.dll", "ID3DXBuffer");
+    d3dx9_33_ID3DXConstantTable_host::define("d3dx9_33.dll", "ID3DXConstantTable");
+    d3dx9_33_ID3DXEffectCompiler_host::define("d3dx9_33.dll", "ID3DXEffectCompiler");
     com_register_iid(IF_D3DXEFFECT33, IID_ID3DXEffect_33);
     com_register_iid(IF_D3DXEFFECTPOOL33, IID_ID3DXEffectPool_33);
     com_register_iid(IF_D3DXBUFFER, IID_ID3DXBuffer_33);

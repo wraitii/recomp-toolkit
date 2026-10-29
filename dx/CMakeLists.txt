@@ -101,8 +101,18 @@ add_custom_command(OUTPUT "${RECOMP_D3DX9_IMPORTS}"
           "${RECOMP_ROOT}/third_party/wine-d3d9/d3dx9tex.h"
           "${CMAKE_CURRENT_SOURCE_DIR}/d3dx9_imports.json"
   VERBATIM)
+set(RECOMP_COM_HOST_SLOTS "${RECOMP_D3D9_GENERATED_DIR}/com_host_slots.inc")
+add_custom_command(OUTPUT "${RECOMP_COM_HOST_SLOTS}"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${RECOMP_D3D9_GENERATED_DIR}"
+  COMMAND ${Python3_EXECUTABLE} "${RECOMP_ROOT}/tools/gen_com_host_slots.py"
+          --catalog "${CMAKE_CURRENT_SOURCE_DIR}/metadata/com-methods.json"
+          --output "${RECOMP_COM_HOST_SLOTS}"
+  DEPENDS "${RECOMP_ROOT}/tools/gen_com_host_slots.py"
+          "${CMAKE_CURRENT_SOURCE_DIR}/metadata/com-methods.json"
+  VERBATIM)
 add_custom_target(d3d9_generated DEPENDS "${RECOMP_D3D9_INTERFACES}" "${RECOMP_D3D9_CONSTANTS}"
-                  "${RECOMP_D3DX9_33_INTERFACES}" "${RECOMP_D3DX9_IMPORTS}")
+                  "${RECOMP_D3DX9_33_INTERFACES}" "${RECOMP_D3DX9_IMPORTS}"
+                  "${RECOMP_COM_HOST_SLOTS}")
 
 add_library(recomp_dx OBJECT ${RECOMP_DX_SOURCES})
 add_dependencies(recomp_dx d3d8_com_tables d3d9_generated)

@@ -16,7 +16,7 @@ use rk_core::contract::DirectArguments;
 use rk_core::program::Program;
 use rk_core::settings::Settings;
 use rk_core::{Addr, Error, Result};
-use rk_emit::{Body, Declaration, Preludes};
+use rk_emit::{Body, Declaration, HostMethod, Preludes};
 
 pub use reloc as reloc_output;
 pub use symbols::{symbol_rows, SymbolRow};
@@ -101,6 +101,7 @@ pub struct Translation<'a> {
     pub call_returns: Vec<Addr>,
     pub call_facts: BTreeMap<Addr, Vec<Addr>>,
     pub cw_effects: BTreeMap<Addr, (u16, u16, u16)>,
+    pub host_methods: Vec<HostMethod>,
     pub direct_variants: BTreeSet<Addr>,
 }
 
@@ -138,6 +139,14 @@ pub fn write(out: &Path, t: &Translation) -> Result<Written> {
             body_header = body_header.replace("#include \"x86.h\"", &constants);
         }
     }
+    if !t.host_methods.is_empty() {
+        let declarations: String = t
+            .host_methods
+            .iter()
+            .map(|method| format!("void {}(X86 *c);\n", method.symbol))
+            .collect();
+        body_header = body_header.replace("#endif\n", &(declarations + "#endif\n"));
+    }
     write_file(&out.join("body.h"), &body_header)?;
     let chunks = partition_chunks(&t.bodies, CHUNK_SOURCE_BUDGET);
     let chunk_count = chunks.len();
@@ -170,7 +179,7 @@ pub fn write(out: &Path, t: &Translation) -> Result<Written> {
     write_file(&out.join("table.c"), &table)?;
     write_file(
         &out.join("call_facts.c"),
-        &table::call_facts(&t.call_facts, &t.cw_effects, &prefix),
+        &table::call_facts(&t.call_facts, &t.cw_effects, &t.host_methods, &prefix),
     )?;
     write_file(
         &out.join("symbols.json"),

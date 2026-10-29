@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use rk_core::program::Program;
 use rk_core::settings::{Dispatch, Module};
 use rk_core::{Addr, Error, Result};
+use rk_emit::HostMethod;
 
 use crate::SymbolRow;
 
@@ -357,6 +358,7 @@ pub fn module_table(
 pub fn call_facts(
     facts: &BTreeMap<Addr, Vec<Addr>>,
     cw_effects: &BTreeMap<Addr, (u16, u16, u16)>,
+    host_methods: &[HostMethod],
     prefix: &str,
 ) -> String {
     let mut s = String::new();
@@ -394,8 +396,31 @@ pub fn call_facts(
     }
     let _ = writeln!(
         s,
-        "}};\nconst uint32_t {prefix}cw_effect_count = {};",
+        "}};\nconst uint32_t {prefix}cw_effect_count = {};\n",
         cw_effects.len()
     );
+    for method in host_methods {
+        let _ = writeln!(s, "void {}(X86 *c);", method.symbol);
+    }
+    let _ = writeln!(s, "const RecompHostMethod {prefix}host_methods[] = {{");
+    for method in host_methods {
+        let _ = writeln!(
+            s,
+            "    {{\"{}\", {}u, {}}},",
+            method.identity, method.pop, method.symbol
+        );
+    }
+    if host_methods.is_empty() {
+        s.push_str("    {0, 0u, 0},\n");
+    }
+    let _ = writeln!(
+        s,
+        "}};\nconst uint32_t {prefix}host_method_count = {};\n\nRecompHostSlot {prefix}host_slots[] = {{",
+        host_methods.len()
+    );
+    for _ in 0..host_methods.len().max(1) {
+        s.push_str("    {1u, 0},\n");
+    }
+    s.push_str("};\n");
     s
 }

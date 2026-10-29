@@ -3346,18 +3346,27 @@ void device_destroy(ComObj *o) {
 
 } // namespace
 
+#include "com_host_slots.inc"
+
+COM_HOST_SLOTS(d3d8_IDirect3D8, IF_D3D8, g_d3d8, true)
+COM_HOST_SLOTS(d3d8_IDirect3DDevice8, IF_D3D8DEVICE, g_device8, true)
+COM_HOST_SLOTS(d3d8_IDirect3DSurface8, IF_D3D8SURFACE8, g_surface8, true)
+COM_HOST_SLOTS(d3d8_IDirect3DTexture8, IF_D3D8TEXTURE8, g_texture8, true)
+COM_HOST_SLOTS(d3d8_IDirect3DVertexBuffer8, IF_D3D8VERTEXBUFFER8, g_vertexbuffer8, true)
+COM_HOST_SLOTS(d3d8_IDirect3DIndexBuffer8, IF_D3D8INDEXBUFFER8, g_indexbuffer8, true)
+
 void d3d8_register() {
     static bool done = false;
     if (done)
         return;
     done = true;
 
-    com_define_checked<IF_D3D8, g_d3d8>("d3d8.dll", "IDirect3D8");
-    com_define_checked<IF_D3D8DEVICE, g_device8>("d3d8.dll", "IDirect3DDevice8");
-    com_define_checked<IF_D3D8SURFACE8, g_surface8>("d3d8.dll", "IDirect3DSurface8");
-    com_define_checked<IF_D3D8TEXTURE8, g_texture8>("d3d8.dll", "IDirect3DTexture8");
-    com_define_checked<IF_D3D8VERTEXBUFFER8, g_vertexbuffer8>("d3d8.dll", "IDirect3DVertexBuffer8");
-    com_define_checked<IF_D3D8INDEXBUFFER8, g_indexbuffer8>("d3d8.dll", "IDirect3DIndexBuffer8");
+    d3d8_IDirect3D8_host::define("d3d8.dll", "IDirect3D8");
+    d3d8_IDirect3DDevice8_host::define("d3d8.dll", "IDirect3DDevice8");
+    d3d8_IDirect3DSurface8_host::define("d3d8.dll", "IDirect3DSurface8");
+    d3d8_IDirect3DTexture8_host::define("d3d8.dll", "IDirect3DTexture8");
+    d3d8_IDirect3DVertexBuffer8_host::define("d3d8.dll", "IDirect3DVertexBuffer8");
+    d3d8_IDirect3DIndexBuffer8_host::define("d3d8.dll", "IDirect3DIndexBuffer8");
     com_bind(IF_D3D8, K_D3D8);
     com_bind(IF_D3D8DEVICE, K_D3D8DEVICE);
     com_bind(IF_D3D8SURFACE8, K_D3D8SURFACE);

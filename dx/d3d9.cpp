@@ -6887,15 +6887,34 @@ static void d3d9_pipeline_object_destroy(ComObj *o) {
     o->d3d9_state_handle = 0;
 }
 
+#include "com_host_slots.inc"
+
+COM_HOST_SLOTS(d3d9_IDirect3D9, IF_D3D9, g_d3d9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DDevice9, IF_D3DDEVICE9, g_device9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DResource9, IF_D3DRESOURCE9, g_resource9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DTexture9, IF_D3DTEXTURE9, g_texture9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DCubeTexture9, IF_D3DCUBETEXTURE9, g_cubetexture9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DSurface9, IF_D3DSURFACE9, g_surface9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DVertexBuffer9, IF_D3DVERTEXBUFFER9, g_vb9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DIndexBuffer9, IF_D3DINDEXBUFFER9, g_ib9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DVertexDeclaration9, IF_D3DVERTEXDECL9, g_decl9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DQuery9, IF_D3DQUERY9, g_query9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DBaseTexture9, IF_D3DBASETEXTURE9, g_basetexture9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DVolume9, IF_D3DVOLUME9, g_volume9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DVolumeTexture9, IF_D3DVOLUMETEXTURE9, g_volumetexture9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DVertexShader9, IF_D3DVERTEXSHADER9, g_vertexshader9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DPixelShader9, IF_D3DPIXELSHADER9, g_pixelshader9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DStateBlock9, IF_D3DSTATEBLOCK9, g_stateblock9, true)
+
 void d3d9_register() {
     static bool done = false;
     if (done)
         return;
     done = true;
 
-    com_define_checked<IF_D3D9, g_d3d9>("d3d9.dll", "IDirect3D9");
-    com_define_checked<IF_D3DDEVICE9, g_device9>("d3d9.dll", "IDirect3DDevice9");
-    com_define_checked<IF_D3DRESOURCE9, g_resource9>("d3d9.dll", "IDirect3DResource9");
+    d3d9_IDirect3D9_host::define("d3d9.dll", "IDirect3D9");
+    d3d9_IDirect3DDevice9_host::define("d3d9.dll", "IDirect3DDevice9");
+    d3d9_IDirect3DResource9_host::define("d3d9.dll", "IDirect3DResource9");
     com_bind(IF_D3D9, K_D3D9);
     com_bind(IF_D3DDEVICE9, K_D3D9DEVICE);
     com_bind(IF_D3DRESOURCE9, K_D3D9VB);
@@ -6903,20 +6922,19 @@ void d3d9_register() {
     com_register_iid(IF_D3D9, IID_IDirect3D9_);
     com_register_iid(IF_D3DDEVICE9, IID_IDirect3DDevice9_);
     com_register_iid(IF_D3DRESOURCE9, IID_IDirect3DResource9_);
-    com_define_checked<IF_D3DTEXTURE9, g_texture9>("d3d9.dll", "IDirect3DTexture9");
-    com_define_checked<IF_D3DCUBETEXTURE9, g_cubetexture9>("d3d9.dll", "IDirect3DCubeTexture9");
-    com_define_checked<IF_D3DSURFACE9, g_surface9>("d3d9.dll", "IDirect3DSurface9");
-    com_define_checked<IF_D3DVERTEXBUFFER9, g_vb9>("d3d9.dll", "IDirect3DVertexBuffer9");
-    com_define_checked<IF_D3DINDEXBUFFER9, g_ib9>("d3d9.dll", "IDirect3DIndexBuffer9");
-    com_define_checked<IF_D3DVERTEXDECL9, g_decl9>("d3d9.dll", "IDirect3DVertexDeclaration9");
-    com_define_checked<IF_D3DQUERY9, g_query9>("d3d9.dll", "IDirect3DQuery9");
-    com_define_checked<IF_D3DBASETEXTURE9, g_basetexture9>("d3d9.dll", "IDirect3DBaseTexture9");
-    com_define_checked<IF_D3DVOLUME9, g_volume9>("d3d9.dll", "IDirect3DVolume9");
-    com_define_checked<IF_D3DVOLUMETEXTURE9, g_volumetexture9>("d3d9.dll",
-                                                               "IDirect3DVolumeTexture9");
-    com_define_checked<IF_D3DVERTEXSHADER9, g_vertexshader9>("d3d9.dll", "IDirect3DVertexShader9");
-    com_define_checked<IF_D3DPIXELSHADER9, g_pixelshader9>("d3d9.dll", "IDirect3DPixelShader9");
-    com_define_checked<IF_D3DSTATEBLOCK9, g_stateblock9>("d3d9.dll", "IDirect3DStateBlock9");
+    d3d9_IDirect3DTexture9_host::define("d3d9.dll", "IDirect3DTexture9");
+    d3d9_IDirect3DCubeTexture9_host::define("d3d9.dll", "IDirect3DCubeTexture9");
+    d3d9_IDirect3DSurface9_host::define("d3d9.dll", "IDirect3DSurface9");
+    d3d9_IDirect3DVertexBuffer9_host::define("d3d9.dll", "IDirect3DVertexBuffer9");
+    d3d9_IDirect3DIndexBuffer9_host::define("d3d9.dll", "IDirect3DIndexBuffer9");
+    d3d9_IDirect3DVertexDeclaration9_host::define("d3d9.dll", "IDirect3DVertexDeclaration9");
+    d3d9_IDirect3DQuery9_host::define("d3d9.dll", "IDirect3DQuery9");
+    d3d9_IDirect3DBaseTexture9_host::define("d3d9.dll", "IDirect3DBaseTexture9");
+    d3d9_IDirect3DVolume9_host::define("d3d9.dll", "IDirect3DVolume9");
+    d3d9_IDirect3DVolumeTexture9_host::define("d3d9.dll", "IDirect3DVolumeTexture9");
+    d3d9_IDirect3DVertexShader9_host::define("d3d9.dll", "IDirect3DVertexShader9");
+    d3d9_IDirect3DPixelShader9_host::define("d3d9.dll", "IDirect3DPixelShader9");
+    d3d9_IDirect3DStateBlock9_host::define("d3d9.dll", "IDirect3DStateBlock9");
     com_register_iid(IF_D3DTEXTURE9, IID_IDirect3DTexture9_);
     com_register_iid(IF_D3DCUBETEXTURE9, IID_IDirect3DCubeTexture9_);
     com_register_iid(IF_D3DSURFACE9, IID_IDirect3DSurface9_);

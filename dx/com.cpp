@@ -416,6 +416,13 @@ uint32_t com_vtable_of(ComIface iface) {
     return iface < IF_COUNT ? g_vtable[iface] : 0;
 }
 
+void com_host_mismatch(const char *dll, const char *iface_name, size_t slot, const char *what) {
+    LOGW("dx: %s!%s slot %zu has a %s that differs from dx/metadata/com-methods.json", dll,
+         iface_name, slot, what);
+    fflush(stderr);
+    abort();
+}
+
 void com_report_failure(X86 *c, ComIface iface, size_t slot) {
     const uint32_t target = rd32(com_vtable_of(iface) + uint32_t(slot) * 4);
     dx_report_failure(imports_describe(target), c->r[R_EAX], rd32(c->r[R_ESP]));
