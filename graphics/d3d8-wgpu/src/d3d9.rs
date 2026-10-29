@@ -2782,8 +2782,6 @@ pub fn d3d9_present_handoff(
         Err(status) => crate::bridge::FrameHandoffResult {
             status,
             handoff: crate::bridge::FrameHandoff {
-                ready_event: std::ptr::null_mut(),
-                ready_value: 0,
                 texture: std::ptr::null_mut(),
                 lease: 0,
                 width: 0,

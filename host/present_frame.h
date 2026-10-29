@@ -29,9 +29,16 @@ struct Target {
     gpu::Device *device = nullptr;
     HostSceneTarget scene;
     gpu::Texture pixels;
+    std::vector<gpu::Texture> retired_pixels;
     int pixels_w = 0, pixels_h = 0;
     gpu::Format pixels_format = gpu::Format::RGBA8;
     std::vector<uint8_t> test_pixels;
+    void release_retired() {
+        if (device)
+            for (auto texture : retired_pixels)
+                device->destroy(texture);
+        retired_pixels.clear();
+    }
     void release_scene() {
         if (device) {
             if (scene.world)
@@ -45,6 +52,19 @@ struct Target {
         release_scene();
         if (device && pixels)
             device->destroy(pixels);
+        release_retired();
+    }
+};
+struct PendingNativeTexture {
+    gpu::Device *device = nullptr;
+    gpu::Texture source;
+    gpu::Texture destination;
+    int w = 0, h = 0;
+    std::shared_ptr<void> lease;
+    uint32_t (*ready)(void *) = nullptr;
+    ~PendingNativeTexture() {
+        if (device && source)
+            device->destroy(source);
     }
 };
 struct Frame {
@@ -60,6 +80,7 @@ struct Frame {
     double acknowledgement_deadline = 0;
     unsigned pending_prefixes = 0;
     std::shared_ptr<Target> target;
+    std::shared_ptr<PendingNativeTexture> pending_native;
     // Scene history can advance before this drawable is acknowledged.
     std::shared_ptr<Target> scene_lease;
     std::shared_ptr<Fence> prefix = std::make_shared<Fence>();

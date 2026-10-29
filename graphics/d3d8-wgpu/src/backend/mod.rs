@@ -359,6 +359,11 @@ impl GpuContext {
             panic!("d3d8-wgpu uncaptured wgpu error: {error}");
         });
         device.on_uncaptured_error(uncaptured);
+        let physical_loss = crate::d3d9::gpu::PhysicalLoss::default();
+        let callback_loss = physical_loss.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            callback_loss.mark(format!("{reason:?}: {message}"));
+        });
 
         log::info!(
             "d3d8-wgpu adapter: backend={:?} name={:?} vendor=0x{:04x} device=0x{:04x}",
@@ -370,7 +375,7 @@ impl GpuContext {
 
         Ok(Self {
             d3d9_pending: Default::default(),
-            d3d9_physical_loss: Default::default(),
+            d3d9_physical_loss: physical_loss,
             device,
             queue,
             adapter_info,

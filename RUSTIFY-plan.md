@@ -410,26 +410,64 @@ has not moved to Rust, so this is a G2 API family, not completion of G2.
 
 ## P native frame ownership slice
 
-D3D7/8/9 native frames now transfer one shared opaque owned token to the host.
-It retains the ring slot, texture, readiness event and GPU device/queue until
-rejection or host copy completion; D3D9 additionally retains its context and
-submission worker. The null host also consumes rejected tokens. Completion
-releases the imported texture and token before retiring the presenter's tracked
-command. Ring replacement and teardown drop their own references without waiting
-for, or leaking, borrowed busy pointers. The old borrowed-pointer host seam and
-D3D7/8 leaked busy allocations are removed. D3D7 stages without sealing, keeping
-its layered DirectDraw flow; D3D8/9 use the owned present endpoint. D3D7's RGB565
-conversion, CPU fallback and GDI behavior remain on their existing paths.
+D3D7/8/9 native frames transfer an opaque owned token to the host. It retains
+the ring slot and GPU device/queue; D3D9 additionally retains its context and
+submission worker. The null host consumes rejected tokens. Ring replacement and
+teardown drop their references without leaking borrowed busy pointers. D3D7
+stages without sealing, preserving layered DirectDraw flow; D3D8/9 use the owned
+present endpoint. CPU fallback and GDI synchronization remain independent.
+The ownership checkpoint is `746b72d3`.
 
-Normal pacing remains asynchronous: three reusable producer slots, one producer
-GPU copy and one host GPU copy, with the existing native readiness event. The
-new path adds a token allocation per frame, not a texture allocation. Exceptional
-host staging/registration failure drains encoded work before releasing resources.
-No comparable native latency baseline was captured. Loss before readiness can
-still leave an unsignaled wait and stall the host queue or shutdown, including
-when staging declines after encoding a wait. This is ownership progress, not
-completion of P or its cancellation contract.
+The readiness follow-up replaces native event waits with per-image
+pending/ready/failed state. A private Metal blit or RGB565 conversion publishes
+completion for the command that writes the exported image. wgpu 30.0.1 defers
+encoder commands and forbids mixing them with raw HAL encoding, so attaching a
+handler to a presumed wgpu copy command was rejected. Pending uploads are flushed
+before native reads; D3D8 source initialization is tracked by texture identity.
+D3D9 retains asynchronous submission through its existing worker.
 
+The host captures the source and destination in the writing frame. Only ready
+frames submit host copies and enter composition; failed producers drop frames.
+Later full-frame staging supersedes an unsubmitted native source. Dropping a frame
+or stopping the presenter releases unsubmitted host leases without waiting for
+production. A separate producer reference keeps slots busy until production
+completes; submitted host copies retain sources through their own completion.
+Same-frame replacement retains previously encoded destinations until retirement.
+The host polls pending sealed sources at 1 ms intervals rather than placing an
+unsignaled wait in its GPU queue. Three producer slots and pooled host targets
+remain reusable; no per-frame texture allocation or synchronous GPU wait is added.
+
+This removes the producer-event shutdown dependency, not all GPU hangs. Already
+submitted host commands must still finish before their resources can be released.
+A producer that never completes may retain its resources; host cancellation does
+not fabricate completion. Native copy success plus the context loss signal does
+not independently certify every preceding wgpu draw. Direct loss/resize/shutdown
+qualification and matched latency/CPU measurements remain open. Loss racing after
+readiness cannot retract an already submitted drawable.
+
+The readiness build passes for the RT3 app with p-code enabled. Existing CPU and
+Metal GPU consumers and presenter checks (311 fake, 134 offscreen Metal) pass;
+the test build used the existing no-p-code workaround. These checks do not call
+the native handoff, its pending-frame gate or the new 16-bit conversion. Agents
+did not launch the app; the user reviewed it as described below. No tests or
+translator changes were added.
+
+The first readiness build regressed severely in the user's RT3 run (14:20
+Samply capture). The presenter waited only for the newest frame, while mailbox
+eviction could remove older ready frames before selection. In the 3.3–7.8 s
+capture interval, guest seal markers have a 0.240 ms median; they do not measure
+displayed FPS. The profile samples little producer-slot waiting and does not
+identify the presenter worker, so it supports but does not prove this starvation
+explanation. Selection now takes the newest ready eligible frame, preserves
+newer pending frames and protects one oldest eligible native candidate from
+replacement. Capture priority and viewport eligibility remain enforced. Producer
+completion also releases its resource reference immediately, independent of how
+long Metal retains the callback block. The user ran the corrected RT3 build and
+reported that it looked better, then approved committing this checkpoint. This
+is qualitative normal-path evidence; no corrected-run profile or direct physical
+loss qualification was supplied. The original regressed build is superseded.
+
+The following runtime evidence predates the readiness follow-up.
 The RT3 app rebuilt without being launched. Existing fake presenter checks
 (311), offscreen Metal presenter checks (134), and CPU/GPU consumers pass.
 These do not directly exercise the owned native seam or its rejection,
@@ -449,38 +487,30 @@ and no translator code changed.
 
 The current checkpoint includes G1's useful API path, P's offscreen lease and
 native frame ownership slice, and G2's 2D texture API family. Metal consumers pass;
-the user reviewed both the texture and owned-handoff tranches in RT3, with a
-sampled normal-path profile for the latter. Full G1 qualification, G2 guest migration and
-P presentation remain open. Build artifacts and game installations remain ignored.
+the user reviewed the texture, ownership and corrected readiness tranches in RT3.
+Ownership has a normal-path profile; corrected readiness has qualitative user
+confirmation. Full G1 qualification, G2 guest migration and P presentation remain
+open. Build artifacts and game installations remain ignored.
 
-Next, qualify the owned native handoff through the host. Resolve loss before
-readiness without hanging a GPU wait or exposing
-an invalid frame. Preserve layered sealed frames, GDI readback and CPU fallback.
-Capture the existing present workload and latency/copy baseline before switching
-paths; a blocking completion wait requires an explicit performance tradeoff.
-Acceptance needs normal presentation plus resize, retained frames, rejection,
-loss and shutdown evidence through the host, not only the offscreen consumer.
+Carry native readiness qualification forward: resize, retained frames, rejection,
+loss and shutdown. Compare against the
+ownership checkpoint's RT3 workload, including polling cost and displayed latency;
+guest seal cadence alone is insufficient. Existing offscreen consumer checks do
+not establish native seam cancellation behavior. Preserve layered sealed frames,
+GDI readback and CPU fallback through qualification. No new tests were requested.
 
-The readiness audit found that `pending_prefixes` gates retirement, not
-composition: the worker currently relies on GPU queue order. The next change
-needs a per-frame readiness gate before composition, with immutable destination,
-source lease and generation captured while holding the guest baton. Submit host
-copies only after successful producer completion, in guest staging order even
-when callbacks arrive out of order. Failure drops the frame without inventing
-readiness; frame drop and shutdown cancel unsubmitted sources, while submitted
-copies retain their leases through completion. Wake the presenter on each
-transition. Keep GDI's synchronized fetch independent and do not access guest
-memory from readiness callbacks. Replacing the native event wait alone is
-insufficient.
-
-In parallel, implement G2's first guest adapter operation family against explicit
-checked memory/allocation and native COM services. Start with buffer lifecycle
-and staging, then reuse that facade for textures; keep shared COM identity native
-and retire each replaced marshaling path after its callers switch. Do not expand
+The next major implementation milestone is G2's D3D9 guest buffer adapter. Deliver
+vertex/index buffer creation, release, lock/unlock and draw-time synchronization
+through Rust guest marshaling, using checked memory/allocation and native COM
+services. First establish that narrow facade, then move buffer staging and switch
+native callers to it; reuse the facade for textures afterward. Keep shared COM
+identity native and retire replaced marshaling paths after their callers switch. Do not expand
 cube/volume APIs or D3D7 surface migration before their lifetime contracts are
 established. The buffer inventory includes full-buffer aligned guest staging,
 nested writable locks, draw-time synchronization, retained staging budgets,
-allocation rollback and heap-reset teardown. Preserve these through the checked
+allocation rollback and heap-reset teardown. Use the shared resource semantics;
+the standalone convenience API rejects nested locks and cannot replace the guest
+contract unchanged. Preserve these through the checked
 facade while native COM owns identity and recursive release. Carry the
 qualification gaps above into each slice rather than
 marking the graphics release complete from Metal or RT3 alone.

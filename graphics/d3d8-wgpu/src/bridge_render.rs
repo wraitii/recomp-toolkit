@@ -76,8 +76,6 @@ fn empty_light() -> Light {
 
 fn empty_frame() -> FrameHandoff {
     FrameHandoff {
-        ready_event: std::ptr::null_mut(),
-        ready_value: 0,
         texture: std::ptr::null_mut(),
         lease: 0,
         width: 0,
@@ -654,8 +652,6 @@ pub(crate) fn present_handoff(device: &Device, bpp: u32) -> FrameHandoffResult {
             Ok(frame) => FrameHandoffResult {
                 status: status(StatusCode::Ok, ""),
                 handoff: FrameHandoff {
-                    ready_event: frame.ready_event,
-                    ready_value: frame.ready_value,
                     texture: frame.texture.cast_mut().cast(),
                     lease: frame.lease,
                     width: frame.width,

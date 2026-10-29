@@ -267,6 +267,8 @@ struct Service : std::enable_shared_from_this<Service> {
                 ddraw_present_release({f->frame_id});
         }
         // The target history lease is separate from the retired frame arena.
+        if (f->target)
+            f->target->release_retired();
         f->target.reset();
         f->scene_lease.reset();
         completed.notify_all();
@@ -350,6 +352,7 @@ struct Service : std::enable_shared_from_this<Service> {
     void drop(const std::shared_ptr<Frame> &f) {
         ++drops;
         f->dropped = true;
+        f->pending_native.reset();
         f->gpu = true;
         retiring.push_back(f);
         sweep();
@@ -508,8 +511,16 @@ struct Service : std::enable_shared_from_this<Service> {
             return;
         }
         if (mailbox.size() == 2) {
-            auto old = std::find_if(mailbox.begin(), mailbox.end(),
-                                    [](const auto &v) { return !v->capture; });
+            auto old = mailbox.end();
+            if (mailbox.front()->pending_native &&
+                (surface_viewport < 0 || mailbox.front()->viewport == bool(surface_viewport))) {
+                auto newest = std::prev(mailbox.end());
+                if (newest != mailbox.begin() && !(*newest)->capture)
+                    old = newest;
+            } else {
+                old = std::find_if(mailbox.begin(), mailbox.end(),
+                                   [](const auto &v) { return !v->capture; });
+            }
             if (old == mailbox.end()) {
                 drop(f);
                 return;
@@ -677,6 +688,68 @@ struct Service : std::enable_shared_from_this<Service> {
         f.layout = frame_layout(f);
     }
 
+    bool submit_native(const std::shared_ptr<Frame> &frame,
+                       std::shared_ptr<PendingNativeTexture> pending) {
+        {
+            std::lock_guard lock(mutex);
+            if (stop)
+                return false;
+        }
+        auto self = shared_from_this();
+        gpu::CommandBuffer cb;
+        std::shared_ptr<Fence> fence;
+        std::shared_ptr<std::atomic<bool>> finished;
+        bool tracked = false;
+        try {
+            cb = device->begin();
+            if (!cb)
+                return false;
+            device->blit(cb, pending->source, {0, 0, pending->w, pending->h}, pending->destination,
+                         0, 0);
+            fence = std::make_shared<Fence>();
+            finished = std::make_shared<std::atomic<bool>>(false);
+            fence->done = false;
+            {
+                std::lock_guard lock(mutex);
+                frame->prefix = fence;
+                ++frame->pending_prefixes;
+                ++pending_commands;
+                tracked = true;
+            }
+            device->on_complete(cb, [self, frame, pending, fence,
+                                     finished](gpu::CommandStatus status, double) mutable {
+                pending.reset();
+                if (finished->exchange(true))
+                    return;
+                std::lock_guard lock(self->mutex);
+                fence->done = true;
+                fence->success = status == gpu::CommandStatus::Completed;
+                frame->success = frame->success && fence->success;
+                --frame->pending_prefixes;
+                --self->pending_commands;
+                self->sweep();
+                self->completed.notify_all();
+                self->wake.notify_one();
+            });
+            device->commit(cb);
+            return true;
+        } catch (...) {
+            fprintf(stderr, "presenter: deferred native texture copy failed\n");
+            if (cb) {
+                device->commit(cb);
+                device->wait(cb);
+            }
+            if (tracked && !finished->exchange(true)) {
+                std::lock_guard lock(mutex);
+                fence->done = true;
+                fence->success = false;
+                --frame->pending_prefixes;
+                --pending_commands;
+            }
+            return false;
+        }
+    }
+
     void tick(double ts) {
         if (!std::isfinite(ts) || ts < 0)
             return;
@@ -794,14 +867,57 @@ struct Service : std::enable_shared_from_this<Service> {
                     return bool(v->capture) &&
                            (surface_viewport < 0 || v->viewport == bool(surface_viewport));
                 });
+                auto chosen = mailbox.end();
+                uint32_t chosen_state = 0;
+                auto readiness = [](const std::shared_ptr<Frame> &frame) {
+                    const auto &pending = frame->pending_native;
+                    return pending ? pending->ready(pending->lease.get()) : 1u;
+                };
                 if (requested != mailbox.end()) {
-                    f = *requested;
-                    mailbox.erase(requested);
+                    const uint32_t state = readiness(*requested);
+                    if (state == 0)
+                        return;
+                    chosen = requested;
+                    chosen_state = state;
                 } else {
-                    f = mailbox.back();
-                    mailbox.pop_back();
+                    for (auto it = mailbox.end(); it != mailbox.begin();) {
+                        --it;
+                        if (surface_viewport >= 0 && (*it)->viewport != bool(surface_viewport))
+                            continue;
+                        const uint32_t state = readiness(*it);
+                        if (state == 0)
+                            continue;
+                        if (state == 1) {
+                            chosen = it;
+                            chosen_state = state;
+                            break;
+                        }
+                        fprintf(stderr, "presenter: native texture producer failed (%u)\n", state);
+                        auto failed = *it;
+                        it = mailbox.erase(it);
+                        chosen = mailbox.end();
+                        drop(failed);
+                    }
                 }
-                for (auto it = mailbox.begin(); it != mailbox.end();) {
+                if (chosen == mailbox.end()) {
+                    seal_pending = !mailbox.empty();
+                    return;
+                }
+                if (chosen_state != 1) {
+                    fprintf(stderr, "presenter: native texture producer failed (%u)\n",
+                            chosen_state);
+                    auto failed = *chosen;
+                    mailbox.erase(chosen);
+                    drop(failed);
+                    seal_pending = !mailbox.empty();
+                    return;
+                }
+                const size_t older = std::distance(mailbox.begin(), chosen);
+                f = *chosen;
+                mailbox.erase(chosen);
+                size_t examined = 0;
+                for (auto it = mailbox.begin(); it != mailbox.end() && examined < older;
+                     ++examined) {
                     if ((*it)->capture) {
                         ++it;
                         continue;
@@ -817,6 +933,17 @@ struct Service : std::enable_shared_from_this<Service> {
             f->acknowledgement_deadline = ts + acknowledgement_grace();
             f->input.drawable_w = rect.w;
             f->input.drawable_h = rect.h;
+        }
+        if (f->pending_native) {
+            auto pending = std::move(f->pending_native);
+            if (!submit_native(f, std::move(pending))) {
+                std::lock_guard lock(mutex);
+                auto it = std::find(flights.begin(), flights.end(), f);
+                if (it != flights.end())
+                    flights.erase(it);
+                drop(f);
+                return;
+            }
         }
         auto prepare = [&] {
             std::lock_guard lock(mutex);
@@ -984,19 +1111,28 @@ struct Service : std::enable_shared_from_this<Service> {
                 double ts;
                 {
                     std::unique_lock lock(mutex);
+                    const bool native_pending =
+                        std::any_of(mailbox.begin(), mailbox.end(),
+                                    [](const auto &frame) { return bool(frame->pending_native); });
                     if (offscreen) {
                         // A synthetic link, tied to monotonic host time and independent
                         // of the pinned simulation clock. The guest never waits here.
-                        auto elapsed =
-                            std::chrono::duration<double>(Clock::now() - synthetic_start).count();
-                        synthetic_index =
-                            std::max(synthetic_index + 1, uint64_t(elapsed * kOffscreenHz) + 1);
-                        auto deadline =
-                            synthetic_start +
-                            std::chrono::duration_cast<Clock::duration>(
-                                std::chrono::duration<double>(synthetic_index / kOffscreenHz));
-                        wake.wait_until(lock, deadline, [&] { return stop; });
-                        ts = synthetic_origin + synthetic_index / kOffscreenHz;
+                        if (native_pending) {
+                            wake.wait_for(lock, std::chrono::milliseconds(1));
+                            ts = this->now();
+                        } else {
+                            auto elapsed =
+                                std::chrono::duration<double>(Clock::now() - synthetic_start)
+                                    .count();
+                            synthetic_index =
+                                std::max(synthetic_index + 1, uint64_t(elapsed * kOffscreenHz) + 1);
+                            auto deadline =
+                                synthetic_start +
+                                std::chrono::duration_cast<Clock::duration>(
+                                    std::chrono::duration<double>(synthetic_index / kOffscreenHz));
+                            wake.wait_until(lock, deadline, [&] { return stop; });
+                            ts = synthetic_origin + synthetic_index / kOffscreenHz;
+                        }
                     } else {
                         // Seal is a bootstrap event, not an acknowledgement. A
                         // bounded wait also services a stopped link and checks
@@ -1010,7 +1146,9 @@ struct Service : std::enable_shared_from_this<Service> {
                                     0.0, std::min(delay, pending->acknowledgement_deadline - now));
                         // Recompute after every completion notification, even
                         // without a display-link callback or a new guest seal.
-                        if (!window_ready())
+                        if (native_pending && !tick_pending && message.load() == nullptr)
+                            wake.wait_for(lock, std::chrono::milliseconds(1));
+                        else if (!window_ready())
                             wake.wait_for(lock, std::chrono::duration<double>(delay));
                         ts = this->now();
                         tick_pending = false;
@@ -1222,6 +1360,12 @@ extern "C" void host_present_stop() {
     {
         std::lock_guard lock(s->mutex);
         s->stop = true;
+        if (s->writing)
+            s->writing->pending_native.reset();
+        for (auto &frame : s->mailbox)
+            frame->pending_native.reset();
+        for (auto &frame : s->retiring)
+            frame->pending_native.reset();
         s->wake.notify_all();
         s->completed.notify_all();
     }
@@ -1342,26 +1486,40 @@ extern "C" void host_present_stage_rgba(const uint8_t *rgba, int w, int h) {
     std::lock_guard lock(s->mutex);
     if (s->stop || !s->writing || !s->writing->target)
         return;
+    const bool had_staged = s->writing->staged_pixels && !s->writing->pending_native;
     s->guest_w = w;
     s->guest_h = h;
-    s->writing->staged_pixels = true;
     s->writing->viewport = false;
     auto &t = *s->writing->target;
-    if (s->fake)
+    if (s->fake) {
+        s->writing->pending_native.reset();
+        s->writing->staged_pixels = true;
         t.test_pixels.assign(rgba, rgba + size_t(w) * h * 4);
-    else {
+    } else {
         t.device = s->device;
         if (!t.pixels || t.pixels_w != w || t.pixels_h != h ||
             t.pixels_format != gpu::Format::RGBA8) {
-            if (t.pixels)
-                s->device->destroy(t.pixels);
-            t.pixels = s->texture(w, h);
+            if (t.pixels && had_staged)
+                t.retired_pixels.reserve(t.retired_pixels.size() + 1);
+            auto replacement = s->texture(w, h);
+            if (!replacement)
+                return;
+            if (t.pixels) {
+                if (had_staged)
+                    t.retired_pixels.push_back(t.pixels);
+                else
+                    s->device->destroy(t.pixels);
+            }
+            t.pixels = replacement;
             t.pixels_format = gpu::Format::RGBA8;
             t.pixels_w = w;
             t.pixels_h = h;
         }
-        if (t.pixels)
+        if (t.pixels) {
+            s->writing->pending_native.reset();
+            s->writing->staged_pixels = true;
             s->device->upload(t.pixels, {0, 0, w, h}, rgba, w * 4);
+        }
     }
 }
 extern "C" void host_present_stage_rgba_viewport(const uint8_t *rgba, int w, int h,
@@ -1386,6 +1544,45 @@ bool host_present_gpu_ready() {
     auto s = active.load();
     return s && !s->fake && s->device && !s->stop;
 }
+bool host_present_stage_pending_native(const std::shared_ptr<PendingNativeTexture> &pending) {
+    auto s = active.load();
+    if (!s || s->fake || !s->device || !pending || !pending->source || pending->w <= 0 ||
+        pending->h <= 0)
+        return false;
+    const auto format = s->device->describe(pending->source).format;
+    s->acquire(pending->w, pending->h, 0, 0);
+    std::lock_guard lock(s->mutex);
+    if (s->stop || !s->writing || !s->writing->target)
+        return false;
+    auto &target = *s->writing->target;
+    const bool had_staged = s->writing->staged_pixels && !s->writing->pending_native;
+    if (!target.pixels || target.pixels_w != pending->w || target.pixels_h != pending->h ||
+        target.pixels_format != format || had_staged) {
+        if (target.pixels && had_staged)
+            target.retired_pixels.reserve(target.retired_pixels.size() + 1);
+        auto destination = s->texture(pending->w, pending->h, format);
+        if (!destination)
+            return false;
+        if (target.pixels) {
+            if (had_staged)
+                target.retired_pixels.push_back(target.pixels);
+            else
+                s->device->destroy(target.pixels);
+        }
+        target.device = s->device;
+        target.pixels = destination;
+        target.pixels_w = pending->w;
+        target.pixels_h = pending->h;
+        target.pixels_format = format;
+    }
+    pending->destination = target.pixels;
+    s->guest_w = pending->w;
+    s->guest_h = pending->h;
+    s->writing->viewport = false;
+    s->writing->staged_pixels = true;
+    s->writing->pending_native = pending;
+    return true;
+}
 // The GPU counterpart of host_present_stage_rgba: the frame's pixels are a copy
 // of `src`, encoded into `cb`. The caller commits `cb` before it seals, and the
 // one queue runs that copy before anything composes the frame.
@@ -1401,19 +1598,30 @@ bool host_present_stage_texture(gpu::Texture src, int w, int h, int guest_w, int
     std::lock_guard lock(s->mutex);
     if (s->stop || !s->writing || !s->writing->target)
         return false;
+    const bool had_staged = s->writing->staged_pixels && !s->writing->pending_native;
     s->writing->viewport = false;
     auto &t = *s->writing->target;
     t.device = s->device;
     if (!t.pixels || t.pixels_w != w || t.pixels_h != h || t.pixels_format != format) {
-        if (t.pixels)
-            s->device->destroy(t.pixels);
-        t.pixels = s->texture(w, h, format);
+        if (t.pixels && had_staged)
+            t.retired_pixels.reserve(t.retired_pixels.size() + 1);
+        auto replacement = s->texture(w, h, format);
+        if (!replacement)
+            return false;
+        if (t.pixels) {
+            if (had_staged)
+                t.retired_pixels.push_back(t.pixels);
+            else
+                s->device->destroy(t.pixels);
+        }
+        t.pixels = replacement;
         t.pixels_format = format;
         t.pixels_w = w;
         t.pixels_h = h;
     }
     if (!t.pixels)
         return false;
+    s->writing->pending_native.reset();
     // Supersampled pixels do not enlarge the guest's client area. Publishing
     // their dimensions here sends touches beyond that area and hides cursors.
     s->guest_w = guest_w;

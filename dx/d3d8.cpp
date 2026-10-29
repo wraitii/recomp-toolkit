@@ -1280,9 +1280,13 @@ void Dev_Present(X86 *c) {
             if (d3d_bridge_ok(handoff.status)) {
                 if (host_display_present_owned_texture(
                         handoff.handoff.texture, int(handoff.handoff.width),
-                        int(handoff.handoff.height), handoff.handoff.ready_event,
-                        handoff.handoff.ready_value,
-                        reinterpret_cast<void *>(handoff.handoff.lease), [](void *lease) {
+                        int(handoff.handoff.height),
+                        reinterpret_cast<void *>(handoff.handoff.lease),
+                        [](void *lease) {
+                            return recomp::d3d::present_lease_ready(
+                                reinterpret_cast<size_t>(lease));
+                        },
+                        [](void *lease) {
                             recomp::d3d::release_present_lease(reinterpret_cast<size_t>(lease));
                         })) {
                     com_ret(c, D8_OK);

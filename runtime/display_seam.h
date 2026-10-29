@@ -42,12 +42,12 @@ void host_display_present_window_viewport(const uint32_t *argb, int w, int h, in
 // scratch storage before copying it; callers must dump raw pixels beforehand.
 void host_display_present_window_rgba(uint8_t *rgba, int w, int h);
 typedef void (*HostTextureRelease)(void *lease);
+typedef uint32_t (*HostTextureReady)(void *lease);
 // Consumes the lease; release runs on rejection or after the host copy completes.
-int host_display_stage_owned_texture(void *native_texture, int w, int h, void *ready_event,
-                                     uint64_t ready_value, void *lease, HostTextureRelease release);
-int host_display_present_owned_texture(void *native_texture, int w, int h, void *ready_event,
-                                       uint64_t ready_value, void *lease,
-                                       HostTextureRelease release);
+int host_display_stage_owned_texture(void *native_texture, int w, int h, void *lease,
+                                     HostTextureReady ready, HostTextureRelease release);
+int host_display_present_owned_texture(void *native_texture, int w, int h, void *lease,
+                                       HostTextureReady ready, HostTextureRelease release);
 // Seconds to the presenter's next refresh boundary, `intervals` refreshes
 // on - when a Present with a sync interval returns. Zero on a headless
 // presenter. The caller waits in the scheduler, never in the host.

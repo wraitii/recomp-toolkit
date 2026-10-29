@@ -16,7 +16,7 @@ use super::{
     texture_cache::{TextureCache, TextureKey},
 };
 use crate::backend::native_present::{
-    NativeSlot, ReadyEvent, create_ready_event, retain_slot, signal_ready,
+    NativeConverter, NativeSlot, begin_slot, create_converter, retain_slot, submit_copy,
 };
 use crate::{
     RenderError,
@@ -1016,8 +1016,8 @@ const FRAME_RING_SLOTS: usize = 3;
 /// GPU copies of the backbuffer handed to the host presenter as raw native
 /// textures, so a present moves no pixels through the CPU.
 struct FrameRing {
-    ready_event: ReadyEvent,
-    ready_value: u64,
+    converter: Option<NativeConverter>,
+    initialized_source: Option<wgpu::Texture>,
     width: u32,
     height: u32,
     slots: Vec<std::sync::Arc<NativeSlot>>,
@@ -1025,8 +1025,6 @@ struct FrameRing {
 }
 
 pub struct FrameHandoff {
-    pub ready_event: *mut u8,
-    pub ready_value: u64,
     pub texture: *const core::ffi::c_void,
     pub lease: usize,
     pub width: u32,
@@ -1246,7 +1244,6 @@ pub struct Device {
     batch: std::cell::RefCell<DrawBatch>,
     /// Present handoff ring (see [`FrameRing`]); created on first use.
     frame_ring: std::cell::RefCell<Option<FrameRing>>,
-    rgb565_handoff: std::cell::RefCell<Option<wgpu::ComputePipeline>>,
     /// The batch's target needs `publish_target` after it is flushed.
     publish_pending: std::cell::Cell<bool>,
     submits: std::cell::Cell<u64>,
@@ -1316,7 +1313,6 @@ impl Device {
             texture_groups: Default::default(),
             batch: Default::default(),
             frame_ring: Default::default(),
-            rgb565_handoff: Default::default(),
             publish_pending: Default::default(),
             submits: Default::default(),
             buffers_created_at_flush: Default::default(),
@@ -2964,8 +2960,8 @@ impl Device {
         }
         if ring.is_none() {
             *ring = Some(FrameRing {
-                ready_event: create_ready_event(&self.gpu.device)?,
-                ready_value: 0,
+                converter: None,
+                initialized_source: None,
                 width: b.width,
                 height: b.height,
                 slots: (0..FRAME_RING_SLOTS)
@@ -2999,59 +2995,57 @@ impl Device {
         let slot = std::sync::Arc::clone(&ring.slots[index]);
         let native = native_texture_ptr(&slot.texture)?;
         self.wait_slot(&slot.busy)?;
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("d3d8-present-copy"),
-            });
-        if bpp == 16 {
-            self.encode_rgb565_handoff(&mut encoder, &b.view, &slot.texture);
-        } else {
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &b.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &slot.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: b.width,
-                    height: b.height,
-                    depth_or_array_layers: 1,
-                },
-            );
+        if bpp == 16 && ring.converter.is_none() {
+            ring.converter = Some(create_converter(&self.gpu.device)?);
         }
-        let ready_value = ring.ready_value.checked_add(1).ok_or_else(|| {
-            RenderError::new(
+        if ring.initialized_source.as_ref() != Some(&b.texture) {
+            let mut initialize =
+                self.gpu
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("d3d8-native-present-source"),
+                    });
+            {
+                let _pass = initialize.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("d3d8-native-present-source"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &b.view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+            }
+            self.gpu.queue.submit([initialize.finish()]);
+            ring.initialized_source = Some(b.texture.clone());
+        } else {
+            self.gpu.queue.submit(std::iter::empty());
+        }
+        let readiness = begin_slot(std::sync::Arc::clone(&slot), Some(self.gpu.physical_loss()));
+        if self.gpu.physical_loss().is_lost() {
+            return Err(RenderError::new(
                 "present_handoff",
-                "native GPU synchronization value overflow",
-            )
-        })?;
-        self.gpu.queue.submit([encoder.finish()]);
-        let ready_event = signal_ready(&self.gpu.queue, &ring.ready_event, ready_value)?;
-        ring.ready_value = ready_value;
-        self.gpu
-            .device
-            .poll(wgpu::PollType::Poll)
-            .map_err(|e| RenderError::new("present_handoff::poll", e.to_string()))?;
-        let lease = retain_slot(
-            slot,
-            ring.ready_event.clone(),
-            &self.gpu.device,
+                "physical device is lost",
+            ));
+        }
+        submit_copy(
             &self.gpu.queue,
-            None,
-        );
+            &b.texture,
+            &slot.texture,
+            std::sync::Arc::clone(&readiness),
+            if bpp == 16 {
+                ring.converter.as_ref()
+            } else {
+                None
+            },
+        )?;
+        let lease = retain_slot(readiness, &self.gpu.device, &self.gpu.queue, None);
         ring.next = (index + 1) % FRAME_RING_SLOTS;
         Ok(FrameHandoff {
-            ready_event,
-            ready_value,
             texture: native,
             lease,
             width: b.width,
@@ -3059,82 +3053,15 @@ impl Device {
         })
     }
 
-    fn encode_rgb565_handoff(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        source: &wgpu::TextureView,
-        destination: &wgpu::Texture,
-    ) {
-        let mut pipeline = self.rgb565_handoff.borrow_mut();
-        let pipeline = pipeline.get_or_insert_with(|| {
-            let shader = self
-                .gpu
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("d3d8-rgb565-handoff"),
-                    source: wgpu::ShaderSource::Wgsl(
-                        r#"
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var dst: texture_storage_2d<rgba8unorm, write>;
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let size = textureDimensions(dst);
-    if (id.x >= size.x || id.y >= size.y) { return; }
-    let p = vec2<i32>(id.xy);
-    let bytes = vec3<u32>(textureLoad(src, p, 0).rgb * 255.0 + vec3<f32>(0.5));
-    let reduced = bytes >> vec3<u32>(3, 2, 3);
-    let expanded = reduced * vec3<u32>(255) / vec3<u32>(31, 63, 31);
-    textureStore(dst, p, vec4<f32>(vec3<f32>(expanded) / 255.0, 1.0));
-}
-"#
-                        .into(),
-                    ),
-                });
-            self.gpu
-                .device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("d3d8-rgb565-handoff"),
-                    layout: None,
-                    module: &shader,
-                    entry_point: Some("main"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                })
-        });
-        let view = destination.create_view(&wgpu::TextureViewDescriptor::default());
-        let group = self
-            .gpu
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("d3d8-rgb565-handoff"),
-                layout: &pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(source),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                ],
-            });
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("d3d8-rgb565-handoff"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &group, &[]);
-        pass.dispatch_workgroups(
-            destination.width().div_ceil(8),
-            destination.height().div_ceil(8),
-            1,
-        );
-    }
-
     fn wait_slot(&self, busy: &std::sync::atomic::AtomicU32) -> Result<(), RenderError> {
         let start = std::time::Instant::now();
         while busy.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            if self.gpu.physical_loss().is_lost() {
+                return Err(RenderError::new(
+                    "present_handoff",
+                    "physical device lost while waiting for a frame slot",
+                ));
+            }
             if start.elapsed() > std::time::Duration::from_secs(2) {
                 return Err(RenderError::new(
                     "present_handoff",

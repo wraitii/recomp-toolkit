@@ -17,6 +17,7 @@
 // Palette expansion goes through host/indexed_frame.cpp, which
 // already had exactly this loop and is used unchanged.
 #include "present.h"
+#include "present_frame.h"
 #include "page_overlay.h"
 #include "boot.h"
 #include "d3d_render.h"
@@ -315,69 +316,24 @@ extern "C" void host_display_present_window_rgba(uint8_t *rgba, int w, int h) {
     host_present_seal_window();
 }
 
-// GPU-to-GPU counterpart of the RGBA seam: the guest's D3D8 frame is a native
-// texture on this device, copied into the presenter's frame by a blit that
-// the one queue runs before the frame is composed. The alpha the CPU path
-// forces to 255 is not needed: legacy frames are composed with opaque blending.
-static int stage_native_texture(void *native_texture, int w, int h, void *ready_event,
-                                uint64_t ready_value, std::shared_ptr<void> lease) {
+// The owned native source is copied after producer completion, before composition.
+static int stage_native_texture(void *native_texture, int w, int h, HostTextureReady ready,
+                                std::shared_ptr<void> lease) {
     gpu::Device *device = host_present_device();
-    if (!native_texture || !lease || w <= 0 || h <= 0 || !host_present_gpu_ready() || !device ||
-        host_dump_every())
+    if (!native_texture || !lease || !ready || w <= 0 || h <= 0 || !host_present_gpu_ready() ||
+        !device || host_dump_every())
         return 0;
-    gpu::Texture src = device->import_native_texture(native_texture);
-    if (!src)
+    auto pending = std::make_shared<PendingNativeTexture>();
+    pending->device = device;
+    pending->lease = std::move(lease);
+    pending->ready = ready;
+    pending->w = w;
+    pending->h = h;
+    pending->source = device->import_native_texture(native_texture);
+    if (!pending->source)
         return 0;
     host_present_first_write();
-    gpu::CommandBuffer cb = device->begin();
-    if (ready_event && !device->wait_native_event(cb, ready_event, ready_value)) {
-        device->destroy(src);
-        device->commit(cb);
-        return 0;
-    }
-    // The command buffer is committed whether or not anything was staged: an
-    // open Metal encoder must be ended, and the slot is released on completion.
-    bool staged;
-    try {
-        staged = host_present_stage_texture(src, w, h, w, h, cb);
-    } catch (...) {
-        fprintf(stderr, "presenter: native texture staging failed\n");
-        device->commit(cb);
-        device->wait(cb);
-        device->destroy(src);
-        return 0;
-    }
-    if (staged) {
-        void *prefix = nullptr;
-        try {
-            prefix = host_present_prefix_begin();
-            if (!prefix) {
-                device->commit(cb);
-                device->wait(cb);
-                device->destroy(src);
-                return 0;
-            }
-            device->on_complete(
-                cb, [device, src, lease, prefix](gpu::CommandStatus status, double) mutable {
-                    device->destroy(src);
-                    if (status != gpu::CommandStatus::Completed)
-                        fprintf(stderr, "presenter: native texture copy failed\n");
-                    lease.reset();
-                    host_present_prefix_done(prefix, status == gpu::CommandStatus::Completed);
-                });
-        } catch (...) {
-            fprintf(stderr, "presenter: native texture completion registration failed\n");
-            device->commit(cb);
-            device->wait(cb);
-            device->destroy(src);
-            host_present_prefix_done(prefix, false);
-            return 0;
-        }
-    } else {
-        device->destroy(src);
-    }
-    device->commit(cb);
-    if (!staged)
+    if (!host_present_stage_pending_native(pending))
         return 0;
     {
         ReportLock held;
@@ -387,30 +343,30 @@ static int stage_native_texture(void *native_texture, int w, int h, void *ready_
     return 1;
 }
 
-extern "C" int host_display_stage_owned_texture(void *native_texture, int w, int h,
-                                                void *ready_event, uint64_t ready_value,
-                                                void *lease, HostTextureRelease release) {
+extern "C" int host_display_stage_owned_texture(void *native_texture, int w, int h, void *lease,
+                                                HostTextureReady ready,
+                                                HostTextureRelease release) {
     if (!release)
         return 0;
     try {
         std::shared_ptr<void> retained(lease, release);
-        return stage_native_texture(native_texture, w, h, ready_event, ready_value, retained);
+        return stage_native_texture(native_texture, w, h, ready, retained);
     } catch (...) {
         fprintf(stderr, "presenter: owned native texture handoff failed\n");
         return 0;
     }
 }
 
-extern "C" int host_display_present_owned_texture(void *native_texture, int w, int h,
-                                                  void *ready_event, uint64_t ready_value,
-                                                  void *lease, HostTextureRelease release) {
+extern "C" int host_display_present_owned_texture(void *native_texture, int w, int h, void *lease,
+                                                  HostTextureReady ready,
+                                                  HostTextureRelease release) {
     if (!release)
         return 0;
     try {
         std::shared_ptr<void> retained(lease, release);
         if (g_mode_w != w || g_mode_h != h || g_mode_bpp != 32)
             host_set_display_mode(w, h, 32);
-        if (!stage_native_texture(native_texture, w, h, ready_event, ready_value, retained))
+        if (!stage_native_texture(native_texture, w, h, ready, retained))
             return 0;
         host_present_seal_window();
         return 1;

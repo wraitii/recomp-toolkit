@@ -179,8 +179,6 @@ pub mod ffi {
         light: Light,
     }
     struct FrameHandoff {
-        ready_event: *mut u8,
-        ready_value: u64,
         texture: *mut u8,
         lease: usize,
         width: u32,
@@ -1338,6 +1336,7 @@ pub mod ffi {
             src_rect: &[D3d9Rect],
             dst_rect: &[D3d9Rect],
         ) -> FrameHandoffResult;
+        unsafe fn present_lease_ready(lease: usize) -> u32;
         unsafe fn release_present_lease(lease: usize);
         fn d3d9_commit_present(device: &mut D3d9Device);
         fn d3d9_backbuffer_descriptor(device: &D3d9Device) -> D3d9SurfaceDescriptorResult;
@@ -1766,7 +1765,7 @@ pub mod ffi {
     }
 }
 
-use crate::backend::native_present::release_present_lease;
+use crate::backend::native_present::{present_lease_ready, release_present_lease};
 use crate::bridge_render::{
     adapter_info, begin_scene, clear, draw_indexed_primitive, draw_primitive, end_scene, get_light,
     get_light_enable, get_material, get_viewport, light_enable, present, present_handoff,

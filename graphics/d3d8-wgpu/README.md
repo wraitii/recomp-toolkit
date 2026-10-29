@@ -54,11 +54,16 @@ work. A lost context makes the lease unavailable; a replacement context cannot
 use an image from the old context. The kit's native presenter does not yet consume
 this lease.
 
-The kit's D3D7/8/9 native rings share a separate owned token retaining the slot,
-texture, event and GPU handles through rejection or host-copy completion.
-D3D9 also retains its context. Native readiness remains an asynchronous event;
-loss before signaling can stall the host queue and shutdown. Cancellation and
-direct host qualification of the owned path remain open.
+The kit's D3D7/8/9 native rings share an owned token retaining the slot and
+GPU handles; D3D9 also retains its context. A separate producer reference keeps
+the slot busy if the host cancels before production finishes. Native Metal blit
+or RGB565 conversion completion publishes pending/ready/failed state. The host
+polls pending sealed frames at a 1 ms interval, submits copies only when ready,
+and cancels unsubmitted sources on replacement, frame drop or shutdown. It never
+enqueues a producer-event GPU wait. Submitted host copies retain their sources
+through completion. This does not bound stalled host GPU submissions or certify
+preceding wgpu draws whose errors have not surfaced as device loss. Direct host
+loss/resize/shutdown qualification and a matched latency profile remain open.
 
 ## Status
 

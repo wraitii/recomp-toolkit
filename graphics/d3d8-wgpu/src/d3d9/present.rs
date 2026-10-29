@@ -6,20 +6,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::backend::native_present::{
-    NativeSlot, ReadyEvent, create_ready_event, ready_event_handle, retain_slot, signal_ready,
+    NativeReadiness, NativeSlot, NativeSubmission, begin_slot, retain_slot,
 };
 
 pub(crate) struct PresentRing {
     context: PhysicalLoss,
-    ready_event: ReadyEvent,
-    ready_value: u64,
     slots: Vec<Arc<NativeSlot>>,
     next: usize,
 }
 
-fn wait_slot(busy: &AtomicU32) -> Result<(), RenderError> {
+fn wait_slot(busy: &AtomicU32, loss: &PhysicalLoss) -> Result<(), RenderError> {
     let start = std::time::Instant::now();
     while busy.load(Ordering::Acquire) != 0 {
+        if loss.is_lost() {
+            return Err(RenderError::new(
+                "D3D9::PresentHandoff",
+                "physical device lost while waiting for a frame slot",
+            ));
+        }
         if start.elapsed() > std::time::Duration::from_secs(2) {
             return Err(RenderError::new(
                 "D3D9::PresentHandoff",
@@ -64,10 +68,9 @@ pub(crate) fn handoff(
                 error
             }
         })?;
-    let (mut frame, slot, event) = frame;
+    let (mut frame, readiness) = frame;
     frame.lease = retain_slot(
-        slot,
-        event,
+        readiness,
         &context.device,
         &context.queue,
         Some(Arc::clone(context)),
@@ -79,7 +82,7 @@ fn prepare_handoff(
     slot: &mut Option<PresentRing>,
     gpu: &D3d9Gpu,
     target: &OffscreenTarget,
-) -> Result<(FrameHandoff, Arc<NativeSlot>, ReadyEvent), RenderError> {
+) -> Result<(FrameHandoff, Arc<NativeReadiness>), RenderError> {
     let recreate = slot.as_ref().is_none_or(|ring| {
         !ring.context.same_context(&gpu.loss().physical_loss())
             || ring.slots[0].texture.width() != target.width
@@ -89,8 +92,6 @@ fn prepare_handoff(
     if recreate {
         *slot = Some(PresentRing {
             context: gpu.loss().physical_loss(),
-            ready_event: create_ready_event(&gpu.device)?,
-            ready_value: 0,
             slots: (0..3)
                 .map(|_| {
                     Arc::new(NativeSlot {
@@ -120,56 +121,28 @@ fn prepare_handoff(
     let index = ring.next;
     let slot = Arc::clone(&ring.slots[index]);
     let texture = native_texture(&slot.texture)?;
-    wait_slot(&slot.busy)?;
-    let ready_value = ring.ready_value.checked_add(1).ok_or_else(|| {
-        RenderError::new(
+    wait_slot(&slot.busy, &gpu.loss().physical_loss())?;
+    let readiness = begin_slot(Arc::clone(&slot), Some(gpu.loss().physical_loss()));
+    if gpu.is_physical() {
+        return Err(RenderError::new(
             "D3D9::PresentHandoff",
-            "native GPU synchronization value overflow",
-        )
-    })?;
-    gpu.record(|encoder, _| {
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &target.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: &slot.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: target.width,
-                height: target.height,
-                depth_or_array_layers: 1,
-            },
-        );
-    });
-    let event = ring.ready_event.clone();
-    gpu.submit_then(move |queue| {
-        if let Err(error) = signal_ready(queue, &event, ready_value) {
-            log::error!("{error}");
-        }
-    });
-    let ready_event = ready_event_handle(&ring.ready_event);
-    ring.ready_value = ready_value;
-    gpu.device
-        .poll(wgpu::PollType::Poll)
-        .map_err(|error| RenderError::new("D3D9::PresentHandoff", error.to_string()))?;
+            gpu.loss().physical_message(),
+        ));
+    }
+    let submission = NativeSubmission::new(
+        Arc::clone(&readiness),
+        target.texture.clone(),
+        slot.texture.clone(),
+    );
+    gpu.submit_then(move |queue| submission.submit(queue));
     ring.next = (index + 1) % ring.slots.len();
     Ok((
         FrameHandoff {
-            ready_event,
-            ready_value,
             texture,
             lease: 0,
             width: target.width,
             height: target.height,
         },
-        slot,
-        ring.ready_event.clone(),
+        readiness,
     ))
 }

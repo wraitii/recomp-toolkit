@@ -354,6 +354,8 @@ void host_gpu2d_release_device();
 // False when nothing was staged.
 bool host_present_stage_texture(gpu::Texture src, int w, int h, int guest_w, int guest_h,
                                 gpu::CommandBuffer cb);
+struct PendingNativeTexture;
+bool host_present_stage_pending_native(const std::shared_ptr<PendingNativeTexture> &pending);
 // Register BEFORE committing each prefix buffer on the renderer's queue. Its
 // completion fences all earlier prefixes; dropped frames retire behind it.
 void host_present_track_command(gpu::CommandBuffer command);

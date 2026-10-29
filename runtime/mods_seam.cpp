@@ -152,15 +152,15 @@ extern "C" __attribute__((weak)) void host_display_present_window_viewport(const
     host_display_present_window(argb, w, h);
 }
 extern "C" __attribute__((weak)) void host_display_present_window_rgba(uint8_t *, int, int) {}
-extern "C" __attribute__((weak)) int host_display_stage_owned_texture(void *, int, int, void *,
-                                                                      uint64_t, void *lease,
+extern "C" __attribute__((weak)) int host_display_stage_owned_texture(void *, int, int, void *lease,
+                                                                      HostTextureReady,
                                                                       HostTextureRelease release) {
     if (release)
         release(lease);
     return 0;
 }
 extern "C" __attribute__((weak)) int
-host_display_present_owned_texture(void *, int, int, void *, uint64_t, void *lease,
+host_display_present_owned_texture(void *, int, int, void *lease, HostTextureReady,
                                    HostTextureRelease release) {
     if (release)
         release(lease);

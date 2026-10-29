@@ -1106,8 +1106,11 @@ void Dev_Present(X86 *c) {
         if (result.status.code == recomp::d3d::StatusCode::Ok) {
             presented = host_display_present_owned_texture(
                 result.handoff.texture, (int)result.handoff.width, (int)result.handoff.height,
-                result.handoff.ready_event, result.handoff.ready_value,
-                reinterpret_cast<void *>(result.handoff.lease), [](void *lease) {
+                reinterpret_cast<void *>(result.handoff.lease),
+                [](void *lease) {
+                    return recomp::d3d::present_lease_ready(reinterpret_cast<size_t>(lease));
+                },
+                [](void *lease) {
                     recomp::d3d::release_present_lease(reinterpret_cast<size_t>(lease));
                 });
             if (presented) {
