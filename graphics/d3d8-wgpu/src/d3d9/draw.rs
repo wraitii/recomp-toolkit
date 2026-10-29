@@ -3755,17 +3755,30 @@ fn feedback_bindings(
     };
     gpu.record(|encoder, _| {
         for level in 0..levels {
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    mip_level: level,
-                    ..source.as_image_copy()
-                },
-                wgpu::TexelCopyTextureInfo {
-                    mip_level: level,
-                    ..copy.as_image_copy()
-                },
-                size.mip_level_size(level, dimension),
-            );
+            let mut extent = size.mip_level_size(level, dimension);
+            let layers = if dimension == wgpu::TextureDimension::D2 {
+                let layers = extent.depth_or_array_layers;
+                extent.depth_or_array_layers = 1;
+                layers
+            } else {
+                1
+            };
+            for layer in 0..layers {
+                let origin = wgpu::Origin3d { x: 0, y: 0, z: layer };
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        mip_level: level,
+                        origin,
+                        ..source.as_image_copy()
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        mip_level: level,
+                        origin,
+                        ..copy.as_image_copy()
+                    },
+                    extent,
+                );
+            }
         }
     });
     Ok(bindings
