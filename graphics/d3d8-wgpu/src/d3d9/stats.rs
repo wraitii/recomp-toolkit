@@ -45,6 +45,7 @@ pub(super) struct Counters {
     pub constant_updates: u64,
     pub constant_registers: u64,
     pub constant_temp_bytes: u64,
+    pub constant_scratch_grows: u64,
     pub buffer_uploads: u64,
     pub buffer_upload_bytes: u64,
     pub buffer_snapshot_copies: u64,
