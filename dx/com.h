@@ -568,15 +568,38 @@ struct ComMethod {
 void com_reset();
 
 ComObj *com_new(ComKind kind);
-ComObj *com_get(uint32_t id);
+
+extern ComObj *const *g_com_table;
+extern uint32_t g_com_count;
+[[gnu::cold]] ComObj *com_this_bad_magic(uint32_t addr);
+
+inline ComObj *com_get(uint32_t id) {
+    if (!id || id > g_com_count)
+        return nullptr;
+    ComObj *o = g_com_table[id - 1];
+    return o->alive ? o : nullptr;
+}
 // Every object in creation order, including dead ones; the object with id n is
 // at index n - 1. Prefer this over com_get when walking the whole table.
 std::deque<ComObj> &com_objects();
 // The object a guest interface pointer refers to, or null when `addr` is not
 // one of ours. `want` may be IF_NONE to accept any interface.
-ComObj *com_this(uint32_t addr, ComIface want = IF_NONE);
+inline ComObj *com_this(uint32_t addr, ComIface want = IF_NONE) {
+    if (!addr || !gm_valid(addr, COM_VIEW_SIZE))
+        return nullptr;
+    if (rd32(addr + COM_OFF_magic) != COM_MAGIC)
+        return com_this_bad_magic(addr);
+    ComObj *o = com_get(rd32(addr + COM_OFF_obj));
+    if (!o)
+        return nullptr;
+    if (want != IF_NONE && rd32(addr + COM_OFF_iface) != want)
+        return nullptr;
+    return o;
+}
 // Same, reading `this` from the shim's first stack argument.
-ComObj *com_this_arg(X86 *c, ComIface want = IF_NONE);
+inline ComObj *com_this_arg(X86 *c, ComIface want = IF_NONE) {
+    return com_this(arg(c, 0), want);
+}
 ComIface com_iface_of(uint32_t addr);
 
 // Guest address of `o` seen through `iface`, allocating the view on first use.
