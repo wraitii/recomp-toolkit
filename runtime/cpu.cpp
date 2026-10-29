@@ -132,6 +132,17 @@ RecompEntryFn recomp_icall_resolve(uint32_t target) {
     return entry ? entry->fn : nullptr;
 }
 
+void recomp_icall_miss(X86 *c, uint32_t target, uint32_t site) {
+#ifndef RECOMP_CHECK_CALL_FACTS
+    if (!recomp_observe_on && target - GUEST_SHIM_BASE >= GUEST_SHIM_END - GUEST_SHIM_BASE)
+        if (RecompEntryFn fn = recomp_icall_resolve(target)) {
+            fn(c);
+            return;
+        }
+#endif
+    recomp_icall_slow(c, target, site);
+}
+
 void recomp_icall_slow(X86 *c, uint32_t target, uint32_t site) {
 #ifndef RECOMP_CHECK_CALL_FACTS
     if (target - GUEST_SHIM_BASE < GUEST_SHIM_END - GUEST_SHIM_BASE && !recomp_frame_watch &&
