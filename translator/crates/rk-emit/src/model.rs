@@ -6,6 +6,7 @@ use rk_core::Addr;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Declaration {
     Raw(Addr),
+    Region(Addr),
     Direct(Addr),
     DirectVariant {
         addr: Addr,

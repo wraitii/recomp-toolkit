@@ -270,12 +270,16 @@ next(c);\n}\n",
     }
     let declarations: BTreeSet<&Declaration> = group.iter().flat_map(|b| &b.declarations).collect();
     let mut raw = BTreeSet::new();
+    let mut regions = BTreeSet::new();
     let mut direct = BTreeSet::new();
     let mut variants = BTreeSet::new();
     for declaration in declarations {
         match declaration {
             Declaration::Raw(addr) => {
                 raw.insert(*addr);
+            }
+            Declaration::Region(addr) => {
+                regions.insert(*addr);
             }
             Declaration::Direct(addr) => {
                 direct.insert(*addr);
@@ -290,6 +294,9 @@ next(c);\n}\n",
     }
     for addr in raw {
         let _ = writeln!(s, "void call_{addr:08x}(X86 *c);");
+    }
+    for addr in regions {
+        let _ = writeln!(s, "void region_{addr:08x}(X86 *c, uint32_t target);");
     }
     if !direct.is_empty() {
         s.push_str(DIRECT_GUARD);
@@ -346,7 +353,7 @@ fn entry_chunks(
             Declaration::Direct(target) => {
                 direct.insert(target);
             }
-            Declaration::DirectVariant { .. } => {}
+            Declaration::Region(_) | Declaration::DirectVariant { .. } => {}
         }
     }
     let mut groups: BTreeMap<Addr, Vec<(usize, Addr)>> = BTreeMap::new();

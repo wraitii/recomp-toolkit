@@ -1022,6 +1022,17 @@ typedef struct RecompRegion {
     void (*fn)(X86 *, uint32_t);
     const uint8_t *boundaries;
 } RecompRegion;
+
+uint32_t recomp_seh_pending_target(void);
+RECOMP_HOT_INLINE void recomp_region_jump(X86 *c, void (*fn)(X86 *, uint32_t), uint32_t target) {
+    if (RECOMP_UNLIKELY(recomp_profile_enabled || recomp_frame_watch ||
+                        recomp_seh_pending_target())) {
+        recomp_jump(c, target);
+        return;
+    }
+    recomp_execution_checkpoint(c);
+    fn(c, target);
+}
 const RecompRegion *recomp_region_find(const RecompRegion *regions, uint32_t count,
                                        uint32_t target);
 void recomp_region_invoke(X86 *c, const RecompRegion *region, uint32_t target);

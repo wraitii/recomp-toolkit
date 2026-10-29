@@ -968,8 +968,8 @@ impl<'a> Emitter<'a> {
                     }
                     None if end_addr.is_some() => {
                         let addr = end_addr.unwrap();
-                        let at = self.guest_addr(addr);
-                        let _ = writeln!(self.out, "c->eip = {at}; recomp_jump(c, {at}); return;");
+                        let jump = self.static_jump(addr, addr);
+                        let _ = writeln!(self.out, "{jump}");
                     }
                     None => {
                         return Err(self.error(self.s.addr, "block falls through to no successor"))
@@ -1034,16 +1034,12 @@ impl<'a> Emitter<'a> {
             Op::CallInd => self.call_ind(value, addr).map(|_| true),
             Op::Tail { target } => {
                 self.publish(value)?;
-                let at = self.guest_addr(addr);
-                let target_expr = self.guest_addr(target);
                 if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
                     self.declare_raw(target);
                     let _ = writeln!(self.out, "CALL_RAW({target:08x}); return;");
                 } else {
-                    let _ = writeln!(
-                        self.out,
-                        "c->eip = {at}; recomp_jump(c, {target_expr}); return;"
-                    );
+                    let jump = self.static_jump(addr, target);
+                    let _ = writeln!(self.out, "{jump}");
                 }
                 Ok(false)
             }
@@ -2039,16 +2035,12 @@ impl<'a> Emitter<'a> {
             return self.edge(Some(current), target_block);
         }
         self.publish(value)?;
-        let at = self.guest_addr(self.s.value_addr[value as usize]);
-        let target_expr = self.guest_addr(target);
         if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
             self.declare_raw(target);
             let _ = writeln!(self.out, "CALL_RAW({target:08x}); return;");
         } else {
-            let _ = writeln!(
-                self.out,
-                "c->eip = {at}; recomp_jump(c, {target_expr}); return;"
-            );
+            let jump = self.static_jump(self.s.value_addr[value as usize], target);
+            let _ = writeln!(self.out, "{jump}");
         }
         Ok(())
     }
@@ -2081,8 +2073,6 @@ impl<'a> Emitter<'a> {
             }
             return Ok(());
         }
-        let at = self.guest_addr(self.s.value_addr[value as usize]);
-        let target_expr = self.guest_addr(target);
         if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
             self.declare_raw(target);
             let _ = writeln!(
@@ -2090,10 +2080,8 @@ impl<'a> Emitter<'a> {
                 "if ((uint32_t)({condition})) {{ CALL_RAW({target:08x}); return; }}"
             );
         } else {
-            let _ = writeln!(
-                self.out,
-                "if ((uint32_t)({condition})) {{ c->eip = {at}; recomp_jump(c, {target_expr}); return; }}"
-            );
+            let jump = self.static_jump(self.s.value_addr[value as usize], target);
+            let _ = writeln!(self.out, "if ((uint32_t)({condition})) {{ {jump} }}");
         }
         let end_addr = self.block_end_addr(current);
         let fallthrough = self
@@ -2821,6 +2809,18 @@ impl<'a> Emitter<'a> {
 
     fn declare_raw(&mut self, target: Addr) {
         self.declarations.insert(Declaration::Raw(target));
+    }
+
+    fn static_jump(&mut self, at: Addr, target: Addr) -> String {
+        let at = self.guest_addr(at);
+        let target_expr = self.guest_addr(target);
+        match self.ctx.region_entries.get(&target) {
+            Some(&owner) if self.ctx.reloc.is_none() => {
+                self.declarations.insert(Declaration::Region(owner));
+                format!("c->eip = {at}; recomp_region_jump(c, region_{owner:08x}, {target_expr}); return;")
+            }
+            _ => format!("c->eip = {at}; recomp_jump(c, {target_expr}); return;"),
+        }
     }
 
     fn assignment(&self, value: ValueId, expr: &str) -> String {
