@@ -240,7 +240,7 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
     if (capture_ == Capture::Identify)
         message = "Move one stick or trigger, or press a button. Esc stops identifying.";
     else if (capture_ != Capture::None)
-        message = "Press the keyboard key to assign. Esc cancels.";
+        message = "Press the keyboard key to assign. Use Clear to remove the assignment.";
     else if (center_capture_)
         message = "Keep this input at rest. Recording its resting position...";
     else if (sweep_)
@@ -356,7 +356,7 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
                      : key                    ? key
                                               : "None",
                      206);
-                line("", "Clear keyboard output", 207);
+                line("", "Clear", 207);
             }
             if (selected_ < 6) {
                 const int y = detail_top + (index++ - detail_scroll_) * px(35);
@@ -743,7 +743,7 @@ void PadMapperEditor::key(int scancode, bool down) {
         return;
     if (!down)
         return;
-    if (capture_ == Capture::Key && scancode != kScanEscape) {
+    if (capture_ == Capture::Key) {
         if (scancode_name(scancode)) {
             button().guest_key = scancode;
             capture_ = Capture::None;
