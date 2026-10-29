@@ -485,8 +485,16 @@ bool parse_pad_mapper_profile(const std::string &text, PadMapperProfile *profile
     }
     if (!seen.count("version"))
         return fail("missing profile version");
-    if (seen.size() - seen.count("directinput_rumble") != 114)
-        return fail("incomplete pad mapper profile");
+    const std::string defaults = serialize_pad_mapper_profile(pad_mapper_default_profile());
+    for (size_t start = 0; start < defaults.size();) {
+        const size_t end = defaults.find('\n', start);
+        const std::string key = defaults.substr(start, defaults.find('=', start) - start);
+        start = end == std::string::npos ? defaults.size() : end + 1;
+        if (key == "directinput_rumble" || key.find(".guest_key") != std::string::npos)
+            continue;
+        if (!seen.count(key))
+            return fail("incomplete pad mapper profile: missing " + key);
+    }
     std::string validation;
     if (!validate_pad_mapper_profile(next, &validation))
         return fail(validation);
