@@ -229,7 +229,11 @@ impl D3d9Queries {
         if record.native_completion {
             return Ok(());
         }
+        let physical = gpu.loss().physical_loss();
         gpu.submit_then(move |queue| {
+            if physical.is_lost() {
+                return;
+            }
             queue.submit(std::iter::empty());
             queue.on_submitted_work_done(move || {
                 done.fetch_max(generation, Ordering::AcqRel);
@@ -312,7 +316,12 @@ impl D3d9Queries {
         let mapped = Arc::new(OnceLock::new());
         let map_target = readback.clone();
         let flag = Arc::clone(&mapped);
+        let physical = gpu.loss().physical_loss();
         gpu.submit_then(move |_| {
+            if physical.is_lost() {
+                let _ = flag.set(false);
+                return;
+            }
             map_target.map_async(wgpu::MapMode::Read, .., move |result| {
                 let _ = flag.set(result.is_ok());
             });

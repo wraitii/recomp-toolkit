@@ -273,7 +273,232 @@ impl Default for D3d9Resource {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct BufferLockRequest {
+    pub offset: u32,
+    pub size: u32,
+    pub flags: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BufferLockRange {
+    pub offset: u32,
+    pub size: u32,
+    pub total: u32,
+}
+
+pub struct BufferUnlockResult {
+    pub status: Result<(), RenderError>,
+    pub closed: bool,
+}
+
+fn merge_staged_writes(b: &mut BufferState, bytes: &[u8], default_pool: bool) {
+    let (lo, hi) = b
+        .writable
+        .iter()
+        .fold((u32::MAX, 0u32), |(lo, hi), &(a, c)| (lo.min(a), hi.max(c)));
+    let declared = (lo, hi);
+    let mut lo = lo as usize;
+    let mut hi = hi as usize;
+    if b.bytes[..lo] != bytes[..lo] {
+        lo = b.bytes[..lo]
+            .iter()
+            .zip(&bytes[..lo])
+            .position(|(old, new)| old != new)
+            .unwrap();
+    }
+    if b.bytes[hi..] != bytes[hi..] {
+        hi += b.bytes[hi..]
+            .iter()
+            .zip(&bytes[hi..])
+            .rposition(|(old, new)| old != new)
+            .unwrap()
+            + 1;
+    }
+    b.bytes[lo..hi].copy_from_slice(&bytes[lo..hi]);
+    let (lo, hi) = (lo as u32, hi as u32);
+    if (lo, hi) != declared {
+        static REPORTED: AtomicBool = AtomicBool::new(false);
+        if !REPORTED.swap(true, Ordering::Relaxed) || super::trace_enabled() {
+            eprintln!(
+                "[d3d9] buffer writes extend beyond lock range: kind={:?} size={} declared={}-{} preserved={lo}-{hi}; preserving mapped writes",
+                b.kind, b.size, declared.0, declared.1
+            );
+        }
+    }
+    if hi > lo {
+        if default_pool || b.writable_dirty {
+            if b.dirty_hi <= b.dirty_lo {
+                b.dirty_lo = lo;
+                b.dirty_hi = hi;
+            } else {
+                b.dirty_lo = b.dirty_lo.min(lo);
+                b.dirty_hi = b.dirty_hi.max(hi);
+            }
+        }
+        b.generation = b.generation.wrapping_add(1);
+    }
+}
+
 impl D3d9Resource {
+    pub fn new_cpu_buffer(request: &BufferRequest) -> Result<Self, RenderError> {
+        let mut resource = Self::default();
+        initialize_buffer(None, &mut resource, request)?;
+        Ok(resource)
+    }
+
+    pub fn prepare_buffer_lock(
+        &self,
+        request: &BufferLockRequest,
+    ) -> Result<BufferLockRange, RenderError> {
+        let Some(ResourceState::Buffer(b)) = self.state.as_ref() else {
+            return Err(invalid("LockBuffer", "D3D9 buffer is not initialized"));
+        };
+        let unknown = request.flags & !D3DLOCK_KNOWN;
+        if unknown != 0 {
+            return Err(invalid(
+                "LockBuffer",
+                format!("unknown D3DLOCK flag(s) {unknown:#x}"),
+            ));
+        }
+        if request.flags & D3DLOCK_DONOTWAIT != 0 {
+            return Err(invalid(
+                "LockBuffer",
+                "D3DLOCK_DONOTWAIT is invalid for vertex and index buffers",
+            ));
+        }
+        if request.flags & D3DLOCK_READONLY != 0 && request.flags & D3DLOCK_DISCARD != 0 {
+            return Err(invalid(
+                "LockBuffer",
+                "D3DLOCK_READONLY cannot be combined with D3DLOCK_DISCARD",
+            ));
+        }
+        if b.usage & D3DUSAGE_WRITEONLY != 0 && request.flags & D3DLOCK_READONLY != 0 {
+            return Err(invalid(
+                "LockBuffer",
+                "D3DUSAGE_WRITEONLY buffers cannot be locked D3DLOCK_READONLY",
+            ));
+        }
+        if b.size == 0 {
+            return Err(unsupported(
+                "LockBuffer",
+                "zero-length D3D9 buffer locks are not implemented",
+            ));
+        }
+        let total = b.size;
+        if request.offset > total {
+            return Err(invalid(
+                "LockBuffer",
+                "D3D9 buffer lock offset is past the end",
+            ));
+        }
+        let size = if request.size == 0 {
+            total - request.offset
+        } else {
+            request.size
+        };
+        if size > total - request.offset {
+            return Err(invalid(
+                "LockBuffer",
+                "D3D9 buffer lock range is past the end",
+            ));
+        }
+        Ok(BufferLockRange {
+            offset: request.offset,
+            size,
+            total,
+        })
+    }
+
+    pub fn commit_buffer_lock(
+        &mut self,
+        request: &BufferLockRequest,
+    ) -> Result<BufferLockRange, RenderError> {
+        let range = self.prepare_buffer_lock(request)?;
+        let Some(ResourceState::Buffer(b)) = self.state.as_mut() else {
+            return Err(invalid("LockBuffer", "D3D9 buffer is not initialized"));
+        };
+        let count = b
+            .lock_count
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or_else(|| oom("LockBuffer", "D3D9 buffer lock count overflow"))?;
+        let writable = request.flags & D3DLOCK_READONLY == 0;
+        if writable {
+            b.writable
+                .try_reserve(1)
+                .map_err(|_| oom("LockBuffer", "D3D9 buffer lock record allocation failed"))?;
+        }
+        b.lock_count.store(count, Ordering::Release);
+        if writable {
+            if request.flags & D3DLOCK_NO_DIRTY_UPDATE == 0 {
+                b.writable_dirty = true;
+            }
+            b.writable
+                .push((range.offset, range.offset.saturating_add(range.size)));
+        }
+        Ok(range)
+    }
+
+    pub fn buffer_bytes(&self) -> &[u8] {
+        match self.state.as_ref() {
+            Some(ResourceState::Buffer(b)) => &b.bytes,
+            _ => &[],
+        }
+    }
+
+    pub fn sync_locked_buffer(&mut self, bytes: &[u8]) -> Result<(), RenderError> {
+        let Some(ResourceState::Buffer(b)) = self.state.as_mut() else {
+            return Err(invalid("LockBuffer", "D3D9 buffer is not initialized"));
+        };
+        if b.lock_count.load(Ordering::Acquire) == 0 || b.writable.is_empty() {
+            return Ok(());
+        }
+        if bytes.len() != b.bytes.len() {
+            return Err(invalid(
+                "LockBuffer",
+                "D3D9 buffer staging size does not match the buffer",
+            ));
+        }
+        let default_pool = b.pool == D3DPOOL_DEFAULT;
+        merge_staged_writes(b, bytes, default_pool);
+        upload_dirty_buffer(b)
+    }
+
+    pub fn unlock_buffer(&mut self, bytes: &[u8]) -> BufferUnlockResult {
+        let Some(ResourceState::Buffer(b)) = self.state.as_mut() else {
+            return BufferUnlockResult {
+                status: Err(invalid("UnlockBuffer", "D3D9 buffer is not initialized")),
+                closed: false,
+            };
+        };
+        if b.lock_count.load(Ordering::Acquire) == 0 {
+            return BufferUnlockResult {
+                status: Ok(()),
+                closed: false,
+            };
+        }
+        if bytes.len() != b.bytes.len() {
+            return BufferUnlockResult {
+                status: Err(invalid(
+                    "UnlockBuffer",
+                    "D3D9 buffer unlock staging size does not match the buffer",
+                )),
+                closed: false,
+            };
+        }
+        let default_pool = b.pool == D3DPOOL_DEFAULT;
+        b.lock_count.fetch_sub(1, Ordering::AcqRel);
+        let closed = b.lock_count.load(Ordering::Acquire) == 0;
+        if closed && !b.writable.is_empty() {
+            merge_staged_writes(b, bytes, default_pool);
+            b.writable.clear();
+            b.writable_dirty = false;
+        }
+        let status = if closed { upload_buffer(self) } else { Ok(()) };
+        BufferUnlockResult { status, closed }
+    }
+
     pub fn lock_handles(&self) -> Vec<Arc<AtomicU32>> {
         match self.state.as_ref() {
             Some(ResourceState::Buffer(b)) => vec![Arc::clone(&b.lock_count)],
@@ -785,6 +1010,14 @@ pub fn create_buffer(
     resource: &mut D3d9Resource,
     request: &BufferRequest,
 ) -> Result<(), RenderError> {
+    initialize_buffer(Some(gpu), resource, request)
+}
+
+fn initialize_buffer(
+    gpu: Option<&D3d9Gpu>,
+    resource: &mut D3d9Resource,
+    request: &BufferRequest,
+) -> Result<(), RenderError> {
     if resource.initialized() {
         return Err(invalid(
             "CreateVertexBuffer",
@@ -837,9 +1070,16 @@ pub fn create_buffer(
             }
         }
     }
+    if gpu.is_none() && has_gpu_storage(request.pool) {
+        return Err(invalid(
+            "CreateResource",
+            "D3DPOOL_DEFAULT and D3DPOOL_MANAGED buffers require a device",
+        ));
+    }
     let bytes = alloc_bytes(request.size)?;
+    let uploaded = alloc_bytes(request.size)?;
     let initial_dirty = request.pool == D3DPOOL_MANAGED;
-    resource.gpu = Some(gpu.clone());
+    resource.gpu = gpu.cloned();
     resource.state = Some(ResourceState::Buffer(BufferState {
         kind: request.kind,
         size: request.size,
@@ -847,7 +1087,7 @@ pub fn create_buffer(
         pool: request.pool,
         fvf: request.fvf,
         format: request.format,
-        uploaded: Arc::new(Mutex::new(Arc::new(alloc_bytes(request.size)?))),
+        uploaded: Arc::new(Mutex::new(Arc::new(uploaded))),
         bytes,
         lock_count: Arc::new(AtomicU32::new(0)),
         writable: Vec::new(),

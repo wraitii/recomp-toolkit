@@ -116,6 +116,9 @@ impl OffscreenTarget {
 
 /// Owns the wgpu instance/device/queue and, for windowed use, the surface.
 pub struct GpuContext {
+    pub(crate) d3d9_pending:
+        std::sync::OnceLock<Arc<std::sync::Mutex<crate::d3d9::gpu::PendingWork>>>,
+    pub(crate) d3d9_physical_loss: crate::d3d9::gpu::PhysicalLoss,
     /// The wgpu logical device.
     pub device: wgpu::Device,
     /// The queue used to submit work.
@@ -128,6 +131,7 @@ pub struct GpuContext {
     surface: Option<wgpu::Surface<'static>>,
     /// Window backing `surface`, kept so `present` can size the swapchain to the
     /// physical window rather than the offscreen target.
+    #[cfg(feature = "windowing")]
     window: Option<Arc<winit::window::Window>>,
     /// Last configuration applied to `surface`.
     surface_config: Option<wgpu::SurfaceConfiguration>,
@@ -202,6 +206,53 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 "#;
 
 impl GpuContext {
+    /// Submit all queued D3D9 work before the owner submits directly to the queue.
+    pub fn synchronize_d3d9(&self) {
+        if let Some(pending) = self.d3d9_pending.get() {
+            pending.lock().unwrap().synchronize();
+        }
+    }
+
+    pub fn physical_loss(&self) -> crate::d3d9::gpu::PhysicalLoss {
+        self.d3d9_physical_loss.clone()
+    }
+    /// Wrap a caller-owned headless device and queue. The caller guarantees that
+    /// both came from this adapter and imports each device only once; wgpu does
+    /// not expose a check for that provenance. Share the returned context with
+    /// every client. The caller owns error/loss handling and must synchronize
+    /// direct queue access with all clients.
+    pub fn from_supplied(
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Result<Self, RenderError> {
+        if !adapter.features().contains(device.features())
+            || !device.limits().check_limits(&adapter.limits())
+        {
+            return Err(RenderError::invalid(
+                "SuppliedContext",
+                "device capabilities exceed the supplied adapter capabilities",
+            ));
+        }
+        let adapter_info = adapter.get_info();
+        Ok(Self {
+            d3d9_pending: Default::default(),
+            d3d9_physical_loss: Default::default(),
+            device,
+            queue,
+            adapter_info,
+            adapter,
+            surface: None,
+            #[cfg(feature = "windowing")]
+            window: None,
+            surface_config: None,
+            viewport_clear: Default::default(),
+            fxaa: Default::default(),
+            readback: Default::default(),
+            blit: None,
+        })
+    }
+
     /// Create a headless context with the default backend set.
     pub async fn new_headless() -> Result<Self, RenderError> {
         let instance = wgpu::Instance::default();
@@ -212,6 +263,7 @@ impl GpuContext {
         Self::from_adapter(
             adapter,
             None,
+            #[cfg(feature = "windowing")]
             None,
             wgpu::Features::ADDRESS_MODE_CLAMP_TO_BORDER,
         )
@@ -235,7 +287,14 @@ impl GpuContext {
             | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
             | wgpu::Features::POLYGON_MODE_LINE
             | wgpu::Features::POLYGON_MODE_POINT;
-        Self::from_adapter(adapter, None, None, requested).await
+        Self::from_adapter(
+            adapter,
+            None,
+            #[cfg(feature = "windowing")]
+            None,
+            requested,
+        )
+        .await
     }
 
     /// True when this context owns a window surface, i.e. [`GpuContext::present`]
@@ -250,6 +309,7 @@ impl GpuContext {
     ///
     /// The caller owns the event loop and the window lifetime; the `Arc` keeps
     /// the window alive through the surface. No event loop is created here.
+    #[cfg(feature = "windowing")]
     pub async fn new_windowed(window: Arc<winit::window::Window>) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::default();
         let surface = instance
@@ -274,7 +334,7 @@ impl GpuContext {
     async fn from_adapter(
         adapter: wgpu::Adapter,
         surface: Option<wgpu::Surface<'static>>,
-        window: Option<Arc<winit::window::Window>>,
+        #[cfg(feature = "windowing")] window: Option<Arc<winit::window::Window>>,
         requested_features: wgpu::Features,
     ) -> Result<Self, RenderError> {
         let adapter_info = adapter.get_info();
@@ -309,11 +369,14 @@ impl GpuContext {
         );
 
         Ok(Self {
+            d3d9_pending: Default::default(),
+            d3d9_physical_loss: Default::default(),
             device,
             queue,
             adapter_info,
             adapter,
             surface,
+            #[cfg(feature = "windowing")]
             window,
             surface_config: None,
             viewport_clear: Default::default(),
@@ -936,6 +999,7 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
 
         // The swapchain is sized to the physical window, not to the offscreen
         // target; the blit below maps target texels onto it explicitly.
+        #[cfg(feature = "windowing")]
         let (surface_width, surface_height) = self
             .window
             .as_ref()
@@ -944,6 +1008,8 @@ struct Values { color: vec4<f32>, depth: vec4<f32> }
                 (size.width.max(1), size.height.max(1))
             })
             .unwrap_or((target.width.max(1), target.height.max(1)));
+        #[cfg(not(feature = "windowing"))]
+        let (surface_width, surface_height) = (target.width.max(1), target.height.max(1));
 
         let config = wgpu::SurfaceConfiguration {
             color_space: wgpu::SurfaceColorSpace::Auto,

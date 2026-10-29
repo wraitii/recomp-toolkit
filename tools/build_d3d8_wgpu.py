@@ -7,6 +7,18 @@ import shutil
 import subprocess
 
 
+def native_target_args(target):
+    if not target:
+        return []
+    rustc = os.environ.get("RUSTC", "rustc")
+    version = subprocess.run([rustc, "-vV"], capture_output=True, text=True, check=True).stdout
+    host = next((line.removeprefix("host: ") for line in version.splitlines()
+                 if line.startswith("host: ")), None)
+    if target != host:
+        raise ValueError(f"renderer Cargo target {target} does not match Rust host {host}")
+    return ["--target", target]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cargo", required=True)
@@ -17,13 +29,18 @@ def main():
     parser.add_argument("--native-libs", type=Path, required=True)
     parser.add_argument("--cxx", required=True)
     parser.add_argument("--deployment-target")
+    parser.add_argument("--target")
     args = parser.parse_args()
+    try:
+        target_args = native_target_args(args.target)
+    except ValueError as error:
+        parser.error(str(error))
     build_env = dict(os.environ, CARGO_TARGET_DIR=str(args.target_dir), CXX=args.cxx)
     if args.deployment_target:
         build_env["MACOSX_DEPLOYMENT_TARGET"] = args.deployment_target
     process = subprocess.Popen(
         [args.cargo, "rustc", "--release", "--lib", "--locked", "--message-format=json",
-         "--manifest-path", str(args.crate / "Cargo.toml"), "--", "--print=native-static-libs"],
+         "--manifest-path", str(args.crate / "Cargo.toml"), *target_args, "--", "--print=native-static-libs"],
         env=build_env,
         stdout=subprocess.PIPE, text=True)
     outputs = {}
@@ -62,7 +79,7 @@ def main():
         parser.exit(status, "D3D8 renderer Cargo build failed\n")
     corpus = subprocess.run(
         [args.cargo, "build", "--release", "--locked", "--manifest-path",
-         str(args.crate / "Cargo.toml"), "--bin", "shader-corpus"],
+         str(args.crate / "Cargo.toml"), "--bin", "shader-corpus", *target_args],
         env=build_env)
     if corpus.returncode:
         parser.exit(corpus.returncode, "D3D8 shader corpus CLI build failed\n")

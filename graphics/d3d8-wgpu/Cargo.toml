@@ -6,6 +6,20 @@ publish = false
 description = "Isolated D3D8-semantics renderer prototype on wgpu (not a game integration)"
 license = "MIT OR Apache-2.0"
 
+[workspace]
+members = ["consumer"]
+default-members = ["."]
+resolver = "3"
+
+[workspace.dependencies]
+pollster = "0.4"
+wgpu = "30.0.1"
+
+[features]
+default = ["windowing", "probe"]
+windowing = ["dep:winit"]
+probe = ["dep:env_logger"]
+
 [lib]
 name = "d3d8_wgpu"
 path = "src/lib.rs"
@@ -14,28 +28,35 @@ crate-type = ["staticlib", "rlib"]
 [[bin]]
 name = "probe-headless"
 path = "src/bin/probe_headless.rs"
+required-features = ["probe"]
 
 [[bin]]
 name = "probe-windowed"
 path = "src/bin/probe_windowed.rs"
+required-features = ["probe", "windowing"]
 
 [[bin]]
 name = "shader-corpus"
 path = "src/bin/shader_corpus.rs"
 
+[[test]]
+name = "probe_report"
+path = "tests/probe_report.rs"
+required-features = ["probe"]
+
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
 bcdec_rs = "0.2"
 ddsfile = "0.5"
-env_logger = "0.11"
+env_logger = { version = "0.11", optional = true }
 half = { version = "2", features = ["bytemuck"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tga", "bmp", "pnm"] }
 log = "0.4"
-pollster = "0.4"
+pollster.workspace = true
 smallvec = { version = "1", features = ["union"] }
 texpresso = "2"
-wgpu = "30.0.1"
-winit = "0.30"
+wgpu.workspace = true
+winit = { version = "0.30", optional = true }
 naga = { version = "30", features = ["wgsl-in"] }
 
 [build-dependencies]

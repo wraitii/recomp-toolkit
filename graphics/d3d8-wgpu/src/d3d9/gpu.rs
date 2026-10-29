@@ -13,34 +13,46 @@ fn align_up(value: u32, align: u32) -> u32 {
 
 #[derive(Clone, Default)]
 pub struct D3d9Loss {
-    state: Arc<LossState>,
+    physical: PhysicalLoss,
+    reset_required: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Default)]
+pub struct PhysicalLoss {
+    state: Arc<PhysicalLossState>,
 }
 
 #[derive(Default)]
-struct LossState {
-    physical: AtomicBool,
-    reset_required: AtomicBool,
+struct PhysicalLossState {
+    lost: AtomicBool,
     reason: Mutex<Option<String>>,
 }
 
 impl D3d9Loss {
-    pub fn mark_physical(&self, reason: String) {
-        if let Ok(mut slot) = self.state.reason.lock() {
-            *slot = Some(reason);
+    pub(crate) fn physical_loss(&self) -> PhysicalLoss {
+        self.physical.clone()
+    }
+    pub fn from_physical(physical: PhysicalLoss) -> Self {
+        Self {
+            physical,
+            reset_required: Arc::new(AtomicBool::new(false)),
         }
-        self.state.physical.store(true, Ordering::Release);
+    }
+
+    pub fn mark_physical(&self, reason: String) {
+        self.physical.mark(reason);
     }
 
     pub fn is_physical(&self) -> bool {
-        self.state.physical.load(Ordering::Acquire)
+        self.physical.is_lost()
     }
 
     pub fn mark_reset_required(&self) {
-        self.state.reset_required.store(true, Ordering::Release);
+        self.reset_required.store(true, Ordering::Release);
     }
 
     pub fn is_reset_required(&self) -> bool {
-        self.state.reset_required.load(Ordering::Acquire)
+        self.reset_required.load(Ordering::Acquire)
     }
 
     pub fn is_blocked(&self) -> bool {
@@ -48,11 +60,16 @@ impl D3d9Loss {
     }
 
     pub fn clear_reset_required(&self) {
-        self.state.reset_required.store(false, Ordering::Release);
+        self.reset_required.store(false, Ordering::Release);
     }
 
     pub fn reason(&self) -> Option<String> {
-        self.state.reason.lock().ok().and_then(|slot| slot.clone())
+        self.physical
+            .state
+            .reason
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 
     pub fn physical_message(&self) -> String {
@@ -60,6 +77,23 @@ impl D3d9Loss {
             .reason()
             .unwrap_or_else(|| "reason unknown".to_string());
         format!("the physical wgpu device was lost ({reason})")
+    }
+}
+
+impl PhysicalLoss {
+    pub(crate) fn same_context(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
+    pub fn mark(&self, reason: String) {
+        if let Ok(mut slot) = self.state.reason.lock() {
+            *slot = Some(reason);
+        }
+        self.state.lost.store(true, Ordering::Release);
+    }
+
+    pub fn is_lost(&self) -> bool {
+        self.state.lost.load(Ordering::Acquire)
     }
 }
 
@@ -135,7 +169,7 @@ struct Submitter {
 }
 
 impl Submitter {
-    fn new(queue: wgpu::Queue) -> Self {
+    fn new(queue: wgpu::Queue, physical: PhysicalLoss) -> Self {
         let (jobs, received) = mpsc::channel::<SubmitJob>();
         let (returned, belts) = mpsc::channel();
         let thread = std::thread::Builder::new()
@@ -144,8 +178,10 @@ impl Submitter {
                 for job in received {
                     match job {
                         SubmitJob::Frame(encoder, mut staging) => {
-                            queue.submit([encoder.finish()]);
-                            staging.recall();
+                            if !physical.is_lost() {
+                                queue.submit([encoder.finish()]);
+                                staging.recall();
+                            }
                             let _ = returned.send(staging);
                         }
                         SubmitJob::After(work) => work(&queue),
@@ -187,8 +223,9 @@ impl Drop for Submitter {
     }
 }
 
-struct PendingWork {
+pub(crate) struct PendingWork {
     device: wgpu::Device,
+    physical: PhysicalLoss,
     encoder: Option<wgpu::CommandEncoder>,
     staging: wgpu::util::StagingBelt,
     clear: Option<PendingClear>,
@@ -208,6 +245,10 @@ fn frame_encoder<'a>(
 }
 
 impl PendingWork {
+    pub(crate) fn synchronize(&mut self) {
+        self.submit();
+        self.submitter.sync();
+    }
     fn apply_clear(&mut self) {
         if let Some(clear) = self.clear.take() {
             clear.record(frame_encoder(&self.device, &mut self.encoder));
@@ -215,6 +256,11 @@ impl PendingWork {
     }
 
     fn submit(&mut self) {
+        if self.physical.is_lost() {
+            self.clear = None;
+            self.encoder = None;
+            return;
+        }
         self.apply_clear();
         let Some(encoder) = self.encoder.take() else {
             return;
@@ -238,6 +284,9 @@ impl Drop for PendingWork {
 pub struct D3d9Gpu {
     pub device: wgpu::Device,
     pub(crate) backend: wgpu::Backend,
+    pub(crate) shader_mode: Option<String>,
+    pub(crate) shader_mode_error: Option<String>,
+    pub(crate) tint: bool,
     pub(crate) interpreter:
         Arc<std::sync::OnceLock<crate::render::interpreter::PreparedInterpreter>>,
     queue: wgpu::Queue,
@@ -252,6 +301,9 @@ impl Clone for D3d9Gpu {
         Self {
             device: self.device.clone(),
             backend: self.backend,
+            shader_mode: self.shader_mode.clone(),
+            shader_mode_error: self.shader_mode_error.clone(),
+            tint: self.tint,
             interpreter: Arc::clone(&self.interpreter),
             queue: self.queue.clone(),
             pending: Arc::clone(&self.pending),
@@ -263,23 +315,34 @@ impl Clone for D3d9Gpu {
 }
 
 impl D3d9Gpu {
-    pub fn from_context(gpu: &GpuContext) -> Self {
-        Self::from_context_with_loss(gpu, D3d9Loss::default())
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        self.loss.physical.same_context(&other.loss.physical)
+            && Arc::ptr_eq(&self.loss.reset_required, &other.loss.reset_required)
     }
 
-    pub fn from_context_with_loss(gpu: &GpuContext, loss: D3d9Loss) -> Self {
+    pub fn from_context(gpu: &GpuContext) -> Self {
+        Self::from_context_with_loss(gpu, D3d9Loss::from_physical(gpu.physical_loss()))
+    }
+
+    pub(crate) fn from_context_with_loss(gpu: &GpuContext, loss: D3d9Loss) -> Self {
         Self {
             device: gpu.device.clone(),
             backend: gpu.adapter_info.backend,
+            shader_mode: None,
+            shader_mode_error: None,
+            tint: false,
             interpreter: Arc::new(std::sync::OnceLock::new()),
             queue: gpu.queue.clone(),
-            pending: Arc::new(Mutex::new(PendingWork {
-                device: gpu.device.clone(),
-                encoder: None,
-                staging: wgpu::util::StagingBelt::new(gpu.device.clone(), STAGING_CHUNK),
-                clear: None,
-                submitter: Submitter::new(gpu.queue.clone()),
-                flush_pending: Arc::new(AtomicBool::new(false)),
+            pending: Arc::clone(gpu.d3d9_pending.get_or_init(|| {
+                Arc::new(Mutex::new(PendingWork {
+                    device: gpu.device.clone(),
+                    physical: gpu.physical_loss(),
+                    encoder: None,
+                    staging: wgpu::util::StagingBelt::new(gpu.device.clone(), STAGING_CHUNK),
+                    clear: None,
+                    submitter: Submitter::new(gpu.queue.clone(), gpu.physical_loss()),
+                    flush_pending: Arc::new(AtomicBool::new(false)),
+                }))
             })),
             loss,
             mipgen: Arc::new(Mutex::new(MipGenState::default())),
@@ -320,9 +383,14 @@ impl D3d9Gpu {
             return;
         }
         let flush_pending = Arc::clone(&pending.flush_pending);
+        let physical = self.loss.physical_loss();
         pending
             .submitter
             .send(SubmitJob::After(Box::new(move |queue| {
+                if physical.is_lost() {
+                    flush_pending.store(false, Ordering::Release);
+                    return;
+                }
                 queue.submit(std::iter::empty());
                 queue.on_submitted_work_done(move || {
                     flush_pending.store(false, Ordering::Release);

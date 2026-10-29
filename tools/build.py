@@ -829,6 +829,10 @@ def parse_args(argv, system=None):
                              "calibrated once to fill it. Zero runs correctness/size only")
     parser.add_argument("--corpus-trials", type=int, default=9)
     parser.add_argument("--target", choices=sorted(TARGETS), default="app")
+    parser.add_argument("--renderer-cargo-target", default="", metavar="TRIPLE",
+                        help="Explicit native Cargo target triple for the renderer")
+    parser.add_argument("--renderer-consumer", choices=("build", "run", "gpu-build", "gpu-run", "probe-build"),
+                        help="Build or run a renderer consumer, or build the headless probe without windowing")
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 2, 8))
     parser.add_argument("--translation-piece-mb", type=int,
                         help="Generated C source MB per macOS translation dylib (CMake default: 160)")
@@ -895,6 +899,14 @@ def parse_args(argv, system=None):
     if args.stub and (args.config == "Debug" or args.regenerate):
         parser.error("--stub cannot be combined with --config Debug or --regenerate")
     game_config.resolve_game_args(args)
+    if args.renderer_consumer:
+        if args.jobs < 1:
+            parser.error("--jobs must be at least 1")
+        if any((args.regenerate, args.regen_function, args.stub, args.diff_harness,
+                args.translator_harness, args.function_corpus, args.stack_return_report,
+                args.produce_analysis_facts, args.target != "app", args.config != "Release")):
+            parser.error("--renderer-consumer is an isolated Release build mode")
+        return args, parser
     if not (args.game_dir / "game.toml").is_file():
         parser.error("No game config at %s/game.toml" % args.game_dir)
     if args.target == "plugins" and not (args.game_dir / "mods/CMakeLists.txt").is_file():
@@ -941,6 +953,28 @@ def regenerate_selection(value, cfg, parser):
 def main():
     """Check inputs, translate under the build lock when needed, then configure and build."""
     args, parser = parse_args(sys.argv[1:])
+    if args.renderer_consumer:
+        from build_d3d8_wgpu import native_target_args
+        try:
+            target_args = native_target_args(args.renderer_cargo_target)
+        except ValueError as error:
+            parser.error(str(error))
+        target_dir = args.build_root / "d3d8-wgpu/rust"
+        probe = args.renderer_consumer == "probe-build"
+        binary = "probe-headless" if probe else ("d3d9-gpu-consumer" if args.renderer_consumer.startswith("gpu-") else "d3d9-cpu-consumer")
+        package = "d3d8-wgpu" if probe else "d3d9-cpu-consumer"
+        features = ["--no-default-features", "--features", "probe"] if probe else []
+        with buildlock.BuildLock(args.build_root.parent, "tools/build.py --renderer-consumer"):
+            subprocess.run(["cargo", "build", "--release", "--locked", "--jobs", str(args.jobs), "-p", package,
+                            "--bin", binary,
+                            "--manifest-path", str(ROOT / "graphics/d3d8-wgpu/Cargo.toml"),
+                            "--target-dir", str(target_dir), *target_args, *features], check=True)
+            if args.renderer_consumer in ("run", "gpu-run"):
+                output_dir = target_dir / args.renderer_cargo_target if args.renderer_cargo_target else target_dir
+                if os.name == "nt":
+                    binary += ".exe"
+                subprocess.run([str(output_dir / "release" / binary)], check=True)
+        return
     if not args.function_corpus and not args.translator_harness:
         status = subprocess.call([sys.executable, str(ROOT / "tools/check_flag_state.py")])
         if status:
@@ -996,6 +1030,7 @@ def main():
     preset = preset_name(args.preset, args.config, stub=args.stub, target=args.target)
     build_dir = build_dir_for(args.build_root, preset)
     defines = game_defines(args.game_dir, args.build_root) + [
+        "-DRECOMP_RENDERER_CARGO_TARGET=" + args.renderer_cargo_target,
         "-DRECOMP_CHECK_CALL_FACTS=" + ("ON" if args.check_call_facts else "OFF"),
         "-DRECOMP_OBSERVE=" + ("OFF" if args.no_observe else "ON")]
     if args.translation_piece_mb is not None:

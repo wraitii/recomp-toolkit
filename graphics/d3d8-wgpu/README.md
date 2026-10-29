@@ -27,6 +27,37 @@ into existing batch storage before later state changes.
 - `reference/` is gitignored local material (Wine's D3D8 headers); the pinned copy the
   generators use is `third_party/wine-d3d8/`.
 
+## Independent D3D9 consumer
+
+The ordinary Rust slice starts with `D3d9Device::new_owned(&request)` or
+`D3d9Device::new_supplied(&request, context)`, then wraps the device in
+`d3d9::api::Device`. Its buffer handles support creation, lock/update, binding,
+draw, CPU image readback, reset and release. The same device API also supports
+2D texture creation, mip descriptors, rectangle locks and sampling. See
+`consumer/src/bin/d3d9-gpu-consumer.rs`
+for both constructors and `tools/build.py --renderer-consumer gpu-build` or
+`gpu-run` to build or run it. The CPU-only consumer uses `build` or `run`.
+
+For a supplied context, construct `GpuContext::from_supplied` with an adapter,
+device and queue from the same wgpu version. The caller guarantees their
+provenance, handles device loss and coordinates external queue submissions.
+Share the same `Arc<GpuContext>` among renderer clients sharing that device;
+forward the owner's device-loss callback to `context.physical_loss()` and
+provide a replacement context before resetting affected clients. Readback images
+own their bytes and report their format and alpha interpretation.
+
+`present_gpu_image` returns a retained snapshot and its context. Its copy is
+submitted in queue order but may not be GPU-complete. Use `texture_for` with the
+same context, retain the lease through submission of reads, and do not mutate or
+destroy the exported texture. Serialize external queue submissions with renderer
+work. A lost context makes the lease unavailable; a replacement context cannot
+use an image from the old context. The kit's native presenter does not yet consume
+this lease.
+
+Adapting the lease to the native presenter requires completion-owned retention
+and a cancellation path when the GPU is lost before readiness. The current
+native event and busy-slot handoff does not provide that cancellation contract.
+
 ## Status
 
 Fixed-function DotProduct3 evaluates signed RGB components, saturates the
@@ -71,6 +102,13 @@ pixels in guest memory in D3D byte order; writable UnlockRect uploads only the
 locked rectangle in queue order after prior draws. Read-only locks preserve
 GPU contents, and Reset rejects an outstanding backbuffer lock. The bridge
 supports READONLY and NOSYSLOCK flags for these locks.
+
+Reset stages resources and validates them before its ready step. Before ready,
+failure leaves the installed resources and device state in place; it may mark
+the device as requiring reset, and the caller may abort. After ready, the caller
+must commit every staged resource and finish; abort is rejected.
+That commit succeeds even if physical loss occurs concurrently. The loss remains
+reported by subsequent GPU operations and requires context recovery.
 
 The renderer boundary is a CXX bridge. Rust owns typed device, resource and
 storage state; C++ retains guest COM dispatch, memory validation and HRESULT

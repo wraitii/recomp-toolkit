@@ -1,4 +1,4 @@
-use super::gpu::D3d9Gpu;
+use super::gpu::{D3d9Gpu, PhysicalLoss};
 use crate::RenderError;
 use crate::backend::OffscreenTarget;
 use crate::bridge::FrameHandoff;
@@ -9,7 +9,7 @@ use crate::backend::native_present::{
 };
 
 pub(crate) struct PresentRing {
-    device: wgpu::Device,
+    context: PhysicalLoss,
     ready_event: ReadyEvent,
     ready_value: u64,
     textures: Vec<wgpu::Texture>,
@@ -84,7 +84,7 @@ fn prepare_handoff(
     target: &OffscreenTarget,
 ) -> Result<FrameHandoff, RenderError> {
     let recreate = slot.as_ref().is_none_or(|ring| {
-        ring.device != gpu.device
+        !ring.context.same_context(&gpu.loss().physical_loss())
             || ring.textures[0].width() != target.width
             || ring.textures[0].height() != target.height
             || ring.textures[0].format() != target.format
@@ -96,7 +96,7 @@ fn prepare_handoff(
             }
         }
         *slot = Some(PresentRing {
-            device: gpu.device.clone(),
+            context: gpu.loss().physical_loss(),
             ready_event: create_ready_event(&gpu.device)?,
             ready_value: 0,
             textures: (0..3)

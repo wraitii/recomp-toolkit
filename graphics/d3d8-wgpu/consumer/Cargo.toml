@@ -1,0 +1,10 @@
+[package]
+name = "d3d9-cpu-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+d3d8-wgpu = { path = "..", default-features = false }
+pollster.workspace = true
+wgpu.workspace = true

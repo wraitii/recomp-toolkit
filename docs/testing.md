@@ -7,10 +7,15 @@
 | `tools/test.py --translator` | Synthetic assembly cases translated and compared with Unicorn | No |
 | `tools/test.py --mods` | Mod loader, hooks and replay against the translated archive | Yes |
 | `tools/test.py --d3d8-wgpu test\|probe` | Rust D3D8 renderer tests or offscreen probe | Yes, plus a GPU |
+| `tools/build.py --renderer-consumer build\|run` | Build, or build and run, the independent D3D9 CPU buffer consumer | No |
+| `tools/build.py --renderer-consumer gpu-build\|gpu-run` | Build, or build and run, the independent D3D9 offscreen GPU consumer | No game; GPU to run |
+| `tools/build.py --renderer-consumer probe-build` | Compile the headless renderer probe without windowing; no execution | No |
 | `tools/format.py` | Native code formatting | No |
 
 CTest labels: `nogame`, `game`, `gpu`, `device`, `mods`. Run a subset with
 `ctest --test-dir <build root>/cmake/macos -L nogame` or `-R dx_tests`.
+The D3D9 CPU consumer disables the renderer's windowing and probe features;
+the renderer still builds its CXX bridge.
 
 Push and pull-request CI requires portable tooling and macOS stub builds, including
 the game-free native and GPU suites. Native Windows and Linux jobs are optional;

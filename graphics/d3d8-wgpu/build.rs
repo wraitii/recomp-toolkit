@@ -153,6 +153,14 @@ fn main() {
         println!("cargo:rerun-if-changed={input}");
         fingerprint(&root.join(input), &root, &mut hash);
     }
+    let mut features: Vec<_> = std::env::vars_os()
+        .filter_map(|(key, _)| key.into_string().ok())
+        .filter(|key| key.starts_with("CARGO_FEATURE_"))
+        .collect();
+    features.sort();
+    for byte in features.join("\0").bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    }
     println!(
         "cargo:rustc-env=RECOMP_RENDERER_BUILD={hash:016x}-{}-{}",
         std::env::var("TARGET").unwrap(),

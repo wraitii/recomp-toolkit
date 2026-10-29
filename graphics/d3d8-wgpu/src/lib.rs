@@ -21,6 +21,7 @@ pub(crate) mod bridge_translate;
 pub mod d3d8;
 pub mod d3d9;
 pub(crate) mod fast_map;
+#[cfg(feature = "probe")]
 pub mod probe;
 pub(crate) mod render;
 pub(crate) mod shader;

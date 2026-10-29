@@ -24,17 +24,17 @@ pub(super) fn enabled(gpu: &D3d9Gpu) -> bool {
     mode(gpu).is_ok_and(|m| m != Mode::Specialized)
 }
 
-pub(super) fn tint_enabled() -> bool {
-    static TINT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TINT.get_or_init(|| std::env::var("RECOMP_D3D9_UBER_TINT").is_ok_and(|value| value == "1"))
+pub(super) fn tint_enabled(gpu: &D3d9Gpu) -> bool {
+    gpu.tint
 }
 
 fn mode(gpu: &D3d9Gpu) -> Result<Mode, RenderError> {
-    static MODE: std::sync::OnceLock<Result<Option<Mode>, RenderError>> =
-        std::sync::OnceLock::new();
-    MODE.get_or_init(|| match std::env::var("RECOMP_D3D9_SHADER_MODE") {
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Ok(value) => match value.as_str() {
+    if let Some(error) = &gpu.shader_mode_error {
+        return Err(unsupported("InterpreterMode", error.clone()));
+    }
+    match gpu.shader_mode.as_deref() {
+        None => Ok(None),
+        Some(value) => match value {
             "specialized" => Ok(Some(Mode::Specialized)),
             "compare-family11" => Ok(Some(Mode::CompareFamily11)),
             "hybrid" => Ok(Some(Mode::Hybrid)),
@@ -44,9 +44,7 @@ fn mode(gpu: &D3d9Gpu) -> Result<Mode, RenderError> {
                 format!("unknown mode {value:?}"),
             )),
         },
-        Err(error) => Err(unsupported("InterpreterMode", error.to_string())),
-    })
-    .clone()
+    }
     .map(|mode| {
         mode.unwrap_or(if gpu.backend == wgpu::Backend::Metal {
             Mode::Hybrid
@@ -89,13 +87,13 @@ pub(crate) fn prepare(gpu: &D3d9Gpu) -> Result<(), RenderError> {
         gpu.backend,
         prepared.families.len(),
         started.elapsed().as_secs_f64() * 1000.0,
-        tint_enabled()
+        tint_enabled(gpu)
     );
     if trace_compilation() {
         eprintln!(
             "[d3d9-uber] prepare mode={mode:?} abi={} tint={} modules=1 pipelines={} ms={:.3} source_bytes={} program_bytes={} limits={:?}",
             program::ABI_VERSION,
-            tint_enabled(),
+            tint_enabled(gpu),
             prepared.families.len(),
             started.elapsed().as_secs_f64() * 1000.0,
             prepared.source.len(),

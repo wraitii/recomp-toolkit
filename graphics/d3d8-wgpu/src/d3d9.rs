@@ -22,9 +22,10 @@ use crate::d3d9::resource::StagedStorage;
 use crate::fast_map::FastMap;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
+pub mod api;
 pub mod copy;
 pub mod d3dx;
 pub mod d3dx_effect;
@@ -59,25 +60,6 @@ fn trace_draw_limit() -> u32 {
 }
 pub use d3dx_math::*;
 pub use d3dx_shader::*;
-
-static LIVE_DEVICES: AtomicUsize = AtomicUsize::new(0);
-
-struct DeviceReservation;
-
-impl DeviceReservation {
-    fn acquire() -> Result<Self, ()> {
-        LIVE_DEVICES
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| Self)
-            .map_err(|_| ())
-    }
-}
-
-impl Drop for DeviceReservation {
-    fn drop(&mut self) {
-        LIVE_DEVICES.fetch_sub(1, Ordering::AcqRel);
-    }
-}
 
 const D3DDEVTYPE_HAL: u32 = 1;
 const D3DDEVTYPE_REF: u32 = 2;
@@ -305,7 +287,7 @@ struct CachedBinding {
 }
 
 struct RestorePlan {
-    gpu: Option<GpuContext>,
+    gpu: Option<Arc<GpuContext>>,
     d3d9_gpu: D3d9Gpu,
     loss: Arc<D3d9Loss>,
     targets: ImplicitTargets,
@@ -332,10 +314,151 @@ struct D3d9Probe {
     features: wgpu::Features,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PresentParams {
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub count: u32,
+    pub multisample_type: u32,
+    pub multisample_quality: u32,
+    pub swap_effect: u32,
+    pub windowed: u32,
+    pub enable_auto_depth_stencil: u32,
+    pub auto_depth_stencil_format: u32,
+    pub flags: u32,
+    pub fullscreen_refresh_rate: u32,
+    pub presentation_interval: u32,
+}
+
+impl From<PresentParams> for D3d9PresentParams {
+    fn from(value: PresentParams) -> Self {
+        Self {
+            width: value.width,
+            height: value.height,
+            format: value.format,
+            count: value.count,
+            multisample_type: value.multisample_type,
+            multisample_quality: value.multisample_quality,
+            swap_effect: value.swap_effect,
+            windowed: value.windowed,
+            enable_auto_depth_stencil: value.enable_auto_depth_stencil,
+            auto_depth_stencil_format: value.auto_depth_stencil_format,
+            flags: value.flags,
+            fullscreen_refresh_rate: value.fullscreen_refresh_rate,
+            presentation_interval: value.presentation_interval,
+        }
+    }
+}
+
+impl From<D3d9PresentParams> for PresentParams {
+    fn from(value: D3d9PresentParams) -> Self {
+        Self {
+            width: value.width,
+            height: value.height,
+            format: value.format,
+            count: value.count,
+            multisample_type: value.multisample_type,
+            multisample_quality: value.multisample_quality,
+            swap_effect: value.swap_effect,
+            windowed: value.windowed,
+            enable_auto_depth_stencil: value.enable_auto_depth_stencil,
+            auto_depth_stencil_format: value.auto_depth_stencil_format,
+            flags: value.flags,
+            fullscreen_refresh_rate: value.fullscreen_refresh_rate,
+            presentation_interval: value.presentation_interval,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DisplayMode {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_rate: u32,
+    pub format: u32,
+}
+
+impl From<DisplayMode> for D3d9DisplayMode {
+    fn from(value: DisplayMode) -> Self {
+        Self {
+            width: value.width,
+            height: value.height,
+            refresh_rate: value.refresh_rate,
+            format: value.format,
+        }
+    }
+}
+
+impl From<D3d9DisplayMode> for DisplayMode {
+    fn from(value: D3d9DisplayMode) -> Self {
+        Self {
+            width: value.width,
+            height: value.height,
+            refresh_rate: value.refresh_rate,
+            format: value.format,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceRequest {
+    pub adapter: u32,
+    pub device_type: u32,
+    pub behavior_flags: u32,
+    pub present: PresentParams,
+    pub display_mode: DisplayMode,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DeviceConfig {
+    pub shader_mode: Option<String>,
+    pub shader_mode_error: Option<String>,
+    pub tint: bool,
+}
+
+impl DeviceConfig {
+    fn from_environment() -> Self {
+        let (shader_mode, shader_mode_error) = match std::env::var("RECOMP_D3D9_SHADER_MODE") {
+            Ok(value) => (Some(value), None),
+            Err(std::env::VarError::NotPresent) => (None, None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        Self {
+            shader_mode,
+            shader_mode_error,
+            tint: std::env::var("RECOMP_D3D9_UBER_TINT").is_ok_and(|value| value == "1"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceCreateErrorKind {
+    InvalidArgument,
+    Unsupported,
+    Backend,
+    OutOfMemory,
+    InvalidData,
+}
+
+#[derive(Debug)]
+pub struct DeviceCreateError {
+    pub kind: DeviceCreateErrorKind,
+    pub message: String,
+    pub present: PresentParams,
+}
+
+impl core::fmt::Display for DeviceCreateError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DeviceCreateError {}
+
 pub struct D3d9Device {
-    gpu: Option<GpuContext>,
+    gpu: Option<Arc<GpuContext>>,
     d3d9_gpu: Option<D3d9Gpu>,
-    reservation: Option<DeviceReservation>,
     adapter: u32,
     device_type: u32,
     behavior_flags: u32,
@@ -346,7 +469,8 @@ pub struct D3d9Device {
     resources: FastMap<u32, ResourceRegistration>,
     features: wgpu::Features,
     limits: wgpu::Limits,
-    replacement: Option<(GpuContext, Arc<D3d9Loss>)>,
+    replacement: Option<(Arc<GpuContext>, Arc<D3d9Loss>)>,
+    supplied_context: bool,
     restore: Option<RestorePlan>,
     state: state::D3d9State,
     objects: shader::D3d9Objects,
@@ -366,7 +490,79 @@ pub struct D3d9Device {
     implicit_depthbuffer_id: u32,
 }
 
+impl Drop for D3d9Device {
+    fn drop(&mut self) {
+        if let Some(gpu) = &self.d3d9_gpu {
+            if !gpu.is_physical() {
+                gpu.submit_pending();
+            }
+        }
+    }
+}
+
 impl D3d9Device {
+    pub fn new_owned(request: &DeviceRequest) -> Result<(Self, PresentParams), DeviceCreateError> {
+        Self::new_owned_configured(request, &DeviceConfig::default())
+    }
+
+    pub fn new_owned_configured(
+        request: &DeviceRequest,
+        config: &DeviceConfig,
+    ) -> Result<(Self, PresentParams), DeviceCreateError> {
+        let mut device = Self::default();
+        let present = create_device(&mut device, request, None, config)?;
+        Ok((device, present))
+    }
+
+    pub fn new_supplied(
+        request: &DeviceRequest,
+        context: Arc<GpuContext>,
+    ) -> Result<(Self, PresentParams), DeviceCreateError> {
+        Self::new_supplied_configured(request, context, &DeviceConfig::default())
+    }
+
+    pub fn new_supplied_configured(
+        request: &DeviceRequest,
+        context: Arc<GpuContext>,
+        config: &DeviceConfig,
+    ) -> Result<(Self, PresentParams), DeviceCreateError> {
+        let mut device = Self::default();
+        let present = create_device(&mut device, request, Some(context), config)?;
+        Ok((device, present))
+    }
+
+    pub fn supply_replacement(&mut self, context: Arc<GpuContext>) -> Result<(), RenderError> {
+        if !self.supplied_context || self.gpu.is_none() {
+            return Err(RenderError::invalid(
+                "ReplaceContext",
+                "device does not use a supplied context",
+            ));
+        }
+        if self.restore.is_some() {
+            return Err(RenderError::invalid(
+                "ReplaceContext",
+                "reset is in progress",
+            ));
+        }
+        if context.physical_loss().is_lost() {
+            return Err(RenderError::invalid(
+                "ReplaceContext",
+                "replacement context is lost",
+            ));
+        }
+        if !context.device.features().contains(self.features)
+            || !self.limits.check_limits(&context.device.limits())
+        {
+            return Err(RenderError::invalid(
+                "ReplaceContext",
+                "replacement context has incompatible capabilities",
+            ));
+        }
+        let loss = Arc::new(D3d9Loss::from_physical(context.physical_loss()));
+        self.replacement = Some((context, loss));
+        Ok(())
+    }
+
     fn resource_gpu(&self) -> Result<&D3d9Gpu, RenderError> {
         self.d3d9_gpu
             .as_ref()
@@ -476,272 +672,93 @@ pub fn d3d9_buffer_descriptor(resource: &D3d9Resource) -> D3d9BufferDescriptorRe
     }
 }
 
-fn lock_fail(code: StatusCode, message: impl Into<String>) -> D3d9BufferLockResult {
-    D3d9BufferLockResult {
-        status: status(code, message),
-        offset: 0,
-        size: 0,
-        total: 0,
+fn buffer_lock_request(request: &D3d9BufferLockRequest) -> resource::BufferLockRequest {
+    resource::BufferLockRequest {
+        offset: request.offset,
+        size: request.size,
+        flags: request.flags,
     }
 }
 
-fn validate_buffer_lock(
-    resource: &D3d9Resource,
-    request: &D3d9BufferLockRequest,
-) -> Result<(u32, u32, u32), D3d9BufferLockResult> {
-    let Some(resource::ResourceState::Buffer(b)) = resource.state.as_ref() else {
-        return Err(lock_fail(
-            StatusCode::InvalidArgument,
-            "D3D9 buffer is not initialized",
-        ));
-    };
-    let unknown = request.flags & !resource::D3DLOCK_KNOWN;
-    if unknown != 0 {
-        return Err(lock_fail(
-            StatusCode::InvalidArgument,
-            format!("unknown D3DLOCK flag(s) {unknown:#x}"),
-        ));
+fn buffer_lock_result(
+    result: Result<resource::BufferLockRange, RenderError>,
+) -> D3d9BufferLockResult {
+    match result {
+        Ok(range) => D3d9BufferLockResult {
+            status: status(StatusCode::Ok, ""),
+            offset: range.offset,
+            size: range.size,
+            total: range.total,
+        },
+        Err(error) => D3d9BufferLockResult {
+            status: buffer_status(Err(error)),
+            offset: 0,
+            size: 0,
+            total: 0,
+        },
     }
-    if request.flags & resource::D3DLOCK_DONOTWAIT != 0 {
-        return Err(lock_fail(
-            StatusCode::InvalidArgument,
-            "D3DLOCK_DONOTWAIT is invalid for vertex and index buffers",
-        ));
-    }
-    if request.flags & resource::D3DLOCK_READONLY != 0
-        && request.flags & resource::D3DLOCK_DISCARD != 0
-    {
-        return Err(lock_fail(
-            StatusCode::InvalidArgument,
-            "D3DLOCK_READONLY cannot be combined with D3DLOCK_DISCARD",
-        ));
-    }
-    if b.usage & resource::D3DUSAGE_WRITEONLY != 0
-        && request.flags & resource::D3DLOCK_READONLY != 0
-    {
-        return Err(lock_fail(
-            StatusCode::InvalidArgument,
-            "D3DUSAGE_WRITEONLY buffers cannot be locked D3DLOCK_READONLY",
-        ));
-    }
-    if b.size == 0 {
-        return Err(lock_fail(
-            StatusCode::Unsupported,
-            "zero-length D3D9 buffer locks are not implemented",
-        ));
-    }
-    let total = b.size;
-    if request.offset > total {
-        return Err(lock_fail(
-            StatusCode::InvalidArgument,
-            "D3D9 buffer lock offset is past the end",
-        ));
-    }
-    let size = if request.size == 0 {
-        total - request.offset
-    } else {
-        request.size
-    };
-    if size > total - request.offset {
-        return Err(lock_fail(
-            StatusCode::InvalidArgument,
-            "D3D9 buffer lock range is past the end",
-        ));
-    }
-    Ok((request.offset, size, total))
 }
 
 pub fn d3d9_buffer_lock_prepare(
     resource: &mut D3d9Resource,
     request: &D3d9BufferLockRequest,
 ) -> D3d9BufferLockResult {
-    let (offset, size, total) = match validate_buffer_lock(resource, request) {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    D3d9BufferLockResult {
-        status: status(StatusCode::Ok, ""),
-        offset,
-        size,
-        total,
-    }
+    buffer_lock_result(resource.prepare_buffer_lock(&buffer_lock_request(request)))
 }
 
 pub fn d3d9_buffer_lock_commit(
     resource: &mut D3d9Resource,
     request: &D3d9BufferLockRequest,
 ) -> D3d9BufferLockResult {
-    let (offset, size, total) = match validate_buffer_lock(resource, request) {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    let Some(resource::ResourceState::Buffer(b)) = resource.state.as_mut() else {
-        return lock_fail(
-            StatusCode::InvalidArgument,
-            "D3D9 buffer is not initialized",
-        );
-    };
-    let count = match b.lock_count.load(Ordering::Acquire).checked_add(1) {
-        Some(count) => count,
-        None => return lock_fail(StatusCode::OutOfMemory, "D3D9 buffer lock count overflow"),
-    };
-    let writable = request.flags & resource::D3DLOCK_READONLY == 0;
-    if writable && b.writable.try_reserve(1).is_err() {
-        return lock_fail(
-            StatusCode::OutOfMemory,
-            "D3D9 buffer lock record allocation failed",
-        );
-    }
-    b.lock_count.store(count, Ordering::Release);
-    if writable {
-        if request.flags & resource::D3DLOCK_NO_DIRTY_UPDATE == 0 {
-            b.writable_dirty = true;
-        }
-        b.writable.push((offset, offset.saturating_add(size)));
-    }
-    if trace_enabled() {
-        static COUNT: AtomicU32 = AtomicU32::new(0);
-        if COUNT.fetch_add(1, Ordering::Relaxed) < 128 {
-            eprintln!(
-                "[d3d9-trace] buffer_lock resource={:p} pool={} format={} usage={} offset={} size={} flags={:#x}",
-                b as *const resource::BufferState,
-                b.pool,
-                b.format,
-                b.usage,
-                offset,
-                size,
-                request.flags
-            );
+    let result = resource.commit_buffer_lock(&buffer_lock_request(request));
+    if let (Ok(range), Some(resource::ResourceState::Buffer(b))) =
+        (&result, resource.state.as_ref())
+    {
+        if trace_enabled() {
+            static COUNT: AtomicU32 = AtomicU32::new(0);
+            if COUNT.fetch_add(1, Ordering::Relaxed) < 128 {
+                eprintln!(
+                    "[d3d9-trace] buffer_lock resource={:p} pool={} format={} usage={} offset={} size={} flags={:#x}",
+                    b as *const resource::BufferState,
+                    b.pool,
+                    b.format,
+                    b.usage,
+                    range.offset,
+                    range.size,
+                    request.flags
+                );
+            }
         }
     }
-    D3d9BufferLockResult {
-        status: status(StatusCode::Ok, ""),
-        offset,
-        size,
-        total,
-    }
+    buffer_lock_result(result)
 }
 
 pub fn d3d9_buffer_bytes(resource: &D3d9Resource) -> &[u8] {
-    match resource.state.as_ref() {
-        Some(resource::ResourceState::Buffer(b)) => &b.bytes,
-        _ => &[],
-    }
-}
-
-fn merge_staged_writes(b: &mut resource::BufferState, bytes: &[u8], default_pool: bool) {
-    let (lo, hi) = b
-        .writable
-        .iter()
-        .fold((u32::MAX, 0u32), |(lo, hi), &(a, c)| (lo.min(a), hi.max(c)));
-    let declared = (lo, hi);
-    let mut lo = lo as usize;
-    let mut hi = hi as usize;
-    if b.bytes[..lo] != bytes[..lo] {
-        lo = b.bytes[..lo]
-            .iter()
-            .zip(&bytes[..lo])
-            .position(|(old, new)| old != new)
-            .unwrap();
-    }
-    if b.bytes[hi..] != bytes[hi..] {
-        hi += b.bytes[hi..]
-            .iter()
-            .zip(&bytes[hi..])
-            .rposition(|(old, new)| old != new)
-            .unwrap()
-            + 1;
-    }
-    b.bytes[lo..hi].copy_from_slice(&bytes[lo..hi]);
-    let (lo, hi) = (lo as u32, hi as u32);
-    if (lo, hi) != declared {
-        static REPORTED: AtomicBool = AtomicBool::new(false);
-        if !REPORTED.swap(true, Ordering::Relaxed) || trace_enabled() {
-            eprintln!(
-                "[d3d9] buffer writes extend beyond lock range: kind={:?} size={} declared={}-{} preserved={lo}-{hi}; preserving mapped writes",
-                b.kind, b.size, declared.0, declared.1
-            );
-        }
-    }
-    if hi > lo {
-        if default_pool || b.writable_dirty {
-            if b.dirty_hi <= b.dirty_lo {
-                b.dirty_lo = lo;
-                b.dirty_hi = hi;
-            } else {
-                b.dirty_lo = b.dirty_lo.min(lo);
-                b.dirty_hi = b.dirty_hi.max(hi);
-            }
-        }
-        b.generation = b.generation.wrapping_add(1);
-    }
+    resource.buffer_bytes()
 }
 
 pub fn d3d9_buffer_sync_locked(resource: &mut D3d9Resource, bytes: &[u8]) -> Status {
-    let Some(resource::ResourceState::Buffer(b)) = resource.state.as_mut() else {
-        return status(StatusCode::InvalidArgument, "D3D9 buffer is not initialized");
-    };
-    if b.lock_count.load(Ordering::Acquire) == 0 || b.writable.is_empty() {
-        return status(StatusCode::Ok, "");
-    }
-    if bytes.len() != b.bytes.len() {
-        return status(
-            StatusCode::InvalidArgument,
-            "D3D9 buffer staging size does not match the buffer",
-        );
-    }
-    let default_pool = b.pool == resource::D3DPOOL_DEFAULT;
-    merge_staged_writes(b, bytes, default_pool);
-    bridge_ok(resource::upload_dirty_buffer(b))
+    buffer_status(resource.sync_locked_buffer(bytes))
 }
 
 pub fn d3d9_buffer_unlock(resource: &mut D3d9Resource, bytes: &[u8]) -> D3d9BufferUnlockResult {
-    let default_pool = matches!(
-        resource.state.as_ref(),
-        Some(resource::ResourceState::Buffer(b)) if b.pool == resource::D3DPOOL_DEFAULT
-    );
-    let Some(resource::ResourceState::Buffer(b)) = resource.state.as_mut() else {
-        return D3d9BufferUnlockResult {
-            status: status(
-                StatusCode::InvalidArgument,
-                "D3D9 buffer is not initialized",
-            ),
-            closed: false,
-        };
-    };
-    if b.lock_count.load(Ordering::Acquire) == 0 {
-        return D3d9BufferUnlockResult {
-            status: status(StatusCode::Ok, ""),
-            closed: false,
-        };
-    }
-    if bytes.len() != b.bytes.len() {
-        return D3d9BufferUnlockResult {
-            status: status(
-                StatusCode::InvalidArgument,
-                "D3D9 buffer unlock staging size does not match the buffer",
-            ),
-            closed: false,
-        };
-    }
-    b.lock_count.fetch_sub(1, Ordering::AcqRel);
-    let closed = b.lock_count.load(Ordering::Acquire) == 0;
-    if closed && !b.writable.is_empty() {
-        merge_staged_writes(b, bytes, default_pool);
-        b.writable.clear();
-        b.writable_dirty = false;
-    }
-    if closed {
-        if let Err(error) = resource::upload_buffer(resource) {
-            return D3d9BufferUnlockResult {
-                status: bridge_error(error),
-                closed: true,
-            };
-        }
-    }
+    let result = resource.unlock_buffer(bytes);
     D3d9BufferUnlockResult {
-        status: status(StatusCode::Ok, ""),
-        closed,
+        status: buffer_status(result.status),
+        closed: result.closed,
+    }
+}
+
+fn buffer_status(result: Result<(), RenderError>) -> Status {
+    match result {
+        Ok(()) => status(StatusCode::Ok, ""),
+        Err(error) => {
+            let mut mapped = bridge_error(error.clone());
+            if matches!(error.operation, "LockBuffer" | "UnlockBuffer") {
+                mapped.message = error.cause;
+            }
+            mapped
+        }
     }
 }
 
@@ -771,6 +788,11 @@ fn texture_kind(kind: D3d9TextureKind) -> Result<resource::TextureKind, RenderEr
             "invalid D3D9 texture kind",
         )),
     }
+}
+
+fn texture_no_autogen(resource: &D3d9Resource, usage: u32) -> bool {
+    usage & resource::D3DUSAGE_AUTOGENMIPMAP != 0
+        && !matches!(resource.state.as_ref(), Some(resource::ResourceState::Texture(t)) if t.autogen)
 }
 
 pub fn d3d9_create_texture(
@@ -809,8 +831,7 @@ pub fn d3d9_create_texture(
     };
     match resource::create_texture(&gpu, resource, &mapped) {
         Ok(()) => {
-            let no_autogen = request.usage & resource::D3DUSAGE_AUTOGENMIPMAP != 0
-                && !matches!(resource.state.as_ref(), Some(resource::ResourceState::Texture(t)) if t.autogen);
+            let no_autogen = texture_no_autogen(resource, request.usage);
             D3d9TextureCreateResult {
                 status: status(StatusCode::Ok, ""),
                 no_autogen,
@@ -1017,36 +1038,30 @@ fn lock_result_fail(error: RenderError) -> D3d9LevelLockResult {
     }
 }
 
-pub fn d3d9_level_lock_prepare(
+fn level_lock_prepare(
     resource: &mut D3d9Resource,
-    request: &D3d9LevelLockRequest,
-) -> D3d9LevelLockResult {
-    let mapped = map_lock_request(request);
-    if let Err(error) = resource::validate_level_lock(resource, &mapped) {
-        return lock_result_fail(error);
-    }
-    let gpu = match resource.gpu_handle() {
-        Ok(gpu) => gpu,
-        Err(error) => return lock_result_fail(error),
-    };
+    request: &resource::LockRequest,
+) -> Result<resource::LockResult, api::ApiError> {
+    resource::validate_level_lock(resource, request)?;
+    let gpu = resource.gpu_handle()?;
     if request.flags & resource::D3DLOCK_DONOTWAIT != 0
         && request.flags & resource::D3DLOCK_DISCARD == 0
         && !gpu.is_blocked()
         && resource::lock_would_block(resource, request.face, request.level)
     {
-        return D3d9LevelLockResult {
-            status: status(
-                StatusCode::WasStillDrawing,
-                "the surface is busy and cannot be locked without waiting",
-            ),
-            pitch: 0,
-            slice_pitch: 0,
-            offset: 0,
-            size: 0,
-            total: 0,
-        };
+        return Err(api::ApiError {
+            kind: api::ApiErrorKind::WasStillDrawing,
+            message: "the surface is busy and cannot be locked without waiting".into(),
+        });
     }
-    match resource::level_lock_prepare(&gpu, resource, &mapped) {
+    Ok(resource::level_lock_prepare(&gpu, resource, request)?)
+}
+
+pub fn d3d9_level_lock_prepare(
+    resource: &mut D3d9Resource,
+    request: &D3d9LevelLockRequest,
+) -> D3d9LevelLockResult {
+    match level_lock_prepare(resource, &map_lock_request(request)) {
         Ok(result) => D3d9LevelLockResult {
             status: status(StatusCode::Ok, ""),
             pitch: result.pitch,
@@ -1055,7 +1070,14 @@ pub fn d3d9_level_lock_prepare(
             size: result.size,
             total: result.total,
         },
-        Err(error) => lock_result_fail(error),
+        Err(error) => D3d9LevelLockResult {
+            status: status(error.kind.status_code(), error.message),
+            pitch: 0,
+            slice_pitch: 0,
+            offset: 0,
+            size: 0,
+            total: 0,
+        },
     }
 }
 
@@ -1084,49 +1106,44 @@ pub fn d3d9_level_bytes(resource: &D3d9Resource, face: u32, level: u32) -> &[u8]
     resource::level_bytes(resource, face, level).unwrap_or(&[])
 }
 
+fn level_unlock(
+    resource: &mut D3d9Resource,
+    face: u32,
+    level: u32,
+    bytes: &[u8],
+) -> (Result<(), RenderError>, bool) {
+    let closed = match resource::level_unlock(resource, face, level, bytes) {
+        Ok(closed) => closed,
+        Err(error) => return (Err(error), false),
+    };
+    if closed && (resource::is_default_pool(resource) || resource.is_managed()) {
+        if let Some(gpu) = resource.gpu_handle().ok().filter(|gpu| !gpu.is_blocked()) {
+            let result = resource::upload_level(&gpu, resource, face, level).and_then(|()| {
+                if resource::autogen_capable(resource) {
+                    resource::generate_mips(&gpu, resource)
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = result {
+                if !gpu.is_physical() {
+                    return (Err(error), true);
+                }
+            }
+        }
+    }
+    (Ok(()), closed)
+}
+
 pub fn d3d9_level_unlock(
     resource: &mut D3d9Resource,
     face: u32,
     level: u32,
     bytes: &[u8],
 ) -> D3d9BufferUnlockResult {
-    let closed = match resource::level_unlock(resource, face, level, bytes) {
-        Ok(closed) => closed,
-        Err(error) => {
-            return D3d9BufferUnlockResult {
-                status: bridge_error(error),
-                closed: false,
-            };
-        }
-    };
-    if closed && (resource::is_default_pool(resource) || resource.is_managed()) {
-        if let Some(gpu) = resource.gpu_handle().ok().filter(|gpu| !gpu.is_blocked()) {
-            if let Err(error) = resource::upload_level(&gpu, resource, face, level) {
-                return D3d9BufferUnlockResult {
-                    status: if gpu.is_physical() {
-                        status(StatusCode::Ok, "")
-                    } else {
-                        bridge_error(error)
-                    },
-                    closed: true,
-                };
-            }
-            if resource::autogen_capable(resource) {
-                if let Err(error) = resource::generate_mips(&gpu, resource) {
-                    return D3d9BufferUnlockResult {
-                        status: if gpu.is_physical() {
-                            status(StatusCode::Ok, "")
-                        } else {
-                            bridge_error(error)
-                        },
-                        closed: true,
-                    };
-                }
-            }
-        }
-    }
+    let (result, closed) = level_unlock(resource, face, level, bytes);
     D3d9BufferUnlockResult {
-        status: status(StatusCode::Ok, ""),
+        status: bridge_ok(result),
         closed,
     }
 }
@@ -1366,7 +1383,6 @@ impl Default for D3d9Device {
         Self {
             gpu: None,
             d3d9_gpu: None,
-            reservation: None,
             adapter: 0,
             device_type: 0,
             behavior_flags: 0,
@@ -1376,6 +1392,7 @@ impl Default for D3d9Device {
             features: wgpu::Features::empty(),
             limits: wgpu::Limits::default(),
             replacement: None,
+            supplied_context: false,
             restore: None,
             state: state::D3d9State::default(),
             objects: shader::D3d9Objects::default(),
@@ -1420,17 +1437,6 @@ impl Default for D3d9Device {
 
 pub fn new_d3d9_device() -> Box<D3d9Device> {
     Box::default()
-}
-
-fn fail(
-    present: &D3d9PresentParams,
-    code: StatusCode,
-    message: impl Into<String>,
-) -> D3d9CreateResult {
-    D3d9CreateResult {
-        status: status(code, message),
-        present: *present,
-    }
 }
 
 fn validate_present_params(
@@ -1695,97 +1701,168 @@ pub fn d3d9_create_device(
     device: &mut D3d9Device,
     request: &D3d9DeviceRequest,
 ) -> D3d9CreateResult {
+    let request = DeviceRequest {
+        adapter: request.adapter,
+        device_type: request.device_type,
+        behavior_flags: request.behavior_flags,
+        present: request.present.into(),
+        display_mode: request.display_mode.into(),
+    };
+    match create_owned_device(device, &request) {
+        Ok(present) => D3d9CreateResult {
+            status: status(StatusCode::Ok, ""),
+            present: present.into(),
+        },
+        Err(error) => {
+            let code = match error.kind {
+                DeviceCreateErrorKind::InvalidArgument => StatusCode::InvalidArgument,
+                DeviceCreateErrorKind::Unsupported => StatusCode::Unsupported,
+                DeviceCreateErrorKind::Backend => StatusCode::Backend,
+                DeviceCreateErrorKind::OutOfMemory => StatusCode::OutOfMemory,
+                DeviceCreateErrorKind::InvalidData => StatusCode::InvalidData,
+            };
+            D3d9CreateResult {
+                status: status(code, error.message),
+                present: error.present.into(),
+            }
+        }
+    }
+}
+
+fn create_error(
+    present: &PresentParams,
+    kind: DeviceCreateErrorKind,
+    message: impl Into<String>,
+) -> DeviceCreateError {
+    DeviceCreateError {
+        kind,
+        message: message.into(),
+        present: *present,
+    }
+}
+
+fn create_render_error(present: PresentParams, error: RenderError) -> DeviceCreateError {
+    let kind = match error.kind {
+        crate::RenderErrorKind::InvalidArgument => DeviceCreateErrorKind::InvalidArgument,
+        crate::RenderErrorKind::Unsupported => DeviceCreateErrorKind::Unsupported,
+        crate::RenderErrorKind::OutOfMemory => DeviceCreateErrorKind::OutOfMemory,
+        crate::RenderErrorKind::InvalidData => DeviceCreateErrorKind::InvalidData,
+    };
+    create_error(&present, kind, error.to_string())
+}
+
+fn create_owned_device(
+    device: &mut D3d9Device,
+    request: &DeviceRequest,
+) -> Result<PresentParams, DeviceCreateError> {
+    create_device(device, request, None, &DeviceConfig::from_environment())
+}
+
+fn create_device(
+    device: &mut D3d9Device,
+    request: &DeviceRequest,
+    supplied: Option<Arc<GpuContext>>,
+    config: &DeviceConfig,
+) -> Result<PresentParams, DeviceCreateError> {
     if device.gpu.is_some() {
-        return fail(
+        return Err(create_error(
             &request.present,
-            StatusCode::InvalidArgument,
+            DeviceCreateErrorKind::InvalidArgument,
             "D3D9 device is already initialized",
-        );
+        ));
     }
     if request.adapter != 0 {
-        return fail(
+        return Err(create_error(
             &request.present,
-            StatusCode::InvalidArgument,
+            DeviceCreateErrorKind::InvalidArgument,
             format!(
                 "adapter {} does not exist; only adapter 0 is available",
                 request.adapter
             ),
-        );
+        ));
     }
     if request.device_type != D3DDEVTYPE_HAL {
-        return fail(
+        return Err(create_error(
             &request.present,
-            StatusCode::Unsupported,
+            DeviceCreateErrorKind::Unsupported,
             format!(
                 "D3DDEVTYPE {} is not implemented; only D3DDEVTYPE_HAL",
                 request.device_type
             ),
-        );
+        ));
     }
     let unknown = request.behavior_flags & !D3DCREATE_KNOWN;
     if unknown != 0 {
-        return fail(
+        return Err(create_error(
             &request.present,
-            StatusCode::InvalidArgument,
+            DeviceCreateErrorKind::InvalidArgument,
             format!("unknown D3DCREATE flag(s) {unknown:#x}"),
-        );
+        ));
     }
     let vertex_processing = request.behavior_flags & D3DCREATE_VERTEXPROCESSING;
     if vertex_processing == 0 || vertex_processing.count_ones() != 1 {
-        return fail(
+        return Err(create_error(
             &request.present,
-            StatusCode::InvalidArgument,
+            DeviceCreateErrorKind::InvalidArgument,
             "exactly one vertex processing D3DCREATE flag is required",
-        );
+        ));
     }
     let extra = request.behavior_flags & !D3DCREATE_IMPLEMENTED;
     if extra != 0 {
-        return fail(
+        return Err(create_error(
             &request.present,
-            StatusCode::Unsupported,
+            DeviceCreateErrorKind::Unsupported,
             format!("D3DCREATE flag(s) {extra:#x} are not implemented"),
-        );
+        ));
     }
-    let present = match validate_present_params(&request.present, &request.display_mode) {
-        Ok(present) => present,
-        Err(error) => return fail_status(&request.present, bridge_error(error)),
-    };
-    let reservation = match DeviceReservation::acquire() {
-        Ok(reservation) => reservation,
-        Err(()) => {
-            return fail_status(
-                &present,
-                status(
-                    StatusCode::Unsupported,
-                    "more than one D3D9 device is not implemented",
-                ),
-            );
+    let bridge_present: D3d9PresentParams = request.present.into();
+    let bridge_display: D3d9DisplayMode = request.display_mode.into();
+    let present = validate_present_params(&bridge_present, &bridge_display)
+        .map_err(|error| create_render_error(request.present, error))?;
+    let normalized = present.into();
+    let is_supplied = supplied.is_some();
+    let (gpu, loss) = match supplied {
+        Some(gpu) => {
+            let loss = Arc::new(D3d9Loss::from_physical(gpu.physical_loss()));
+            (gpu, loss)
+        }
+        None => {
+            let gpu = pollster::block_on(GpuContext::new_headless_d3d9()).map_err(|error| {
+                create_error(
+                    &normalized,
+                    DeviceCreateErrorKind::Backend,
+                    error.to_string(),
+                )
+            })?;
+            let loss = Arc::new(D3d9Loss::from_physical(gpu.physical_loss()));
+            attach_loss(&gpu, &loss);
+            (Arc::new(gpu), loss)
         }
     };
-    let gpu = match pollster::block_on(GpuContext::new_headless_d3d9()) {
-        Ok(gpu) => gpu,
-        Err(error) => return fail_status(&present, status(StatusCode::Backend, error.to_string())),
-    };
-    let loss = Arc::new(D3d9Loss::default());
-    attach_loss(&gpu, &loss);
-    let targets = match create_targets(&gpu, &present) {
-        Ok(targets) => targets,
-        Err(error) => return fail_status(&present, bridge_error(error)),
-    };
+    if loss.is_blocked() {
+        return Err(create_error(
+            &normalized,
+            DeviceCreateErrorKind::Backend,
+            "supplied device is lost",
+        ));
+    }
+    let targets =
+        create_targets(&gpu, &present).map_err(|error| create_render_error(normalized, error))?;
     device.features = gpu.device.features();
     device.limits = gpu.device.limits();
-    let d3d9_gpu = D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone());
-    if let Err(error) = draw::uber::prepare(&d3d9_gpu) {
-        return fail_status(&present, bridge_error(error));
-    }
+    let mut d3d9_gpu = D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone());
+    d3d9_gpu.shader_mode = config.shader_mode.clone();
+    d3d9_gpu.shader_mode_error = config.shader_mode_error.clone();
+    d3d9_gpu.tint = config.tint;
+    draw::uber::prepare(&d3d9_gpu).map_err(|error| create_render_error(normalized, error))?;
     device.d3d9_gpu = Some(d3d9_gpu);
     device.gpu = Some(gpu);
-    device.reservation = Some(reservation);
+    device.supplied_context = is_supplied;
     device.adapter = request.adapter;
     device.device_type = request.device_type;
     device.behavior_flags = request.behavior_flags;
     device.present = present;
-    device.display_mode = request.display_mode;
+    device.display_mode = bridge_display;
     device.state.set_target_size(present.width, present.height);
     if present.enable_auto_depth_stencil != 0 {
         device.depth_target_id = u32::MAX;
@@ -1794,13 +1871,18 @@ pub fn d3d9_create_device(
     device.loss = Some(loss);
     device.targets = Some(targets);
     device.registry_epoch += 1;
-    D3d9CreateResult {
-        status: status(StatusCode::Ok, ""),
-        present,
-    }
+    Ok(normalized)
 }
 
 pub fn d3d9_register_resource(device: &mut D3d9Device, id: u32, resource: &D3d9Resource) -> Status {
+    if !matches!((device.d3d9_gpu.as_ref(), resource.gpu.as_ref()),
+        (Some(device_gpu), Some(resource_gpu)) if device_gpu.same_owner(resource_gpu))
+    {
+        return status(
+            StatusCode::InvalidArgument,
+            "resource belongs to a different device",
+        );
+    }
     let Some(pool) = resource.pool() else {
         return status(
             StatusCode::Unsupported,
@@ -2107,6 +2189,9 @@ fn replacement_ready(device: &mut D3d9Device) -> Result<(), String> {
         }
     }
     device.replacement = None;
+    if device.supplied_context {
+        return Err("the supplied context owner must replace the device".to_string());
+    }
     let gpu =
         pollster::block_on(GpuContext::new_headless_d3d9()).map_err(|error| error.to_string())?;
     if !gpu.device.features().contains(device.features)
@@ -2117,13 +2202,13 @@ fn replacement_ready(device: &mut D3d9Device) -> Result<(), String> {
                 .to_string(),
         );
     }
-    let loss = Arc::new(D3d9Loss::default());
+    let loss = Arc::new(D3d9Loss::from_physical(gpu.physical_loss()));
     attach_loss(&gpu, &loss);
     poll_device(&gpu).map_err(|error| error.message)?;
     if loss.is_physical() {
         return Err("replacement device was lost during creation".to_string());
     }
-    device.replacement = Some((gpu, loss));
+    device.replacement = Some((Arc::new(gpu), loss));
     Ok(())
 }
 
@@ -2154,11 +2239,15 @@ pub fn d3d9_reset(device: &mut D3d9Device, request: &D3d9ResetRequest) -> D3d9Re
     if let Ok(gpu) = bridge_gpu(device) {
         gpu.submit_pending();
     }
-    if let Err(error) = poll_device(device.gpu.as_ref().expect("device is initialized")) {
-        if let Some(loss) = device.loss.as_ref() {
-            loss.mark_reset_required();
+    if !device.loss.as_ref().is_some_and(|loss| loss.is_physical()) {
+        if let Err(error) = poll_device(device.gpu.as_ref().expect("device is initialized")) {
+            if !device.loss.as_ref().is_some_and(|loss| loss.is_physical()) {
+                if let Some(loss) = device.loss.as_ref() {
+                    loss.mark_reset_required();
+                }
+                return reset_fail(request.present, error);
+            }
         }
-        return reset_fail(request.present, error);
     }
     let physical = device.loss.as_ref().is_some_and(|loss| loss.is_physical());
     let present = match reset_validation(device, request) {
@@ -2196,7 +2285,12 @@ pub fn d3d9_reset(device: &mut D3d9Device, request: &D3d9ResetRequest) -> D3d9Re
                 return reset_fail(present, status(StatusCode::DeviceLost, error.to_string()));
             }
         };
-        let d3d9_gpu = D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone());
+        let mut d3d9_gpu = D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone());
+        if let Some(previous) = device.d3d9_gpu.as_ref() {
+            d3d9_gpu.shader_mode = previous.shader_mode.clone();
+            d3d9_gpu.shader_mode_error = previous.shader_mode_error.clone();
+            d3d9_gpu.tint = previous.tint;
+        }
         if let Err(error) = draw::uber::prepare(&d3d9_gpu) {
             device.replacement = Some((gpu, loss));
             return reset_fail(present, bridge_error(error));
@@ -2401,7 +2495,6 @@ pub fn d3d9_finish_reset(device: &mut D3d9Device) -> D3d9ResetResult {
         plan.expected.len(),
         "D3D9 reset finish invariant: reset is not fully committed"
     );
-    let lost = plan.loss.is_physical();
     device.targets = Some(plan.targets);
     device.registry = plan.registry;
     device.registry_epoch += 1;
@@ -2437,21 +2530,20 @@ pub fn d3d9_finish_reset(device: &mut D3d9Device) -> D3d9ResetResult {
     } else {
         plan.loss.clear_reset_required();
     }
-    let status = if lost {
-        status(
-            StatusCode::DeviceLost,
-            "replacement device was lost before completion",
-        )
-    } else {
-        status(StatusCode::Ok, "")
-    };
+    // After ready, commit is infallible; physical loss remains visible to later operations.
     D3d9ResetResult {
-        status,
+        status: status(StatusCode::Ok, ""),
         present: plan.present,
     }
 }
 
 pub fn d3d9_abort_reset(device: &mut D3d9Device) -> Status {
+    if device.restore.as_ref().is_some_and(|plan| plan.ready) {
+        return status(
+            StatusCode::InvalidArgument,
+            "Reset cannot be aborted after commit is ready",
+        );
+    }
     device.restore = None;
     device.replacement = None;
     status(StatusCode::Ok, "")
@@ -2603,37 +2695,60 @@ fn commit_presented(device: &mut D3d9Device) {
     }
 }
 
-fn read_presented(device: &D3d9Device, target: &OffscreenTarget) -> D3d9FrameResult {
-    let Some(gpu) = device.gpu.as_ref() else {
-        return frame_fail(status(
-            StatusCode::InvalidArgument,
-            "D3D9 device is not initialized",
-        ));
-    };
+fn read_presented(
+    device: &D3d9Device,
+    target: &OffscreenTarget,
+) -> Result<api::Image, api::ApiError> {
+    let gpu = device.gpu.as_ref().ok_or_else(|| api::ApiError {
+        kind: api::ApiErrorKind::InvalidArgument,
+        message: "D3D9 device is not initialized".into(),
+    })?;
     let width = target.width;
     let height = target.height;
     let mut bytes = Vec::new();
     let len = (width as usize)
         .saturating_mul(height as usize)
         .saturating_mul(4);
-    if bytes.try_reserve_exact(len).is_err() {
-        return frame_fail(status(
-            StatusCode::OutOfMemory,
-            "present readback allocation failed",
-        ));
-    }
+    bytes.try_reserve_exact(len).map_err(|_| api::ApiError {
+        kind: api::ApiErrorKind::OutOfMemory,
+        message: "present readback allocation failed".into(),
+    })?;
     bytes.resize(len, 0);
+    gpu.synchronize_d3d9();
+    if let Some(loss) = device.loss.as_ref().filter(|loss| loss.is_physical()) {
+        return Err(api::ApiError {
+            kind: api::ApiErrorKind::DeviceLost,
+            message: loss.physical_message(),
+        });
+    }
     if let Err(error) = gpu.read_pixels_into(target, &mut bytes) {
         if let Some(loss) = device.loss.as_ref().filter(|loss| loss.is_physical()) {
-            return frame_fail(status(StatusCode::DeviceLost, loss.physical_message()));
+            return Err(api::ApiError {
+                kind: api::ApiErrorKind::DeviceLost,
+                message: loss.physical_message(),
+            });
         }
-        return frame_fail(bridge_error(error));
+        return Err(error.into());
     }
-    D3d9FrameResult {
-        status: status(StatusCode::Ok, ""),
+    Ok(api::Image {
         width,
         height,
         bytes,
+        format: api::ImageFormat::Rgba8Unorm,
+        alpha: api::AlphaInterpretation::Unspecified,
+        color: api::ColorInterpretation::UnormNoTransferConversion,
+    })
+}
+
+fn bridge_frame(result: Result<api::Image, api::ApiError>) -> D3d9FrameResult {
+    match result {
+        Ok(image) => D3d9FrameResult {
+            status: status(StatusCode::Ok, ""),
+            width: image.width,
+            height: image.height,
+            bytes: image.bytes,
+        },
+        Err(error) => frame_fail(status(error.kind.status_code(), error.message)),
     }
 }
 
@@ -2682,13 +2797,99 @@ pub fn d3d9_commit_present(device: &mut D3d9Device) {
 }
 
 pub fn d3d9_present_readback(device: &D3d9Device) -> D3d9FrameResult {
-    let Some(targets) = device.targets.as_ref() else {
-        return frame_fail(status(
-            StatusCode::InvalidArgument,
-            "D3D9 device has no implicit swap chain",
-        ));
+    let result = match device.targets.as_ref() {
+        Some(targets) => read_presented(device, &targets.presented),
+        None => Err(api::ApiError {
+            kind: api::ApiErrorKind::InvalidArgument,
+            message: "D3D9 device has no implicit swap chain".into(),
+        }),
     };
-    read_presented(device, &targets.presented)
+    bridge_frame(result)
+}
+
+fn present_gpu_snapshot(
+    device: &mut D3d9Device,
+) -> Result<(Arc<GpuContext>, wgpu::Texture, u32, u32), api::ApiError> {
+    prepare_present(device, &[], &[]).map_err(api::ApiError::from)?;
+    let context = Arc::clone(device.gpu.as_ref().expect("device is initialized"));
+    let targets = device.targets.as_ref().expect("swap chain is initialized");
+    let pending = &targets.pending;
+    let gpu = device.resource_gpu()?.clone();
+    let lost_or_error = |error: RenderError| {
+        if context.physical_loss().is_lost() {
+            api::ApiError {
+                kind: api::ApiErrorKind::DeviceLost,
+                message: "image GPU context is lost".into(),
+            }
+        } else {
+            error.into()
+        }
+    };
+    let texture = gpu
+        .create_texture(
+            pending.width,
+            pending.height,
+            1,
+            1,
+            pending.format,
+            wgpu::TextureDimension::D2,
+            wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+        )
+        .map_err(&lost_or_error)?;
+    gpu.validate("PresentGpuImage", || {
+        gpu.record(|encoder, _| {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &pending.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: pending.width,
+                    height: pending.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        });
+        Ok(())
+    })
+    .map_err(&lost_or_error)?;
+    context.synchronize_d3d9();
+    if context.physical_loss().is_lost() {
+        return Err(api::ApiError {
+            kind: api::ApiErrorKind::DeviceLost,
+            message: "image GPU context is lost".into(),
+        });
+    }
+    let (width, height) = (pending.width, pending.height);
+    commit_presented(device);
+    Ok((context, texture, width, height))
+}
+
+fn present_cpu_image(
+    device: &mut D3d9Device,
+    src_rect: &[crate::bridge::D3d9Rect],
+    dst_rect: &[crate::bridge::D3d9Rect],
+) -> Result<api::Image, api::ApiError> {
+    prepare_present(device, src_rect, dst_rect).map_err(api::ApiError::from)?;
+    let target = device
+        .targets
+        .as_ref()
+        .expect("swap chain is initialized")
+        .pending
+        .clone();
+    let image = read_presented(device, &target)?;
+    commit_presented(device);
+    Ok(image)
 }
 
 pub fn d3d9_present(
@@ -2696,20 +2897,7 @@ pub fn d3d9_present(
     src_rect: &[crate::bridge::D3d9Rect],
     dst_rect: &[crate::bridge::D3d9Rect],
 ) -> D3d9FrameResult {
-    if let Err(status) = prepare_present(device, src_rect, dst_rect) {
-        return frame_fail(status);
-    }
-    let target = device
-        .targets
-        .as_ref()
-        .expect("swap chain is initialized")
-        .pending
-        .clone();
-    let result = read_presented(device, &target);
-    if result.status.code == StatusCode::Ok {
-        commit_presented(device);
-    }
-    result
+    bridge_frame(present_cpu_image(device, src_rect, dst_rect))
 }
 
 fn empty_surface_descriptor() -> D3d9SurfaceDescriptor {
@@ -3538,13 +3726,6 @@ fn reset_output_present(mut present: D3d9PresentParams) -> D3d9PresentParams {
     present
 }
 
-fn fail_status(present: &D3d9PresentParams, status: Status) -> D3d9CreateResult {
-    D3d9CreateResult {
-        status,
-        present: *present,
-    }
-}
-
 fn reset_fail(present: D3d9PresentParams, status: Status) -> D3d9ResetResult {
     D3d9ResetResult {
         status,
@@ -3880,8 +4061,8 @@ pub fn d3d9_get_clip_plane(device: &D3d9Device, index: u32) -> FloatValuesResult
     ok_floats(device.state.clip_plane(index).to_vec())
 }
 
-pub fn d3d9_set_texture(device: &mut D3d9Device, stage: u32, id: u32) -> Status {
-    if let Err(error) = validate_binding(
+fn set_texture(device: &mut D3d9Device, stage: u32, id: u32) -> Result<(), RenderError> {
+    validate_binding(
         device,
         id,
         &[
@@ -3889,10 +4070,12 @@ pub fn d3d9_set_texture(device: &mut D3d9Device, stage: u32, id: u32) -> Status 
             resource::D3DRTYPE_CUBETEXTURE,
             resource::D3DRTYPE_VOLUMETEXTURE,
         ],
-    ) {
-        return bridge_error(error);
-    }
-    bridge_ok(device.state.set_texture(stage, id))
+    )?;
+    device.state.set_texture(stage, id)
+}
+
+pub fn d3d9_set_texture(device: &mut D3d9Device, stage: u32, id: u32) -> Status {
+    bridge_ok(set_texture(device, stage, id))
 }
 
 pub fn d3d9_get_texture(device: &D3d9Device, stage: u32) -> ValueResult {
@@ -3902,6 +4085,24 @@ pub fn d3d9_get_texture(device: &D3d9Device, stage: u32) -> ValueResult {
     }
 }
 
+fn set_stream_source(
+    device: &mut D3d9Device,
+    stream: u32,
+    buffer: u32,
+    offset: u32,
+    stride: u32,
+) -> Result<(), RenderError> {
+    validate_binding(device, buffer, &[resource::D3DRTYPE_VERTEXBUFFER])?;
+    device.state.set_stream_source(
+        stream,
+        state::StreamSource {
+            buffer,
+            offset,
+            stride,
+        },
+    )
+}
+
 pub fn d3d9_set_stream_source(
     device: &mut D3d9Device,
     stream: u32,
@@ -3909,17 +4110,7 @@ pub fn d3d9_set_stream_source(
     offset: u32,
     stride: u32,
 ) -> Status {
-    if let Err(error) = validate_binding(device, buffer, &[resource::D3DRTYPE_VERTEXBUFFER]) {
-        return bridge_error(error);
-    }
-    bridge_ok(device.state.set_stream_source(
-        stream,
-        state::StreamSource {
-            buffer,
-            offset,
-            stride,
-        },
-    ))
+    bridge_ok(set_stream_source(device, stream, buffer, offset, stride))
 }
 
 pub fn d3d9_get_stream_source(device: &D3d9Device, stream: u32) -> D3d9StreamResult {
@@ -3962,12 +4153,13 @@ pub fn d3d9_get_indices(device: &D3d9Device) -> ValueResult {
     ok_value(device.state.bindings().indices)
 }
 
+fn create_fvf_declaration(device: &mut D3d9Device, fvf: u32) -> Result<u32, RenderError> {
+    let elements = shader::fvf_declaration(fvf)?;
+    device.objects.add_fvf_declaration(fvf, &elements)
+}
+
 pub fn d3d9_create_fvf_declaration(device: &mut D3d9Device, fvf: u32) -> ValueResult {
-    let elements = match shader::fvf_declaration(fvf) {
-        Ok(elements) => elements,
-        Err(error) => return err_value(error),
-    };
-    match device.objects.add_fvf_declaration(fvf, &elements) {
+    match create_fvf_declaration(device, fvf) {
         Ok(handle) => ok_value(handle),
         Err(error) => err_value(error),
     }
@@ -4931,32 +5123,51 @@ fn validate_depth_target(device: &D3d9Device, id: u32) -> Result<(), RenderError
     Ok(())
 }
 
-pub fn d3d9_begin_scene(device: &mut D3d9Device) -> Status {
+fn begin_scene(device: &mut D3d9Device) -> Result<(), RenderError> {
     if device.gpu.is_none() {
-        return status(
-            StatusCode::InvalidArgument,
+        return Err(RenderError::invalid(
+            "BeginScene",
             "D3D9 device is not initialized",
-        );
+        ));
     }
     if device.in_scene {
-        return status(StatusCode::InvalidArgument, "BeginScene is already active");
+        return Err(RenderError::invalid(
+            "BeginScene",
+            "BeginScene is already active",
+        ));
     }
-    if let Err(error) = flush_draws(device) {
-        return bridge_error(error);
-    }
+    flush_draws(device)?;
     device.in_scene = true;
-    status(StatusCode::Ok, "")
+    Ok(())
+}
+
+fn end_scene(device: &mut D3d9Device) -> Result<(), RenderError> {
+    if !device.in_scene {
+        return Err(RenderError::invalid(
+            "EndScene",
+            "EndScene without BeginScene",
+        ));
+    }
+    flush_draws(device)?;
+    device.in_scene = false;
+    Ok(())
+}
+
+pub fn d3d9_begin_scene(device: &mut D3d9Device) -> Status {
+    scene_status(begin_scene(device))
 }
 
 pub fn d3d9_end_scene(device: &mut D3d9Device) -> Status {
-    if !device.in_scene {
-        return status(StatusCode::InvalidArgument, "EndScene without BeginScene");
+    scene_status(end_scene(device))
+}
+
+fn scene_status(result: Result<(), RenderError>) -> Status {
+    match result {
+        Err(error) if matches!(error.operation, "BeginScene" | "EndScene") => {
+            status(StatusCode::InvalidArgument, error.cause)
+        }
+        result => bridge_ok(result),
     }
-    if let Err(error) = flush_draws(device) {
-        return bridge_error(error);
-    }
-    device.in_scene = false;
-    status(StatusCode::Ok, "")
 }
 
 pub fn d3d9_flush(device: &mut D3d9Device) -> Status {
@@ -5056,24 +5267,21 @@ pub fn d3d9_get_depth_stencil(device: &D3d9Device) -> ValueResult {
     }
 }
 
-pub fn d3d9_clear(
+fn clear(
     device: &mut D3d9Device,
     flags: u32,
     color: u32,
     z: f32,
     stencil: u32,
-    rects: &[crate::bridge::D3d9Rect],
-) -> Status {
-    let gpu = match device_gpu(device) {
-        Ok(gpu) => gpu,
-        Err(status) => return status,
-    };
+    rects: &[TargetRect],
+) -> Result<(), api::ApiError> {
+    let gpu = device_gpu(device).map_err(api::ApiError::from)?;
     if let Err(error) = flush_draws_with_gpu(device, &gpu) {
-        return bridge_gpu_ok(&gpu, Err(error));
+        return Err(bridge_gpu_ok(&gpu, Err(error)).into());
     }
     let target = match resolve_target_view(device, device.render_target_id, 0, 0, false) {
         Ok(view) => view,
-        Err(error) => return bridge_error(error),
+        Err(error) => return Err(error.into()),
     };
     let depth = match if device.depth_target_id == 0 {
         None
@@ -5088,7 +5296,7 @@ pub fn d3d9_clear(
     } {
         None => None,
         Some(Ok(view)) => Some(view),
-        Some(Err(error)) => return bridge_error(error),
+        Some(Err(error)) => return Err(error.into()),
     };
     let viewport = device.state.viewport();
     let mut regions = Vec::new();
@@ -5098,13 +5306,7 @@ pub fn d3d9_clear(
         }
     } else {
         for rect in rects {
-            let rect = TargetRect {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
-            };
-            if let Some(region) = clear_region(Some(rect), viewport, target.width, target.height) {
+            if let Some(region) = clear_region(Some(*rect), viewport, target.width, target.height) {
                 regions.push(region);
             }
         }
@@ -5125,31 +5327,49 @@ pub fn d3d9_clear(
     }) {
         Ok(()) => {
             mark_clear_fresh(device, flags);
-            status(StatusCode::Ok, "")
+            Ok(())
         }
-        Err(error) => bridge_error(error),
+        Err(error) => Err(error.into()),
     }
 }
 
-pub fn d3d9_draw_primitive(
+pub fn d3d9_clear(
+    device: &mut D3d9Device,
+    flags: u32,
+    color: u32,
+    z: f32,
+    stencil: u32,
+    rects: &[crate::bridge::D3d9Rect],
+) -> Status {
+    let rects: Vec<_> = rects
+        .iter()
+        .map(|rect| TargetRect {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        })
+        .collect();
+    match clear(device, flags, color, z, stencil, &rects) {
+        Ok(()) => status(StatusCode::Ok, ""),
+        Err(error) => status(error.kind.status_code(), error.message),
+    }
+}
+
+fn draw_primitive(
     device: &mut D3d9Device,
     primitive: u32,
     start_vertex: u32,
     primitive_count: u32,
-) -> Status {
+) -> Result<(), api::ApiError> {
     if !device.in_scene {
-        return status(
-            StatusCode::InvalidArgument,
-            "DrawPrimitive requires BeginScene",
-        );
+        return Err(api::ApiError {
+            kind: api::ApiErrorKind::InvalidArgument,
+            message: "DrawPrimitive requires BeginScene".into(),
+        });
     }
-    if let Err(status) = device_gpu(device) {
-        return status;
-    }
-    let streams = match collect_streams(device, &device.state) {
-        Ok(streams) => streams,
-        Err(error) => return bridge_error(error),
-    };
+    device_gpu(device).map_err(api::ApiError::from)?;
+    let streams = collect_streams(device, &device.state)?;
     let command = draw::DrawCommand {
         primitive,
         primitive_count,
@@ -5162,9 +5382,19 @@ pub fn d3d9_draw_primitive(
         num_vertices: 0,
         streams,
     };
-    match dispatch_draw(device, command) {
+    dispatch_draw(device, command)?;
+    Ok(())
+}
+
+pub fn d3d9_draw_primitive(
+    device: &mut D3d9Device,
+    primitive: u32,
+    start_vertex: u32,
+    primitive_count: u32,
+) -> Status {
+    match draw_primitive(device, primitive, start_vertex, primitive_count) {
         Ok(()) => status(StatusCode::Ok, ""),
-        Err(error) => bridge_error(error),
+        Err(error) => status(error.kind.status_code(), error.message),
     }
 }
 

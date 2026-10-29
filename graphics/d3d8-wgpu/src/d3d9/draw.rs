@@ -3249,7 +3249,7 @@ pub(crate) fn execute(
                     None => (opaque, unbound | (1 << physical)),
                 },
             );
-        parameters.interpreter_flags(opaque, unbound, uber::tint_enabled())
+        parameters.interpreter_flags(opaque, unbound, uber::tint_enabled(gpu))
     } else {
         parameters
     };

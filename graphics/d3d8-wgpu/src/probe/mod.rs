@@ -7,7 +7,9 @@ use crate::{
         resource::VertexBuffer,
     },
 };
+#[cfg(feature = "windowing")]
 use std::sync::Arc;
+#[cfg(feature = "windowing")]
 use winit::window::Window;
 
 /// One base-level texture upload. The probe only exercises level 0; mip chains
@@ -136,9 +138,15 @@ pub fn run(options: &ProbeOptions) -> Result<ProbeReport, ProbeError> {
         ));
     }
     let gpu = pollster::block_on(GpuContext::new_headless())?;
-    run_with_gpu(options, gpu, None)
+    run_with_gpu(
+        options,
+        gpu,
+        #[cfg(feature = "windowing")]
+        None,
+    )
 }
 
+#[cfg(feature = "windowing")]
 pub fn run_windowed(
     options: &ProbeOptions,
     window: Arc<Window>,
@@ -228,7 +236,7 @@ fn draw_two_stage_quad(
 fn run_with_gpu(
     options: &ProbeOptions,
     gpu: GpuContext,
-    window: Option<&Window>,
+    #[cfg(feature = "windowing")] window: Option<&Window>,
 ) -> Result<ProbeReport, ProbeError> {
     if options.width < 32 || options.height < 32 {
         return Err(ProbeError::Unsupported(
@@ -1167,6 +1175,7 @@ fn run_with_gpu(
     });
 
     if !options.headless {
+        #[cfg(feature = "windowing")]
         if let Some(window) = window {
             window.pre_present_notify();
         }
