@@ -54,9 +54,11 @@ work. A lost context makes the lease unavailable; a replacement context cannot
 use an image from the old context. The kit's native presenter does not yet consume
 this lease.
 
-Adapting the lease to the native presenter requires completion-owned retention
-and a cancellation path when the GPU is lost before readiness. The current
-native event and busy-slot handoff does not provide that cancellation contract.
+The kit's D3D7/8/9 native rings share a separate owned token retaining the slot,
+texture, event and GPU handles through rejection or host-copy completion.
+D3D9 also retains its context. Native readiness remains an asynchronous event;
+loss before signaling can stall the host queue and shutdown. Cancellation and
+direct host qualification of the owned path remain open.
 
 ## Status
 

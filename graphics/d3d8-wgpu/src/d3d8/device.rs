@@ -15,7 +15,9 @@ use super::{
     stats, survey,
     texture_cache::{TextureCache, TextureKey},
 };
-use crate::backend::native_present::{ReadyEvent, create_ready_event, signal_ready};
+use crate::backend::native_present::{
+    NativeSlot, ReadyEvent, create_ready_event, retain_slot, signal_ready,
+};
 use crate::{
     RenderError,
     backend::{GpuContext, OffscreenTarget},
@@ -1018,21 +1020,15 @@ struct FrameRing {
     ready_value: u64,
     width: u32,
     height: u32,
-    textures: Vec<wgpu::Texture>,
-    /// 1 while the host still reads the slot. Leaked: the host clears it from a
-    /// GPU completion callback that may outlive the device.
-    busy: Vec<&'static std::sync::atomic::AtomicU32>,
+    slots: Vec<std::sync::Arc<NativeSlot>>,
     next: usize,
 }
 
-/// One frame handed to the host. `texture` is a borrowed native texture
-/// (`MTLTexture*`), valid while the device lives; the host sets `*busy` to 0
-/// when it no longer reads it.
 pub struct FrameHandoff {
     pub ready_event: *mut u8,
     pub ready_value: u64,
     pub texture: *const core::ffi::c_void,
-    pub busy: &'static std::sync::atomic::AtomicU32,
+    pub lease: usize,
     pub width: u32,
     pub height: u32,
 }
@@ -2951,7 +2947,6 @@ impl Device {
     }
 
     pub fn present_surface_handoff(&self, bpp: u32) -> Result<FrameHandoff, RenderError> {
-        use std::sync::atomic::Ordering;
         if bpp != 16 && bpp != 32 {
             return Err(RenderError::invalid(
                 "present_handoff",
@@ -2965,11 +2960,7 @@ impl Device {
             .as_ref()
             .is_some_and(|r| r.width != b.width || r.height != b.height)
         {
-            // Resized: the old slots may still be read by the host.
-            let old = ring.take().unwrap();
-            for busy in &old.busy {
-                self.wait_slot(busy)?;
-            }
+            ring.take();
         }
         if ring.is_none() {
             *ring = Some(FrameRing {
@@ -2977,36 +2968,37 @@ impl Device {
                 ready_value: 0,
                 width: b.width,
                 height: b.height,
-                textures: (0..FRAME_RING_SLOTS)
+                slots: (0..FRAME_RING_SLOTS)
                     .map(|_| {
-                        self.gpu.device.create_texture(&wgpu::TextureDescriptor {
-                            label: Some("d3d8-present-ring"),
-                            size: wgpu::Extent3d {
-                                width: b.width,
-                                height: b.height,
-                                depth_or_array_layers: 1,
-                            },
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: b.format,
-                            usage: wgpu::TextureUsages::COPY_DST
-                                | wgpu::TextureUsages::TEXTURE_BINDING
-                                | wgpu::TextureUsages::STORAGE_BINDING,
-                            view_formats: &[],
+                        std::sync::Arc::new(NativeSlot {
+                            busy: std::sync::atomic::AtomicU32::new(0),
+                            texture: self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                                label: Some("d3d8-present-ring"),
+                                size: wgpu::Extent3d {
+                                    width: b.width,
+                                    height: b.height,
+                                    depth_or_array_layers: 1,
+                                },
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format: b.format,
+                                usage: wgpu::TextureUsages::COPY_DST
+                                    | wgpu::TextureUsages::TEXTURE_BINDING
+                                    | wgpu::TextureUsages::STORAGE_BINDING,
+                                view_formats: &[],
+                            }),
                         })
                     })
-                    .collect(),
-                busy: (0..FRAME_RING_SLOTS)
-                    .map(|_| &*Box::leak(Box::new(std::sync::atomic::AtomicU32::new(0))))
                     .collect(),
                 next: 0,
             });
         }
         let ring = ring.as_mut().expect("present ring is initialized");
-        let slot = ring.next;
-        let native = native_texture_ptr(&ring.textures[slot])?;
-        self.wait_slot(ring.busy[slot])?;
+        let index = ring.next;
+        let slot = std::sync::Arc::clone(&ring.slots[index]);
+        let native = native_texture_ptr(&slot.texture)?;
+        self.wait_slot(&slot.busy)?;
         let mut encoder = self
             .gpu
             .device
@@ -3014,7 +3006,7 @@ impl Device {
                 label: Some("d3d8-present-copy"),
             });
         if bpp == 16 {
-            self.encode_rgb565_handoff(&mut encoder, &b.view, &ring.textures[slot]);
+            self.encode_rgb565_handoff(&mut encoder, &b.view, &slot.texture);
         } else {
             encoder.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -3024,7 +3016,7 @@ impl Device {
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyTextureInfo {
-                    texture: &ring.textures[slot],
+                    texture: &slot.texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -3049,13 +3041,19 @@ impl Device {
             .device
             .poll(wgpu::PollType::Poll)
             .map_err(|e| RenderError::new("present_handoff::poll", e.to_string()))?;
-        ring.busy[slot].store(1, Ordering::Release);
-        ring.next = (slot + 1) % FRAME_RING_SLOTS;
+        let lease = retain_slot(
+            slot,
+            ring.ready_event.clone(),
+            &self.gpu.device,
+            &self.gpu.queue,
+            None,
+        );
+        ring.next = (index + 1) % FRAME_RING_SLOTS;
         Ok(FrameHandoff {
             ready_event,
             ready_value,
             texture: native,
-            busy: ring.busy[slot],
+            lease,
             width: b.width,
             height: b.height,
         })

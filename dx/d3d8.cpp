@@ -1278,15 +1278,16 @@ void Dev_Present(X86 *c) {
         if (!dx_dump_enabled() && !g_native_handoff_failed) {
             auto handoff = recomp::d3d::present_handoff(*dev->d3d8_device->value, 32);
             if (d3d_bridge_ok(handoff.status)) {
-                if (host_display_present_native_texture(
+                if (host_display_present_owned_texture(
                         handoff.handoff.texture, int(handoff.handoff.width),
-                        int(handoff.handoff.height), handoff.handoff.busy,
-                        handoff.handoff.ready_event, handoff.handoff.ready_value)) {
+                        int(handoff.handoff.height), handoff.handoff.ready_event,
+                        handoff.handoff.ready_value,
+                        reinterpret_cast<void *>(handoff.handoff.lease), [](void *lease) {
+                            recomp::d3d::release_present_lease(reinterpret_cast<size_t>(lease));
+                        })) {
                     com_ret(c, D8_OK);
                     return;
                 }
-                // Declined (different device or no GPU presenter): not retried.
-                __atomic_store_n(handoff.handoff.busy, 0u, __ATOMIC_RELEASE);
             }
             g_native_handoff_failed = true;
             std::string message(handoff.status.message.data(), handoff.status.message.size());

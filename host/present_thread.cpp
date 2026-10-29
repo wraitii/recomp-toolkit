@@ -1469,17 +1469,21 @@ void *host_present_prefix_begin() {
         return nullptr;
     auto fence = std::make_shared<Fence>();
     fence->done = false;
+    auto handle = std::make_unique<PrefixHandle>();
+    handle->service = s;
+    handle->fence = fence;
     std::shared_ptr<Frame> frame;
     {
         std::lock_guard lock(s->mutex);
         if (!s->writing)
             return nullptr;
         frame = s->writing;
+        handle->frame = frame;
         frame->prefix = fence;
         ++frame->pending_prefixes;
         ++s->pending_commands;
     }
-    return new PrefixHandle{s, fence, frame};
+    return handle.release();
 }
 void host_present_prefix_done(void *handle, bool success) {
     std::unique_ptr<PrefixHandle> h(static_cast<PrefixHandle *>(handle));

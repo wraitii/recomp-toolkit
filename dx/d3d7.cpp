@@ -2310,14 +2310,14 @@ bool d3d7_stage_surface(ComObj *s) {
     const auto result = recomp::d3d::present_handoff(*dev->d3d7_host->value, s->bpp);
     if (host_ok(result.status, "PresentHandoff")) {
         void *native = result.handoff.texture;
-        uint32_t *busy = result.handoff.busy;
         const uint32_t w = result.handoff.width, h = result.handoff.height;
         ddraw_external_present_begin();
-        if (host_display_stage_native_texture(native, (int)w, (int)h, busy,
-                                              result.handoff.ready_event,
-                                              result.handoff.ready_value))
+        if (host_display_stage_owned_texture(
+                native, (int)w, (int)h, result.handoff.ready_event, result.handoff.ready_value,
+                reinterpret_cast<void *>(result.handoff.lease), [](void *lease) {
+                    recomp::d3d::release_present_lease(reinterpret_cast<size_t>(lease));
+                }))
             return true;
-        __atomic_store_n(busy, 0u, __ATOMIC_RELEASE);
     }
     dev->d3d7_native_handoff_failed = true;
     log_once("d3d7.present.handoff",

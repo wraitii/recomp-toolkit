@@ -2765,7 +2765,8 @@ pub fn d3d9_present_handoff(
             .expect("swap chain is initialized")
             .pending
             .clone();
-        present::handoff(&mut device.present_ring, &gpu, &target).map_err(|error| {
+        let context = device.gpu.as_ref().expect("device is initialized");
+        present::handoff(&mut device.present_ring, &gpu, &target, context).map_err(|error| {
             if gpu.is_physical() {
                 status(StatusCode::DeviceLost, gpu.loss().physical_message())
             } else {
@@ -2784,7 +2785,7 @@ pub fn d3d9_present_handoff(
                 ready_event: std::ptr::null_mut(),
                 ready_value: 0,
                 texture: std::ptr::null_mut(),
-                busy: std::ptr::null_mut(),
+                lease: 0,
                 width: 0,
                 height: 0,
             },

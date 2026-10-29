@@ -41,16 +41,13 @@ void host_display_present_window_viewport(const uint32_t *argb, int w, int h, in
 // Synchronous RGBA snapshot. Windowed hosts force alpha opaque in caller-owned
 // scratch storage before copying it; callers must dump raw pixels beforehand.
 void host_display_present_window_rgba(uint8_t *rgba, int w, int h);
-// Present a frame that already lives on the presenter's GPU device as a native
-// texture (Metal: `MTLTexture*`), without CPU pixels. The host copies it into
-// its own frame on its queue and stores 0 to `*busy` once that copy has
-// finished and the texture may be overwritten. Returns 0, having done nothing,
-// when the host cannot take the texture (different device, CPU-only presenter);
-// the caller then falls back to `host_display_present_window_rgba`.
-int host_display_present_native_texture(void *native_texture, int w, int h, uint32_t *busy,
-                                        void *ready_event, uint64_t ready_value);
-int host_display_stage_native_texture(void *native_texture, int w, int h, uint32_t *busy,
-                                      void *ready_event, uint64_t ready_value);
+typedef void (*HostTextureRelease)(void *lease);
+// Consumes the lease; release runs on rejection or after the host copy completes.
+int host_display_stage_owned_texture(void *native_texture, int w, int h, void *ready_event,
+                                     uint64_t ready_value, void *lease, HostTextureRelease release);
+int host_display_present_owned_texture(void *native_texture, int w, int h, void *ready_event,
+                                       uint64_t ready_value, void *lease,
+                                       HostTextureRelease release);
 // Seconds to the presenter's next refresh boundary, `intervals` refreshes
 // on - when a Present with a sync interval returns. Zero on a headless
 // presenter. The caller waits in the scheduler, never in the host.

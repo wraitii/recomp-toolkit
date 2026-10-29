@@ -408,29 +408,81 @@ workloads and the other desktop backends. Native guest marshaling/HRESULT/stagin
 has not moved to Rust, so this is a G2 API family, not completion of G2.
 
 
+## P native frame ownership slice
+
+D3D7/8/9 native frames now transfer one shared opaque owned token to the host.
+It retains the ring slot, texture, readiness event and GPU device/queue until
+rejection or host copy completion; D3D9 additionally retains its context and
+submission worker. The null host also consumes rejected tokens. Completion
+releases the imported texture and token before retiring the presenter's tracked
+command. Ring replacement and teardown drop their own references without waiting
+for, or leaking, borrowed busy pointers. The old borrowed-pointer host seam and
+D3D7/8 leaked busy allocations are removed. D3D7 stages without sealing, keeping
+its layered DirectDraw flow; D3D8/9 use the owned present endpoint. D3D7's RGB565
+conversion, CPU fallback and GDI behavior remain on their existing paths.
+
+Normal pacing remains asynchronous: three reusable producer slots, one producer
+GPU copy and one host GPU copy, with the existing native readiness event. The
+new path adds a token allocation per frame, not a texture allocation. Exceptional
+host staging/registration failure drains encoded work before releasing resources.
+No comparable native latency baseline was captured. Loss before readiness can
+still leave an unsignaled wait and stall the host queue or shutdown, including
+when staging declines after encoding a wait. This is ownership progress, not
+completion of P or its cancellation contract.
+
+The RT3 app rebuilt without being launched. Existing fake presenter checks
+(311), offscreen Metal presenter checks (134), and CPU/GPU consumers pass.
+These do not directly exercise the owned native seam or its rejection,
+resize and shutdown paths. The user subsequently reported that RT3 still works
+and supplied a symbolicated Samply capture (2026-10-29 13:38), whose stacks reach
+the owned D3D8 handoff. In the stable 21.5–23.7 s 3D interval, `Dev_Present`
+accounts for approximately 14.6 ms of 1,906.9 ms sampled main-thread CPU (0.8%),
+including 7.4 ms in the Rust handoff, with no sampled ring-slot wait. This is
+normal-path evidence, not loss/shutdown qualification or a before/after latency
+comparison. Frame markers measure guest seal cadence, not display completion.
+Test-binary compilation passed with
+p-code disabled; the p-code-enabled configuration encountered unresolved symbols
+in `interp_tests`. The final RT3 app build retained p-code. No tests were added
+and no translator code changed.
+
 ## Next tranche handoff
 
-The current checkpoint is G1's useful API path, P's offscreen image lease and
-G2's 2D texture API family, with passing Metal consumer runs and user-reviewed
-RT3 integration. Full G1 qualification, G2 guest migration and P presentation
-remain open. The checkpoint includes the new API and consumer sources and both
-planning files. Build artifacts and game installations remain ignored.
+The current checkpoint includes G1's useful API path, P's offscreen lease and
+native frame ownership slice, and G2's 2D texture API family. Metal consumers pass;
+the user reviewed both the texture and owned-handoff tranches in RT3, with a
+sampled normal-path profile for the latter. Full G1 qualification, G2 guest migration and
+P presentation remain open. Build artifacts and game installations remain ignored.
 
-Next, establish the P native presenter handoff: retain an owned lease across the
-native boundary and release it exactly once on completion, rejection, frame drop
-or shutdown. Resolve loss before readiness without hanging a GPU wait or exposing
+Next, qualify the owned native handoff through the host. Resolve loss before
+readiness without hanging a GPU wait or exposing
 an invalid frame. Preserve layered sealed frames, GDI readback and CPU fallback.
 Capture the existing present workload and latency/copy baseline before switching
 paths; a blocking completion wait requires an explicit performance tradeoff.
 Acceptance needs normal presentation plus resize, retained frames, rejection,
 loss and shutdown evidence through the host, not only the offscreen consumer.
 
-In parallel, scope G2's first guest adapter operation family against explicit
+The readiness audit found that `pending_prefixes` gates retirement, not
+composition: the worker currently relies on GPU queue order. The next change
+needs a per-frame readiness gate before composition, with immutable destination,
+source lease and generation captured while holding the guest baton. Submit host
+copies only after successful producer completion, in guest staging order even
+when callbacks arrive out of order. Failure drops the frame without inventing
+readiness; frame drop and shutdown cancel unsubmitted sources, while submitted
+copies retain their leases through completion. Wake the presenter on each
+transition. Keep GDI's synchronized fetch independent and do not access guest
+memory from readiness callbacks. Replacing the native event wait alone is
+insufficient.
+
+In parallel, implement G2's first guest adapter operation family against explicit
 checked memory/allocation and native COM services. Start with buffer lifecycle
 and staging, then reuse that facade for textures; keep shared COM identity native
 and retire each replaced marshaling path after its callers switch. Do not expand
 cube/volume APIs or D3D7 surface migration before their lifetime contracts are
-established. Carry the qualification gaps above into each slice rather than
+established. The buffer inventory includes full-buffer aligned guest staging,
+nested writable locks, draw-time synchronization, retained staging budgets,
+allocation rollback and heap-reset teardown. Preserve these through the checked
+facade while native COM owns identity and recursive release. Carry the
+qualification gaps above into each slice rather than
 marking the graphics release complete from Metal or RT3 alone.
 
 Resume with `tools/build.py --renderer-consumer run`, `gpu-run` for the GPU
@@ -438,4 +490,4 @@ consumer, and `probe-build` for the no-windowing probe build when relevant chang
 justify rerunning them. Build the integration app with
 `tools/build.py --game railroad-tycoon-3 --target app --jobs 8`. Translator code
 was unchanged in this tranche; no translator regeneration or differential run is
-needed for documentation-only handoff work.
+needed for these presentation changes.

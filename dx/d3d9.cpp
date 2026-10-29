@@ -1104,16 +1104,18 @@ void Dev_Present(X86 *c) {
     if (!dx_dump_enabled() && direct && dev->d3d9_device->native_present_available) {
         auto result = dev->d3d9_device->present_handoff(srs, drs);
         if (result.status.code == recomp::d3d::StatusCode::Ok) {
-            presented = host_display_present_native_texture(
+            presented = host_display_present_owned_texture(
                 result.handoff.texture, (int)result.handoff.width, (int)result.handoff.height,
-                result.handoff.busy, result.handoff.ready_event, result.handoff.ready_value);
+                result.handoff.ready_event, result.handoff.ready_value,
+                reinterpret_cast<void *>(result.handoff.lease), [](void *lease) {
+                    recomp::d3d::release_present_lease(reinterpret_cast<size_t>(lease));
+                });
             if (presented) {
                 dev->d3d9_device->commit_present();
                 gdi_present_external(dev->id, dev->hwnd, (int)result.handoff.width,
                                      (int)result.handoff.height, fullscreen, !fullscreen,
                                      fetch_presented);
             } else {
-                __atomic_store_n(result.handoff.busy, 0u, __ATOMIC_RELEASE);
                 dev->d3d9_device->native_present_available = false;
                 LOGW("d3d9: presenter declined native texture handoff; using RGBA readback");
             }

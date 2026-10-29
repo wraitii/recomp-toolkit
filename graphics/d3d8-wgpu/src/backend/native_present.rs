@@ -68,3 +68,47 @@ pub(crate) fn signal_ready(
         "native GPU synchronization is unavailable on this backend",
     ))
 }
+
+pub(crate) struct NativeSlot {
+    pub texture: wgpu::Texture,
+    pub busy: std::sync::atomic::AtomicU32,
+}
+
+struct NativeLease {
+    slot: std::sync::Arc<NativeSlot>,
+    _event: ReadyEvent,
+    _device: wgpu::Device,
+    _queue: wgpu::Queue,
+    _context: Option<std::sync::Arc<super::GpuContext>>,
+}
+
+impl Drop for NativeLease {
+    fn drop(&mut self) {
+        self.slot
+            .busy
+            .store(0, std::sync::atomic::Ordering::Release);
+    }
+}
+
+pub(crate) fn retain_slot(
+    slot: std::sync::Arc<NativeSlot>,
+    event: ReadyEvent,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    context: Option<std::sync::Arc<super::GpuContext>>,
+) -> usize {
+    slot.busy.store(1, std::sync::atomic::Ordering::Release);
+    Box::into_raw(Box::new(NativeLease {
+        slot,
+        _event: event,
+        _device: device.clone(),
+        _queue: queue.clone(),
+        _context: context,
+    })) as usize
+}
+
+pub unsafe fn release_present_lease(lease: usize) {
+    if lease != 0 {
+        drop(unsafe { Box::from_raw(lease as *mut NativeLease) });
+    }
+}
