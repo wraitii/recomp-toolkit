@@ -231,6 +231,12 @@ uint32_t imports_alloc_trampoline(const char *dll, const char *name, void (*fn)(
     return TRAMP_BASE + TRAMP_STRIDE * idx;
 }
 
+bool imports_trampoline_slow(uint32_t target) {
+    uint32_t idx = (target - TRAMP_BASE) / TRAMP_STRIDE;
+    return !imports_is_trampoline(target) || idx >= g_tramp_count ||
+           (g_dispatch[idx].flags & kDispatchSlow);
+}
+
 // The data imports D3DPopTB.exe has. weanetr.dll exports three GUIDs (16 bytes
 // each) and options_to_parity_table (an int array; 4 KB of zeroed storage is
 // what the plan specifies). Registering more is how a later task adds its own.

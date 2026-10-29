@@ -417,8 +417,7 @@ uint32_t com_vtable_of(ComIface iface) {
 }
 
 void com_host_mismatch(const char *dll, const char *iface_name, size_t slot, const char *what) {
-    LOGW("dx: %s!%s slot %zu has a %s that differs from dx/metadata/com-methods.json", dll,
-         iface_name, slot, what);
+    LOGW("dx: %s!%s slot %zu: %s", dll, iface_name, slot, what);
     fflush(stderr);
     abort();
 }

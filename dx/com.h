@@ -680,14 +680,20 @@ uint32_t com_define_host(const char *dll, const char *iface_name, const ComHostS
     for (size_t i = 0; i < N; ++i) {
         const ComMethod &m = Methods[i];
         if (strcmp(m.name, host[i].name) != 0)
-            com_host_mismatch(dll, iface_name, i, "name");
+            com_host_mismatch(dll, iface_name, i, "name differs from dx/metadata/com-methods.json");
         if (m.argc != host[i].argc)
-            com_host_mismatch(dll, iface_name, i, "argc");
+            com_host_mismatch(dll, iface_name, i, "argc differs from dx/metadata/com-methods.json");
         bool entry = m.fn && m.fn != imports_unsupported &&
                      !(Checked && strcmp(m.name, "GetAvailableTextureMem") == 0);
         methods[i] = {m.name, m.argc, entry ? host[i].fn : m.fn};
     }
-    return com_define(Iface, dll, iface_name, methods, N);
+    uint32_t vt = com_define(Iface, dll, iface_name, methods, N);
+    for (size_t i = 0; vt && i < N; ++i)
+        if (imports_trampoline_slow(rd32(vt + 4 * (uint32_t)i)) !=
+            (!Methods[i].fn || Methods[i].fn == imports_unsupported))
+            com_host_mismatch(dll, iface_name, i,
+                              "host entry changes the trampoline's slow-path status");
+    return vt;
 }
 
 #define COM_HOST_ENTRY_(ctx, sym, slot, name, argc)                                                \

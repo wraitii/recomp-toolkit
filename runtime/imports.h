@@ -94,6 +94,10 @@ void media_foundation_register();
 // COM vtable slots inside the same trampoline range.
 uint32_t imports_alloc_trampoline(const char *dll, const char *name, void (*fn)(X86 *),
                                   uint8_t argc_stdcall);
+// Whether a trampoline takes the slow dispatch path (no handler, unsupported, or
+// unknown arity). A COM slot's handler may be a dx/com.h host entry wrapping the
+// real one, so compare handler identity only through this, never by pointer.
+bool imports_trampoline_slow(uint32_t target);
 
 // ---------------------------------------------------------------------------
 // Data imports. A few imports are variables, not functions (weanetr exports
