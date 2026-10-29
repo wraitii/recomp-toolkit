@@ -39,6 +39,7 @@ TARGETS = {
     "gen": ["recomp_gen"],
     "dispatch-tests": ["dispatch_tests"],
     "interp-tests": ["interp_tests"],
+    "d3d9-guest-tests": ["d3d9_guest_tests"],
     "plugins": ["plugins"],
     "ios": ["recomp_app"],
     "android": ["recomp_app"],

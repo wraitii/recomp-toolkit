@@ -7,6 +7,7 @@
 #include "frame_dump.h"
 #include "d3d9_constants.inc"
 #include "d3d_bridge_helpers.h"
+#include "guest_memory.h"
 #include "d3dx9shader_shim.h"
 #include "d3dx9effect_shim.h"
 #include "d3dx9tex.h"
@@ -32,9 +33,11 @@ static const uint32_t D3DERR_NOTFOUND = MAKE_D3DHRESULT(2150);
 static const uint32_t D3DERR_MOREDATA = MAKE_D3DHRESULT(2151);
 static const uint32_t D3DERR_DEVICELOST = MAKE_D3DHRESULT(2152);
 static const uint32_t D3DERR_DEVICENOTRESET = MAKE_D3DHRESULT(2153);
-static const uint32_t D3DOK_NOAUTOGEN = 0x08760000u | 2159u;
 static constexpr uint32_t D3D9_PIXEL_SHADER_FLOAT_CONSTANTS = 224;
-static constexpr uint32_t D3D9_LOCK_READONLY = 0x10u;
+static recomp::d3d::GuestBufferBudget &d3d9_buffer_budget() {
+    static auto budget = recomp::d3d::new_guest_buffer_budget();
+    return *budget;
+}
 
 static uint32_t bridge_result(X86 *c, const recomp::d3d::Status &status) {
     if (status.code == recomp::d3d::StatusCode::Ok)
@@ -52,23 +55,7 @@ static uint32_t bridge_result(X86 *c, const recomp::d3d::Status &status) {
         fflush(stderr);
         imports_unsupported(c);
     }
-    if (status.code == recomp::d3d::StatusCode::InvalidArgument)
-        return D3DERR_INVALIDCALL;
-    if (status.code == recomp::d3d::StatusCode::InvalidData)
-        return MAKE_D3DHRESULT(2905);
-    if (status.code == recomp::d3d::StatusCode::OutOfMemory)
-        return E_OUTOFMEMORY;
-    if (status.code == recomp::d3d::StatusCode::WasStillDrawing)
-        return MAKE_D3DHRESULT(540);
-    if (status.code == recomp::d3d::StatusCode::DeviceLost)
-        return D3DERR_DEVICELOST;
-    if (status.code == recomp::d3d::StatusCode::DeviceNotReset)
-        return D3DERR_DEVICENOTRESET;
-    if (status.code == recomp::d3d::StatusCode::NoAutogen)
-        return D3DOK_NOAUTOGEN;
-    if (status.code == recomp::d3d::StatusCode::NotAvailable)
-        return D3DERR_NOTAVAILABLE;
-    return D3DERR_NOTAVAILABLE;
+    return recomp::d3d::guest_status_hresult(status);
 }
 
 static void d3d9_setup_guest_fpu(X86 *c, uint32_t behavior_flags) {
@@ -293,18 +280,15 @@ static void d3d9_bind_slot(ComObj *dev, size_t slot, uint32_t id) {
         d3d9_ref_del(current);
     current = id;
 }
-// Retail D3D9 does not refuse draws from a locked buffer; the device reads
-// whatever the guest has written so far, as with a managed buffer's dirty upload.
 static bool d3d9_sync_locked_buffers(X86 *c, ComObj *dev) {
+    auto callbacks = guest_memory_callbacks();
     for (size_t slot = 16; slot <= 32; ++slot) {
         ComObj *o = com_get(dev->d3d9_device->live_bindings[slot]);
-        if (!o || !o->d3d9_resource)
+        if (!o || !o->d3d9_resource || !o->d3d9_resource->guest_buffer)
             continue;
-        auto it = o->d3d9_resource->staging.find(0);
-        if (it == o->d3d9_resource->staging.end() || !it->second.active || !it->second.writable)
-            continue;
-        recomp::d3d::Status status = o->d3d9_resource->sync_locked(
-            rust::Slice<const uint8_t>(gm_ptr(it->second.addr), it->second.size));
+        auto &resource = *o->d3d9_resource;
+        auto status = recomp::d3d::guest_buffer_sync(**resource.guest_buffer, *resource.value,
+                                                     reinterpret_cast<uintptr_t>(&callbacks));
         if (status.code != recomp::d3d::StatusCode::Ok) {
             com_ret(c, bridge_result(c, status));
             return false;
@@ -1189,20 +1173,31 @@ static uint8_t *resource_bytes(ComObj *o) {
     return o->blob.empty() ? nullptr : o->blob.data();
 }
 
-static constexpr uint64_t D3D9_RETAINED_STAGING_LIMIT = 64ull * 1024ull * 1024ull;
-static uint64_t g_d3d9_retained_staging_bytes = 0;
-
 static void d3d9_free_staging(D3d9Staging &staging) {
     if (staging.addr)
         heap_free(staging.addr);
-    if (staging.retain)
-        g_d3d9_retained_staging_bytes -= staging.size;
     staging = {};
 }
 
 static void d3d9_release_staging(D3d9HostResource *h) {
     if (!h)
         return;
+    if (h->guest_buffer) {
+        auto callbacks = guest_memory_callbacks();
+        auto status = recomp::d3d::guest_buffer_release(**h->guest_buffer, d3d9_buffer_budget(),
+                                                        reinterpret_cast<uintptr_t>(&callbacks));
+        if (status.code != recomp::d3d::StatusCode::Ok)
+            LOGW("d3d9: guest buffer release failed: %s", status.message.c_str());
+        h->guest_buffer.reset();
+    }
+    if (h->guest_texture) {
+        auto callbacks = guest_memory_callbacks();
+        auto status = recomp::d3d::guest_texture_release(**h->guest_texture,
+                                                         reinterpret_cast<uintptr_t>(&callbacks));
+        if (status.code != recomp::d3d::StatusCode::Ok)
+            LOGW("d3d9: guest texture release failed: %s", status.message.c_str());
+        h->guest_texture.reset();
+    }
     for (auto &entry : h->staging)
         d3d9_free_staging(entry.second);
     h->staging.clear();
@@ -1247,26 +1242,21 @@ static void d3d9_register_wgpu_resource(ComObj *dev, ComObj *o) {
 static void create_buffer_wgpu(X86 *c, recomp::d3d::D3d9BufferKind kind) {
     ComObj *dev = this_device9(c);
     uint32_t out = arg(c, 5);
-    if (!out || !gm_valid(out, 4)) {
-        com_ret(c, D3DERR_INVALIDCALL);
+    auto callbacks = guest_memory_callbacks();
+    bool vertex = kind == recomp::d3d::D3d9BufferKind::Vertex;
+    auto prepared = recomp::d3d::guest_buffer_prepare_create(
+        reinterpret_cast<uintptr_t>(&callbacks), out, vertex, arg(c, 1), arg(c, 2), arg(c, 3),
+        arg(c, 4), arg(c, 6) != 0);
+    if (prepared.status.code != recomp::d3d::StatusCode::Ok) {
+        com_ret(c, bridge_result(c, prepared.status));
         return;
     }
-    com_out_ptr(out, 0);
     if (!dev || !dev->d3d9_device) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
-    bool vertex = kind == recomp::d3d::D3d9BufferKind::Vertex;
-    recomp::d3d::D3d9BufferRequest request{};
-    request.kind = kind;
-    request.size = arg(c, 1);
-    request.usage = arg(c, 2);
-    request.pool = arg(c, 4);
-    request.fvf = vertex ? arg(c, 3) : 0;
-    request.format = vertex ? 100 : arg(c, 3);
-    request.shared_handle = arg(c, 6) != 0;
     auto resource = std::make_shared<D3d9HostResource>();
-    recomp::d3d::Status status = resource->create_buffer(*dev->d3d9_device, request);
+    recomp::d3d::Status status = resource->create_buffer(*dev->d3d9_device, prepared.request);
     if (status.code != recomp::d3d::StatusCode::Ok) {
         com_ret(c, bridge_result(c, status));
         return;
@@ -1289,7 +1279,13 @@ static void create_buffer_wgpu(X86 *c, recomp::d3d::D3d9BufferKind kind) {
         com_ret(c, E_OUTOFMEMORY);
         return;
     }
-    com_out_ptr(out, view);
+    status =
+        recomp::d3d::guest_publish_interface(reinterpret_cast<uintptr_t>(&callbacks), out, view);
+    if (status.code != recomp::d3d::StatusCode::Ok) {
+        com_release(buffer);
+        com_ret(c, bridge_result(c, status));
+        return;
+    }
     com_ret(c, D3D_OK9);
 }
 
@@ -1366,14 +1362,7 @@ static void create_texture_wgpu(X86 *c, recomp::d3d::D3d9TextureKind kind) {
     ComKind com_kind = K_D3D9TEXTURE;
     switch (kind) {
     case recomp::d3d::D3d9TextureKind::Texture2D:
-        request.width = arg(c, 1);
-        request.height = arg(c, 2);
-        request.levels = arg(c, 3);
-        request.usage = arg(c, 4);
-        request.format = arg(c, 5);
-        request.pool = arg(c, 6);
         out = arg(c, 7);
-        request.shared_handle = arg(c, 8) != 0;
         break;
     case recomp::d3d::D3d9TextureKind::Cube:
         request.width = request.height = arg(c, 1);
@@ -1401,11 +1390,23 @@ static void create_texture_wgpu(X86 *c, recomp::d3d::D3d9TextureKind kind) {
         break;
     }
     request.depth = request.depth ? request.depth : 1;
-    if (!out || !gm_valid(out, 4)) {
-        com_ret(c, D3DERR_INVALIDCALL);
-        return;
+    auto callbacks = guest_memory_callbacks();
+    if (kind == recomp::d3d::D3d9TextureKind::Texture2D) {
+        auto prepared = recomp::d3d::guest_texture_prepare_create(
+            reinterpret_cast<uintptr_t>(&callbacks), out, arg(c, 1), arg(c, 2), arg(c, 3),
+            arg(c, 4), arg(c, 5), arg(c, 6), arg(c, 8) != 0);
+        if (prepared.status.code != recomp::d3d::StatusCode::Ok) {
+            com_ret(c, bridge_result(c, prepared.status));
+            return;
+        }
+        request = std::move(prepared.request);
+    } else {
+        if (!out || !gm_valid(out, 4)) {
+            com_ret(c, D3DERR_INVALIDCALL);
+            return;
+        }
+        com_out_ptr(out, 0);
     }
-    com_out_ptr(out, 0);
     if (!dev || !dev->d3d9_device) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
@@ -1433,41 +1434,35 @@ static void create_texture_wgpu(X86 *c, recomp::d3d::D3d9TextureKind kind) {
         com_ret(c, E_OUTOFMEMORY);
         return;
     }
-    com_out_ptr(out, view);
+    auto status =
+        recomp::d3d::guest_publish_interface(reinterpret_cast<uintptr_t>(&callbacks), out, view);
+    if (status.code != recomp::d3d::StatusCode::Ok) {
+        com_release(tex);
+        com_ret(c, bridge_result(c, status));
+        return;
+    }
     com_ret(c, D3D_OK9);
 }
 
 static void create_surface_wgpu(X86 *c, uint32_t out_index, uint32_t usage) {
     ComObj *dev = this_device9(c);
     uint32_t out = arg(c, out_index);
-    if (!out || !gm_valid(out, 4)) {
-        com_ret(c, D3DERR_INVALIDCALL);
+    auto callbacks = guest_memory_callbacks();
+    bool offscreen = out_index == 5;
+    auto prepared = recomp::d3d::guest_surface_prepare_create(
+        reinterpret_cast<uintptr_t>(&callbacks), out, arg(c, 1), arg(c, 2), arg(c, 3), offscreen,
+        arg(c, 4), offscreen ? 0 : arg(c, 5), !offscreen && arg(c, 6) != 0, usage,
+        arg(c, offscreen ? 6 : 8) != 0);
+    if (prepared.status.code != recomp::d3d::StatusCode::Ok) {
+        com_ret(c, bridge_result(c, prepared.status));
         return;
     }
-    com_out_ptr(out, 0);
     if (!dev || !dev->d3d9_device) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
-    recomp::d3d::D3d9SurfaceRequest request{};
-    request.width = arg(c, 1);
-    request.height = arg(c, 2);
-    request.format = arg(c, 3);
-    if (out_index == 5) {
-        request.pool = arg(c, 4);
-        request.usage = 0;
-        request.shared_handle = arg(c, 6) != 0;
-    } else {
-        request.pool = 0;
-        request.usage = usage;
-        request.multisample_type = arg(c, 4);
-        request.multisample_quality = arg(c, 5);
-        request.lockable = usage == USAGE_RENDERTARGET && arg(c, 6) != 0;
-        request.discard = usage == USAGE_DEPTHSTENCIL && arg(c, 6) != 0;
-        request.shared_handle = arg(c, 8) != 0;
-    }
     auto resource = std::make_shared<D3d9HostResource>();
-    recomp::d3d::Status status = resource->create_surface(*dev->d3d9_device, request);
+    recomp::d3d::Status status = resource->create_surface(*dev->d3d9_device, prepared.request);
     if (status.code != recomp::d3d::StatusCode::Ok) {
         com_ret(c, bridge_result(c, status));
         return;
@@ -1488,7 +1483,13 @@ static void create_surface_wgpu(X86 *c, uint32_t out_index, uint32_t usage) {
         com_ret(c, E_OUTOFMEMORY);
         return;
     }
-    com_out_ptr(out, view);
+    status =
+        recomp::d3d::guest_publish_interface(reinterpret_cast<uintptr_t>(&callbacks), out, view);
+    if (status.code != recomp::d3d::StatusCode::Ok) {
+        com_release(s);
+        com_ret(c, bridge_result(c, status));
+        return;
+    }
     com_ret(c, D3D_OK9);
 }
 
@@ -4143,6 +4144,17 @@ void X_D3DX33MatrixInverse(X86 *c) {
     set_eax(c, out);
 }
 
+static bool d3d9_guest_rect_owner(const ComObj *owner) {
+    return owner && !owner->d3d9_implicit &&
+           (owner->kind == K_D3D9TEXTURE || owner->kind == K_D3D9SURFACE);
+}
+
+static recomp::d3d::GuestTexture &d3d9_guest_texture(D3d9HostResource &resource) {
+    if (!resource.guest_texture)
+        resource.guest_texture.emplace(recomp::d3d::new_guest_texture());
+    return **resource.guest_texture;
+}
+
 static void level_lock_wgpu(X86 *c, ComObj *o, uint32_t face, uint32_t level, bool volume,
                             uint32_t rect_addr, uint32_t box_addr, uint32_t flags, uint32_t out,
                             bool box_output) {
@@ -4156,6 +4168,23 @@ static void level_lock_wgpu(X86 *c, ComObj *o, uint32_t face, uint32_t level, bo
     }
     if (!owner || !owner->d3d9_resource) {
         imports_unsupported(c);
+        return;
+    }
+    if (d3d9_guest_rect_owner(owner) && !volume && !box_output) {
+        auto callbacks = guest_memory_callbacks();
+        auto prepared = recomp::d3d::guest_rect_prepare(reinterpret_cast<uintptr_t>(&callbacks),
+                                                        out, rect_addr, level, flags);
+        if (prepared.status.code != recomp::d3d::StatusCode::Ok) {
+            com_ret(c, bridge_result(c, prepared.status));
+            return;
+        }
+        if (!d3d9_flush_resource_owner(c, owner))
+            return;
+        auto &resource = *owner->d3d9_resource;
+        auto status = recomp::d3d::guest_rect_lock(d3d9_guest_texture(resource), *resource.value,
+                                                   reinterpret_cast<uintptr_t>(&callbacks),
+                                                   prepared.request, out);
+        com_ret(c, bridge_result(c, status));
         return;
     }
     if (!out || !gm_valid(out, box_output ? 12 : 8) || (rect_addr && !gm_valid(rect_addr, 16)) ||
@@ -4248,6 +4277,25 @@ static void level_unlock_wgpu(X86 *c, ComObj *o, uint32_t face, uint32_t level) 
         return;
     }
     D3d9HostResource *h = owner->d3d9_resource.get();
+    if (d3d9_guest_rect_owner(owner)) {
+        if (!h->guest_texture) {
+            com_ret(c, D3DERR_INVALIDCALL);
+            return;
+        }
+        auto callbacks = guest_memory_callbacks();
+        auto status = recomp::d3d::guest_rect_prepare_unlock(
+            **h->guest_texture, reinterpret_cast<uintptr_t>(&callbacks), level);
+        if (status.code != recomp::d3d::StatusCode::Ok) {
+            com_ret(c, bridge_result(c, status));
+            return;
+        }
+        if (!d3d9_flush_resource_owner(c, owner))
+            return;
+        status = recomp::d3d::guest_rect_unlock(**h->guest_texture, *h->value,
+                                                reinterpret_cast<uintptr_t>(&callbacks), level);
+        com_ret(c, bridge_result(c, status));
+        return;
+    }
     uint64_t key = ((uint64_t)face << 32) | level;
     auto it = h->staging.find(key);
     if (it == h->staging.end() || !it->second.addr) {
@@ -5215,108 +5263,32 @@ static void resource_preload(X86 *c) {
 
 static void buffer_lock_wgpu(X86 *c) {
     ComObj *o = com_this_arg(c);
-    uint32_t offset = arg(c, 1), size = arg(c, 2), out = arg(c, 3), flags = arg(c, 4);
-    if (!o || (o->kind != K_D3D9VB && o->kind != K_D3D9IB) || !o->d3d9_resource) {
+    if (!o || (o->kind != K_D3D9VB && o->kind != K_D3D9IB) || !o->d3d9_resource ||
+        !o->d3d9_resource->guest_buffer) {
         imports_unsupported(c);
         return;
     }
-    if (!out || !gm_valid(out, 4)) {
-        com_ret(c, D3DERR_INVALIDCALL);
-        return;
-    }
-    recomp::d3d::D3d9BufferLockRequest request{};
-    request.offset = offset;
-    request.size = size;
-    request.flags = flags;
-    recomp::d3d::D3d9BufferLockResult prepared = o->d3d9_resource->lock_prepare(request);
-    if (prepared.status.code != recomp::d3d::StatusCode::Ok) {
-        com_ret(c, bridge_result(c, prepared.status));
-        return;
-    }
-    D3d9Staging &staging = o->d3d9_resource->staging[0];
-    bool fresh = staging.addr == 0;
-    if (fresh) {
-        if (prepared.total == 0) {
-            d3d9_free_staging(staging);
-            o->d3d9_resource->staging.erase(0);
-            com_ret(c, D3DERR_INVALIDCALL);
-            return;
-        }
-        uint32_t stage = heap_alloc(prepared.total, false, 16);
-        if (!stage) {
-            d3d9_free_staging(staging);
-            o->d3d9_resource->staging.erase(0);
-            com_ret(c, E_OUTOFMEMORY);
-            return;
-        }
-        staging.addr = stage;
-        staging.size = prepared.total;
-        staging.retain =
-            prepared.total <= D3D9_RETAINED_STAGING_LIMIT - g_d3d9_retained_staging_bytes;
-        if (staging.retain)
-            g_d3d9_retained_staging_bytes += prepared.total;
-    }
-    bool starting = !staging.active;
-    if (starting && !staging.synchronized) {
-        rust::Slice<const uint8_t> bytes = o->d3d9_resource->bytes();
-        if (bytes.size() != prepared.total || staging.size != prepared.total) {
-            if (fresh) {
-                d3d9_free_staging(staging);
-                o->d3d9_resource->staging.erase(0);
-            }
-            com_ret(c, D3DERR_INVALIDCALL);
-            return;
-        }
-        memcpy(gm_ptr(staging.addr), bytes.data(), prepared.total);
-    }
-    recomp::d3d::D3d9BufferLockResult committed = o->d3d9_resource->lock_commit(request);
-    if (committed.status.code != recomp::d3d::StatusCode::Ok) {
-        if (fresh) {
-            d3d9_free_staging(staging);
-            o->d3d9_resource->staging.erase(0);
-        }
-        com_ret(c, bridge_result(c, committed.status));
-        return;
-    }
-    if (starting) {
-        staging.active = true;
-        staging.synchronized = false;
-        staging.writable = false;
-    }
-    if ((flags & D3D9_LOCK_READONLY) == 0)
-        staging.writable = true;
-    wr32(out, staging.addr + committed.offset);
-    com_ret(c, D3D_OK9);
+    auto callbacks = guest_memory_callbacks();
+    auto &resource = *o->d3d9_resource;
+    auto status = recomp::d3d::guest_buffer_lock(
+        **resource.guest_buffer, d3d9_buffer_budget(), *resource.value,
+        reinterpret_cast<uintptr_t>(&callbacks), arg(c, 1), arg(c, 2), arg(c, 3), arg(c, 4));
+    com_ret(c, bridge_result(c, status));
 }
 
 static void buffer_unlock_wgpu(X86 *c) {
     ComObj *o = com_this_arg(c);
-    if (!o || (o->kind != K_D3D9VB && o->kind != K_D3D9IB) || !o->d3d9_resource) {
+    if (!o || (o->kind != K_D3D9VB && o->kind != K_D3D9IB) || !o->d3d9_resource ||
+        !o->d3d9_resource->guest_buffer) {
         imports_unsupported(c);
         return;
     }
-    auto it = o->d3d9_resource->staging.find(0);
-    if (it == o->d3d9_resource->staging.end() || !it->second.addr) {
-        com_ret(c, D3D_OK9);
-        return;
-    }
-    rust::Slice<const uint8_t> bytes(gm_ptr(it->second.addr), it->second.size);
-    recomp::d3d::D3d9BufferUnlockResult result = o->d3d9_resource->unlock(bytes);
-    if (result.closed) {
-        it->second.active = false;
-        it->second.synchronized =
-            result.status.code == recomp::d3d::StatusCode::Ok && it->second.writable;
-        it->second.writable = false;
-        if (!it->second.retain || result.status.code != recomp::d3d::StatusCode::Ok) {
-            d3d9_free_staging(it->second);
-            o->d3d9_resource->staging.erase(it);
-        }
-    }
-    if (result.status.code != recomp::d3d::StatusCode::Ok) {
-        com_ret(c, bridge_result(c, result.status));
-        return;
-    }
-    com_ret(c, D3D_OK9);
+    auto callbacks = guest_memory_callbacks();
+    auto &resource = *o->d3d9_resource;
+    auto status =
+        recomp::d3d::guest_buffer_unlock(**resource.guest_buffer, d3d9_buffer_budget(),
+                                         *resource.value, reinterpret_cast<uintptr_t>(&callbacks));
+    com_ret(c, bridge_result(c, status));
 }
 
 void VB_Lock(X86 *c) {
@@ -5336,25 +5308,10 @@ void Buf_GetDesc(X86 *c) {
         imports_unsupported(c);
         return;
     }
-    uint32_t desc_size = o->kind == K_D3D9VB ? 24 : 20;
-    if (!d || !gm_valid(d, desc_size)) {
-        com_ret(c, D3DERR_INVALIDCALL);
-        return;
-    }
-    recomp::d3d::D3d9BufferDescriptorResult result = o->d3d9_resource->descriptor();
-    if (result.status.code != recomp::d3d::StatusCode::Ok) {
-        com_ret(c, bridge_result(c, result.status));
-        return;
-    }
-    memset(gm_ptr(d), 0, desc_size);
-    wr32(d + 0, result.descriptor.format);
-    wr32(d + 4, result.descriptor.resource_type);
-    wr32(d + 8, result.descriptor.usage);
-    wr32(d + 12, result.descriptor.pool);
-    wr32(d + 16, result.descriptor.size);
-    if (o->kind == K_D3D9VB)
-        wr32(d + 20, result.descriptor.fvf);
-    com_ret(c, D3D_OK9);
+    auto callbacks = guest_memory_callbacks();
+    auto status = recomp::d3d::guest_buffer_descriptor(
+        *o->d3d9_resource->value, reinterpret_cast<uintptr_t>(&callbacks), d, o->kind == K_D3D9VB);
+    com_ret(c, bridge_result(c, status));
 }
 
 // D3DLOCKED_RECT is { INT Pitch; void *pBits; }.
@@ -5401,6 +5358,15 @@ void Surf_GetDesc(X86 *c) {
         wr32(d + 24, result.descriptor.width);
         wr32(d + 28, result.descriptor.height);
         com_ret(c, D3D_OK9);
+        return;
+    }
+    ComObj *owner = s && s->d3d9_parent ? com_get(s->d3d9_parent) : s;
+    if (s && s->d3d9_resource && d3d9_guest_rect_owner(owner) && owner->d3d9_resource) {
+        auto callbacks = guest_memory_callbacks();
+        auto status = recomp::d3d::guest_surface_desc(
+            *owner->d3d9_resource->value, reinterpret_cast<uintptr_t>(&callbacks), d,
+            s->d3d9_parent ? s->d3d9_level : 0, owner->kind == K_D3D9TEXTURE);
+        com_ret(c, bridge_result(c, status));
         return;
     }
     if (!s || !s->d3d9_resource || !d || !gm_valid(d, 32)) {
@@ -5507,6 +5473,14 @@ void Tex_GetLevelCount(X86 *c) {
 void Tex_GetLevelDesc(X86 *c) {
     ComObj *tex = com_this_arg(c);
     uint32_t d = arg(c, 2);
+    if (tex && tex->kind == K_D3D9TEXTURE && tex->d3d9_resource) {
+        auto callbacks = guest_memory_callbacks();
+        auto status = recomp::d3d::guest_surface_desc(*tex->d3d9_resource->value,
+                                                      reinterpret_cast<uintptr_t>(&callbacks), d,
+                                                      arg(c, 1), true);
+        com_ret(c, bridge_result(c, status));
+        return;
+    }
     if (!tex || !tex->d3d9_resource || !d || !gm_valid(d, 32)) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;

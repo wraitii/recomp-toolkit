@@ -26,6 +26,7 @@ bool heap_free(uint32_t addr);
 // the start of a live allocation.
 uint32_t heap_size(uint32_t addr);
 bool heap_owns(uint32_t addr);
+uint64_t heap_generation();
 
 struct HeapStats {
     uint32_t used_blocks;

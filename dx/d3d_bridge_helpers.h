@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <utility>
@@ -449,21 +450,22 @@ struct D3dxEffectHost {
 struct D3d9Staging {
     uint32_t addr = 0;
     uint32_t size = 0;
-    bool active = false;
-    bool synchronized = false;
-    bool writable = false;
-    bool retain = false;
 };
 
 struct D3d9HostResource {
     rust::Box<recomp::d3d::D3d9Resource> value;
     std::map<uint64_t, D3d9Staging> staging;
+    std::optional<rust::Box<recomp::d3d::GuestBuffer>> guest_buffer;
+    std::optional<rust::Box<recomp::d3d::GuestTexture>> guest_texture;
 
     D3d9HostResource() : value(recomp::d3d::new_d3d9_resource()) {}
 
     recomp::d3d::Status create_buffer(const D3d9HostDevice &device,
                                       const recomp::d3d::D3d9BufferRequest &request) {
-        return recomp::d3d::d3d9_create_buffer(*device.value, *value, request);
+        auto status = recomp::d3d::d3d9_create_buffer(*device.value, *value, request);
+        if (status.code == recomp::d3d::StatusCode::Ok)
+            guest_buffer.emplace(recomp::d3d::new_guest_buffer());
+        return status;
     }
 
     recomp::d3d::D3d9TextureCreateResult
@@ -480,32 +482,6 @@ struct D3d9HostResource {
     recomp::d3d::Status create_surface(const D3d9HostDevice &device,
                                        const recomp::d3d::D3d9SurfaceRequest &request) {
         return recomp::d3d::d3d9_create_surface(*device.value, *value, request);
-    }
-
-    recomp::d3d::D3d9BufferDescriptorResult descriptor() const {
-        return recomp::d3d::d3d9_buffer_descriptor(*value);
-    }
-
-    recomp::d3d::D3d9BufferLockResult
-    lock_prepare(const recomp::d3d::D3d9BufferLockRequest &request) {
-        return recomp::d3d::d3d9_buffer_lock_prepare(*value, request);
-    }
-
-    recomp::d3d::D3d9BufferLockResult
-    lock_commit(const recomp::d3d::D3d9BufferLockRequest &request) {
-        return recomp::d3d::d3d9_buffer_lock_commit(*value, request);
-    }
-
-    rust::Slice<const uint8_t> bytes() const {
-        return recomp::d3d::d3d9_buffer_bytes(*value);
-    }
-
-    recomp::d3d::D3d9BufferUnlockResult unlock(rust::Slice<const uint8_t> bytes) {
-        return recomp::d3d::d3d9_buffer_unlock(*value, bytes);
-    }
-
-    recomp::d3d::Status sync_locked(rust::Slice<const uint8_t> bytes) {
-        return recomp::d3d::d3d9_buffer_sync_locked(*value, bytes);
     }
 
     recomp::d3d::ValueResult resource_type() const {

@@ -16,6 +16,11 @@
 #include <vector>
 
 uint8_t *g_mem = nullptr;
+static uint64_t g_heap_generation = 0;
+
+uint64_t heap_generation() {
+    return g_heap_generation;
+}
 
 // ---------------------------------------------------------------------------
 // The guest-memory watchpoint declared in x86.h. A stray write is only ever
@@ -677,6 +682,7 @@ uint8_t *reserve_arena() {
 } // namespace
 
 void mem_init() {
+    ++g_heap_generation;
     recomp_seh_reset(nullptr);
     if (g_mem) {
         os_vm_release(g_mem, GUEST_SIZE);
@@ -718,6 +724,7 @@ void recomp_arena_swap(uint8_t *other, size_t size) {
 }
 
 void mem_shutdown() {
+    ++g_heap_generation;
     recomp_seh_reset(nullptr);
     if (g_mem) {
         os_vm_release(g_mem, GUEST_SIZE);

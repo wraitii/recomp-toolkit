@@ -10,6 +10,7 @@
 | `tools/build.py --renderer-consumer build\|run` | Build, or build and run, the independent D3D9 CPU buffer consumer | No |
 | `tools/build.py --renderer-consumer gpu-build\|gpu-run` | Build, or build and run, the independent D3D9 offscreen GPU consumer | No game; GPU to run |
 | `tools/build.py --renderer-consumer probe-build` | Compile the headless renderer probe without windowing; no execution | No |
+| `tools/build.py --stub --no-pcode --target d3d9-guest-tests` | Build the headless D3D9 guest COM stub; run `d3d9_guest_tests` from the build root's `stub/recomp/` directory | No game; GPU to run |
 | `tools/format.py` | Native code formatting | No |
 
 CTest labels: `nogame`, `game`, `gpu`, `device`, `mods`. Run a subset with
@@ -29,6 +30,14 @@ constructed state fixtures, with offscreen GPU devices for render-target binding
 it does not demonstrate game rendering. It uses Rust CPU storage and mip layouts
 through CXX, including
 live locked resources across generation reset.
+`d3d9_guest_tests` (`gpu`) creates a headless guest Win32 window, calls the D3D9
+factory import and exercises device/resource methods through guest COM vtables.
+It checks offscreen drawing and textured pixel readback, nested buffer locks,
+retained-pointer writes, allocation failure/retry, descriptor store hooks,
+texture/surface aliases and live locks across heap reset. Reset rejection
+preserves a managed texture; successful Reset retains its lock, and writes after
+Reset reach a GPU sample. SDL surface presentation and game rendering remain
+outside its coverage. The stub uses the no-p-code test configuration.
 `d3d7_mipmap_tests` (`gpu`) follows DirectDraw implicit mip attachments and
 per-level locks through D3D7 texture binding and real GPU readback. It checks
 capability reporting, point/linear mip filtering, fractional LOD bias,

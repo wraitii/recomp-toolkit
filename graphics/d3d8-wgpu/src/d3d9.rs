@@ -2,8 +2,7 @@ use crate::RenderError;
 use crate::backend::{DepthAttachment, GpuContext, OffscreenTarget};
 use crate::bridge::{
     D3d9AdapterIdentifierResult, D3d9Bindings as BridgeBindings, D3d9BindingsResult,
-    D3d9BlockBindingsResult, D3d9BufferDescriptor, D3d9BufferDescriptorResult, D3d9BufferKind,
-    D3d9BufferLockRequest, D3d9BufferLockResult, D3d9BufferRequest, D3d9BufferUnlockResult,
+    D3d9BlockBindingsResult, D3d9BufferKind, D3d9BufferRequest, D3d9BufferUnlockResult,
     D3d9CapsResult, D3d9CheckDepthStencilRequest, D3d9CheckDeviceFormatRequest,
     D3d9CheckDeviceTypeRequest, D3d9CheckFormatConversionRequest, D3d9CheckMultiSampleRequest,
     D3d9CreateResult, D3d9CreationParameters, D3d9CreationParametersResult, D3d9DeclarationResult,
@@ -642,78 +641,12 @@ pub fn d3d9_create_buffer(
     bridge_ok(resource::create_buffer(&gpu, resource, &mapped))
 }
 
-pub fn d3d9_buffer_descriptor(resource: &D3d9Resource) -> D3d9BufferDescriptorResult {
-    match resource.state.as_ref() {
-        Some(resource::ResourceState::Buffer(b)) => D3d9BufferDescriptorResult {
-            status: status(StatusCode::Ok, ""),
-            descriptor: D3d9BufferDescriptor {
-                format: b.format,
-                resource_type: resource.resource_type().unwrap_or(0),
-                usage: b.usage,
-                pool: b.pool,
-                size: b.size,
-                fvf: b.fvf,
-            },
-        },
-        _ => D3d9BufferDescriptorResult {
-            status: status(
-                StatusCode::InvalidArgument,
-                "D3D9 buffer is not initialized",
-            ),
-            descriptor: D3d9BufferDescriptor {
-                format: 0,
-                resource_type: 0,
-                usage: 0,
-                pool: 0,
-                size: 0,
-                fvf: 0,
-            },
-        },
-    }
-}
-
-fn buffer_lock_request(request: &D3d9BufferLockRequest) -> resource::BufferLockRequest {
-    resource::BufferLockRequest {
-        offset: request.offset,
-        size: request.size,
-        flags: request.flags,
-    }
-}
-
-fn buffer_lock_result(
-    result: Result<resource::BufferLockRange, RenderError>,
-) -> D3d9BufferLockResult {
-    match result {
-        Ok(range) => D3d9BufferLockResult {
-            status: status(StatusCode::Ok, ""),
-            offset: range.offset,
-            size: range.size,
-            total: range.total,
-        },
-        Err(error) => D3d9BufferLockResult {
-            status: buffer_status(Err(error)),
-            offset: 0,
-            size: 0,
-            total: 0,
-        },
-    }
-}
-
-pub fn d3d9_buffer_lock_prepare(
-    resource: &mut D3d9Resource,
-    request: &D3d9BufferLockRequest,
-) -> D3d9BufferLockResult {
-    buffer_lock_result(resource.prepare_buffer_lock(&buffer_lock_request(request)))
-}
-
-pub fn d3d9_buffer_lock_commit(
-    resource: &mut D3d9Resource,
-    request: &D3d9BufferLockRequest,
-) -> D3d9BufferLockResult {
-    let result = resource.commit_buffer_lock(&buffer_lock_request(request));
-    if let (Ok(range), Some(resource::ResourceState::Buffer(b))) =
-        (&result, resource.state.as_ref())
-    {
+pub(crate) fn trace_buffer_lock(
+    resource: &D3d9Resource,
+    range: &resource::BufferLockRange,
+    flags: u32,
+) {
+    if let Some(resource::ResourceState::Buffer(b)) = resource.state.as_ref() {
         if trace_enabled() {
             static COUNT: AtomicU32 = AtomicU32::new(0);
             if COUNT.fetch_add(1, Ordering::Relaxed) < 128 {
@@ -725,39 +658,9 @@ pub fn d3d9_buffer_lock_commit(
                     b.usage,
                     range.offset,
                     range.size,
-                    request.flags
+                    flags
                 );
             }
-        }
-    }
-    buffer_lock_result(result)
-}
-
-pub fn d3d9_buffer_bytes(resource: &D3d9Resource) -> &[u8] {
-    resource.buffer_bytes()
-}
-
-pub fn d3d9_buffer_sync_locked(resource: &mut D3d9Resource, bytes: &[u8]) -> Status {
-    buffer_status(resource.sync_locked_buffer(bytes))
-}
-
-pub fn d3d9_buffer_unlock(resource: &mut D3d9Resource, bytes: &[u8]) -> D3d9BufferUnlockResult {
-    let result = resource.unlock_buffer(bytes);
-    D3d9BufferUnlockResult {
-        status: buffer_status(result.status),
-        closed: result.closed,
-    }
-}
-
-fn buffer_status(result: Result<(), RenderError>) -> Status {
-    match result {
-        Ok(()) => status(StatusCode::Ok, ""),
-        Err(error) => {
-            let mut mapped = bridge_error(error.clone());
-            if matches!(error.operation, "LockBuffer" | "UnlockBuffer") {
-                mapped.message = error.cause;
-            }
-            mapped
         }
     }
 }
@@ -1038,7 +941,7 @@ fn lock_result_fail(error: RenderError) -> D3d9LevelLockResult {
     }
 }
 
-fn level_lock_prepare(
+pub(crate) fn level_lock_prepare(
     resource: &mut D3d9Resource,
     request: &resource::LockRequest,
 ) -> Result<resource::LockResult, api::ApiError> {
@@ -1106,7 +1009,7 @@ pub fn d3d9_level_bytes(resource: &D3d9Resource, face: u32, level: u32) -> &[u8]
     resource::level_bytes(resource, face, level).unwrap_or(&[])
 }
 
-fn level_unlock(
+pub(crate) fn level_unlock(
     resource: &mut D3d9Resource,
     face: u32,
     level: u32,

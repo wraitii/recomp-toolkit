@@ -440,6 +440,16 @@ impl D3d9Resource {
         Ok(range)
     }
 
+    pub(crate) fn rollback_buffer_lock(&mut self, flags: u32, previous_dirty: bool) {
+        if let Some(ResourceState::Buffer(buffer)) = self.state.as_mut() {
+            buffer.lock_count.fetch_sub(1, Ordering::AcqRel);
+            if flags & D3DLOCK_READONLY == 0 {
+                buffer.writable.pop();
+                buffer.writable_dirty = previous_dirty;
+            }
+        }
+    }
+
     pub fn buffer_bytes(&self) -> &[u8] {
         match self.state.as_ref() {
             Some(ResourceState::Buffer(b)) => &b.bytes,
@@ -2357,6 +2367,21 @@ pub fn level_lock_commit(
         level.writable.push(resolved.region);
     }
     Ok(lock_result(&resolved))
+}
+
+pub(crate) fn rollback_level_lock(
+    resource: &mut D3d9Resource,
+    face: u32,
+    level: u32,
+    flags: u32,
+) -> Result<(), RenderError> {
+    let state = resource.level_mut(face, level)?;
+    state.lock_count.store(0, Ordering::Release);
+    if flags & D3DLOCK_READONLY == 0 {
+        state.writable.pop();
+        state.writable_dirty = false;
+    }
+    Ok(())
 }
 
 impl ResolvedLock {

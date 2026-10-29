@@ -20,6 +20,7 @@ pub(crate) mod bridge_render;
 pub(crate) mod bridge_translate;
 pub mod d3d8;
 pub mod d3d9;
+pub mod guest;
 pub(crate) mod fast_map;
 #[cfg(feature = "probe")]
 pub mod probe;

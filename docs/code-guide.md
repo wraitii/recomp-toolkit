@@ -17,6 +17,7 @@ translated locally into `build/recomp/gen/` and are never edited in place.
 | Audio streaming or gaps | [audio/mixer.cpp](../host/audio/mixer.cpp) | `ensure_engine`, `host_audio_stream`, `host_audio_queue`, `host_audio_queued_bytes` |
 | Sound evidence | [audio_capture.cpp](../host/audio_capture.cpp) | `host_capture_write`, `host_capture_stats` |
 | Original graphics API behavior | [DirectX adapters](../dx/README.md) | `Surface_Lock`, `Surface_Unlock`, `Surface_Blt`, `Surface_Flip`, `d3d_upload_texture` |
+| D3D9 guest buffer and 2D staging | [Rust guest adapter](../graphics/d3d8-wgpu/src/guest/mod.rs), [native COM dispatch](../dx/d3d9.cpp) | `guest_buffer_lock`, `guest_rect_lock`, `guest_rect_unlock`; native memory callbacks in `dx/guest_memory.h` |
 | Imports, startup, memory | [Guest runtime](../runtime/README.md) | `loader_load`, `patch_iat`, `imports_dispatch`, `heap_realloc` |
 | Mod lifecycle and hooks | [loader.cpp](../mods/loader.cpp), [hooks.cpp](../mods/hooks.cpp) | `mods_load_all`, `build_api`, `mods_hook_dispatch`, `mods_call_next` |
 | Code map and program model | [code_map.py](../tools/recomp/code_map.py), [rk-image](../translator/crates/rk-image/src/lib.rs) | `pack`, `read_map`, `Program` |

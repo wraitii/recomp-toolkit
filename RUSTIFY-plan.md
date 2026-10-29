@@ -483,11 +483,79 @@ p-code disabled; the p-code-enabled configuration encountered unresolved symbols
 in `interp_tests`. The final RT3 app build retained p-code. No tests were added
 and no translator code changed.
 
+## G2 guest buffer adapter
+
+D3D9 vertex/index buffer create arguments, output pointers, lock/unlock staging,
+descriptors and draw-time synchronization now pass through `src/guest` in the
+renderer crate. It calls the existing shared resource semantics, including nested
+locks, dirty ranges and draws while locked. Native COM retains interface identity,
+binding references, resource registration and recursive teardown. Replaced native
+buffer staging and private CXX lock/descriptor wrappers are removed.
+
+The scoped memory capability uses synchronous native callbacks, checked nonzero
+32-bit addresses and copied bytes; no guest pointer or borrow enters asynchronous
+work. Unaligned output writes use little-endian bytes. The caller holds the
+scheduler baton and must not yield, call guest code or exchange arena contents
+during an operation. Native allocation callbacks contain exceptions. Heap
+initialization/shutdown changes the allocation generation, preventing stale
+staging from freeing a reused address. Retained staging accounting also resets by
+generation, correcting the old counter surviving a guest heap reset. Arena swaps
+preserve heap metadata; they do not identify a new allocation generation, and
+adapter operations must remain outside alternate-arena execution.
+
+The adapter preserves full-buffer aligned staging and the shared 64 MiB retention
+budget. Owned scratch storage reuses capacity across synchronization calls and lies
+outside the guest retention budget. Copying guest bytes adds work relative to
+the former borrowed native slice;
+D3D9 workload performance remains to be measured. The standalone renderer
+consumers and RT3's D3D8 path do not exercise these adapters; focused guest
+qualification is recorded below.
+
+## G2 guest 2D texture/surface adapter and stub
+
+D3D9 2D texture and explicit surface creation arguments, rectangular lock/unlock
+and descriptors use the checked Rust guest adapter. Native COM resolves root
+owners and mip aliases, retains their identities/references and flushes the
+resource owner before readback or unlock. Root and surface aliases share one
+per-level staging owner. Shared lock preparation preserves DONOTWAIT and
+readback, while shared unlock preserves dirty updates, upload and autogen.
+Closed locks release staging even when upload fails. Primary failures survive
+cleanup errors, and inconsistent staging budgets return a named error. Failed output publication
+rolls back committed locks; staging records reserve fallibly before commit.
+Cube/volume operations and implicit targets retain their existing paths.
+
+Scalar guest outputs retain native `wr32` watch/dirty hooks through an explicit
+word-write callback; raw staging copies remain bulk copies. Descriptor zeroing
+and field-write coverage preserve existing behavior, including texture-owned
+surface descriptors reporting the texture resource type. This change fixes the
+initial buffer adapter's scalar outputs bypassing the hooks.
+
+At the user's request, `d3d9_guest_tests` is a small headless stub using real
+Win32 window creation, the D3D9 factory import and guest COM dispatch, including
+CreateDevice and Reset. It passes 187 checks on Metal: guest buffer draws and
+textured pixel readback, nested locks, retained writes, heap exhaustion/retry,
+descriptor store hooks, mip aliases, an offscreen surface and live locks across
+heap reset. It verifies rejected Reset preserves a managed texture, then releases
+the DEFAULT-pool blocker and resets while the texture remains locked. New writes
+after Reset reach a subsequent GPU sample. The unaligned descriptor store-hook
+assertion runs with hooks enabled. These are headless guest windows; SDL surface
+presentation and full game behavior remain unqualified.
+
+Independent CPU and Metal GPU consumers pass, and the RT3 app rebuilds with
+p-code enabled; agents did not launch it. Formatting, game-literal and diff checks
+pass. See [testing](docs/testing.md) for the stub build target. This closes the
+buffer/2D guest tranche, with native COM identity retained and no translator
+changes. Game-scale performance and persistent scratch cost, physical loss,
+injected host allocation/upload failure, stale allocation release after address
+reuse and alternate-arena execution remain open. Civ 4 is deferred until broader
+game-level evidence is needed.
+
 ## Next tranche handoff
 
 The current checkpoint includes G1's useful API path, P's offscreen lease and
-native frame ownership slice, and G2's 2D texture API family. Metal consumers pass;
-the user reviewed the texture, ownership and corrected readiness tranches in RT3.
+native frame ownership slice, G2's 2D texture API family and guest buffer/2D
+texture adapters. Metal consumers pass; the user reviewed the earlier texture,
+ownership and corrected readiness tranches in RT3.
 Ownership has a normal-path profile; corrected readiness has qualitative user
 confirmation. Full G1 qualification, G2 guest migration and P presentation remain
 open. Build artifacts and game installations remain ignored.
@@ -497,27 +565,20 @@ loss and shutdown. Compare against the
 ownership checkpoint's RT3 workload, including polling cost and displayed latency;
 guest seal cadence alone is insufficient. Existing offscreen consumer checks do
 not establish native seam cancellation behavior. Preserve layered sealed frames,
-GDI readback and CPU fallback through qualification. No new tests were requested.
+GDI readback and CPU fallback through qualification. The user subsequently
+requested the D3D9 stub recorded above.
 
-The next major implementation milestone is G2's D3D9 guest buffer adapter. Deliver
-vertex/index buffer creation, release, lock/unlock and draw-time synchronization
-through Rust guest marshaling, using checked memory/allocation and native COM
-services. First establish that narrow facade, then move buffer staging and switch
-native callers to it; reuse the facade for textures afterward. Keep shared COM
-identity native and retire replaced marshaling paths after their callers switch. Do not expand
-cube/volume APIs or D3D7 surface migration before their lifetime contracts are
-established. The buffer inventory includes full-buffer aligned guest staging,
-nested writable locks, draw-time synchronization, retained staging budgets,
-allocation rollback and heap-reset teardown. Use the shared resource semantics;
-the standalone convenience API rejects nested locks and cannot replace the guest
-contract unchanged. Preserve these through the checked
-facade while native COM owns identity and recursive release. Carry the
-qualification gaps above into each slice rather than
-marking the graphics release complete from Metal or RT3 alone.
+Next expand coherent G2 families around these adapters: resource views and
+bindings/state marshaling, followed by shaders, draw arguments and device
+lifecycle. Use the guest stub for focused qualification before a slower Civ 4
+build. Keep cube/volume and D3D7 surface expansion behind their lifetime
+contracts. Carry native readiness qualification alongside G2; Rust composition
+remains the next P implementation increment. Full G2 and the cross-platform
+graphics release are not complete.
 
 Resume with `tools/build.py --renderer-consumer run`, `gpu-run` for the GPU
 consumer, and `probe-build` for the no-windowing probe build when relevant changes
 justify rerunning them. Build the integration app with
 `tools/build.py --game railroad-tycoon-3 --target app --jobs 8`. Translator code
 was unchanged in this tranche; no translator regeneration or differential run is
-needed for these presentation changes.
+needed for these adapter changes.

@@ -90,7 +90,7 @@ impl ApiErrorKind {
         }
     }
 
-    pub(super) fn status_code(self) -> StatusCode {
+    pub(crate) fn status_code(self) -> StatusCode {
         match self {
             Self::InvalidArgument => StatusCode::InvalidArgument,
             Self::Unsupported => StatusCode::Unsupported,
