@@ -446,11 +446,13 @@ pub struct D3dxEffect {
     spare_values: Vec<f32>,
     preshader_inputs: RefCell<Vec<[f32; 4]>>,
     targets: RefCell<FastMap<u32, ParamTarget>>,
+    pub(crate) last_error: Option<Status>,
 }
 
 impl Default for D3dxEffect {
     fn default() -> Self {
         Self {
+            last_error: None,
             id: NEXT_EFFECT.fetch_add(1, Ordering::Relaxed),
             device_id: 0,
             params: Vec::new(),

@@ -50,6 +50,61 @@ struct D3dHostDevice {
     D3dHostDevice() : value(recomp::d3d::new_device()) {}
 };
 
+// Flat entry points (graphics/d3d8-wgpu/src/d3d9/flat.rs) for the hottest methods.
+// They return the StatusCode and keep a failing Status for the take_last_error calls.
+extern "C" {
+uint32_t rk_d3d9_set_render_state(recomp::d3d::D3d9Device *device, uint32_t state, uint32_t value);
+uint32_t rk_d3d9_set_texture_stage_state(recomp::d3d::D3d9Device *device, uint32_t stage,
+                                         uint32_t state, uint32_t value);
+uint32_t rk_d3d9_set_sampler_state(recomp::d3d::D3d9Device *device, uint32_t sampler,
+                                   uint32_t state, uint32_t value);
+uint32_t rk_d3d9_set_stream_source(recomp::d3d::D3d9Device *device, uint32_t stream,
+                                   uint32_t buffer, uint32_t offset, uint32_t stride);
+uint32_t rk_d3d9_set_indices(recomp::d3d::D3d9Device *device, uint32_t id);
+uint32_t rk_d3d9_set_vertex_declaration(recomp::d3d::D3d9Device *device, uint32_t handle);
+uint32_t rk_d3d9_draw_primitive(recomp::d3d::D3d9Device *device, uint32_t primitive,
+                                uint32_t start_vertex, uint32_t primitive_count);
+uint32_t rk_d3d9_draw_indexed_primitive(recomp::d3d::D3d9Device *device, uint32_t primitive,
+                                        int32_t base_vertex, uint32_t min_index,
+                                        uint32_t num_vertices, uint32_t start_index,
+                                        uint32_t primitive_count);
+uint32_t rk_d3d9_draw_primitive_up(recomp::d3d::D3d9Device *device, uint32_t primitive,
+                                   uint32_t primitive_count, const uint8_t *vertices, size_t len,
+                                   uint32_t stride);
+uint32_t rk_d3d9_query_get_data(recomp::d3d::D3d9Device *device, uint32_t handle, uint8_t *data,
+                                size_t len, uint32_t size, uint32_t flags, uint32_t *value);
+uint32_t rk_d3dx_effect_set(recomp::d3d::D3dxEffect *effect, uint32_t handle, uint32_t setter,
+                            const uint8_t *data, size_t len);
+uint32_t rk_d3dx_effect_set_texture(recomp::d3d::D3dxEffect *effect, uint32_t handle, uint32_t id,
+                                    uint32_t *old_id);
+uint32_t rk_d3dx_effect_begin(recomp::d3d::D3dxEffect *effect, recomp::d3d::D3d9Device *device,
+                              uint32_t flags, uint32_t *passes);
+uint32_t rk_d3dx_effect_end_pass(recomp::d3d::D3dxEffect *effect);
+uint32_t rk_d3dx_effect_end(recomp::d3d::D3dxEffect *effect, recomp::d3d::D3d9Device *device);
+}
+
+struct D3d9Status {
+    recomp::d3d::StatusCode code;
+    recomp::d3d::D3d9Device *device;
+
+    D3d9Status(uint32_t raw, recomp::d3d::D3d9Device &owner)
+        : code(static_cast<recomp::d3d::StatusCode>(raw)), device(&owner) {}
+    recomp::d3d::Status take() const {
+        return recomp::d3d::d3d9_take_last_error(*device);
+    }
+};
+
+struct D3dxStatus {
+    recomp::d3d::StatusCode code;
+    recomp::d3d::D3dxEffect *effect;
+
+    D3dxStatus(uint32_t raw, recomp::d3d::D3dxEffect &owner)
+        : code(static_cast<recomp::d3d::StatusCode>(raw)), effect(&owner) {}
+    recomp::d3d::Status take() const {
+        return recomp::d3d::d3dx_effect_take_last_error(*effect);
+    }
+};
+
 struct D3d9HostResource;
 
 struct D3d9HostDevice {
@@ -93,20 +148,21 @@ struct D3d9HostDevice {
                               rust::Slice<const recomp::d3d::D3d9Rect> rects) {
         return recomp::d3d::d3d9_clear(*value, flags, color, z, stencil, rects);
     }
-    recomp::d3d::Status draw_primitive(uint32_t primitive, uint32_t start_vertex,
-                                       uint32_t primitive_count) {
-        return recomp::d3d::d3d9_draw_primitive(*value, primitive, start_vertex, primitive_count);
+    D3d9Status draw_primitive(uint32_t primitive, uint32_t start_vertex, uint32_t primitive_count) {
+        return {rk_d3d9_draw_primitive(&*value, primitive, start_vertex, primitive_count), *value};
     }
-    recomp::d3d::Status draw_indexed_primitive(uint32_t primitive, int32_t base_vertex,
-                                               uint32_t min_index, uint32_t num_vertices,
-                                               uint32_t start_index, uint32_t primitive_count) {
-        return recomp::d3d::d3d9_draw_indexed_primitive(*value, primitive, base_vertex, min_index,
-                                                        num_vertices, start_index, primitive_count);
+    D3d9Status draw_indexed_primitive(uint32_t primitive, int32_t base_vertex, uint32_t min_index,
+                                      uint32_t num_vertices, uint32_t start_index,
+                                      uint32_t primitive_count) {
+        return {rk_d3d9_draw_indexed_primitive(&*value, primitive, base_vertex, min_index,
+                                               num_vertices, start_index, primitive_count),
+                *value};
     }
-    recomp::d3d::Status draw_primitive_up(uint32_t primitive, uint32_t primitive_count,
-                                          rust::Slice<const uint8_t> vertices, uint32_t stride) {
-        return recomp::d3d::d3d9_draw_primitive_up(*value, primitive, primitive_count, vertices,
-                                                   stride);
+    D3d9Status draw_primitive_up(uint32_t primitive, uint32_t primitive_count,
+                                 const uint8_t *vertices, size_t len, uint32_t stride) {
+        return {
+            rk_d3d9_draw_primitive_up(&*value, primitive, primitive_count, vertices, len, stride),
+            *value};
     }
     recomp::d3d::Status draw_indexed_primitive_up(uint32_t primitive, uint32_t min_vertex,
                                                   uint32_t num_vertices, uint32_t primitive_count,
@@ -150,9 +206,9 @@ struct D3d9HostDevice {
     recomp::d3d::Status query_issue(uint32_t handle, uint32_t flags) {
         return recomp::d3d::d3d9_query_issue(*value, handle, flags);
     }
-    recomp::d3d::ValueResult query_get_data(uint32_t handle, rust::Slice<uint8_t> data,
-                                            uint32_t size, uint32_t flags) {
-        return recomp::d3d::d3d9_query_get_data(*value, handle, data, size, flags);
+    D3d9Status query_get_data(uint32_t handle, uint8_t *data, size_t len, uint32_t size,
+                              uint32_t flags, uint32_t *ready) {
+        return {rk_d3d9_query_get_data(&*value, handle, data, len, size, flags, ready), *value};
     }
     recomp::d3d::D3d9ResetResult reset(const recomp::d3d::D3d9ResetRequest &request) {
         return recomp::d3d::d3d9_reset(*value, request);
@@ -226,20 +282,20 @@ struct D3d9HostDevice {
     recomp::d3d::D3d9CapsResult caps() const {
         return recomp::d3d::d3d9_device_caps(*value);
     }
-    recomp::d3d::Status set_render_state(uint32_t state, uint32_t v) {
-        return recomp::d3d::d3d9_set_render_state(*value, state, v);
+    D3d9Status set_render_state(uint32_t state, uint32_t v) {
+        return {rk_d3d9_set_render_state(&*value, state, v), *value};
     }
     recomp::d3d::ValueResult render_state(uint32_t state) const {
         return recomp::d3d::d3d9_get_render_state(*value, state);
     }
-    recomp::d3d::Status set_texture_stage_state(uint32_t stage, uint32_t state, uint32_t v) {
-        return recomp::d3d::d3d9_set_texture_stage_state(*value, stage, state, v);
+    D3d9Status set_texture_stage_state(uint32_t stage, uint32_t state, uint32_t v) {
+        return {rk_d3d9_set_texture_stage_state(&*value, stage, state, v), *value};
     }
     recomp::d3d::ValueResult texture_stage_state(uint32_t stage, uint32_t state) const {
         return recomp::d3d::d3d9_get_texture_stage_state(*value, stage, state);
     }
-    recomp::d3d::Status set_sampler_state(uint32_t sampler, uint32_t state, uint32_t v) {
-        return recomp::d3d::d3d9_set_sampler_state(*value, sampler, state, v);
+    D3d9Status set_sampler_state(uint32_t sampler, uint32_t state, uint32_t v) {
+        return {rk_d3d9_set_sampler_state(&*value, sampler, state, v), *value};
     }
     recomp::d3d::ValueResult sampler_state(uint32_t sampler, uint32_t state) const {
         return recomp::d3d::d3d9_get_sampler_state(*value, sampler, state);
@@ -295,9 +351,9 @@ struct D3d9HostDevice {
     recomp::d3d::ValueResult texture(uint32_t stage) const {
         return recomp::d3d::d3d9_get_texture(*value, stage);
     }
-    recomp::d3d::Status set_stream_source(uint32_t stream, uint32_t buffer, uint32_t offset,
-                                          uint32_t stride) {
-        return recomp::d3d::d3d9_set_stream_source(*value, stream, buffer, offset, stride);
+    D3d9Status set_stream_source(uint32_t stream, uint32_t buffer, uint32_t offset,
+                                 uint32_t stride) {
+        return {rk_d3d9_set_stream_source(&*value, stream, buffer, offset, stride), *value};
     }
     recomp::d3d::D3d9StreamResult stream_source(uint32_t stream) const {
         return recomp::d3d::d3d9_get_stream_source(*value, stream);
@@ -308,8 +364,8 @@ struct D3d9HostDevice {
     recomp::d3d::ValueResult stream_freq(uint32_t stream) const {
         return recomp::d3d::d3d9_get_stream_freq(*value, stream);
     }
-    recomp::d3d::Status set_indices(uint32_t id) {
-        return recomp::d3d::d3d9_set_indices(*value, id);
+    D3d9Status set_indices(uint32_t id) {
+        return {rk_d3d9_set_indices(&*value, id), *value};
     }
     recomp::d3d::ValueResult indices() const {
         return recomp::d3d::d3d9_get_indices(*value);
@@ -333,8 +389,8 @@ struct D3d9HostDevice {
     recomp::d3d::D3d9DeclarationResult declaration_elements(uint32_t handle) const {
         return recomp::d3d::d3d9_declaration_elements(*value, handle);
     }
-    recomp::d3d::Status set_vertex_declaration(uint32_t handle) {
-        return recomp::d3d::d3d9_set_vertex_declaration(*value, handle);
+    D3d9Status set_vertex_declaration(uint32_t handle) {
+        return {rk_d3d9_set_vertex_declaration(&*value, handle), *value};
     }
     recomp::d3d::ValueResult vertex_declaration() const {
         return recomp::d3d::d3d9_get_vertex_declaration(*value);
@@ -754,5 +810,8 @@ struct D3dHostDevice7State {
 };
 
 inline bool d3d_bridge_ok(const recomp::d3d::Status &status) {
+    return status.code == recomp::d3d::StatusCode::Ok;
+}
+inline bool d3d_bridge_ok(const D3d9Status &status) {
     return status.code == recomp::d3d::StatusCode::Ok;
 }

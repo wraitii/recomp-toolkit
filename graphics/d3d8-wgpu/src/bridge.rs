@@ -810,6 +810,7 @@ pub mod ffi {
         ) -> D3d9CreateResult;
         fn d3d9_creation_parameters(device: &D3d9Device) -> D3d9CreationParametersResult;
         fn d3d9_set_render_state(device: &mut D3d9Device, state: u32, value: u32) -> Status;
+        fn d3d9_take_last_error(device: &mut D3d9Device) -> Status;
         fn d3d9_get_render_state(device: &D3d9Device, state: u32) -> ValueResult;
         fn d3d9_set_texture_stage_state(
             device: &mut D3d9Device,
@@ -1116,6 +1117,7 @@ pub mod ffi {
         fn d3dx_effect_batch_active(effect: &D3dxEffect) -> bool;
         fn d3dx_effect_set_state_manager(effect: &mut D3dxEffect, active: bool) -> Status;
         fn d3dx_effect_end_pass(effect: &mut D3dxEffect) -> Status;
+        fn d3dx_effect_take_last_error(effect: &mut D3dxEffect) -> Status;
         fn d3dx_effect_end(effect: &mut D3dxEffect, device: &mut D3d9Device) -> Status;
         fn d3dx_effect_on_lost(effect: &mut D3dxEffect, device: &mut D3d9Device) -> Status;
         fn d3dx_effect_on_reset(effect: &mut D3dxEffect, device: &mut D3d9Device) -> Status;
@@ -1802,6 +1804,7 @@ use crate::d3d9::d3dx_effect::{
     d3dx_effect_texture_ref_count, d3dx_effect_texture_refs, d3dx_effect_texture_shared,
     d3dx_effect_validate_technique, new_d3dx_effect, new_d3dx_effect_pool,
 };
+use crate::d3d9::flat::{d3d9_take_last_error, d3dx_effect_take_last_error};
 use crate::d3d9::{
     D3d9Device, D3d9Resource, D3dxSurfaceData, d3d9_abort_reset, d3d9_adapter_caps,
     d3d9_adapter_identifier, d3d9_add_dirty_box, d3d9_add_dirty_rect, d3d9_apply_state_block,
