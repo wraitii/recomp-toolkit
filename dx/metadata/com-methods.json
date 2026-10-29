@@ -1,6 +1,11 @@
 {
   "format": "recomp-com-methods-v1",
-  "reference_sha256": "ae7dbbfc97dedcbf4ef601685c4ee052a5bbd7e03b29c13b16588fa9a3f89bf5",
+  "reference_sha256": "5d616c845cd43f671a296b68b89e6f80b40286dc583849fb7a4705b24b623f67",
+  "references": {
+    "d3d8.dll": "e03c863023535cdb80a7adf97f274da6d74c23ec78e20a3cc2447451c572f89b",
+    "d3d9.dll": "fb49b3c44acec5e100a5c0ff1622f7d0207842d87fc513b49047a818e8c351b2",
+    "d3dx9_33.dll": "8bd6088a2129424e5c1479ffebbbe506aa9edbbf4ef720c5c9b329ec5fdebf86"
+  },
   "methods": [
     {
       "dll": "d3d8.dll",
@@ -4180,6 +4185,1231 @@
       "method": "SetNotificationPositions",
       "slot": 12,
       "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXBuffer",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXBuffer",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXBuffer",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXBuffer",
+      "method": "GetBufferPointer",
+      "slot": 12,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXBuffer",
+      "method": "GetBufferSize",
+      "slot": 16,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "GetBufferPointer",
+      "slot": 12,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "GetBufferSize",
+      "slot": 16,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "GetDesc",
+      "slot": 20,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "GetConstantDesc",
+      "slot": 24,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "GetSamplerIndex",
+      "slot": 28,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "GetConstant",
+      "slot": 32,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "GetConstantByName",
+      "slot": 36,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "GetConstantElement",
+      "slot": 40,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetDefaults",
+      "slot": 44,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetValue",
+      "slot": 48,
+      "argc": 5
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetBool",
+      "slot": 52,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetBoolArray",
+      "slot": 56,
+      "argc": 5
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetInt",
+      "slot": 60,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetIntArray",
+      "slot": 64,
+      "argc": 5
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetFloat",
+      "slot": 68,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetFloatArray",
+      "slot": 72,
+      "argc": 5
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetVector",
+      "slot": 76,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetVectorArray",
+      "slot": 80,
+      "argc": 5
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetMatrix",
+      "slot": 84,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetMatrixArray",
+      "slot": 88,
+      "argc": 5
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetMatrixPointerArray",
+      "slot": 92,
+      "argc": 5
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetMatrixTranspose",
+      "slot": 96,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetMatrixTransposeArray",
+      "slot": 100,
+      "argc": 5
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXConstantTable",
+      "method": "SetMatrixTransposePointerArray",
+      "slot": 104,
+      "argc": 5
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectPool",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectPool",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectPool",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetDesc",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetParameterDesc",
+      "slot": 16,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetTechniqueDesc",
+      "slot": 20,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetPassDesc",
+      "slot": 24,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetFunctionDesc",
+      "slot": 28,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetParameter",
+      "slot": 32,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetParameterByName",
+      "slot": 36,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetParameterBySemantic",
+      "slot": 40,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetParameterElement",
+      "slot": 44,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetTechnique",
+      "slot": 48,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetTechniqueByName",
+      "slot": 52,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetPass",
+      "slot": 56,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetPassByName",
+      "slot": 60,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetFunction",
+      "slot": 64,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetFunctionByName",
+      "slot": 68,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetAnnotation",
+      "slot": 72,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetAnnotationByName",
+      "slot": 76,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetValue",
+      "slot": 80,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetValue",
+      "slot": 84,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetBool",
+      "slot": 88,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetBool",
+      "slot": 92,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetBoolArray",
+      "slot": 96,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetBoolArray",
+      "slot": 100,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetInt",
+      "slot": 104,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetInt",
+      "slot": 108,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetIntArray",
+      "slot": 112,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetIntArray",
+      "slot": 116,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetFloat",
+      "slot": 120,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetFloat",
+      "slot": 124,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetFloatArray",
+      "slot": 128,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetFloatArray",
+      "slot": 132,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetVector",
+      "slot": 136,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetVector",
+      "slot": 140,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetVectorArray",
+      "slot": 144,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetVectorArray",
+      "slot": 148,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetMatrix",
+      "slot": 152,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetMatrix",
+      "slot": 156,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetMatrixArray",
+      "slot": 160,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetMatrixArray",
+      "slot": 164,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetMatrixPointerArray",
+      "slot": 168,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetMatrixPointerArray",
+      "slot": 172,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetMatrixTranspose",
+      "slot": 176,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetMatrixTranspose",
+      "slot": 180,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetMatrixTransposeArray",
+      "slot": 184,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetMatrixTransposeArray",
+      "slot": 188,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetMatrixTransposePointerArray",
+      "slot": 192,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetMatrixTransposePointerArray",
+      "slot": 196,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetString",
+      "slot": 200,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetString",
+      "slot": 204,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetTexture",
+      "slot": 208,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetTexture",
+      "slot": 212,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetPixelShader",
+      "slot": 216,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetVertexShader",
+      "slot": 220,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetArrayRange",
+      "slot": 224,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "SetLiteral",
+      "slot": 228,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "GetLiteral",
+      "slot": 232,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "CompileEffect",
+      "slot": 236,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffectCompiler",
+      "method": "CompileShader",
+      "slot": 240,
+      "argc": 7
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "QueryInterface",
+      "slot": 0,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "AddRef",
+      "slot": 4,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "Release",
+      "slot": 8,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetDesc",
+      "slot": 12,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetParameterDesc",
+      "slot": 16,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetTechniqueDesc",
+      "slot": 20,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetPassDesc",
+      "slot": 24,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetFunctionDesc",
+      "slot": 28,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetParameter",
+      "slot": 32,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetParameterByName",
+      "slot": 36,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetParameterBySemantic",
+      "slot": 40,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetParameterElement",
+      "slot": 44,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetTechnique",
+      "slot": 48,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetTechniqueByName",
+      "slot": 52,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetPass",
+      "slot": 56,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetPassByName",
+      "slot": 60,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetFunction",
+      "slot": 64,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetFunctionByName",
+      "slot": 68,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetAnnotation",
+      "slot": 72,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetAnnotationByName",
+      "slot": 76,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetValue",
+      "slot": 80,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetValue",
+      "slot": 84,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetBool",
+      "slot": 88,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetBool",
+      "slot": 92,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetBoolArray",
+      "slot": 96,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetBoolArray",
+      "slot": 100,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetInt",
+      "slot": 104,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetInt",
+      "slot": 108,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetIntArray",
+      "slot": 112,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetIntArray",
+      "slot": 116,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetFloat",
+      "slot": 120,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetFloat",
+      "slot": 124,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetFloatArray",
+      "slot": 128,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetFloatArray",
+      "slot": 132,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetVector",
+      "slot": 136,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetVector",
+      "slot": 140,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetVectorArray",
+      "slot": 144,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetVectorArray",
+      "slot": 148,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetMatrix",
+      "slot": 152,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetMatrix",
+      "slot": 156,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetMatrixArray",
+      "slot": 160,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetMatrixArray",
+      "slot": 164,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetMatrixPointerArray",
+      "slot": 168,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetMatrixPointerArray",
+      "slot": 172,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetMatrixTranspose",
+      "slot": 176,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetMatrixTranspose",
+      "slot": 180,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetMatrixTransposeArray",
+      "slot": 184,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetMatrixTransposeArray",
+      "slot": 188,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetMatrixTransposePointerArray",
+      "slot": 192,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetMatrixTransposePointerArray",
+      "slot": 196,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetString",
+      "slot": 200,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetString",
+      "slot": 204,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetTexture",
+      "slot": 208,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetTexture",
+      "slot": 212,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetPixelShader",
+      "slot": 216,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetVertexShader",
+      "slot": 220,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetArrayRange",
+      "slot": 224,
+      "argc": 4
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetPool",
+      "slot": 228,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetTechnique",
+      "slot": 232,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetCurrentTechnique",
+      "slot": 236,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "ValidateTechnique",
+      "slot": 240,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "FindNextValidTechnique",
+      "slot": 244,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "IsParameterUsed",
+      "slot": 248,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "Begin",
+      "slot": 252,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "BeginPass",
+      "slot": 256,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "CommitChanges",
+      "slot": 260,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "EndPass",
+      "slot": 264,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "End",
+      "slot": 268,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetDevice",
+      "slot": 272,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "OnLostDevice",
+      "slot": 276,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "OnResetDevice",
+      "slot": 280,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetStateManager",
+      "slot": 284,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "GetStateManager",
+      "slot": 288,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "BeginParameterBlock",
+      "slot": 292,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "EndParameterBlock",
+      "slot": 296,
+      "argc": 1
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "ApplyParameterBlock",
+      "slot": 300,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "DeleteParameterBlock",
+      "slot": 304,
+      "argc": 2
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "CloneEffect",
+      "slot": 308,
+      "argc": 3
+    },
+    {
+      "dll": "d3dx9_33.dll",
+      "interface": "ID3DXEffect",
+      "method": "SetRawValue",
+      "slot": 312,
+      "argc": 5
     }
   ]
 }

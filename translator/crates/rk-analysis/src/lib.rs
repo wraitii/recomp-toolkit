@@ -99,6 +99,8 @@ struct PolicyOverride {
 struct MethodCatalog {
     format: String,
     reference_sha256: String,
+    #[serde(default)]
+    references: BTreeMap<String, String>,
     methods: Vec<MethodMeta>,
 }
 
@@ -222,11 +224,10 @@ pub fn run(args: Args) -> Result<()> {
                 method_path.display()
             )));
         }
-        if method_catalog.reference_sha256.len() != 64
-            || !method_catalog
-                .reference_sha256
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit())
+        let sha256 =
+            |hash: &String| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
+        if !sha256(&method_catalog.reference_sha256)
+            || !method_catalog.references.values().all(sha256)
         {
             return Err(Error::input("method catalog has invalid reference_sha256"));
         }
