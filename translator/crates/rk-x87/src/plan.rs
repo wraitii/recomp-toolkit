@@ -268,6 +268,7 @@ fn transition(
     events: &mut Vec<Event>,
 ) -> Result<(), Reason> {
     scalar.fold_pending(events);
+    scalar.compact();
     let mut active = Vec::new();
     let mut fallback = false;
     let live = scalar.snapshot();
