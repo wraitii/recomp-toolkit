@@ -595,6 +595,12 @@ pub mod ffi {
         commands: Vec<D3dxEffectCommand>,
         values: Vec<f32>,
         reserved: bool,
+        bindings_changed: bool,
+    }
+
+    struct D3dxTextureRefCounts {
+        first: u32,
+        second: u32,
     }
 
     #[derive(Clone, Copy)]
@@ -1172,8 +1178,16 @@ pub mod ffi {
         fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) -> ValueResult;
         fn d3dx_effect_texture(effect: &D3dxEffect, handle: u32) -> ValueResult;
         fn d3dx_effect_texture_shared(effect: &D3dxEffect, handle: u32) -> bool;
-        fn d3dx_effect_texture_ref_count(effect: &D3dxEffect, id: u32) -> u32;
-        fn d3dx_effect_pool_texture_ref_count(pool: &D3dxEffectPool, id: u32) -> u32;
+        fn d3dx_effect_texture_ref_counts(
+            effect: &D3dxEffect,
+            first: u32,
+            second: u32,
+        ) -> D3dxTextureRefCounts;
+        fn d3dx_effect_pool_texture_ref_counts(
+            pool: &D3dxEffectPool,
+            first: u32,
+            second: u32,
+        ) -> D3dxTextureRefCounts;
         fn d3dx_effect_set_technique(effect: &mut D3dxEffect, handle: u32) -> Status;
         fn d3dx_effect_current_technique(effect: &D3dxEffect) -> u32;
         fn d3dx_effect_validate_technique(effect: &D3dxEffect, handle: u32) -> Status;
@@ -1889,12 +1903,12 @@ use crate::d3d9::d3dx_effect::{
     d3dx_effect_get, d3dx_effect_is_parameter_used, d3dx_effect_join_pool, d3dx_effect_on_lost,
     d3dx_effect_on_reset, d3dx_effect_param_desc, d3dx_effect_param_name,
     d3dx_effect_param_semantic, d3dx_effect_pass_desc, d3dx_effect_pass_shader,
-    d3dx_effect_pool_id, d3dx_effect_pool_id_of, d3dx_effect_pool_texture_ref_count,
+    d3dx_effect_pool_id, d3dx_effect_pool_id_of, d3dx_effect_pool_texture_ref_counts,
     d3dx_effect_pool_texture_refs, d3dx_effect_prepare_shaders, d3dx_effect_recycle,
     d3dx_effect_release, d3dx_effect_saved_bindings, d3dx_effect_set, d3dx_effect_set_raw,
     d3dx_effect_set_state_manager, d3dx_effect_set_technique, d3dx_effect_set_texture,
     d3dx_effect_shutdown, d3dx_effect_technique_desc, d3dx_effect_texture,
-    d3dx_effect_texture_ref_count, d3dx_effect_texture_refs, d3dx_effect_texture_shared,
+    d3dx_effect_texture_ref_counts, d3dx_effect_texture_refs, d3dx_effect_texture_shared,
     d3dx_effect_validate_technique, new_d3dx_effect, new_d3dx_effect_pool,
 };
 use crate::d3d9::{
@@ -1990,10 +2004,11 @@ pub use ffi::{
     D3dxEffectPassDescResult, D3dxEffectRunResult, D3dxEffectShadersResult,
     D3dxEffectTechniqueDesc, D3dxEffectTechniqueDescResult, D3dxImageInfo, D3dxImageInfoResult,
     D3dxMatrixInverseResult, D3dxMatrixResult, D3dxProfilesResult, D3dxSemantic,
-    D3dxSemanticsResult, D3dxSurfaceReadResult, DeviceInfo, DeviceInfoResult, FloatValuesResult,
-    FrameHandoff, FrameHandoffResult, HandleResult, LevelLayout, LevelLayoutResult, Light,
-    LightResult, Material, MaterialResult, PresentParams, Rect, ResourceConfigurationResult,
-    ResourceGenerationResult, ResourceInfo, ResourceLevel, ResourceLevelResult, ShaderHandleResult,
+    D3dxSemanticsResult, D3dxSurfaceReadResult, D3dxTextureRefCounts, DeviceInfo,
+    DeviceInfoResult, FloatValuesResult, FrameHandoff, FrameHandoffResult, HandleResult,
+    LevelLayout, LevelLayoutResult, Light, LightResult, Material, MaterialResult, PresentParams,
+    Rect, ResourceConfigurationResult, ResourceGenerationResult, ResourceInfo, ResourceLevel,
+    ResourceLevelResult, ShaderHandleResult,
     StateBlockError, Status, StatusCode, TextureBindings, TextureLevel, TextureSetResult,
     ValueResult, ValuesResult, Viewport, ViewportResult,
 };

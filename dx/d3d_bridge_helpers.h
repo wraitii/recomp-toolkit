@@ -438,7 +438,7 @@ struct D3dxEffectHost {
     std::set<uint32_t> saved_refs;
     std::set<uint32_t> published_shaders;
     std::map<uint32_t, uint32_t> handle_tokens;
-    std::map<uint32_t, uint32_t> handle_reverse;
+    std::unordered_map<uint32_t, uint32_t> handle_reverse;
     std::map<std::string, uint32_t> strings;
     std::map<uint32_t, std::pair<uint32_t, uint32_t>> pass_shaders;
     uint32_t dispatch_scratch = 0;

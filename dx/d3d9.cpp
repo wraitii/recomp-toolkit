@@ -2593,23 +2593,20 @@ static void efx_update_texture_refs(ComObj *fx, uint32_t handle, uint32_t old_id
         return;
     if (recomp::d3d::d3dx_effect_texture_shared(*host->value, handle) && host->pool_obj) {
         if (ComObj *pool = com_get(host->pool_obj); pool && pool->d3dx_effect_pool) {
-            uint32_t old_count = recomp::d3d::d3dx_effect_pool_texture_ref_count(
-                *pool->d3dx_effect_pool->value, old_id);
-            uint32_t new_count = recomp::d3d::d3dx_effect_pool_texture_ref_count(
-                *pool->d3dx_effect_pool->value, new_id);
+            auto counts = recomp::d3d::d3dx_effect_pool_texture_ref_counts(
+                *pool->d3dx_effect_pool->value, old_id, new_id);
             if (!efx_texture_ref_allowed(new_id, 0, false))
-                new_count = 0;
-            efx_reconcile_texture_ref(pool->d3dx_effect_pool->texture_refs, old_id, old_count);
-            efx_reconcile_texture_ref(pool->d3dx_effect_pool->texture_refs, new_id, new_count);
+                counts.second = 0;
+            efx_reconcile_texture_ref(pool->d3dx_effect_pool->texture_refs, old_id, counts.first);
+            efx_reconcile_texture_ref(pool->d3dx_effect_pool->texture_refs, new_id, counts.second);
             return;
         }
     }
-    uint32_t old_count = recomp::d3d::d3dx_effect_texture_ref_count(*host->value, old_id);
-    uint32_t new_count = recomp::d3d::d3dx_effect_texture_ref_count(*host->value, new_id);
+    auto counts = recomp::d3d::d3dx_effect_texture_ref_counts(*host->value, old_id, new_id);
     if (!efx_texture_ref_allowed(new_id, host->device_id, true))
-        new_count = 0;
-    efx_reconcile_texture_ref(host->texture_refs, old_id, old_count);
-    efx_reconcile_texture_ref(host->texture_refs, new_id, new_count);
+        counts.second = 0;
+    efx_reconcile_texture_ref(host->texture_refs, old_id, counts.first);
+    efx_reconcile_texture_ref(host->texture_refs, new_id, counts.second);
 }
 
 static void efx_refresh_textures(ComObj *fx) {
@@ -3797,7 +3794,7 @@ static uint32_t efx_run(X86 *c, ComObj *fx, ComObj *dev, recomp::d3d::D3dxEffect
         hr = efx_dispatch_commands(c, fx, dev, result.commands, result.values);
         if (result.reserved)
             recomp::d3d::d3dx_effect_batch_finish(*host->value, !efx_hr_failed(hr));
-        else
+        else if (result.bindings_changed)
             d3d9_refresh_bindings(dev, true);
     }
     recomp::d3d::d3dx_effect_recycle(*host->value, std::move(result.commands),
