@@ -222,6 +222,7 @@ struct CompiledPreshader {
     program: preshader::Preshader,
     constants: Vec<CtabConst>,
     params: Vec<usize>,
+    layouts: Vec<Result<RegisterLayout, RenderError>>,
     outputs: Vec<u32>,
     inputs: RefCell<Vec<[f32; 4]>>,
     result: RefCell<Option<(u32, u64, Vec<f32>)>>,
@@ -266,6 +267,7 @@ struct EfxObject {
     saved_outputs: OnceLock<Result<Vec<u32>, RenderError>>,
     ctab_params: OnceLock<Result<Vec<usize>, RenderError>>,
     preshader: OnceLock<Result<Option<Arc<CompiledPreshader>>, RenderError>>,
+    layouts: OnceLock<Vec<Result<RegisterLayout, RenderError>>>,
     const_version: Cell<u64>,
 }
 
@@ -805,6 +807,7 @@ fn parse_effect(blob: &[u8]) -> Result<D3dxEffect, RenderError> {
                 saved_outputs: OnceLock::new(),
                 ctab_params: OnceLock::new(),
                 preshader: OnceLock::new(),
+                layouts: OnceLock::new(),
                 const_version: Cell::new(0),
             },
         );
@@ -920,6 +923,7 @@ fn parse_effect(blob: &[u8]) -> Result<D3dxEffect, RenderError> {
             saved_outputs: OnceLock::new(),
             ctab_params: OnceLock::new(),
             preshader: OnceLock::new(),
+            layouts: OnceLock::new(),
             const_version: Cell::new(0),
         });
         match usage {
@@ -2875,6 +2879,7 @@ pub fn d3dx_effect_prepare_shaders(
     }
 }
 
+#[derive(Clone)]
 struct RegisterLayout {
     rows: usize,
     cols: usize,
@@ -2984,27 +2989,26 @@ fn register_layout(param: &EfxParam, constant: &CtabConst) -> Result<RegisterLay
     })
 }
 
-fn registers_into(
-    param: &EfxParam,
-    data: &[u8],
-    constant: &CtabConst,
-    out: &mut [f32],
-) -> Result<(), RenderError> {
-    register_layout(param, constant)?.write(data, out)
+fn ctab_layouts(
+    effect: &D3dxEffect,
+    ctab: &[CtabConst],
+    params: &[usize],
+) -> Vec<Result<RegisterLayout, RenderError>> {
+    ctab.iter()
+        .zip(params)
+        .map(|(constant, &index)| register_layout(&effect.params[index], constant))
+        .collect()
 }
 
 fn constant_registers_into(
     effect: &D3dxEffect,
     index: usize,
-    constant: &CtabConst,
+    layout: &Result<RegisterLayout, RenderError>,
     out: &mut [f32],
 ) -> Result<(), RenderError> {
-    let param = effect
-        .params
-        .get(index)
-        .ok_or_else(|| invalid_data("shader constant parameter is missing"))?;
+    let layout = layout.as_ref().map_err(Clone::clone)?;
     effect
-        .with_numeric(index, |data| registers_into(param, data, constant, out))
+        .with_numeric(index, |data| layout.write(data, out))
         .ok_or_else(|| invalid_data("shader constant parameter has no numeric value"))?
 }
 
@@ -3029,11 +3033,13 @@ fn compile_preshader(
     let program = preshader::parse(code)?;
     let constants = parse_ctab(code)?;
     let params = ctab_params(effect, &constants, "preshader input")?;
+    let layouts = ctab_layouts(effect, &constants, &params);
     let outputs = program.output_registers();
     Ok(Arc::new(CompiledPreshader {
         program,
         constants,
         params,
+        layouts,
         outputs,
         inputs: RefCell::new(vec![[0.0f32; 4]; 256]),
         result: RefCell::default(),
@@ -3060,7 +3066,7 @@ fn evaluate_preshader<R>(
     }
     let stamp = next_version();
     let mut inputs = compiled.inputs.borrow_mut();
-    ctab_inputs_with(effect, &compiled.constants, &compiled.params, &mut inputs)?;
+    ctab_inputs_with(effect, compiled, &mut inputs)?;
     let values = preshader::evaluate(&compiled.program, &inputs)?;
     let out = f(&values);
     *result = Some((effect.id, stamp, values));
@@ -3082,11 +3088,15 @@ fn run_preshader<R>(
 
 fn ctab_inputs_with(
     effect: &D3dxEffect,
-    ctab: &[CtabConst],
-    params: &[usize],
+    compiled: &CompiledPreshader,
     inputs: &mut [[f32; 4]],
 ) -> Result<(), RenderError> {
-    for (constant, &index) in ctab.iter().zip(params) {
+    for ((constant, &index), layout) in compiled
+        .constants
+        .iter()
+        .zip(&compiled.params)
+        .zip(&compiled.layouts)
+    {
         if constant.set != D3DXRS_FLOAT4 {
             return Err(unsupported(
                 "Preshader",
@@ -3101,7 +3111,7 @@ fn ctab_inputs_with(
                 "preshader input register range is out of bounds",
             ));
         }
-        constant_registers_into(effect, index, constant, &mut flat[range])?;
+        constant_registers_into(effect, index, layout, &mut flat[range])?;
     }
     Ok(())
 }
@@ -3613,13 +3623,16 @@ fn apply_shader_constants(
         .get_or_init(|| ctab_params(effect, ctab, "shader constant"))
         .as_ref()
         .map_err(Clone::clone)?;
+    let layouts = object
+        .layouts
+        .get_or_init(|| ctab_layouts(effect, ctab, params));
     let stale = |index: usize| changed.is_none_or(|since| effect.param_version(index) > since);
-    for (constant, &index) in ctab.iter().zip(params) {
+    for ((constant, &index), layout) in ctab.iter().zip(params).zip(layouts) {
         match constant.set {
             D3DXRS_FLOAT4 => {
                 if stale(index) {
                     sink.shader_registers(pixel, constant.index, constant.count, |out| {
-                        constant_registers_into(effect, index, constant, out)
+                        constant_registers_into(effect, index, layout, out)
                     })?;
                 }
             }
