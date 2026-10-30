@@ -34,12 +34,15 @@ addresses for dispatch, hooks and diagnostics. Those addresses are identifiers,
 not host pointers and not evidence of human-recovered intent.
 
 Dispatch uses `entry_ADDR` thunks and generated direct calls use `call_ADDR` thunks.
-Those small, separately compiled thunks supply the current dense table index to one
-per-image dispatch function; hook checks, profiling and frame diagnostics no longer
-expand at every call. A translated body (`raw_ADDR`) returns without checking the
-guest return; `fn_ADDR` adds the check for generic callers, while `call_ADDR` runs the
-raw body and leaves the check to the call site, which compares EIP with its
-continuation unless the callee's return slot is proved unchanged.
+Entry thunks and the `call_slow_ADDR` slow arms are compiled separately and supply the
+current dense table index to one per-image dispatch function; hook checks, profiling
+and frame diagnostics no longer expand at every call. A translated body (`raw_ADDR`)
+returns without checking the guest return; `fn_ADDR` adds the check for generic
+callers, while `call_ADDR` runs the raw body and leaves the check to the call site,
+which compares EIP with its continuation unless the callee's return slot is proved
+unchanged. In the main image `call_ADDR` lives beside its body so the compiler can
+inline or tail-branch into it; it takes `call_slow_ADDR` only under slow routes or
+when its `call_ready_ADDR` byte reports a native replacement.
 The base-pointer table selects native replacements, while the raw-pointer table
 retains translated originals. Direct, tail and computed transfers preserve their
 guest stack operations. Replacement headers are compilation dependencies of
