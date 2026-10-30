@@ -227,10 +227,10 @@ static void d3d9_reconcile(std::set<uint32_t> &current, const std::set<uint32_t>
             d3d9_ref_add(id);
     current = desired;
 }
-static void d3d9_reconcile_bindings(std::array<uint32_t, 38> &snapshot,
+static bool d3d9_reconcile_bindings(std::array<uint32_t, 38> &snapshot,
                                     const std::array<uint32_t, 38> &ids) {
     if (snapshot == ids)
-        return;
+        return true;
     std::array<uint32_t, 38> released;
     size_t count = 0;
     for (size_t i = 0; i < ids.size(); ++i) {
@@ -244,26 +244,34 @@ static void d3d9_reconcile_bindings(std::array<uint32_t, 38> &snapshot,
     for (size_t i = 0; i < count; ++i)
         d3d9_ref_del(released[i]);
     snapshot = ids;
+    return false;
 }
-static void d3d9_refresh_bindings(ComObj *dev) {
+static bool d3d9_fvf_decl_view(ComObj *dev, uint32_t handle);
+
+static void d3d9_refresh_bindings(ComObj *dev, bool effect_pass = false) {
     if (!dev || !dev->d3d9_device)
         return;
-    recomp::d3d::D3d9BindingsResult result = dev->d3d9_device->current_bindings();
-    if (result.status.code != recomp::d3d::StatusCode::Ok)
-        return;
+    recomp::d3d::D3d9BindingSnapshot result = dev->d3d9_device->current_bindings();
+    if (effect_pass && result.live.declaration)
+        d3d9_fvf_decl_view(dev, result.live.declaration);
     auto *host = dev->d3d9_device.get();
     auto live = d3d9_binding_ids(dev, result.live);
     size_t slot = 36;
-    for (const auto &target : {host->render_target(), host->depth_stencil()}) {
-        if (target.status.code == recomp::d3d::StatusCode::Ok && target.value &&
-            target.value != 0xffffffffu)
-            live[slot] = target.value;
+    for (uint32_t target : {result.render_target, result.depth_stencil}) {
+        if (target && target != 0xffffffffu)
+            live[slot] = target;
         ++slot;
     }
     auto recording = result.recording_active ? d3d9_binding_ids(dev, result.recording)
                                              : std::array<uint32_t, 38>{};
-    d3d9_reconcile_bindings(host->live_bindings, live);
-    d3d9_reconcile_bindings(host->recording_bindings, recording);
+    const bool live_unchanged = d3d9_reconcile_bindings(host->live_bindings, live);
+    const bool recording_unchanged = d3d9_reconcile_bindings(host->recording_bindings, recording);
+    static const bool count_refreshes = [] {
+        const char *value = os_getenv("RECOMP_D3D9_STATS");
+        return value && strcmp(value, "1") == 0;
+    }();
+    if (count_refreshes)
+        recomp::d3d::d3d9_note_binding_refresh(live_unchanged && recording_unchanged, effect_pass);
 }
 static void d3d9_bind_slot(ComObj *dev, size_t slot, uint32_t id) {
     D3d9HostDevice *host = dev->d3d9_device.get();
@@ -1010,7 +1018,6 @@ void Dev_EndScene(X86 *c) {
 }
 // Defined with the resources below.
 static ComObj *device_backbuffer(ComObj *dev);
-static uint8_t *resource_bytes(ComObj *o);
 
 // (this, Count, pRects, Flags, Color, Z, Stencil). Only the colour target is
 // real so far: a 32-bit surface is filled with the colour, over the listed
@@ -1141,36 +1148,6 @@ void Dev_Present(X86 *c) {
             guest_sleep_ms((uint32_t)(delay * 1000.0));
     }
     com_ret(c, D3D_OK9);
-}
-
-// ---------------------------------------------------------------------------
-// Device resources
-//
-// A game creates textures, buffers and surfaces before it draws anything, and
-// then writes its geometry and its images into them. None of that reaches a
-// GPU yet, but the storage is real guest memory, so a Lock hands back a
-// pointer the game can fill and the contents survive to be drawn later.
-// ---------------------------------------------------------------------------
-// A resource's contents live in host memory, as a driver's would: the guest
-// heap is the game's, and a texture set would exhaust it. The guest sees the
-// bytes only while the resource is locked, through a copy made on the first
-// lock and written back on the last unlock.
-static uint32_t resource_alloc(ComObj *o, uint32_t bytes) {
-    if (!bytes)
-        return 0;
-    o->blob.assign(bytes, 0);
-    o->pixels = 0;
-    o->pixels_bytes = bytes;
-    return 1;
-}
-
-// The bytes to read or write right now: the guest copy while locked.
-static uint8_t *resource_bytes(ComObj *o) {
-    if (!o)
-        return nullptr;
-    if (o->pixels)
-        return gm_ptr(o->pixels);
-    return o->blob.empty() ? nullptr : o->blob.data();
 }
 
 static void d3d9_free_staging(D3d9Staging &staging) {
@@ -3820,12 +3797,8 @@ static uint32_t efx_run(X86 *c, ComObj *fx, ComObj *dev, recomp::d3d::D3dxEffect
         hr = efx_dispatch_commands(c, fx, dev, result.commands, result.values);
         if (result.reserved)
             recomp::d3d::d3dx_effect_batch_finish(*host->value, !efx_hr_failed(hr));
-        else {
-            recomp::d3d::ValueResult decl = dev->d3d9_device->vertex_declaration();
-            if (d3d_bridge_ok(decl.status) && decl.value)
-                d3d9_fvf_decl_view(dev, decl.value);
-            d3d9_refresh_bindings(dev);
-        }
+        else
+            d3d9_refresh_bindings(dev, true);
     }
     recomp::d3d::d3dx_effect_recycle(*host->value, std::move(result.commands),
                                      std::move(result.values));
@@ -6890,15 +6863,34 @@ static void d3d9_pipeline_object_destroy(ComObj *o) {
     o->d3d9_state_handle = 0;
 }
 
+#include "com_host_slots.inc"
+
+COM_HOST_SLOTS(d3d9_IDirect3D9, IF_D3D9, g_d3d9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DDevice9, IF_D3DDEVICE9, g_device9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DResource9, IF_D3DRESOURCE9, g_resource9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DTexture9, IF_D3DTEXTURE9, g_texture9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DCubeTexture9, IF_D3DCUBETEXTURE9, g_cubetexture9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DSurface9, IF_D3DSURFACE9, g_surface9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DVertexBuffer9, IF_D3DVERTEXBUFFER9, g_vb9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DIndexBuffer9, IF_D3DINDEXBUFFER9, g_ib9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DVertexDeclaration9, IF_D3DVERTEXDECL9, g_decl9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DQuery9, IF_D3DQUERY9, g_query9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DBaseTexture9, IF_D3DBASETEXTURE9, g_basetexture9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DVolume9, IF_D3DVOLUME9, g_volume9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DVolumeTexture9, IF_D3DVOLUMETEXTURE9, g_volumetexture9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DVertexShader9, IF_D3DVERTEXSHADER9, g_vertexshader9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DPixelShader9, IF_D3DPIXELSHADER9, g_pixelshader9, true)
+COM_HOST_SLOTS(d3d9_IDirect3DStateBlock9, IF_D3DSTATEBLOCK9, g_stateblock9, true)
+
 void d3d9_register() {
     static bool done = false;
     if (done)
         return;
     done = true;
 
-    com_define_checked<IF_D3D9, g_d3d9>("d3d9.dll", "IDirect3D9");
-    com_define_checked<IF_D3DDEVICE9, g_device9>("d3d9.dll", "IDirect3DDevice9");
-    com_define_checked<IF_D3DRESOURCE9, g_resource9>("d3d9.dll", "IDirect3DResource9");
+    d3d9_IDirect3D9_host::define("d3d9.dll", "IDirect3D9");
+    d3d9_IDirect3DDevice9_host::define("d3d9.dll", "IDirect3DDevice9");
+    d3d9_IDirect3DResource9_host::define("d3d9.dll", "IDirect3DResource9");
     com_bind(IF_D3D9, K_D3D9);
     com_bind(IF_D3DDEVICE9, K_D3D9DEVICE);
     com_bind(IF_D3DRESOURCE9, K_D3D9VB);
@@ -6906,20 +6898,19 @@ void d3d9_register() {
     com_register_iid(IF_D3D9, IID_IDirect3D9_);
     com_register_iid(IF_D3DDEVICE9, IID_IDirect3DDevice9_);
     com_register_iid(IF_D3DRESOURCE9, IID_IDirect3DResource9_);
-    com_define_checked<IF_D3DTEXTURE9, g_texture9>("d3d9.dll", "IDirect3DTexture9");
-    com_define_checked<IF_D3DCUBETEXTURE9, g_cubetexture9>("d3d9.dll", "IDirect3DCubeTexture9");
-    com_define_checked<IF_D3DSURFACE9, g_surface9>("d3d9.dll", "IDirect3DSurface9");
-    com_define_checked<IF_D3DVERTEXBUFFER9, g_vb9>("d3d9.dll", "IDirect3DVertexBuffer9");
-    com_define_checked<IF_D3DINDEXBUFFER9, g_ib9>("d3d9.dll", "IDirect3DIndexBuffer9");
-    com_define_checked<IF_D3DVERTEXDECL9, g_decl9>("d3d9.dll", "IDirect3DVertexDeclaration9");
-    com_define_checked<IF_D3DQUERY9, g_query9>("d3d9.dll", "IDirect3DQuery9");
-    com_define_checked<IF_D3DBASETEXTURE9, g_basetexture9>("d3d9.dll", "IDirect3DBaseTexture9");
-    com_define_checked<IF_D3DVOLUME9, g_volume9>("d3d9.dll", "IDirect3DVolume9");
-    com_define_checked<IF_D3DVOLUMETEXTURE9, g_volumetexture9>("d3d9.dll",
-                                                               "IDirect3DVolumeTexture9");
-    com_define_checked<IF_D3DVERTEXSHADER9, g_vertexshader9>("d3d9.dll", "IDirect3DVertexShader9");
-    com_define_checked<IF_D3DPIXELSHADER9, g_pixelshader9>("d3d9.dll", "IDirect3DPixelShader9");
-    com_define_checked<IF_D3DSTATEBLOCK9, g_stateblock9>("d3d9.dll", "IDirect3DStateBlock9");
+    d3d9_IDirect3DTexture9_host::define("d3d9.dll", "IDirect3DTexture9");
+    d3d9_IDirect3DCubeTexture9_host::define("d3d9.dll", "IDirect3DCubeTexture9");
+    d3d9_IDirect3DSurface9_host::define("d3d9.dll", "IDirect3DSurface9");
+    d3d9_IDirect3DVertexBuffer9_host::define("d3d9.dll", "IDirect3DVertexBuffer9");
+    d3d9_IDirect3DIndexBuffer9_host::define("d3d9.dll", "IDirect3DIndexBuffer9");
+    d3d9_IDirect3DVertexDeclaration9_host::define("d3d9.dll", "IDirect3DVertexDeclaration9");
+    d3d9_IDirect3DQuery9_host::define("d3d9.dll", "IDirect3DQuery9");
+    d3d9_IDirect3DBaseTexture9_host::define("d3d9.dll", "IDirect3DBaseTexture9");
+    d3d9_IDirect3DVolume9_host::define("d3d9.dll", "IDirect3DVolume9");
+    d3d9_IDirect3DVolumeTexture9_host::define("d3d9.dll", "IDirect3DVolumeTexture9");
+    d3d9_IDirect3DVertexShader9_host::define("d3d9.dll", "IDirect3DVertexShader9");
+    d3d9_IDirect3DPixelShader9_host::define("d3d9.dll", "IDirect3DPixelShader9");
+    d3d9_IDirect3DStateBlock9_host::define("d3d9.dll", "IDirect3DStateBlock9");
     com_register_iid(IF_D3DTEXTURE9, IID_IDirect3DTexture9_);
     com_register_iid(IF_D3DCUBETEXTURE9, IID_IDirect3DCubeTexture9_);
     com_register_iid(IF_D3DSURFACE9, IID_IDirect3DSurface9_);

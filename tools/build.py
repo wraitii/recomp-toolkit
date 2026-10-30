@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import hashlib
@@ -678,6 +679,14 @@ def harness_name(system=None):
     return "harness.dylib" if (system or platform.system()) == "Darwin" else "harness.so"
 
 
+def host_entry_stubs(gen, out):
+    """Abort for each COM host entry the translation names; harnesses never arm one."""
+    names = re.findall(r"^void (rk_host_\w+)\(X86 \*c\);$", (Path(gen) / "body.h").read_text(), re.M)
+    out.write_text('#include "x86.h"\n#include <stdlib.h>\n' +
+                   "".join("void %s(X86 *c) { (void)c; abort(); }\n" % name for name in names))
+    return out
+
+
 def build_translator_harness(gen, out):
     """Compile a synthetic translation and the diff host without a game build."""
     gen = Path(gen).resolve()
@@ -707,9 +716,11 @@ def build_translator_harness(gen, out):
         built.append(str(obj))
     whole = (["-dynamiclib", "-lc++", "-framework", "CoreFoundation", "-framework", "CoreServices"]
              if darwin else ["-shared", "-lm"])
+    stubs = host_entry_stubs(gen, objects / "host_entries.c")
     subprocess.check_call(cc + ["-O1", "-ffp-contract=off", "-std=c11", "-w", "-fPIC",
                                 "-I", str(gen), "-I", str(ROOT), "-I", str(ROOT / "runtime"),
-                                str(host[0]), str(host[1])] + built + whole + ["-o", str(out)])
+                                str(host[0]), str(host[1]), str(stubs)] + built + whole +
+                          ["-o", str(out)])
     print("built translator harness: %s" % out)
 
 
@@ -733,7 +744,8 @@ def build_diff_harness(build_root, out):
                ROOT / "platform/os_posix.cpp", ROOT / "platform/env.cpp",
                ROOT / "tools/recomp/diff/host.cpp", ROOT / "runtime/guest_strings.cpp",
                ROOT / "runtime/dispatch.cpp"]
-    inputs = sources + [Path(__file__), archive, ROOT / "runtime/x86.h", gen / "table.c"] + pieces
+    inputs = sources + [Path(__file__), archive, ROOT / "runtime/x86.h", gen / "table.c",
+                        gen / "body.h"] + pieces
     if cache.is_file():
         inputs.append(cache)
     if out.exists() and out.stat().st_mtime > max(p.stat().st_mtime for p in inputs):
@@ -752,9 +764,10 @@ def build_diff_harness(build_root, out):
                "-Wl,-rpath," + str(archive.parent.parent), "-lc++",
                "-framework", "CoreFoundation", "-framework", "CoreServices"] if darwin else
              ["-shared", "-Wl,--whole-archive", str(archive), "-Wl,--no-whole-archive", "-lm"])
+    stubs = host_entry_stubs(gen, out.with_name("host_entries.c"))
     subprocess.check_call(cc + ["-O1", "-ffp-contract=off", "-std=c11", "-w", "-fPIC",
                                 "-I", str(gen), "-I", str(ROOT), "-I", str(ROOT / "runtime"),
-                                str(sources[0]), str(sources[1])] + objects + whole +
+                                str(sources[0]), str(sources[1]), str(stubs)] + objects + whole +
                           ["-o", str(out)])
     print("built diff harness: %s" % out)
 

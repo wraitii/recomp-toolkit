@@ -28,6 +28,7 @@ void recomp_x87_contract_violation(X86 *c, uint32_t addr, uint16_t mask, uint16_
 uint8_t recomp_hooks_ever;
 uint8_t recomp_slow_routes;
 uint32_t recomp_frame_watch;
+uint64_t recomp_import_calls;
 
 void diff_set_hooks_ever(uint8_t value) {
     recomp_hooks_ever = value;

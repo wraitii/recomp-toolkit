@@ -67,6 +67,7 @@ fn transfer(
     }
     if fold_pending {
         scalar.fold_pending(&mut Vec::new());
+        scalar.compact();
     }
     scalar.snapshot()
 }

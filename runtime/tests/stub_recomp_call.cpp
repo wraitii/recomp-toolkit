@@ -9,6 +9,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+extern "C" {
+const RecompHostMethod recomp_host_methods[1] = {};
+const uint32_t recomp_host_method_count = 0;
+RecompHostSlot recomp_host_slots[1] = {};
+}
+
 extern "C" void recomp_call(X86 *c, uint32_t target) {
     if (recomp_module_call(c, target))
         return;

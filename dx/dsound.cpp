@@ -2440,19 +2440,29 @@ void dsound_pump() {
     service_notifications();
 }
 
+#include "com_host_slots.inc"
+
+COM_HOST_SLOTS(dsound_IDirectSound, IF_DSOUND, g_dsound, true)
+COM_HOST_SLOTS(dsound_IDirectSound8, IF_DSOUND8, g_dsound8, true)
+COM_HOST_SLOTS(dsound_IDirectSoundBuffer, IF_DSBUFFER, g_dsbuffer, true)
+COM_HOST_SLOTS(dsound_IDirectSoundBuffer8, IF_DSBUFFER8, g_dsbuffer8, true)
+COM_HOST_SLOTS(dsound_IDirectSound3DBuffer, IF_DS3DBUFFER, g_ds3dbuffer, true)
+COM_HOST_SLOTS(dsound_IDirectSound3DListener, IF_DS3DLISTENER, g_ds3dlistener, true)
+COM_HOST_SLOTS(dsound_IDirectSoundNotify, IF_DSNOTIFY, g_dsnotify, true)
+
 void dsound_register() {
     static bool done = false;
     if (done)
         return;
     done = true;
 
-    com_define_checked<IF_DSOUND, g_dsound>("DSOUND.dll", "IDirectSound");
-    com_define_checked<IF_DSOUND8, g_dsound8>("DSOUND.dll", "IDirectSound8");
-    com_define_checked<IF_DSBUFFER, g_dsbuffer>("DSOUND.dll", "IDirectSoundBuffer");
-    com_define_checked<IF_DSBUFFER8, g_dsbuffer8>("DSOUND.dll", "IDirectSoundBuffer8");
-    com_define_checked<IF_DS3DBUFFER, g_ds3dbuffer>("DSOUND.dll", "IDirectSound3DBuffer");
-    com_define_checked<IF_DS3DLISTENER, g_ds3dlistener>("DSOUND.dll", "IDirectSound3DListener");
-    com_define_checked<IF_DSNOTIFY, g_dsnotify>("DSOUND.dll", "IDirectSoundNotify");
+    dsound_IDirectSound_host::define("DSOUND.dll", "IDirectSound");
+    dsound_IDirectSound8_host::define("DSOUND.dll", "IDirectSound8");
+    dsound_IDirectSoundBuffer_host::define("DSOUND.dll", "IDirectSoundBuffer");
+    dsound_IDirectSoundBuffer8_host::define("DSOUND.dll", "IDirectSoundBuffer8");
+    dsound_IDirectSound3DBuffer_host::define("DSOUND.dll", "IDirectSound3DBuffer");
+    dsound_IDirectSound3DListener_host::define("DSOUND.dll", "IDirectSound3DListener");
+    dsound_IDirectSoundNotify_host::define("DSOUND.dll", "IDirectSoundNotify");
 
     com_bind(IF_DSOUND, K_DSOUND);
     com_bind(IF_DSOUND8, K_DSOUND);

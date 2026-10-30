@@ -974,6 +974,7 @@ const RecompDispatchEntry *recomp_dispatch_lookup(const RecompDispatchTable *tab
                                                   uint32_t target);
 RecompEntryFn recomp_icall_resolve(uint32_t target);
 void recomp_icall_slow(X86 *c, uint32_t target, uint32_t site);
+void recomp_icall_miss(X86 *c, uint32_t target, uint32_t site);
 
 /* A host implementation of a stdcall guest function that guest_call runs in
  * place of the translation while the function is not hooked. args holds the
@@ -1004,6 +1005,23 @@ typedef struct RecompCwEffect {
 } RecompCwEffect;
 extern const RecompCwEffect recomp_cw_effects[];
 extern const uint32_t recomp_cw_effect_count;
+/* Guarded direct calls to COM shim entries at sites with a method fact.
+ * runtime/imports.cpp arms a slot with its trampoline address only while that
+ * trampoline dispatches to `fn` on the fast path; otherwise it holds 1. */
+typedef struct RecompHostMethod {
+    const char *identity;
+    uint32_t pop;
+    void (*fn)(X86 *);
+} RecompHostMethod;
+typedef struct RecompHostSlot {
+    uint32_t tramp;
+    uint32_t *calls;
+} RecompHostSlot;
+extern const RecompHostMethod recomp_host_methods[];
+extern const uint32_t recomp_host_method_count;
+extern RecompHostSlot recomp_host_slots[];
+extern uint64_t recomp_import_calls;
+#define RECOMP_IMPORT_CHECKPOINT_COST 8u
 #ifdef RECOMP_CHECK_CALL_FACTS
 void recomp_call_fact_violation(uint32_t ret, uint32_t target);
 void recomp_import_cw_violation(const char *name, uint16_t before, uint16_t after);
@@ -1021,6 +1039,17 @@ typedef struct RecompRegion {
     void (*fn)(X86 *, uint32_t);
     const uint8_t *boundaries;
 } RecompRegion;
+
+uint32_t recomp_seh_pending_target(void);
+RECOMP_HOT_INLINE void recomp_region_jump(X86 *c, void (*fn)(X86 *, uint32_t), uint32_t target) {
+    if (RECOMP_UNLIKELY(recomp_profile_enabled || recomp_frame_watch ||
+                        recomp_seh_pending_target())) {
+        recomp_jump(c, target);
+        return;
+    }
+    recomp_execution_checkpoint(c);
+    fn(c, target);
+}
 const RecompRegion *recomp_region_find(const RecompRegion *regions, uint32_t count,
                                        uint32_t target);
 void recomp_region_invoke(X86 *c, const RecompRegion *region, uint32_t target);
@@ -1036,8 +1065,8 @@ typedef struct RecompModule {
     void (*const *base_ptrs)(X86 *c);
     RecompHookFn *hook_ptrs;
     uint8_t *hooked;
-    const uint32_t *call_returns;
-    uint32_t call_return_count;
+    const uint32_t *call_return_bits;
+    uint32_t call_return_min, call_return_span;
     const char *const *profile_names;
     const RecompRegion *regions;
     uint32_t region_count;
@@ -1231,43 +1260,27 @@ RECOMP_HOT_INLINE void x86_cc_settle_or_drop(X86 *c, uint32_t need) {
     }
 }
 
-static inline void recomp_icall(X86 *c, uint32_t target, uint32_t site) {
+RECOMP_HOT_INLINE void recomp_icall(X86 *c, uint32_t target, uint32_t site) {
 #ifndef RECOMP_CHECK_CALL_FACTS
-    if (!recomp_observe_on) {
-        if (target - GUEST_SHIM_BASE < GUEST_SHIM_END - GUEST_SHIM_BASE) {
-            if (!recomp_frame_watch) {
-                if (RECOMP_UNLIKELY(!imports_dispatch(c, target)))
-                    recomp_shim_call(c, target);
-                return;
-            }
-        } else {
 #ifdef RECOMP_DISPATCH_ENTRIES
-            const RecompDispatchEntry *entries = RECOMP_DISPATCH_ENTRIES;
-            uint32_t base = RECOMP_DISPATCH_BASE, shift = RECOMP_DISPATCH_SHIFT;
-            uint64_t span = RECOMP_DISPATCH_SPAN;
+    const RecompDispatchEntry *entries = RECOMP_DISPATCH_ENTRIES;
+    uint32_t base = RECOMP_DISPATCH_BASE, shift = RECOMP_DISPATCH_SHIFT;
+    uint64_t span = RECOMP_DISPATCH_SPAN;
 #else
-            const RecompDispatchEntry *entries = recomp_dispatch.entries;
-            uint32_t base = recomp_dispatch.base, shift = recomp_dispatch.shift;
-            uint64_t span = recomp_dispatch.span;
+    const RecompDispatchEntry *entries = recomp_dispatch.entries;
+    uint32_t base = recomp_dispatch.base, shift = recomp_dispatch.shift;
+    uint64_t span = recomp_dispatch.span;
 #endif
-            RecompEntryFn fn;
-            uint32_t offset = target - base;
-            if (offset < span) {
-                const RecompDispatchEntry *entry = entries + (offset >> shift);
-                if (entry->address == target)
-                    fn = entry->fn;
-                else
-                    fn = recomp_icall_resolve(target);
-            } else
-                fn = recomp_icall_resolve(target);
-            if (fn) {
-                fn(c);
-                return;
-            }
+    uint32_t offset = target - base;
+    if (offset < span && !recomp_observe_on) {
+        const RecompDispatchEntry *entry = entries + (offset >> shift);
+        if (entry->address == target) {
+            entry->fn(c);
+            return;
         }
     }
 #endif
-    recomp_icall_slow(c, target, site);
+    recomp_icall_miss(c, target, site);
 }
 
 static inline void recomp_icall_host(X86 *c, uint32_t target, uint32_t site) {
@@ -1281,35 +1294,28 @@ static inline void recomp_icall_host(X86 *c, uint32_t target, uint32_t site) {
     recomp_icall_slow(c, target, site);
 }
 
-static inline void recomp_icall_guest(X86 *c, uint32_t target, uint32_t site) {
+static inline void recomp_icall_method(X86 *c, uint32_t target, uint32_t site, uint32_t ret,
+                                       uint32_t slot, uint32_t pop, void (*fn)(X86 *)) {
 #ifndef RECOMP_CHECK_CALL_FACTS
-    if (!recomp_observe_on) {
-#ifdef RECOMP_DISPATCH_ENTRIES
-        const RecompDispatchEntry *entries = RECOMP_DISPATCH_ENTRIES;
-        uint32_t base = RECOMP_DISPATCH_BASE, shift = RECOMP_DISPATCH_SHIFT;
-        uint64_t span = RECOMP_DISPATCH_SPAN;
-#else
-        const RecompDispatchEntry *entries = recomp_dispatch.entries;
-        uint32_t base = recomp_dispatch.base, shift = recomp_dispatch.shift;
-        uint64_t span = recomp_dispatch.span;
-#endif
-        RecompEntryFn fn;
-        uint32_t offset = target - base;
-        if (offset < span) {
-            const RecompDispatchEntry *entry = entries + (offset >> shift);
-            if (entry->address == target)
-                fn = entry->fn;
-            else
-                fn = recomp_icall_resolve(target);
-        } else
-            fn = recomp_icall_resolve(target);
-        if (fn) {
-            fn(c);
-            return;
-        }
+    RecompHostSlot *s = &recomp_host_slots[slot];
+    if (!RECOMP_UNLIKELY(target != s->tramp)) {
+        recomp_execution_checkpoint_charge(c, RECOMP_IMPORT_CHECKPOINT_COST);
+        ++*s->calls;
+        ++recomp_import_calls;
+        c->eip = ret;
+        fn(c);
+        c->r[R_ESP] += pop;
+        c->eip = ret;
+        return;
     }
+#else
+    (void)ret, (void)slot, (void)pop, (void)fn;
 #endif
-    recomp_icall_slow(c, target, site);
+    recomp_icall_host(c, target, site);
+}
+
+RECOMP_HOT_INLINE void recomp_icall_guest(X86 *c, uint32_t target, uint32_t site) {
+    recomp_icall(c, target, site);
 }
 
 /* Clear the dead descriptor payload so a full-struct comparison does not see

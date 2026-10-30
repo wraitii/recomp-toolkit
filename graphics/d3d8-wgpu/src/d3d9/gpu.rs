@@ -252,6 +252,7 @@ impl Drop for PendingWork {
 
 pub struct D3d9Gpu {
     pub device: wgpu::Device,
+    limits: Arc<wgpu::Limits>,
     pub(crate) backend: wgpu::Backend,
     pub(crate) shader_mode: Option<String>,
     pub(crate) shader_mode_error: Option<String>,
@@ -269,6 +270,7 @@ impl Clone for D3d9Gpu {
     fn clone(&self) -> Self {
         Self {
             device: self.device.clone(),
+            limits: Arc::clone(&self.limits),
             backend: self.backend,
             shader_mode: self.shader_mode.clone(),
             shader_mode_error: self.shader_mode_error.clone(),
@@ -310,6 +312,7 @@ impl D3d9Gpu {
     pub(crate) fn from_context_with_loss(gpu: &GpuContext, loss: D3d9Loss) -> Self {
         Self {
             device: gpu.device.clone(),
+            limits: Arc::new(gpu.device.limits()),
             backend: gpu.adapter_info.backend,
             shader_mode: None,
             shader_mode_error: None,
@@ -440,8 +443,8 @@ impl D3d9Gpu {
         self.device.features()
     }
 
-    pub fn limits(&self) -> wgpu::Limits {
-        self.device.limits()
+    pub fn limits(&self) -> &wgpu::Limits {
+        &self.limits
     }
 
     pub fn available_texture_mem_bytes(&self) -> Result<u64, RenderError> {

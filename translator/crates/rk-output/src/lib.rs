@@ -16,7 +16,7 @@ use rk_core::contract::DirectArguments;
 use rk_core::program::Program;
 use rk_core::settings::Settings;
 use rk_core::{Addr, Error, Result};
-use rk_emit::{Body, Declaration, Preludes};
+use rk_emit::{Body, Declaration, HostMethod, Preludes};
 
 pub use reloc as reloc_output;
 pub use symbols::{symbol_rows, SymbolRow};
@@ -101,6 +101,7 @@ pub struct Translation<'a> {
     pub call_returns: Vec<Addr>,
     pub call_facts: BTreeMap<Addr, Vec<Addr>>,
     pub cw_effects: BTreeMap<Addr, (u16, u16, u16)>,
+    pub host_methods: Vec<HostMethod>,
     pub direct_variants: BTreeSet<Addr>,
 }
 
@@ -138,6 +139,14 @@ pub fn write(out: &Path, t: &Translation) -> Result<Written> {
             body_header = body_header.replace("#include \"x86.h\"", &constants);
         }
     }
+    if !t.host_methods.is_empty() {
+        let declarations: String = t
+            .host_methods
+            .iter()
+            .map(|method| format!("void {}(X86 *c);\n", method.symbol))
+            .collect();
+        body_header = body_header.replace("#endif\n", &(declarations + "#endif\n"));
+    }
     write_file(&out.join("body.h"), &body_header)?;
     let chunks = partition_chunks(&t.bodies, CHUNK_SOURCE_BUDGET);
     let chunk_count = chunks.len();
@@ -170,7 +179,7 @@ pub fn write(out: &Path, t: &Translation) -> Result<Written> {
     write_file(&out.join("table.c"), &table)?;
     write_file(
         &out.join("call_facts.c"),
-        &table::call_facts(&t.call_facts, &t.cw_effects, &prefix),
+        &table::call_facts(&t.call_facts, &t.cw_effects, &t.host_methods, &prefix),
     )?;
     write_file(
         &out.join("symbols.json"),
@@ -261,7 +270,7 @@ next(c);\n}\n",
         let prefix = module.map_or("recomp_".to_string(), |key| format!("recomp_{key}_"));
         s.push_str(
             &t.preludes
-                .return_helpers
+                .table_return_helpers
                 .replace("recomp_call_return_", &format!("{prefix}call_return_")),
         );
     }
@@ -270,12 +279,16 @@ next(c);\n}\n",
     }
     let declarations: BTreeSet<&Declaration> = group.iter().flat_map(|b| &b.declarations).collect();
     let mut raw = BTreeSet::new();
+    let mut regions = BTreeSet::new();
     let mut direct = BTreeSet::new();
     let mut variants = BTreeSet::new();
     for declaration in declarations {
         match declaration {
             Declaration::Raw(addr) => {
                 raw.insert(*addr);
+            }
+            Declaration::Region(addr) => {
+                regions.insert(*addr);
             }
             Declaration::Direct(addr) => {
                 direct.insert(*addr);
@@ -290,6 +303,9 @@ next(c);\n}\n",
     }
     for addr in raw {
         let _ = writeln!(s, "void call_{addr:08x}(X86 *c);");
+    }
+    for addr in regions {
+        let _ = writeln!(s, "void region_{addr:08x}(X86 *c, uint32_t target);");
     }
     if !direct.is_empty() {
         s.push_str(DIRECT_GUARD);
@@ -346,7 +362,7 @@ fn entry_chunks(
             Declaration::Direct(target) => {
                 direct.insert(target);
             }
-            Declaration::DirectVariant { .. } => {}
+            Declaration::Region(_) | Declaration::DirectVariant { .. } => {}
         }
     }
     let mut groups: BTreeMap<Addr, Vec<(usize, Addr)>> = BTreeMap::new();

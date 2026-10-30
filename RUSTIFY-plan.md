@@ -22,20 +22,40 @@ admission, pacing permits, fallback checks, drawable retries, composition reuse,
 encoding order and present/commit ordering. Native adapters retain sealed payloads,
 translate individual GPU operations and publish runtime results.
 Native guest COM identity, DirectDraw CPU operations, frame sealing and runtime
-integration remain intentional boundaries. Full D3D guest migration is separate work.
+integration remain intentional boundaries. Full D3D guest migration is separate work. The C++ boundary is not yet thin:
+it retains COM identity/refcounts/destruction, binding-to-object reconciliation,
+guest marshaling and unmigrated API behavior. Direct COM-call acceleration from
+origin changes dispatch, not ownership; see `dx/README.md` for the boundary.
 
 The app builds and signs. Existing Metal graphics suites and independent
 consumers passed at the latest checkpoint; a short scripted app run exercised
-settings, frame completion and clean exit. This does not establish sustained
-gameplay, physical-loss recovery or comparable performance. The FPS overlay uses
+settings, frame completion and clean exit. The user reports RT3 and Civ4/D3D9
+work correctly after origin reconciliation; workloads and durations were not
+recorded. Physical-loss recovery and comparable performance remain unverified.
+The FPS overlay uses
 GPU completion rates because wgpu supplies no drawable display timestamps.
+
+Reconciliation checkpoint (2026-10-30, origin `f16883e9`): the combined tree
+builds the regenerated RT3 app and passes 11 selected native/graphics suites plus
+29 translator cases at 200 inputs each. The paired RT3 diff sample of 200 functions
+has 110 passing, 81 unreached and nine oracle-divergent functions, with no pair
+discrepancies. Report: `build/railroad-tycoon-3/recomp/diff/paired-cvx2320d/report.json`.
+Rebuilding the harness from origin `f16883e9` reproduces all 200 results exactly
+apart from timing, reusing the generated archive: translator, game inputs and
+harness source dependencies match origin. This isolates the failures from the
+graphics changes, but is not an independently regenerated origin build or a clean
+diff qualification; the nine discrepancies still need translator/harness triage. Both regenerated game apps build, and the user reports successful
+RT3 and Civ4 gameplay after reconciliation. Portable packaging remains open.
 
 ## Upstream scope
 
 Retain rendering profiles, world/UI/overlay composition, input coordinate mapping,
 settings, capture/readback, frame pacing and existing graphics API behavior.
 Preserve CPU-only/null-host operation and useful fake-backend checks. D3D11
-retirement is the explicit API removal; unsupported entry points fail by name.
+retirement includes DXGI factories and the narrow D3DCompile tagged-source path;
+that path recognized three exact shaders rather than compiling general HLSL.
+D3D9 D3DXCompileShader through vkd3d-shader remains supported within its existing
+limits. Unsupported entry points fail by name.
 
 Full Rust presenter ownership means Rust owns the frame queue and worker,
 selection, repeats/drops, pacing, submission/retirement, cancellation and surface
@@ -142,7 +162,10 @@ same implementation, and the change can be reviewed without this conversation.
 
 ### 4. User verification and upstream decision
 
-The user performs final verification after implementation is settled:
+Reconcile current origin/main before final verification, preserving its D3D9
+binding snapshots, effect/draw improvements and runtime/translator changes alongside
+the Rust guest staging and presenter ownership. Run existing automated checks on
+the combined tree; the user performs gameplay verification after it is settled:
 
 - Existing native/graphics suites and the relevant packaged-kit build path.
 - Representative gameplay, rendering profiles, settings, overlays and F10/F11 counters.
@@ -158,17 +181,38 @@ The user performs final verification after implementation is settled:
 Supply exact commands, workload/baseline details and expected outcomes at handoff.
 Keep unexercised cases explicit. No unexplained correctness or material performance
 regression closes this milestone. macOS/Metal is the initial qualification target;
-Linux/Vulkan, Windows/DX12 and mobile/web remain unqualified until exercised.
+Native Linux/Vulkan and Windows/DX12 remain unqualified until exercised.
+Cross-compilation (including mobile/web and multi-architecture builds) is currently
+rejected by the Rust graphics integration; restoring those build paths is separate
+work, not merely a testing task.
 
-## Follow-on work
+## Larger roadmap after this checkpoint
 
-After this upstream checkpoint, deliver separately as needed:
+Recovered from `89437893:RUSTIFY-plan.md`. These are separate future milestones,
+not requirements to extend the current graphics consolidation before merging.
+Their order expresses dependencies; implementation has not been completed here.
 
-- Remaining D3D7/8/9/D3DX guest migration and surface coherence improvements.
-- Automatic physical-device recovery beyond the kit's existing behavior.
-- Translator library reuse and Rust interpreter integration.
-- Runtime memory/loading, dispatch/imports, COM and scheduler ownership changes.
-- Other platform qualification and independent-consumer improvements.
+1. **Finish retained guest graphics (G2/S).** Move remaining D3D7/8/9/D3DX
+   semantics behind narrow guest adapters and settle DirectDraw CPU/GPU surface
+   coherence. Done when each migrated family has one owner and existing games,
+   locks, aliases and reset behavior remain correct. Preserve conservative handling
+   of guest writes through retained pointers.
+2. **Qualify the graphics boundary (P).** Establish desktop Metal/Vulkan/DX12
+   behavior and lifecycle/performance evidence, and restore cross-target builds
+   separately. The earlier independently reusable renderer/presenter objective
+   remains a future option; the current checkpoint promises kit integration,
+   not a standalone SDK. Automatic physical-device recovery is separate work.
+3. **Reusable translator (T).** Expose image analysis and translation through
+   coherent library interfaces while preserving generated C and reproducibility.
+   Done when a non-CLI caller can use the pipeline and translator cases plus the
+   bounded diff harness pass.
+4. **Rust fallback execution (E).** Move p-code fallback execution into Rust while
+   preserving CPU state, guest memory, dispatch, callbacks and checkpoint behavior.
+   Done when translated and fallback execution retain their shared contracts.
+5. **Runtime ownership (R).** Deliver memory/PE loading, dispatch/imports, shared
+   COM identity and scheduler/thread ownership in separate steps. Each step must
+   preserve 32-bit guest addresses, scheduler baton rules and explicit teardown.
+   Multiple independent runtimes are not implied by this migration.
 
 Keep each delivery bounded by a useful kit outcome. Retain generated C, SDL host
 services and useful native dependencies. Follow [AGENTS.md](AGENTS.md): no new tests

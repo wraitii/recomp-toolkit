@@ -149,9 +149,15 @@ pub(super) struct NativeStream {
     pub(super) size: u64,
 }
 
-pub(super) struct NativeGeometryPlan {
-    pub(super) streams: SmallVec<[(u32, VertexAttributes); 2]>,
+pub(super) type NativeLayoutKey = SmallVec<[(u32, u32, LayoutAttribute); 8]>;
+
+pub(super) struct NativeLayout {
+    pub(super) streams: SmallVec<[u32; 2]>,
     pub(super) layouts: VertexLayouts,
+}
+
+pub(super) struct NativeGeometryPlan {
+    pub(super) layout: Arc<NativeLayout>,
     pub(super) topology: wgpu::PrimitiveTopology,
     pub(super) strip_format: Option<wgpu::IndexFormat>,
     pub(super) first: u64,
@@ -165,7 +171,7 @@ pub(super) struct NativeGeometryPlan {
 
 pub(super) struct NativeGeometry {
     pub(super) vertices: SmallVec<[NativeStream; 2]>,
-    pub(super) layouts: VertexLayouts,
+    pub(super) layout: Arc<NativeLayout>,
     pub(super) topology: wgpu::PrimitiveTopology,
     pub(super) strip_format: Option<wgpu::IndexFormat>,
     pub(super) index: GeometryData,
@@ -338,8 +344,7 @@ pub(super) fn plan_native_geometry(
     if !command.indexed || linked.is_empty() {
         return Ok(None);
     }
-    let mut streams = std::mem::take(&mut draw.native_streams);
-    streams.clear();
+    let mut key = NativeLayoutKey::new();
     for input in linked {
         let format = if allow_raw_inputs && input.element_type == D3DDECLTYPE_UBYTE4 {
             Some(wgpu::VertexFormat::Uint8x4)
@@ -364,22 +369,45 @@ pub(super) fn plan_native_geometry(
         {
             return Ok(None);
         }
-        let slot = match streams.iter().position(|(id, _)| *id == stream_id) {
-            Some(slot) => slot,
-            None => {
-                streams.push((stream_id, SmallVec::new()));
-                streams.len() - 1
+        key.push((
+            stream_id,
+            stride,
+            LayoutAttribute {
+                format,
+                offset: u32::from(input.offset),
+                location: input.location,
+            },
+        ));
+    }
+    let layout = match draw.native_layouts.get(&key) {
+        Some(layout) => {
+            stats::record(|s| s.native_layout_hits += 1);
+            Arc::clone(layout)
+        }
+        None => {
+            stats::record(|s| s.native_layout_misses += 1);
+            let mut streams = SmallVec::new();
+            let mut layouts = VertexLayouts::new();
+            for &(stream, stride, attribute) in &key {
+                let slot = match streams.iter().position(|id| *id == stream) {
+                    Some(slot) => slot,
+                    None => {
+                        streams.push(stream);
+                        layouts.push((u64::from(stride), VertexAttributes::new()));
+                        streams.len() - 1
+                    }
+                };
+                layouts[slot].1.push(attribute);
             }
-        };
-        streams[slot].1.push(LayoutAttribute {
-            format,
-            offset: u32::from(input.offset),
-            location: input.location,
-        });
-    }
-    if streams.len() as u32 > gpu.limits().max_vertex_buffers {
-        return Ok(None);
-    }
+            if streams.len() as u32 > gpu.limits().max_vertex_buffers {
+                return Ok(None);
+            }
+            let layout = Arc::new(NativeLayout { streams, layouts });
+            let evicted = draw.native_layouts.insert(key, Arc::clone(&layout), 0);
+            stats::record(|s| s.native_layout_evictions += evicted as u64);
+            layout
+        }
+    };
     if !matches!(command.index_format, 101 | 102) {
         return Err(invalid("Draw", "invalid index format"));
     }
@@ -426,18 +454,8 @@ pub(super) fn plan_native_geometry(
     }
     let first = (i64::from(command.base_vertex) + i64::from(min_raw)) as u64;
     let span = u64::from(max_raw - min_raw + 1);
-    let layouts = streams
-        .iter()
-        .map(|(stream_id, attributes)| {
-            Ok((
-                u64::from(stream_for(command, *stream_id)?.stride),
-                attributes.clone(),
-            ))
-        })
-        .collect::<Result<_, RenderError>>()?;
     Ok(Some(NativeGeometryPlan {
-        streams,
-        layouts,
+        layout,
         topology,
         strip_format: strip.then_some(index_format),
         first,
@@ -454,11 +472,11 @@ pub(super) fn upload_native_geometry(
     gpu: &D3d9Gpu,
     draw: &mut D3d9DrawState,
     command: &DrawCommand,
-    mut plan: NativeGeometryPlan,
+    plan: NativeGeometryPlan,
 ) -> Result<Box<NativeGeometry>, RenderError> {
     let index = draw.geometry_source(gpu, &command.index_bytes)?;
     let mut vertices = SmallVec::new();
-    for (stream_id, _) in plan.streams.drain(..) {
+    for &stream_id in &plan.layout.streams {
         let stream = stream_for(command, stream_id)?;
         let stride = u64::from(stream.stride);
         let offset = u64::from(stream.offset) + plan.first * stride;
@@ -470,10 +488,9 @@ pub(super) fn upload_native_geometry(
         };
         vertices.push(NativeStream { data, offset, size });
     }
-    draw.native_streams = plan.streams;
     let geometry = NativeGeometry {
         vertices,
-        layouts: plan.layouts,
+        layout: plan.layout,
         topology: plan.topology,
         strip_format: plan.strip_format,
         index,

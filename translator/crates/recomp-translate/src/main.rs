@@ -288,7 +288,7 @@ struct BodyContext<'a> {
     known_entries: &'a BTreeSet<Addr>,
     setjmp_targets: &'a BTreeSet<Addr>,
     guest_calls: &'a BTreeSet<Addr>,
-    host_calls: &'a BTreeSet<Addr>,
+    host_calls: &'a rk_emit::HostCalls,
     direct_targets: &'a BTreeSet<Addr>,
     direct_arguments: BTreeMap<Addr, DirectArguments>,
     switches: Switches,
@@ -560,7 +560,7 @@ fn build_bodies(
     owned: Option<BTreeMap<Addr, std::result::Result<FunctionIr, rk_core::Error>>>,
     global: &rk_global::GlobalFacts,
     guest_calls: &BTreeSet<Addr>,
-    host_calls: &BTreeSet<Addr>,
+    host_calls: &rk_emit::HostCalls,
     settings: &Settings,
     x87_mode: X87Mode,
     switches: Switches,
@@ -1386,6 +1386,7 @@ fn main() -> Result<()> {
         call_returns,
         call_facts: facts.runtime_call_facts,
         cw_effects: facts.cw_effects,
+        host_methods: facts.host_calls.methods.clone(),
         direct_variants,
     };
 

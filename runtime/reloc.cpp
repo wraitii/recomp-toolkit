@@ -31,6 +31,7 @@ struct Index {
 
 Index *g_index = nullptr;
 uint64_t g_cache[kCacheSize];
+std::vector<uint8_t> g_images[kCacheSize];
 
 std::vector<const RecompRelocTemplate *> &templates() {
     static std::vector<const RecompRelocTemplate *> v;
@@ -178,11 +179,17 @@ bool cached(Index *index, uint32_t target, uint32_t &template_index, uint32_t &e
     if (template_index >= index->templates.size() ||
         entry_index >= index->templates[template_index]->entry_count)
         return false;
-    uint32_t offset = index->templates[template_index]->entries[entry_index].offset;
+    const RecompRelocTemplate *t = index->templates[template_index];
+    uint32_t offset = t->entries[entry_index].offset;
+    std::vector<uint8_t> &image = g_images[cache_slot(target)];
+    if (image.size() == t->code_len && !memcmp(g_mem + target - offset, image.data(), image.size()))
+        return true;
     if (offset > target || !verify_body(index, template_index, target - offset)) {
         __atomic_store_n(&g_cache[cache_slot(target)], 0, __ATOMIC_RELEASE);
+        image.clear();
         return false;
     }
+    image.assign(g_mem + target - offset, g_mem + target - offset + t->code_len);
     return true;
 }
 
@@ -190,6 +197,7 @@ bool bind(Index *index, uint32_t target, uint32_t &template_index, uint32_t &ent
     if (!lookup(index, target, template_index, entry_index))
         return false;
     uint64_t value = (uint64_t)((template_index << 16) | entry_index) + 1;
+    g_images[cache_slot(target)].clear();
     __atomic_store_n(&g_cache[cache_slot(target)], ((uint64_t)target << 32) | value,
                      __ATOMIC_RELEASE);
     const RecompRelocTemplate *t = index->templates[template_index];
@@ -217,6 +225,8 @@ extern "C" void recomp_reloc_register(const RecompRelocTemplate *table, uint32_t
             all.push_back(&table[i]);
     for (uint64_t &entry : g_cache)
         __atomic_store_n(&entry, 0, __ATOMIC_RELEASE);
+    for (std::vector<uint8_t> &image : g_images)
+        image.clear();
     Index *index = build_index();
     __atomic_store_n(&g_index, index, __ATOMIC_RELEASE);
 }

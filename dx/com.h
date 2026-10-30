@@ -27,6 +27,7 @@
 #include "dxtypes.h"
 
 #include <array>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <memory>
@@ -568,15 +569,38 @@ struct ComMethod {
 void com_reset();
 
 ComObj *com_new(ComKind kind);
-ComObj *com_get(uint32_t id);
+
+extern ComObj *const *g_com_table;
+extern uint32_t g_com_count;
+[[gnu::cold]] ComObj *com_this_bad_magic(uint32_t addr);
+
+inline ComObj *com_get(uint32_t id) {
+    if (!id || id > g_com_count)
+        return nullptr;
+    ComObj *o = g_com_table[id - 1];
+    return o->alive ? o : nullptr;
+}
 // Every object in creation order, including dead ones; the object with id n is
 // at index n - 1. Prefer this over com_get when walking the whole table.
 std::deque<ComObj> &com_objects();
 // The object a guest interface pointer refers to, or null when `addr` is not
 // one of ours. `want` may be IF_NONE to accept any interface.
-ComObj *com_this(uint32_t addr, ComIface want = IF_NONE);
+inline ComObj *com_this(uint32_t addr, ComIface want = IF_NONE) {
+    if (!addr || !gm_valid(addr, COM_VIEW_SIZE))
+        return nullptr;
+    if (rd32(addr + COM_OFF_magic) != COM_MAGIC)
+        return com_this_bad_magic(addr);
+    ComObj *o = com_get(rd32(addr + COM_OFF_obj));
+    if (!o)
+        return nullptr;
+    if (want != IF_NONE && rd32(addr + COM_OFF_iface) != want)
+        return nullptr;
+    return o;
+}
 // Same, reading `this` from the shim's first stack argument.
-ComObj *com_this_arg(X86 *c, ComIface want = IF_NONE);
+inline ComObj *com_this_arg(X86 *c, ComIface want = IF_NONE) {
+    return com_this(arg(c, 0), want);
+}
 ComIface com_iface_of(uint32_t addr);
 
 // Guest address of `o` seen through `iface`, allocating the view on first use.
@@ -627,6 +651,70 @@ uint32_t com_define_checked(const char *dll, const char *iface_name) {
     return com_define_checked<Iface, Methods>(dll, iface_name,
                                               std::make_index_sequence<std::size(Methods)>{});
 }
+
+// Named host entries for interfaces in dx/metadata/com-methods.json. Generated
+// code calls rk_host_<stem>_<Interface>_<Method> directly once runtime/imports.cpp
+// has checked that the vtable trampoline still dispatches to the same function,
+// so the vtable is built from these entries wherever a slot has a handler.
+struct ComHostSlot {
+    const char *name;
+    uint8_t argc;
+    void (*fn)(X86 *);
+};
+
+template <ComIface Iface, const auto &Methods, bool Checked, size_t Slot>
+void com_host_entry(X86 *c) {
+    if constexpr (Checked)
+        com_checked_call<Iface, Methods, Slot>(c);
+    else
+        Methods[Slot].fn(c);
+}
+
+[[noreturn]] void com_host_mismatch(const char *dll, const char *iface_name, size_t slot,
+                                    const char *what);
+
+template <ComIface Iface, const auto &Methods, bool Checked, size_t N>
+uint32_t com_define_host(const char *dll, const char *iface_name, const ComHostSlot (&host)[N]) {
+    static_assert(N == std::size(Methods), "COM method table and catalog differ in slot count");
+    ComMethod methods[N];
+    for (size_t i = 0; i < N; ++i) {
+        const ComMethod &m = Methods[i];
+        if (strcmp(m.name, host[i].name) != 0)
+            com_host_mismatch(dll, iface_name, i, "name differs from dx/metadata/com-methods.json");
+        if (m.argc != host[i].argc)
+            com_host_mismatch(dll, iface_name, i, "argc differs from dx/metadata/com-methods.json");
+        bool entry = m.fn && m.fn != imports_unsupported &&
+                     !(Checked && strcmp(m.name, "GetAvailableTextureMem") == 0);
+        methods[i] = {m.name, m.argc, entry ? host[i].fn : m.fn};
+    }
+    uint32_t vt = com_define(Iface, dll, iface_name, methods, N);
+    for (size_t i = 0; vt && i < N; ++i)
+        if (imports_trampoline_slow(rd32(vt + 4 * (uint32_t)i)) !=
+            (!Methods[i].fn || Methods[i].fn == imports_unsupported))
+            com_host_mismatch(dll, iface_name, i,
+                              "host entry changes the trampoline's slow-path status");
+    return vt;
+}
+
+#define COM_HOST_ENTRY_(ctx, sym, slot, name, argc)                                                \
+    extern "C" void sym(X86 *c) {                                                                  \
+        ctx::call<slot>(c);                                                                        \
+    }
+#define COM_HOST_ROW_(ctx, sym, slot, name, argc) {name, argc, sym},
+// Expands at global scope, after `Methods`, to the named entries for catalog
+// interface `id` (e.g. d3d9_IDirect3DDevice9) and `id`_host::define(dll, name).
+#define COM_HOST_SLOTS(id, Iface, Methods, Checked)                                                \
+    struct id##_host {                                                                             \
+        template <size_t Slot> static void call(X86 *c) {                                          \
+            com_host_entry<Iface, Methods, Checked, Slot>(c);                                      \
+        }                                                                                          \
+        static uint32_t define(const char *dll, const char *iface_name);                           \
+    };                                                                                             \
+    COM_HOST_SLOTS_##id(COM_HOST_ENTRY_, id##_host) uint32_t id##_host::define(                    \
+        const char *dll, const char *iface_name) {                                                 \
+        static const ComHostSlot slots[] = {COM_HOST_SLOTS_##id(COM_HOST_ROW_, id##_host)};        \
+        return com_define_host<Iface, Methods, Checked>(dll, iface_name, slots);                   \
+    }
 // Which kinds an interface may be a view of. Registering this is what makes
 // QueryInterface refuse an interface the object does not implement.
 void com_bind(ComIface iface, ComKind kind);

@@ -142,3 +142,21 @@ Cargo cache, verify both staged graphics archives and their headers are present,
 and check that manifest source/artifact hashes match the bundle. Commercial game
 files, profiles, logs and generated build files must be absent. Full packaging
 and runtime qualification are the final user verification step.
+
+### Minimum gameplay handoff for this consolidation
+
+The user reports RT3 and Civ4 BTS/D3D9 work correctly after origin reconciliation.
+Exact workloads and durations were not recorded, so the following coverage is
+not yet established for those runs:
+
+- Reach a loaded map, move the camera and exercise world rendering and UI.
+- Change available graphics settings and resize/minimize/restore the window;
+  record whether these actually exercise device reset rather than assuming so.
+- Take a capture, check the image, and exit while rendering is active.
+- On one game, check profiles, input mapping and overlays. Compare a fixed save
+  and camera workload against the baseline before claiming performance parity.
+
+Record revision, game version, OS/GPU, workload, duration and visible failures.
+Existing guest D3D9 and presenter suites complement these runs; they do not replace
+real D3D9 gameplay. Physical device loss and other native backends remain unverified.
+Mobile/web cross-builds are currently blocked by the graphics configure guard.

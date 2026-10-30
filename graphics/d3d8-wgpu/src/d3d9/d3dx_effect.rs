@@ -238,6 +238,7 @@ struct EfxParam {
     annotations: Vec<u32>,
     version: u64,
     pool_slot: Option<usize>,
+    pool_version: Option<Arc<AtomicU64>>,
 }
 
 #[derive(Clone)]
@@ -309,7 +310,7 @@ struct PoolEntry {
     value: Vec<u8>,
     objects: Vec<u32>,
     members: BTreeSet<u32>,
-    version: u64,
+    version: Arc<AtomicU64>,
 }
 
 // Parameters sharing a name but not a shape get separate pool entries.
@@ -351,7 +352,7 @@ impl PoolState {
             value,
             objects,
             members: BTreeSet::from([member]),
-            version,
+            version: Arc::new(AtomicU64::new(version)),
         };
         let slot = if let Some(slot) = self.free.pop() {
             self.entries[slot] = Some(entry);
@@ -674,6 +675,7 @@ fn read_annotations(
             annotations: Vec::new(),
             version: 0,
             pool_slot: None,
+            pool_version: None,
         });
     }
     Ok(())
@@ -725,6 +727,7 @@ fn parse_effect(blob: &[u8]) -> Result<D3dxEffect, RenderError> {
             annotations: param_annotations,
             version: 0,
             pool_slot: None,
+            pool_version: None,
         });
     }
     for _ in 0..ntech {
@@ -1257,15 +1260,12 @@ impl D3dxEffect {
 
     fn param_version(&self, index: usize) -> u64 {
         let param = &self.params[index];
-        let mut version = param.version;
-        if let Some(slot) = param.pool_slot {
-            if let Some(pool) = &self.pool {
-                if let Some(entry) = pool.lock().unwrap().slot(slot) {
-                    version = version.max(entry.version);
-                }
+        if self.pool.is_some() {
+            if let Some(version) = &param.pool_version {
+                return param.version.max(version.load(Ordering::Acquire));
             }
         }
-        version
+        param.version
     }
 
     fn with_pool_entry<R>(&self, index: usize, f: impl FnOnce(&PoolEntry) -> R) -> Option<R> {
@@ -1346,18 +1346,27 @@ impl D3dxEffect {
                 let Some(slot) = param.pool_slot else {
                     return;
                 };
+                if param.version != 0
+                    && param
+                        .pool_version
+                        .as_ref()
+                        .is_some_and(|version| version.load(Ordering::Acquire) == param.version)
+                {
+                    return;
+                }
                 let state = pool.lock().unwrap();
                 let Some(entry) = state.slot(slot) else {
                     return;
                 };
-                if param.version != 0 && entry.version == param.version {
+                let version = entry.version.load(Ordering::Relaxed);
+                if param.version != 0 && version == param.version {
                     return;
                 }
                 if let EfxValue::Numeric(bytes) = &mut param.value {
                     bytes.clear();
                     bytes.extend_from_slice(&entry.value);
                 }
-                param.version = param.version.max(entry.version);
+                param.version = param.version.max(version);
             }
             EfxValue::Object(_) => {
                 self.params[index].value = EfxValue::Object(self.pool_objects(index))
@@ -1390,7 +1399,10 @@ impl D3dxEffect {
             if let EfxValue::Object(ids) = &param.value {
                 entry.objects.clone_from(ids);
             }
-            entry.version = entry.version.max(param.version);
+            entry.version.store(
+                entry.version.load(Ordering::Relaxed).max(param.version),
+                Ordering::Release,
+            );
             entry.members.insert(id);
             return;
         }
@@ -1553,6 +1565,7 @@ pub fn d3dx_effect_join_pool(
             state.insert(&param.type_, value, objects, id, 0)
         };
         param.pool_slot = Some(slot);
+        param.pool_version = Some(Arc::clone(&state.slot(slot).unwrap().version));
     }
     ok()
 }
@@ -3054,14 +3067,14 @@ fn sampler_param_states<'a>(effect: &'a D3dxEffect, index: usize) -> Option<&'a 
 }
 
 enum StateSink<'a> {
-    Device(&'a mut D3d9Device),
+    Device(&'a mut D3d9Device, &'a mut Vec<f32>),
     Commands(&'a mut Vec<D3dxEffectCommand>, &'a mut Vec<f32>),
 }
 
 impl StateSink<'_> {
     fn render_state(&mut self, state: u32, value: u32) -> Result<(), RenderError> {
         match self {
-            StateSink::Device(device) => device
+            StateSink::Device(device, _) => device
                 .state
                 .set_render_state(state, value)
                 .map_err(|_| invalid_data("render state is out of bounds")),
@@ -3084,7 +3097,7 @@ impl StateSink<'_> {
         value: u32,
     ) -> Result<(), RenderError> {
         match self {
-            StateSink::Device(device) => device
+            StateSink::Device(device, _) => device
                 .state
                 .set_texture_stage_state(stage, state, value)
                 .map_err(|_| invalid_data("texture stage state is out of bounds")),
@@ -3102,7 +3115,7 @@ impl StateSink<'_> {
 
     fn sampler_state(&mut self, sampler: u32, state: u32, value: u32) -> Result<(), RenderError> {
         match self {
-            StateSink::Device(device) => device
+            StateSink::Device(device, _) => device
                 .state
                 .set_sampler_state(sampler, state, value)
                 .map_err(|_| invalid_data("sampler state is out of bounds")),
@@ -3120,7 +3133,7 @@ impl StateSink<'_> {
 
     fn fvf(&mut self, format: u32) -> Result<(), RenderError> {
         match self {
-            StateSink::Device(device) => {
+            StateSink::Device(device, _) => {
                 if format == 0 {
                     return Ok(());
                 }
@@ -3143,7 +3156,7 @@ impl StateSink<'_> {
 
     fn transform(&mut self, state: u32, matrix: [f32; 16]) -> Result<(), RenderError> {
         match self {
-            StateSink::Device(device) => device
+            StateSink::Device(device, _) => device
                 .state
                 .set_transform(state, matrix)
                 .map_err(|_| invalid_data("texture transform is out of bounds")),
@@ -3160,7 +3173,7 @@ impl StateSink<'_> {
 
     fn texture(&mut self, stage: u32, id: u32) -> Result<(), RenderError> {
         match self {
-            StateSink::Device(device) => device
+            StateSink::Device(device, _) => device
                 .state
                 .set_texture(stage, id)
                 .map_err(|_| invalid_data("texture stage is out of bounds")),
@@ -3178,7 +3191,7 @@ impl StateSink<'_> {
 
     fn shader(&mut self, pixel: bool, handle: u32) -> Result<(), RenderError> {
         match self {
-            StateSink::Device(device) => {
+            StateSink::Device(device, _) => {
                 device.state.set_shader(pixel, handle);
                 Ok(())
             }
@@ -3201,7 +3214,7 @@ impl StateSink<'_> {
         values: Cow<'_, [f32]>,
     ) -> Result<(), RenderError> {
         match self {
-            StateSink::Device(device) => device
+            StateSink::Device(device, _) => device
                 .state
                 .set_constants_f(pixel, start, &values)
                 .map_err(|_| invalid_data("shader constant range is out of bounds")),
@@ -3234,11 +3247,18 @@ impl StateSink<'_> {
             s.constant_registers += u64::from(count);
         });
         match self {
-            StateSink::Device(_) => {
-                stats::record(|s| s.constant_temp_bytes += (len * size_of::<f32>()) as u64);
-                let mut values = vec![0.0f32; len];
-                fill(&mut values)?;
-                self.shader_constants(pixel, start, Cow::Owned(values))
+            StateSink::Device(device, values) => {
+                stats::record(|s| {
+                    s.constant_temp_bytes += (len * size_of::<f32>()) as u64;
+                    s.constant_scratch_grows += u64::from(len > values.capacity());
+                });
+                values.clear();
+                values.resize(len, 0.0);
+                fill(values)?;
+                device
+                    .state
+                    .set_constants_f(pixel, start, values)
+                    .map_err(|_| invalid_data("shader constant range is out of bounds"))
             }
             StateSink::Commands(commands, values_out) => {
                 let offset = values_out.len();
@@ -4051,18 +4071,22 @@ fn prepare_pass(
             reserved: true,
         }
     } else {
-        let mut sink = StateSink::Device(device);
+        let mut sink = StateSink::Device(device, &mut values);
         for state in states {
             if let Err(error) = apply_state(effect, &mut sink, state, ctx) {
+                values.clear();
+                effect.spare_values = values;
                 return run_result(failed(label, error));
             }
         }
+        values.clear();
+        effect.spare_values = values;
         effect.pass_version = ctx.now;
         effect.pass = index as i32;
         D3dxEffectRunResult {
             status: ok(),
             commands,
-            values,
+            values: Vec::new(),
             reserved: false,
         }
     }
@@ -4168,7 +4192,7 @@ fn clear_lost_textures(effect: &mut D3dxEffect, device: &D3d9Device) {
             for id in &mut entry.objects {
                 if *id != 0 && device.resource_pool(*id) == Some(D3DPOOL_DEFAULT) {
                     *id = 0;
-                    entry.version = next_version();
+                    entry.version.store(next_version(), Ordering::Release);
                 }
             }
         }

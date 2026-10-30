@@ -6,6 +6,7 @@ use rk_core::Addr;
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Declaration {
     Raw(Addr),
+    Region(Addr),
     Direct(Addr),
     DirectVariant {
         addr: Addr,
@@ -17,6 +18,7 @@ pub enum Declaration {
 pub struct Preludes {
     pub memory_helpers: String,
     pub return_helpers: String,
+    pub table_return_helpers: String,
     pub float_helpers: String,
 }
 

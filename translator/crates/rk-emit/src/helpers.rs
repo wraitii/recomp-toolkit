@@ -17,6 +17,15 @@ static inline void recomp_return_fast_(X86 *c) {
 }
 ";
 
+const TABLE_RETURN_CHECK: &str = "\
+extern const uint32_t recomp_call_return_min, recomp_call_return_span;
+extern const uint32_t recomp_call_return_bits[];
+RECOMP_HOT_INLINE int recomp_returns_here_(uint32_t target) {
+    uint32_t off = target - recomp_call_return_min;
+    return off < recomp_call_return_span && ((recomp_call_return_bits[off >> 5] >> (off & 31)) & 1u);
+}
+";
+
 pub const MEMORY_HELPERS: &str = "\
 RECOMP_HOT_INLINE uint8_t recomp_rd8_(uint8_t *arena, uint32_t a) {
 #if RECOMP_STORE_HOOKS || (defined(RECOMP_NULL_CHECKS) && RECOMP_NULL_CHECKS)
@@ -176,6 +185,8 @@ pub fn preludes() -> Preludes {
     Preludes {
         memory_helpers: MEMORY_HELPERS.to_string(),
         return_helpers: RETURN_HELPERS.to_string(),
+        table_return_helpers: TABLE_RETURN_CHECK.to_string()
+            + &RETURN_HELPERS.replace("recomp_is_call_return(", "recomp_returns_here_("),
         float_helpers: FLOAT_HELPERS.to_string(),
     }
 }

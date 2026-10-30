@@ -177,14 +177,24 @@ def render(references, bindings, sdk_version, suffix=''):
     return '\n'.join(lines), status
 
 
-def method_catalog(references, bindings, dll, sdk_version):
+def method_catalog(existing, references, bindings, dll, sdk_version):
+    dll = dll.lower()
     text = preprocess("\n".join(reference.decode("utf-8") for reference in references), sdk_version)
-    methods = [{"dll": dll.lower(), "interface": binding["interface"], "method": name,
-                "slot": slot * 4, "argc": argc}
-               for binding in bindings
-               for slot, (name, argc) in enumerate(interface_methods(text, binding["interface"]))]
+    rows = [{"dll": dll, "interface": binding["interface"], "method": name,
+             "slot": slot * 4, "argc": argc}
+            for binding in bindings
+            for slot, (name, argc) in enumerate(interface_methods(text, binding["interface"]))]
+    kept = existing.get("methods", [])
+    first = next((i for i, row in enumerate(kept) if row["dll"] == dll), len(kept))
+    others = [row for row in kept if row["dll"] != dll]
+    methods = others[:first] + rows + others[first:]
+    hashes = dict(existing.get("references", {}))
+    hashes[dll] = hashlib.sha256(b"".join(references)).hexdigest()
+    hashes = dict(sorted(hashes.items()))
+    combined = "".join(f"{name}:{digest}\n" for name, digest in hashes.items())
     return {"format": "recomp-com-methods-v1",
-            "reference_sha256": hashlib.sha256(b"".join(references)).hexdigest(), "methods": methods}
+            "reference_sha256": hashlib.sha256(combined.encode()).hexdigest(),
+            "references": hashes, "methods": methods}
 
 
 def status_document(bindings_path, rows):
@@ -219,7 +229,9 @@ def main():
         generated, rows = render(references, bindings, args.sdk_version, args.suffix)
         outputs = [(args.output, generated)] if args.output else []
         if args.catalog_output:
-            catalog = method_catalog(references, bindings, args.dll, args.sdk_version)
+            existing = (json.loads(args.catalog_output.read_text())
+                        if args.catalog_output.exists() else {})
+            catalog = method_catalog(existing, references, bindings, args.dll, args.sdk_version)
             outputs.append((args.catalog_output, json.dumps(catalog, indent=2) + "\n"))
         if args.status_output is not None:
             outputs.append((args.status_output, status_document(args.bindings, rows)))

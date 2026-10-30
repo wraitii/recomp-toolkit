@@ -9,6 +9,7 @@ functions are run; local functions are translated as helpers. Per-case lines:
 
   # input: eax=0x1 arg0=5
   # table: site=label targets=label,label
+  # method: site=label identity=dll!Interface::Method argc=N
   # translate: key = value
   # env: RK_NO_DIRECT=1
   # xfail: reason
@@ -20,7 +21,9 @@ cannot add two symbols, so give each data label an absolute alias:
   .set global_va, DATA_BASE + (global - data_start)
 
 Then use [global_va]. Put jump tables in .data and list their indirect JMP site
-with # table. A # translate directive merges one TOML value into the fixture's
+with # table. A # method directive gives an indirect CALL site a COM method fact
+(argc includes `this`); the group then translates with an analysis fact file.
+Harness host entries abort, so the site must not run. A # translate directive merges one TOML value into the fixture's
 [translate] table and repeats; # env sets one translator environment switch.
 Cases with the same directives share an image, translation and harness; distinct
 directives get separate groups. An # xfail case documents a known translator bug:
@@ -159,7 +162,7 @@ def case_config(text):
 
 
 def case_directives(text):
-    inputs, tables = [], []
+    inputs, tables, methods = [], [], []
     for line in text.splitlines():
         found = re.match(r"\s*#\s*input:\s*(.*)$", line)
         if found:
@@ -186,7 +189,13 @@ def case_directives(text):
             if set(fields) != {"site", "targets"}:
                 raise ValueError("table directive needs site= and targets=: %s" % line)
             tables.append((fields["site"], fields["targets"].split(",")))
-    return inputs, tables
+        found = re.match(r"\s*#\s*method:\s*(.*)$", line)
+        if found:
+            fields = dict(part.split("=", 1) for part in found.group(1).split())
+            if set(fields) != {"site", "identity", "argc"}:
+                raise ValueError("method directive needs site=, identity= and argc=: %s" % line)
+            methods.append((fields["site"], fields["identity"], int(fields["argc"], 0)))
+    return inputs, tables, methods
 
 
 def fixture(case_files, out):
@@ -211,7 +220,7 @@ def fixture(case_files, out):
         text_blob, data_blob = parsed.data[".text"], parsed.data[".data"]
         if len(text_blob) > CASE_STRIDE or len(data_blob) > CASE_STRIDE:
             raise ValueError("%s: case exceeds %d bytes" % (path, CASE_STRIDE))
-        inputs, tables = case_directives(path.read_text())
+        inputs, tables, methods = case_directives(path.read_text())
         entries = [s for s in funcs if s["bind"] in (1, 2)]
         if not entries:
             raise ValueError("%s: no global function to run" % path)
@@ -244,8 +253,23 @@ def fixture(case_files, out):
                       "text_base": text_base, "data_base": data_base, "spans": spans,
                       "entries": [text_base + s["value"] for s in entries],
                       "inputs": inputs, "tables": table_rows,
+                      "methods": [(resolve(symbols, path.stem, site), identity, argc)
+                                  for site, identity, argc in methods],
                       "xfail": re.search(r"^\s*#\s*xfail:\s*(.+)$", path.read_text(), re.M)})
     return cases
+
+
+def method_facts(cases, exe):
+    methods, sites = [], []
+    for case in cases:
+        for site, identity, argc in case["methods"]:
+            sites.append({"s": "%08x" % site, "k": "call", "e": 0, "ev": [0], "m": len(methods)})
+            methods.append({"id": len(methods), "identity": identity, "argc": argc, "evidence": [0]})
+    return {"format": "recomp-analysis-facts-v2",
+            "executable_sha256": hashlib.sha256(exe.read_bytes()).hexdigest(),
+            "evidence": [{"id": 0, "text": "translator case # method directive"}],
+            "effects": [{"id": 0, "regs": "unknown", "x87": "unknown"}],
+            "methods": methods, "sites": sites, "inputs": {}}
 
 
 def resolve(symbols, case, name):
@@ -485,7 +509,12 @@ def main():
         pe_image(cases, exe)
         map_dir = root / "map"
         write_map(cases, exe, map_dir)
+        facts = any(case["methods"] for case in cases)
+        if facts:
+            group_translate["analysis_facts"] = "analysis-facts.json"
         game = game_dir(root, exe, map_dir, group_translate)
+        if facts:
+            (game / "analysis-facts.json").write_text(json.dumps(method_facts(cases, exe), indent=1))
         timings["group%d.assemble" % index] = time.time() - phase
         phase = time.time()
         gen, report = translate(game, root, env)

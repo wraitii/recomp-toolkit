@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use rk_core::program::Program;
 use rk_core::settings::{Dispatch, Module};
 use rk_core::{Addr, Error, Result};
+use rk_emit::HostMethod;
 
 use crate::SymbolRow;
 
@@ -14,7 +15,7 @@ fn json_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_default()
 }
 
-fn call_return_bitmap(s: &mut String, call_returns: &[Addr], prefix: &str) {
+fn call_return_bitmap(s: &mut String, call_returns: &[Addr], prefix: &str) -> (Addr, usize) {
     let (first, words) = match (call_returns.first(), call_returns.last()) {
         (Some(&first), Some(&last)) => {
             let mut words = vec![0u32; (((last - first) >> 5) + 1) as usize];
@@ -36,10 +37,11 @@ fn call_return_bitmap(s: &mut String, call_returns: &[Addr], prefix: &str) {
         words.len() * 32
     );
     let _ = writeln!(s, "const uint32_t {prefix}call_return_bits[] = {{");
-    for word in words {
+    for word in &words {
         let _ = writeln!(s, "    0x{word:08x}u,");
     }
     s.push_str("};\n");
+    (first, words.len() * 32)
 }
 
 fn entry_dispatch(signature: &str, base_call: &str) -> String {
@@ -274,17 +276,8 @@ pub fn module_table(
     s.push_str("#include \"funcs.h\"\n#include \"thunks.h\"\n\n");
     let _ = writeln!(s, "static const uint32_t {p}addrs[] = {{");
     addr_rows(&mut s, entry_names);
-    let _ = writeln!(s, "}};\nstatic const uint32_t {p}returns[] = {{");
-    addr_rows(
-        &mut s,
-        if call_returns.is_empty() {
-            &[0]
-        } else {
-            call_returns
-        },
-    );
     s.push_str("};\n");
-    call_return_bitmap(&mut s, call_returns, &p);
+    let (return_min, return_span) = call_return_bitmap(&mut s, call_returns, &p);
     let _ = writeln!(s, "static const char *const {p}names[] = {{");
     for row in symbols {
         let _ = writeln!(s, "    {},", json_string(&row.name));
@@ -339,8 +332,7 @@ pub fn module_table(
     let _ = writeln!(s, "    {p}addrs, {n}, {p}base, {p}hooks, {p}hooked,");
     let _ = writeln!(
         s,
-        "    {p}returns, {}, {p}names, {p}regions, {region_count}u, &{p}dispatch\n}};",
-        call_returns.len()
+        "    {p}call_return_bits, 0x{return_min:08x}u, {return_span}u, {p}names, {p}regions, {region_count}u, &{p}dispatch\n}};"
     );
     let _ = writeln!(
         s,
@@ -357,6 +349,7 @@ pub fn module_table(
 pub fn call_facts(
     facts: &BTreeMap<Addr, Vec<Addr>>,
     cw_effects: &BTreeMap<Addr, (u16, u16, u16)>,
+    host_methods: &[HostMethod],
     prefix: &str,
 ) -> String {
     let mut s = String::new();
@@ -394,8 +387,31 @@ pub fn call_facts(
     }
     let _ = writeln!(
         s,
-        "}};\nconst uint32_t {prefix}cw_effect_count = {};",
+        "}};\nconst uint32_t {prefix}cw_effect_count = {};\n",
         cw_effects.len()
     );
+    for method in host_methods {
+        let _ = writeln!(s, "void {}(X86 *c);", method.symbol);
+    }
+    let _ = writeln!(s, "const RecompHostMethod {prefix}host_methods[] = {{");
+    for method in host_methods {
+        let _ = writeln!(
+            s,
+            "    {{\"{}\", {}u, {}}},",
+            method.identity, method.pop, method.symbol
+        );
+    }
+    if host_methods.is_empty() {
+        s.push_str("    {0, 0u, 0},\n");
+    }
+    let _ = writeln!(
+        s,
+        "}};\nconst uint32_t {prefix}host_method_count = {};\n\nRecompHostSlot {prefix}host_slots[] = {{",
+        host_methods.len()
+    );
+    for _ in 0..host_methods.len().max(1) {
+        s.push_str("    {1u, 0},\n");
+    }
+    s.push_str("};\n");
     s
 }

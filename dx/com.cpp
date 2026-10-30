@@ -8,6 +8,9 @@
 #include <bitset>
 #include <deque>
 
+ComObj *const *g_com_table = nullptr;
+uint32_t g_com_count = 0;
+
 namespace {
 
 // Objects are held in a deque so a pointer stays valid while another object is
@@ -68,6 +71,16 @@ uint32_t build_vtable(const VtDef &d) {
     return vt;
 }
 
+std::vector<ComObj *> &table() {
+    static auto *v = new std::vector<ComObj *>();
+    return *v;
+}
+
+void publish_table() {
+    g_com_table = table().data();
+    g_com_count = (uint32_t)table().size();
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -76,6 +89,8 @@ uint32_t build_vtable(const VtDef &d) {
 void com_reset() {
     oleaut32_reset();
     objects().clear();
+    table().clear();
+    publish_table();
     // Objects held guest heap blocks that mem_init() already discarded; the
     // vtables did too, so rebuild them at their new addresses.
     for (uint32_t i = 0; i < IF_COUNT; ++i)
@@ -91,14 +106,9 @@ ComObj *com_new(ComKind kind) {
     o.kind = kind;
     o.refs = 1;
     o.alive = true;
+    table().push_back(&o);
+    publish_table();
     return &o;
-}
-
-ComObj *com_get(uint32_t id) {
-    if (!id || id > objects().size())
-        return nullptr;
-    ComObj &o = objects()[id - 1];
-    return o.alive ? &o : nullptr;
 }
 
 std::deque<ComObj> &com_objects() {
@@ -114,23 +124,9 @@ ComIface com_iface_of(uint32_t addr) {
     return f < IF_COUNT ? (ComIface)f : IF_NONE;
 }
 
-ComObj *com_this(uint32_t addr, ComIface want) {
-    if (!addr || !gm_valid(addr, COM_VIEW_SIZE))
-        return nullptr;
-    if (rd32(addr + COM_OFF_magic) != COM_MAGIC) {
-        log_once("dx.badthis", "dx: COM call on %08x, which is not a shim interface pointer", addr);
-        return nullptr;
-    }
-    ComObj *o = com_get(rd32(addr + COM_OFF_obj));
-    if (!o)
-        return nullptr;
-    if (want != IF_NONE && rd32(addr + COM_OFF_iface) != want)
-        return nullptr;
-    return o;
-}
-
-ComObj *com_this_arg(X86 *c, ComIface want) {
-    return com_this(arg(c, 0), want);
+ComObj *com_this_bad_magic(uint32_t addr) {
+    log_once("dx.badthis", "dx: COM call on %08x, which is not a shim interface pointer", addr);
+    return nullptr;
 }
 
 uint32_t com_view(ComObj *o, ComIface iface) {
@@ -418,6 +414,12 @@ uint32_t com_define(ComIface iface, const char *dll, const char *iface_name,
 
 uint32_t com_vtable_of(ComIface iface) {
     return iface < IF_COUNT ? g_vtable[iface] : 0;
+}
+
+void com_host_mismatch(const char *dll, const char *iface_name, size_t slot, const char *what) {
+    LOGW("dx: %s!%s slot %zu: %s", dll, iface_name, slot, what);
+    fflush(stderr);
+    abort();
 }
 
 void com_report_failure(X86 *c, ComIface iface, size_t slot) {

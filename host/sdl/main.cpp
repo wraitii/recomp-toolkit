@@ -962,7 +962,29 @@ bool is_modifier_scancode(SDL_Scancode sc) {
            sc == SDL_SCANCODE_LGUI || sc == SDL_SCANCODE_RGUI || sc == SDL_SCANCODE_CAPSLOCK;
 }
 
-void handle_key(const SDL_KeyboardEvent &event, bool down) {
+constexpr SDL_KeyboardID kControlsKeyboard = 0xffffffffu;
+uint8_t g_key_sources[SDL_SCANCODE_COUNT] = {};
+
+void handle_key(SDL_KeyboardEvent event, bool down) {
+    const int scan = int(event.scancode);
+    if (scan <= 0 || scan >= SDL_SCANCODE_COUNT)
+        return;
+    const bool synthetic = event.which == kControlsKeyboard;
+    const uint8_t source = synthetic ? 2 : 1;
+    const uint8_t previous = g_key_sources[scan];
+    if (down)
+        g_key_sources[scan] |= source;
+    else
+        g_key_sources[scan] &= uint8_t(~source);
+    if ((!down && g_key_sources[scan]) || (down && previous && !event.repeat))
+        return;
+    if (synthetic)
+        event.mod = SDL_GetModState();
+    for (const auto &modifier : {std::pair{SDL_SCANCODE_LSHIFT, SDL_KMOD_LSHIFT},
+                                 std::pair{SDL_SCANCODE_LCTRL, SDL_KMOD_LCTRL},
+                                 std::pair{SDL_SCANCODE_LALT, SDL_KMOD_LALT}})
+        if (g_key_sources[modifier.first] & 2)
+            event.mod |= modifier.second;
     if (is_modifier_scancode(event.scancode)) {
         PendingInput e;
         e.kind = PendingInput::MODIFIERS;
@@ -1011,6 +1033,8 @@ void note_focus(bool focused) {
     if (focused == g_focused && g_guest_activated)
         return;
     g_focused = focused;
+    if (!focused)
+        std::fill(std::begin(g_key_sources), std::end(g_key_sources), 0);
     g_guest_activated = true;
     PendingInput e;
     e.kind = PendingInput::FOCUS;
@@ -1142,6 +1166,7 @@ void push_touch_action_now(const TouchAction &a) {
         case TouchAction::Key:
             e.type = a.down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
             e.key.windowID = ours;
+            e.key.which = kControlsKeyboard;
             e.key.scancode = (SDL_Scancode)a.scancode;
             e.key.key = SDL_GetKeyFromScancode((SDL_Scancode)a.scancode, SDL_KMOD_NONE, false);
             e.key.down = a.down;

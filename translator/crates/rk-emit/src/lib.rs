@@ -41,6 +41,23 @@ pub struct RelocEmit {
     pub local_size: u32,
 }
 
+/// A COM method a guarded direct call can reach: the catalog identity, the
+/// named shim entry from `tools/gen_com_host_slots.py` and the stdcall pop.
+#[derive(Clone, Debug)]
+pub struct HostMethod {
+    pub identity: String,
+    pub symbol: String,
+    pub pop: u32,
+}
+
+/// Sites with a method fact, each with its slot in `methods` when it can take
+/// a guarded direct call.
+#[derive(Clone, Debug, Default)]
+pub struct HostCalls {
+    pub sites: BTreeMap<Addr, Option<u32>>,
+    pub methods: Vec<HostMethod>,
+}
+
 pub struct EmitContext<'a> {
     pub ir: &'a FunctionIr,
     pub effect_returns: &'a BTreeSet<Addr>,
@@ -52,7 +69,7 @@ pub struct EmitContext<'a> {
     pub region_entries: &'a BTreeMap<Addr, Addr>,
     pub setjmp_targets: &'a BTreeSet<Addr>,
     pub guest_calls: &'a BTreeSet<Addr>,
-    pub host_calls: &'a BTreeSet<Addr>,
+    pub host_calls: &'a HostCalls,
     pub direct: Option<&'a DirectEmit>,
     pub reloc: Option<RelocEmit>,
     pub call_hooks: bool,
@@ -925,6 +942,9 @@ impl<'a> Emitter<'a> {
                         }
                     }
                     continues = self.value(value)?;
+                    let lines =
+                        self.x87_lines(|x87, names| x87.after_lines(self.clone, value, names))?;
+                    self.write_x87(lines);
                 }
                 self.materialize_defs(value)?;
             }
@@ -968,8 +988,8 @@ impl<'a> Emitter<'a> {
                     }
                     None if end_addr.is_some() => {
                         let addr = end_addr.unwrap();
-                        let at = self.guest_addr(addr);
-                        let _ = writeln!(self.out, "c->eip = {at}; recomp_jump(c, {at}); return;");
+                        let jump = self.static_jump(addr, addr);
+                        let _ = writeln!(self.out, "{jump}");
                     }
                     None => {
                         return Err(self.error(self.s.addr, "block falls through to no successor"))
@@ -1034,16 +1054,12 @@ impl<'a> Emitter<'a> {
             Op::CallInd => self.call_ind(value, addr).map(|_| true),
             Op::Tail { target } => {
                 self.publish(value)?;
-                let at = self.guest_addr(addr);
-                let target_expr = self.guest_addr(target);
                 if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
                     self.declare_raw(target);
                     let _ = writeln!(self.out, "CALL_RAW({target:08x}); return;");
                 } else {
-                    let _ = writeln!(
-                        self.out,
-                        "c->eip = {at}; recomp_jump(c, {target_expr}); return;"
-                    );
+                    let jump = self.static_jump(addr, target);
+                    let _ = writeln!(self.out, "{jump}");
                 }
                 Ok(false)
             }
@@ -1933,15 +1949,32 @@ impl<'a> Emitter<'a> {
             .copied()
             .ok_or_else(|| self.error(addr, "indirect call without target"))?;
         let target = self.expr(target)?;
-        let helper = if self.ctx.guest_calls.contains(&addr) {
-            "recomp_icall_guest"
-        } else if self.ctx.host_calls.contains(&addr) {
-            "recomp_icall_host"
-        } else {
-            "recomp_icall"
-        };
         let at = self.guest_addr(addr);
-        let _ = writeln!(self.out, "{helper}(c, (uint32_t)({target}), {at});");
+        let host = self.ctx.host_calls.sites.get(&addr);
+        if let (Some(&Some(slot)), None) = (host, self.ctx.reloc) {
+            let method = &self.ctx.host_calls.methods[slot as usize];
+            let returned = self
+                .plan
+                .return_addr
+                .get(&value)
+                .copied()
+                .ok_or_else(|| self.error(addr, "call without return address"))?;
+            let returned = self.guest_addr(returned);
+            let _ = writeln!(
+                self.out,
+                "recomp_icall_method(c, (uint32_t)({target}), {at}, {returned}, {slot}u, {}u, {});",
+                method.pop, method.symbol
+            );
+        } else {
+            let helper = if self.ctx.guest_calls.contains(&addr) {
+                "recomp_icall_guest"
+            } else if host.is_some() {
+                "recomp_icall_host"
+            } else {
+                "recomp_icall"
+            };
+            let _ = writeln!(self.out, "{helper}(c, (uint32_t)({target}), {at});");
+        }
         if self.plan.settle_sites.contains(&value) {
             self.out.push_str("x86_cc_settle(c);\n");
         }
@@ -2039,16 +2072,12 @@ impl<'a> Emitter<'a> {
             return self.edge(Some(current), target_block);
         }
         self.publish(value)?;
-        let at = self.guest_addr(self.s.value_addr[value as usize]);
-        let target_expr = self.guest_addr(target);
         if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
             self.declare_raw(target);
             let _ = writeln!(self.out, "CALL_RAW({target:08x}); return;");
         } else {
-            let _ = writeln!(
-                self.out,
-                "c->eip = {at}; recomp_jump(c, {target_expr}); return;"
-            );
+            let jump = self.static_jump(self.s.value_addr[value as usize], target);
+            let _ = writeln!(self.out, "{jump}");
         }
         Ok(())
     }
@@ -2081,8 +2110,6 @@ impl<'a> Emitter<'a> {
             }
             return Ok(());
         }
-        let at = self.guest_addr(self.s.value_addr[value as usize]);
-        let target_expr = self.guest_addr(target);
         if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
             self.declare_raw(target);
             let _ = writeln!(
@@ -2090,10 +2117,8 @@ impl<'a> Emitter<'a> {
                 "if ((uint32_t)({condition})) {{ CALL_RAW({target:08x}); return; }}"
             );
         } else {
-            let _ = writeln!(
-                self.out,
-                "if ((uint32_t)({condition})) {{ c->eip = {at}; recomp_jump(c, {target_expr}); return; }}"
-            );
+            let jump = self.static_jump(self.s.value_addr[value as usize], target);
+            let _ = writeln!(self.out, "if ((uint32_t)({condition})) {{ {jump} }}");
         }
         let end_addr = self.block_end_addr(current);
         let fallthrough = self
@@ -2821,6 +2846,18 @@ impl<'a> Emitter<'a> {
 
     fn declare_raw(&mut self, target: Addr) {
         self.declarations.insert(Declaration::Raw(target));
+    }
+
+    fn static_jump(&mut self, at: Addr, target: Addr) -> String {
+        let at = self.guest_addr(at);
+        let target_expr = self.guest_addr(target);
+        match self.ctx.region_entries.get(&target) {
+            Some(&owner) if self.ctx.reloc.is_none() => {
+                self.declarations.insert(Declaration::Region(owner));
+                format!("c->eip = {at}; recomp_region_jump(c, region_{owner:08x}, {target_expr}); return;")
+            }
+            _ => format!("c->eip = {at}; recomp_jump(c, {target_expr}); return;"),
+        }
     }
 
     fn assignment(&self, value: ValueId, expr: &str) -> String {

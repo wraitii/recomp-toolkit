@@ -236,10 +236,13 @@ pub fn merge_shapes(shapes: &[Shape]) -> Shape {
         .map(|shape| if shape.active { shape.base } else { 0 })
         .min()
         .unwrap_or(0);
-    let positions = merged.iter().map(|(position, _)| *position);
+    let positions = merged
+        .iter()
+        .filter(|(_, slot)| slot.parts & !part_bit("tag") != 0)
+        .map(|(position, _)| *position);
     let min_position = positions.clone().min().unwrap_or(0);
     let max_position = positions.max().unwrap_or(0);
-    if high - low >= 8 || max_position - min_position >= 8 {
+    if high - low > 8 || max_position - min_position >= 8 {
         return Shape::Unsafe;
     }
     let published = known
@@ -365,8 +368,11 @@ impl Scalar {
         part: &'static str,
         events: &mut Vec<Event>,
     ) -> Expr {
-        let offset = self.slot(logical).0;
-        let slot = self.slots.get_mut(&offset).expect("slot");
+        let offset = ((self.top + logical) & 7) as u8;
+        if part != "tag" {
+            self.high = self.high.max(self.position + logical);
+        }
+        let slot = self.slots.entry(offset).or_default();
         if let Some(value) = slot.get(part) {
             return value.clone();
         }
@@ -494,20 +500,25 @@ impl Scalar {
         self.move_top(1);
     }
 
-    fn publish(&mut self) -> Vec<Event> {
+    fn publish(&mut self, convention: bool) -> Vec<Event> {
         let mut events = Vec::new();
         let mut tags = Vec::new();
         for (offset, slot) in &mut self.slots {
             let physical = Expr::Physical(Box::new(env("top")), *offset as u32);
             let position = self.low + ((*offset as i32 - self.low) & 7);
-            if self.convention && position < self.position {
-                if position >= self.base && slot.dirty & part_bit("tag") != 0 {
+            if convention && position < self.position {
+                if (position >= self.base || (self.convention && !self.strict))
+                    && slot.dirty & part_bit("tag") != 0
+                {
                     if let Some(tag) = &slot.tag {
                         tags.push((physical, tag.clone()));
                     }
                 }
             } else {
                 for part in ["value", "exact", "bits"] {
+                    if convention && part == "bits" && slot.exact.as_ref() == Some(&zero()) {
+                        continue;
+                    }
                     if slot.dirty & part_bit(part) != 0 {
                         if let Some(value) = slot.get(part) {
                             events.push(Event::Assign(Assign::new(
@@ -528,7 +539,7 @@ impl Scalar {
         if !tags.is_empty() {
             events.push(Event::PublishTags(tags));
         }
-        let top_moved = if self.convention {
+        let top_moved = if convention {
             self.position != self.base
         } else {
             self.top_dirty
@@ -557,20 +568,54 @@ impl Scalar {
         }
         let convention =
             self.convention && self.high < self.low + 8 && self.position < self.low + 8;
-        if convention {
-            self.convention = true;
-        }
         let mut events = Vec::new();
         self.fold_pending(&mut events);
-        events.extend(self.publish());
+        events.extend(self.publish(convention));
         events
+    }
+
+    pub fn compact(&mut self) {
+        if !self.active || !self.convention || self.strict || self.high - self.low > 8 {
+            return;
+        }
+        if self.slots.iter().any(|(offset, slot)| {
+            let position = self.low + ((*offset as i32 - self.low) & 7);
+            slot.mask() & !part_bit("tag") != 0
+                && position < self.position
+                && slot.tag.as_ref() != Some(&empty())
+        }) {
+            return;
+        }
+        let mut low = self.position;
+        let mut high = self.position;
+        self.slots.retain(|offset, slot| {
+            if slot.mask() & !part_bit("tag") == 0 {
+                return true;
+            }
+            let position = self.low + ((*offset as i32 - self.low) & 7);
+            if position < self.position {
+                *slot = Slot {
+                    tag: slot.tag.clone(),
+                    dirty: slot.dirty & part_bit("tag"),
+                    ..Slot::default()
+                };
+            } else {
+                low = low.min(position);
+                high = high.max(position);
+            }
+            slot.mask() != 0
+        });
+        self.top_unknown |= self.base != self.position;
+        self.base = self.position;
+        self.low = low;
+        self.high = high;
     }
 
     pub fn snapshot(&self) -> Shape {
         if !self.active {
             return Shape::Known(INACTIVE);
         }
-        let mut slots = Vec::new();
+        let mut slots: BTreeMap<i32, SlotShape> = BTreeMap::new();
         for (offset, slot) in &self.slots {
             let position = self.low + ((*offset as i32 - self.low) & 7) - self.position;
             let mut dirty = slot.dirty;
@@ -582,30 +627,29 @@ impl Scalar {
             if parts == 0 {
                 continue;
             }
-            let consts = PARTS
-                .into_iter()
-                .filter(|part| parts & part_bit(part) != 0)
-                .filter_map(|part| match slot.get(part) {
-                    Some(value @ Expr::Literal(_, _)) => Some((part, value.clone())),
-                    _ => None,
-                })
-                .collect();
-            slots.push((
-                position,
-                SlotShape {
-                    parts,
-                    narrow: slot.narrow,
-                    consts,
-                    dirty,
-                    quiet: slot.quiet,
-                    pending: slot.pending,
-                },
-            ));
+            let separate_tags = self.convention && !self.strict;
+            for part in crate::scalar::parts(parts) {
+                let position = if separate_tags && part == "tag" {
+                    (*offset as i32 - self.top) & 7
+                } else {
+                    position
+                };
+                let shape = slots.entry(position).or_default();
+                shape.parts |= part_bit(part);
+                shape.dirty |= dirty & part_bit(part);
+                if part != "tag" || !separate_tags {
+                    shape.narrow = slot.narrow;
+                    shape.quiet = slot.quiet;
+                    shape.pending = slot.pending;
+                }
+                if let Some(value @ Expr::Literal(_, _)) = slot.get(part) {
+                    shape.consts.push((part, value.clone()));
+                }
+            }
         }
-        slots.sort_by_key(|(position, _)| *position);
         Shape::Known(CarryShape {
             active: true,
-            slots,
+            slots: slots.into_iter().collect(),
             base: self.base - self.position,
             low: self.low - self.position,
             high: self.high - self.position,
@@ -643,7 +687,18 @@ impl Scalar {
                     .unwrap_or_else(|| carry(*position, part));
                 slot.set(part, value);
             }
-            self.slots.insert((*position & 7) as u8, slot);
+            let target = self.slots.entry((*position & 7) as u8).or_default();
+            for part in parts(slot_shape.parts) {
+                if let Some(value) = slot.get(part) {
+                    target.set(part, value.clone());
+                }
+            }
+            target.dirty |= slot.dirty;
+            if slot_shape.parts & !part_bit("tag") != 0 {
+                target.narrow = slot.narrow;
+                target.quiet = slot.quiet;
+                target.pending = slot.pending;
+            }
         }
     }
 

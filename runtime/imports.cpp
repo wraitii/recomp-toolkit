@@ -18,6 +18,7 @@ void sched_checkpoint();
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <unordered_map>
 
 // Registered unsupported APIs retain their arity for observers and diagnostics,
 // but execution must stop until a real implementation is available.
@@ -58,6 +59,8 @@ struct TrampDispatch {
 
 TrampDispatch g_dispatch[TRAMP_MAX];
 uint32_t g_tramp_count = 0;
+
+void host_arm(uint32_t idx, const std::string &key);
 
 struct Tramp {
     std::string dll;
@@ -164,6 +167,7 @@ void imports_register(const ImportShim *shims, size_t count) {
         if (ti != index().end()) {
             TrampDispatch &d = g_dispatch[ti->second];
             d.set(s.fn ? s.fn : d.fn, s.argc_stdcall);
+            host_arm(ti->second, k);
         }
     }
 }
@@ -195,6 +199,7 @@ uint32_t imports_alloc_trampoline(const char *dll, const char *name, void (*fn)(
                 argc = decorated_stdcall_args(name);
             d.set(fn, argc);
         }
+        host_arm(it->second, k);
         return TRAMP_BASE + TRAMP_STRIDE * it->second;
     }
 
@@ -222,7 +227,14 @@ uint32_t imports_alloc_trampoline(const char *dll, const char *name, void (*fn)(
     tramps().push_back(t);
     g_tramp_count = idx + 1;
     index()[k] = idx;
+    host_arm(idx, k);
     return TRAMP_BASE + TRAMP_STRIDE * idx;
+}
+
+bool imports_trampoline_slow(uint32_t target) {
+    uint32_t idx = (target - TRAMP_BASE) / TRAMP_STRIDE;
+    return !imports_is_trampoline(target) || idx >= g_tramp_count ||
+           (g_dispatch[idx].flags & kDispatchSlow);
 }
 
 // The data imports D3DPopTB.exe has. weanetr.dll exports three GUIDs (16 bytes
@@ -433,18 +445,60 @@ void imports_dump_report(FILE *out) {
 
 namespace {
 ImportReturnObserver g_return_observer = nullptr;
+ImportCallObserver g_call_observer = nullptr;
+
+std::unordered_map<std::string, uint32_t> &host_index() {
+    static auto *index = [] {
+        auto *m = new std::unordered_map<std::string, uint32_t>();
+        for (uint32_t i = 0; i < recomp_host_method_count; ++i)
+            (*m)[recomp_host_methods[i].identity] = i;
+        return m;
+    }();
+    return *index;
 }
+
+std::vector<int32_t> &host_tramps() {
+    static auto *v = new std::vector<int32_t>(recomp_host_method_count, -1);
+    return *v;
+}
+
+void host_arm_slot(uint32_t slot, uint32_t idx) {
+    const RecompHostMethod &m = recomp_host_methods[slot];
+    TrampDispatch &d = g_dispatch[idx];
+    host_tramps()[slot] = (int32_t)idx;
+    if (d.fn == m.fn && d.pop != m.pop) {
+        LOGW("imports: %s pops %u bytes but its method fact pops %u", m.identity, d.pop, m.pop);
+        fflush(stderr);
+        abort();
+    }
+    const bool direct = d.fn == m.fn && !(d.flags & (kDispatchSlow | kDispatchAtomic)) &&
+                        !recomp_observe_on && !recomp_frame_watch && !g_import_tracing.flags &&
+                        !g_call_observer && !g_return_observer;
+    recomp_host_slots[slot].calls = &d.calls;
+    recomp_host_slots[slot].tramp = direct ? TRAMP_BASE + TRAMP_STRIDE * idx : 1u;
+}
+
+void host_arm(uint32_t idx, const std::string &key) {
+    auto it = host_index().find(key);
+    if (it != host_index().end())
+        host_arm_slot(it->second, idx);
+}
+
+void host_refresh() {
+    for (uint32_t slot = 0; slot < recomp_host_method_count; ++slot)
+        if (host_tramps()[slot] >= 0)
+            host_arm_slot(slot, (uint32_t)host_tramps()[slot]);
+}
+} // namespace
 
 void imports_set_return_observer(ImportReturnObserver fn) {
     g_return_observer = fn;
-}
-
-namespace {
-ImportCallObserver g_call_observer = nullptr;
+    host_refresh();
 }
 
 void imports_set_call_observer(ImportCallObserver fn) {
     g_call_observer = fn;
+    host_refresh();
 }
 
 ImportReturnObserver imports_set_return_observer_get(void) {
@@ -494,9 +548,8 @@ static void diagnose_unsupported_import(const X86 *c, const char *desc, uint8_t 
 
 // Dispatch a guest import trampoline at a scheduler checkpoint.
 // Copy dispatch metadata before calling a shim, then restore EIP/ESP according to its calling convention.
+uint64_t recomp_import_calls = 0;
 namespace {
-uint64_t g_import_calls = 0;
-constexpr uint32_t kImportCheckpointCost = 8;
 #ifdef RECOMP_CHECK_CALL_FACTS
 thread_local uint64_t g_guest_entries = 0;
 
@@ -517,10 +570,10 @@ bool cw_effect_allows(uint32_t ret, uint16_t before, uint16_t after) {
 #endif
 } // namespace
 uint64_t imports_call_count() {
-    return g_import_calls;
+    return recomp_import_calls;
 }
 void imports_call_leaves_surfaces() {
-    --g_import_calls;
+    --recomp_import_calls;
 }
 
 [[gnu::noinline]] static void trace_import_enter(X86 *c, const char *desc, uint8_t argc,
@@ -587,7 +640,7 @@ void imports_call_leaves_surfaces() {
         desc[n] = 0;
     }
     ++g_dispatch[idx].calls;
-    ++g_import_calls;
+    ++recomp_import_calls;
 
     uint32_t ret_addr = rd32(c->r[R_ESP]);
     // The guest EIP is only advanced at call boundaries, so without this a
@@ -676,7 +729,7 @@ bool imports_dispatch(X86 *c, uint32_t target) {
     uint32_t idx = (target - TRAMP_BASE) / TRAMP_STRIDE;
     TrampDispatch &d = g_dispatch[idx];
     if (idx >= g_tramp_count || !(d.flags & kDispatchAtomic))
-        recomp_execution_checkpoint_charge(c, kImportCheckpointCost);
+        recomp_execution_checkpoint_charge(c, RECOMP_IMPORT_CHECKPOINT_COST);
     if (RECOMP_UNLIKELY(idx >= g_tramp_count)) {
         LOGW("imports: call to unallocated trampoline %08x (ESP=%08x, return=%08x)", target,
              c->r[R_ESP], rd32(c->r[R_ESP]));
@@ -693,7 +746,7 @@ bool imports_dispatch(X86 *c, uint32_t target) {
                         (d.flags & kDispatchSlow)))
         return imports_dispatch_slow(c, idx, fn, argc, tracing);
     ++g_dispatch[idx].calls;
-    ++g_import_calls;
+    ++recomp_import_calls;
     const uint32_t ret_addr = rd32(c->r[R_ESP]);
     c->eip = ret_addr;
     const uint16_t pop = d.pop;

@@ -151,6 +151,14 @@
         "dx/dsound.cpp COM method tables dispatch to native handlers and COM lifetime hooks without guest callbacks or guest CPU writes beyond com_ret; DirectSoundEnumerate callbacks are separate DLL exports, outside this family. dx/com.h com_ret writes EAX and runtime/imports.cpp performs the stdcall ESP adjustment. Other GPRs and arithmetic flags retain their guest values; reads remain conservative."
       ]
     }
+,
+    {
+      "pattern": "d3dx9_33.dll!*::*",
+      "effect": "unknown",
+      "evidence": [
+        "D3DX9 effect methods remain unaudited; dx/d3d9.cpp effect application and destruction invoke guest ID3DXEffectStateManager methods through guest_call."
+      ]
+    }
   ],
   "methods": [
     {

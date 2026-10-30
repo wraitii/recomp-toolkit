@@ -73,7 +73,7 @@ pub fn plan_function_with_view(
     let base = base.unwrap_or_else(|| publications(&ssa, opts.call_facts));
     let mut return_addr = BTreeMap::new();
     for (index, value) in ssa.values.iter().enumerate() {
-        if !matches!(value.op, rk_ir::Op::Call { .. }) {
+        if !matches!(value.op, rk_ir::Op::Call { .. } | rk_ir::Op::CallInd) {
             continue;
         }
         let addr = ssa.value_addr[index];

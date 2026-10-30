@@ -1884,7 +1884,7 @@ pub(crate) struct D3d9DrawState {
     linked: Vec<LinkedInput>,
     ff_uniforms: Vec<f32>,
     index_slots: FastMap<u32, u32>,
-    native_streams: SmallVec<[(u32, VertexAttributes); 2]>,
+    native_layouts: LruCache<NativeLayoutKey, Arc<NativeLayout>, 256>,
     native_geometry_pool: Vec<Box<NativeGeometry>>,
     pipeline_memo: Option<(PipelineKey, wgpu::RenderPipeline)>,
     memos: memo::Cache,
@@ -2007,6 +2007,7 @@ impl D3d9DrawState {
         self.clear("device-reset");
         self.discard_batch();
         self.native_geometry_pool.clear();
+        self.native_layouts.clear();
         self.interpreter_programs.clear();
         self.upload = None;
     }
@@ -2802,7 +2803,11 @@ pub(crate) fn execute(
     let specialization_started = trace_compilation().then(Instant::now);
     let ready = if hybrid {
         let (buffers, topology, strip_format) = if let Some(plan) = &native_plan {
-            (plan.layouts.clone(), plan.topology, plan.strip_format)
+            (
+                plan.layout.layouts.clone(),
+                plan.topology,
+                plan.strip_format,
+            )
         } else {
             let (attributes, stride) = packed_shader_layout(linked.unwrap(), false)?;
             let buffers = smallvec![(
@@ -2838,11 +2843,7 @@ pub(crate) fn execute(
         Some(plan) if !interpreted => {
             Some(upload_native_geometry(gpu, draw, &snapshot.command, plan)?)
         }
-        Some(mut plan) => {
-            plan.streams.clear();
-            draw.native_streams = plan.streams;
-            None
-        }
+        Some(_) => None,
         None => None,
     };
     if interpreted {
@@ -2965,7 +2966,7 @@ pub(crate) fn execute(
         if let Some(geometry) = &native_geometry {
             eprintln!(
                 "[d3d9-trace] native layouts={:?} topology={:?} index_offset={} index_size={} base_vertex={} count={}",
-                geometry.layouts,
+                geometry.layout.layouts,
                 geometry.topology,
                 geometry.index_offset,
                 geometry.index_size,
@@ -3192,7 +3193,7 @@ pub(crate) fn execute(
             "viewport depth range cannot be represented by wgpu",
         ));
     }
-    let max = u64::from(gpu.device.limits().max_texture_dimension_2d);
+    let max = u64::from(gpu.limits().max_texture_dimension_2d);
     if u64::from(vp.width) > max
         || u64::from(vp.height) > max
         || u64::from(vp.x) + u64::from(vp.width) > 2 * max - 1
@@ -3254,22 +3255,22 @@ pub(crate) fn execute(
         parameters
     };
     let has_attributes = !vertices.attributes.is_empty();
-    let buffers = match native_geometry.as_mut() {
-        Some(geometry) => std::mem::take(&mut geometry.layouts),
-        None if has_attributes => smallvec![(
+    let buffers = match native_geometry.as_ref() {
+        Some(geometry) => Cow::Borrowed(&geometry.layout.layouts),
+        None if has_attributes => Cow::Owned(smallvec![(
             vertices.stride,
             vertices
                 .attributes
                 .iter()
                 .map(LayoutAttribute::new)
                 .collect::<Result<_, _>>()?
-        )],
-        None => SmallVec::new(),
+        )]),
+        None => Cow::Owned(SmallVec::new()),
     };
     let strip_index_format = native_geometry.as_ref().and_then(|g| g.strip_format);
     let pipeline = match &memo.pipeline {
         Some((shape, pipeline))
-            if shape.0 == buffers && shape.1 == topology && shape.2 == strip_index_format =>
+            if shape.0 == *buffers && shape.1 == topology && shape.2 == strip_index_format =>
         {
             pipeline.clone()
         }
@@ -3286,6 +3287,7 @@ pub(crate) fn execute(
             }
             let descriptor =
                 pipeline_descriptor(gpu, state, snapshot, topology, strip_index_format)?;
+            let buffers = buffers.into_owned();
             let key = PipelineKey {
                 entry_points: descriptor.entry_points,
                 modules: memo.modules.clone(),
@@ -3755,17 +3757,34 @@ fn feedback_bindings(
     };
     gpu.record(|encoder, _| {
         for level in 0..levels {
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    mip_level: level,
-                    ..source.as_image_copy()
-                },
-                wgpu::TexelCopyTextureInfo {
-                    mip_level: level,
-                    ..copy.as_image_copy()
-                },
-                size.mip_level_size(level, dimension),
-            );
+            let mut extent = size.mip_level_size(level, dimension);
+            let layers = if dimension == wgpu::TextureDimension::D2 {
+                let layers = extent.depth_or_array_layers;
+                extent.depth_or_array_layers = 1;
+                layers
+            } else {
+                1
+            };
+            for layer in 0..layers {
+                let origin = wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                };
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        mip_level: level,
+                        origin,
+                        ..source.as_image_copy()
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        mip_level: level,
+                        origin,
+                        ..copy.as_image_copy()
+                    },
+                    extent,
+                );
+            }
         }
     });
     Ok(bindings

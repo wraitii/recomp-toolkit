@@ -750,6 +750,14 @@ pub mod ffi {
         recording_active: bool,
     }
 
+    struct D3d9BindingSnapshot {
+        live: D3d9Bindings,
+        recording: D3d9Bindings,
+        recording_active: bool,
+        render_target: u32,
+        depth_stencil: u32,
+    }
+
     struct D3d9BlockBindingsResult {
         status: Status,
         bindings: D3d9Bindings,
@@ -918,7 +926,8 @@ pub mod ffi {
         fn d3d9_apply_state_block(device: &mut D3d9Device, handle: u32) -> Status;
         fn d3d9_destroy_state_block(device: &mut D3d9Device, handle: u32) -> Status;
         fn d3d9_state_block_bindings(device: &D3d9Device, handle: u32) -> D3d9BlockBindingsResult;
-        fn d3d9_current_bindings(device: &D3d9Device) -> D3d9BindingsResult;
+        fn d3d9_current_bindings(device: &D3d9Device) -> D3d9BindingSnapshot;
+        fn d3d9_note_binding_refresh(unchanged: bool, effect_pass: bool);
         fn guest_status_hresult(status: &Status) -> u32;
         fn new_guest_texture() -> Box<GuestTexture>;
         unsafe fn guest_texture_prepare_create(
@@ -1910,7 +1919,8 @@ use crate::d3d9::{
     d3d9_get_shader_constants_i, d3d9_get_stream_freq, d3d9_get_stream_source, d3d9_get_texture,
     d3d9_get_texture_stage_state, d3d9_get_transform, d3d9_get_vertex_declaration,
     d3d9_get_viewport, d3d9_level_bytes, d3d9_level_lock_commit, d3d9_level_lock_prepare,
-    d3d9_level_unlock, d3d9_lod, d3d9_multiply_transform, d3d9_number_of_swap_chains, d3d9_preload,
+    d3d9_level_unlock, d3d9_lod, d3d9_multiply_transform, d3d9_note_binding_refresh,
+    d3d9_number_of_swap_chains, d3d9_preload,
     d3d9_prepare_resource_reset, d3d9_present, d3d9_present_handoff, d3d9_present_readback,
     d3d9_priority, d3d9_readback_level, d3d9_register_resource, d3d9_registered_resource_ids,
     d3d9_reset, d3d9_reset_ready, d3d9_resource_type, d3d9_set_autogen_filter, d3d9_set_clip_plane,
@@ -1959,7 +1969,8 @@ use std::collections::BTreeMap;
 pub use ffi::{
     AdapterInfo, AdapterInfoResult, ApplyStateBlockResult, BindingResult, ConstantRead,
     D3d7RenderStateTranslation, D3d7TextureStageTranslation, D3d7TransformTranslation,
-    D3d7TranslationKind, D3d9AdapterIdentifierResult, D3d9Bindings, D3d9BindingsResult,
+    D3d7TranslationKind, D3d9AdapterIdentifierResult, D3d9BindingSnapshot, D3d9Bindings,
+    D3d9BindingsResult,
     D3d9BlockBindingsResult, D3d9BufferKind, D3d9BufferRequest, D3d9BufferUnlockResult,
     D3d9CapsResult, D3d9CheckDepthStencilRequest, D3d9CheckDeviceFormatRequest,
     D3d9CheckDeviceTypeRequest, D3d9CheckFormatConversionRequest, D3d9CheckMultiSampleRequest,

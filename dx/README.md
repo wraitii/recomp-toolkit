@@ -53,11 +53,24 @@ are unsupported. Short periodic effects use their mean to avoid aliasing.
 
 ## Graphics ownership
 
+COM remains native: `com.cpp` owns guest interface views and vtables, object
+lookup, QueryInterface identity, reference counts and destruction. D3D9 native
+code also maps Rust handles back to guest objects and retains/releases COM
+resources as live bindings and state blocks change. Origin's direct COM-call
+optimization changes dispatch cost, not this ownership.
+
+The C++ layer is therefore more than a thin forwarding bridge. It decodes guest
+calls, publishes interfaces/results, maintains guest-visible relationships and
+coordinates cleanup/reset with Rust. Rust owns migrated resource storage,
+buffer and 2D lock/staging operations, rendering state and GPU execution; its resource ownership
+and frame leases do not replace guest COM reference counts. Moving the remaining
+D3D guest adapters and moving the shared COM registry are distinct future steps.
+
 | Family | Semantic owner | Native boundary |
 | --- | --- | --- |
 | DirectDraw/GDI and DX2–7 recording | `dx/ddraw.cpp`, `dx/d3d*.cpp`, `host/d3d_render.cpp` | CPU pixels, blits, coherence and recorded draws remain native. D3D7 device/resource state uses the Rust guest adapter. |
 | D3D7/8 state and resources | `graphics/d3d8-wgpu/src/d3d8/` and `guest/` | COM identity, guest staging and synchronous marshaling remain in `dx/`. GPU work uses the renderer bridge. |
-| D3D9 devices, resources and draws | `graphics/d3d8-wgpu/src/d3d9/` and `shader/` | Native COM views retain Rust holders; Rust owns storage, locks, API state, reset and execution. |
+| D3D9 devices, resources and draws | `graphics/d3d8-wgpu/src/d3d9/`, `guest/` and `shader/` | Native COM views retain Rust holders; Rust owns storage, buffer and 2D staging, API state, reset and execution. Cube and volume lock staging remains native. |
 | D3DX9 | Rust `d3d9/` owns matrix multiply/transpose/inverse, image and effect operations; vector/projection helpers stay native. | DLL versions share migrated arithmetic; native adapters preserve version-specific results and COM identities. |
 | D3DX10 matrix helpers | `dx/d3dx10.cpp` | Retained native arithmetic; no D3D11 rendering dependency. |
 | D3D11, DXGI factory and D3DCompile | Named unsupported imports in `dx/` | Retired API behavior, separate from ownership cleanup. |
