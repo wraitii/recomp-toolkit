@@ -53,9 +53,35 @@ fn condition(condition: X87Condition) -> &'static str {
 
 pub struct Printer<'a> {
     pub external: &'a dyn External,
+    pub lazy_environment: bool,
 }
 
 impl Printer<'_> {
+    fn resident(&self, part: &str) -> String {
+        if self.lazy_environment && matches!(part, "top" | "sw" | "tag") {
+            format!("x87_cached_{part}_")
+        } else {
+            format!("c->fpu_{part}")
+        }
+    }
+
+    fn synchronize(&self, reload: bool) -> Vec<String> {
+        if !self.lazy_environment {
+            return Vec::new();
+        }
+        ["top", "sw", "tag"]
+            .into_iter()
+            .map(|part| {
+                let cached = self.resident(part);
+                if reload {
+                    format!("{cached} = c->fpu_{part};")
+                } else {
+                    format!("c->fpu_{part} = {cached};")
+                }
+            })
+            .collect()
+    }
+
     pub fn expr(&self, value: &Expr) -> Result<String> {
         Ok(match value {
             Expr::Literal(ty, data) => {
@@ -72,7 +98,7 @@ impl Printer<'_> {
             Expr::Carry(position, part) => carry_name(*position, part),
             Expr::St0Argument => "st0_".into(),
             Expr::Environment(part) => format!("x87_{part}_"),
-            Expr::Resident(part) => format!("c->fpu_{part}"),
+            Expr::Resident(part) => self.resident(part),
             Expr::Cw(value) => format!("0x{value:x}u"),
             Expr::External(id) => self.external.value(*id)?,
             Expr::Cpu => "c".into(),
@@ -84,6 +110,9 @@ impl Printer<'_> {
             Expr::Slot(part, physical) => {
                 let physical = self.expr(physical)?;
                 match *part {
+                    "tag" if self.lazy_environment => {
+                        format!("((x87_cached_tag_ >> (2u * ({physical}))) & 3u)")
+                    }
                     "tag" => format!("ftag_of(c, {physical})"),
                     "value" => format!("c->st[{physical}]"),
                     "bits" => format!("c->st_bits[{physical}]"),
@@ -214,7 +243,27 @@ impl Printer<'_> {
     pub fn events(&self, events: &[Event]) -> Result<Vec<String>> {
         let mut lines: Vec<String> = Vec::new();
         for event in events {
+            let observes_cpu = match event {
+                Event::Evaluate(value) => uses_cpu(value),
+                Event::Assign(assign) => uses_cpu(&assign.value) || uses_cpu(&assign.target),
+                Event::Store { value, address, .. } => uses_cpu(value) || uses_cpu(address),
+                Event::Bitcast { value, target, .. } => uses_cpu(value) || uses_cpu(target),
+                Event::EmptyTags(_) => true,
+                _ => false,
+            };
+            if observes_cpu && self.lazy_environment {
+                lines.extend(self.synchronize(false));
+                let eager = Printer {
+                    external: self.external,
+                    lazy_environment: false,
+                };
+                lines.extend(eager.events(std::slice::from_ref(event))?);
+                lines.extend(self.synchronize(true));
+                continue;
+            }
             match event {
+                Event::CommitEnvironment => lines.extend(self.synchronize(false)),
+                Event::ReloadEnvironment => lines.extend(self.synchronize(true)),
                 Event::Reset => {}
                 Event::Assign(assign) => {
                     let target = self.expr(&assign.target)?;
@@ -286,11 +335,12 @@ impl Printer<'_> {
                         .collect::<Result<Vec<_>>>()?
                         .join(" | ");
                     lines.push(format!(
-                        "c->fpu_tag = (uint16_t)((c->fpu_tag & ~({masks})) | {values});"
+                        "{tag} = (uint16_t)(({tag} & ~({masks})) | {values});",
+                        tag = self.resident("tag")
                     ));
                 }
                 Event::Activation(activation) => {
-                    lines.push("x87_top_ = c->fpu_top;".into());
+                    lines.push(format!("x87_top_ = {};", self.resident("top")));
                     if activation.clone == Some("fast") && !activation.known_mode {
                         let hooks = if self.external.call_hooks() {
                             "recomp_hooks_ever || "
@@ -305,7 +355,7 @@ impl Printer<'_> {
                         lines.push(format!("X87CW{}:;", activation.index));
                     }
                     lines.push("x87_cw_ = c->fpu_cw;".into());
-                    lines.push("x87_sw_ = c->fpu_sw;".into());
+                    lines.push(format!("x87_sw_ = {};", self.resident("sw")));
                 }
                 Event::Declare(_) => {}
                 Event::Conditional(condition, body) => {
@@ -349,6 +399,12 @@ pub trait PlanLines {
         value: ValueId,
         external: &dyn External,
     ) -> Result<Vec<String>>;
+    fn after_lines(
+        &self,
+        clone: usize,
+        value: ValueId,
+        external: &dyn External,
+    ) -> Result<Vec<String>>;
     fn declaration_lines(&self, external: &dyn External) -> Result<Vec<String>>;
     fn st0_handover(
         &self,
@@ -365,7 +421,10 @@ impl PlanLines for Plan {
         block: BlockId,
         external: &dyn External,
     ) -> Result<Vec<String>> {
-        let printer = Printer { external };
+        let printer = Printer {
+            external,
+            lazy_environment: self.lazy_environment,
+        };
         printer.events(
             self.programs[clone]
                 .blocks
@@ -381,7 +440,10 @@ impl PlanLines for Plan {
         value: ValueId,
         external: &dyn External,
     ) -> Result<Vec<String>> {
-        let printer = Printer { external };
+        let printer = Printer {
+            external,
+            lazy_environment: self.lazy_environment,
+        };
         printer.events(
             self.programs[clone]
                 .events
@@ -397,7 +459,10 @@ impl PlanLines for Plan {
         block: BlockId,
         external: &dyn External,
     ) -> Result<Vec<String>> {
-        let printer = Printer { external };
+        let printer = Printer {
+            external,
+            lazy_environment: self.lazy_environment,
+        };
         printer.events(
             self.programs[clone]
                 .ends
@@ -413,7 +478,10 @@ impl PlanLines for Plan {
         value: ValueId,
         external: &dyn External,
     ) -> Result<Vec<String>> {
-        let printer = Printer { external };
+        let printer = Printer {
+            external,
+            lazy_environment: self.lazy_environment,
+        };
         printer.events(
             self.programs[clone]
                 .defaults
@@ -429,7 +497,10 @@ impl PlanLines for Plan {
         value: ValueId,
         external: &dyn External,
     ) -> Result<Option<St0Text>> {
-        let printer = Printer { external };
+        let printer = Printer {
+            external,
+            lazy_environment: self.lazy_environment,
+        };
         let Some(handover) = self.programs[clone].arguments.get(&value) else {
             return Ok(None);
         };
@@ -442,11 +513,66 @@ impl PlanLines for Plan {
         }))
     }
 
+    fn after_lines(
+        &self,
+        clone: usize,
+        value: ValueId,
+        external: &dyn External,
+    ) -> Result<Vec<String>> {
+        let printer = Printer {
+            external,
+            lazy_environment: self.lazy_environment,
+        };
+        printer.events(
+            self.programs[clone]
+                .after
+                .get(&value)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )
+    }
+
     fn declaration_lines(&self, external: &dyn External) -> Result<Vec<String>> {
-        let printer = Printer { external };
-        self.declarations
+        let printer = Printer {
+            external,
+            lazy_environment: self.lazy_environment,
+        };
+        let mut lines = self
+            .declarations
             .iter()
             .map(|value| printer.declaration(value))
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        if self.lazy_environment {
+            for (part, ty) in [("top", "uint32_t"), ("sw", "uint16_t"), ("tag", "uint16_t")] {
+                lines.push(format!("{ty} x87_cached_{part}_ = c->fpu_{part};"));
+            }
+        }
+        Ok(lines)
+    }
+}
+
+fn uses_cpu(value: &Expr) -> bool {
+    match value {
+        Expr::Cpu | Expr::St(_) => true,
+        Expr::AxMerge(v)
+        | Expr::Slot(_, v)
+        | Expr::Physical(v, _)
+        | Expr::Rotate(v, _)
+        | Expr::Group(v)
+        | Expr::Cast(_, v)
+        | Expr::Negate(v)
+        | Expr::NanFold(v)
+        | Expr::NanTest(v)
+        | Expr::LoadWord(v) => uses_cpu(v),
+        Expr::Binary(_, a, b)
+        | Expr::PcRound(a, b)
+        | Expr::FloatStore(a, b)
+        | Expr::StatusWord(a, b) => uses_cpu(a) || uses_cpu(b),
+        Expr::FloatArithmetic(_, cw, a, b, sw) => {
+            uses_cpu(cw) || uses_cpu(a) || uses_cpu(b) || sw.as_ref().is_some_and(|v| uses_cpu(v))
+        }
+        Expr::Load { address, .. } => uses_cpu(address),
+        Expr::IntegerConvert { args, .. } | Expr::Helper(_, args) => args.iter().any(uses_cpu),
+        _ => false,
     }
 }

@@ -56,6 +56,7 @@ pub struct CloneProgram {
     pub blocks: BTreeMap<BlockId, Vec<Event>>,
     pub events: BTreeMap<ValueId, Vec<Event>>,
     pub defaults: BTreeMap<ValueId, Vec<Event>>,
+    pub after: BTreeMap<ValueId, Vec<Event>>,
     pub ends: BTreeMap<BlockId, Vec<Event>>,
     pub arguments: BTreeMap<ValueId, St0Handover>,
     pub activations: u32,
@@ -64,6 +65,7 @@ pub struct CloneProgram {
 #[derive(Clone, Debug, Default)]
 pub struct Plan {
     pub used: bool,
+    pub lazy_environment: bool,
     pub declarations: Vec<Expr>,
     pub programs: Vec<CloneProgram>,
 }
@@ -416,11 +418,18 @@ fn lower_clone(
                         }
                     }
                     events.extend(scalar.flush());
+                    if !strict {
+                        events.push(Event::CommitEnvironment);
+                        program.after.insert(value, vec![Event::ReloadEnvironment]);
+                    }
                     events.push(Event::Reset);
                     scalar.reset();
                 }
                 Op::Return | Op::Tail { .. } | Op::Breakpoint => {
                     events.extend(scalar.flush());
+                    if !strict {
+                        events.push(Event::CommitEnvironment);
+                    }
                 }
                 op @ (Op::Branch { .. }
                 | Op::CBranch { .. }
@@ -430,16 +439,27 @@ fn lower_clone(
                     if carry_mode {
                         if carry::external_exit(s, value) {
                             events.extend(scalar.flush());
+                            if !strict {
+                                events.push(Event::CommitEnvironment);
+                            }
                         }
                         transition(scalar, &targets, entry, &mut events)?;
                         if let Op::BranchInd = op {
                             let mut defaults = scalar.flush();
+                            if !strict {
+                                defaults.push(Event::CommitEnvironment);
+                            }
                             program
                                 .defaults
                                 .insert(value, std::mem::take(&mut defaults));
                         }
                     } else {
                         events.extend(scalar.flush());
+                        if !strict
+                            && (carry::external_exit(s, value) || matches!(op, Op::BranchInd))
+                        {
+                            events.push(Event::CommitEnvironment);
+                        }
                     }
                 }
                 _ => {}
@@ -458,6 +478,9 @@ fn lower_clone(
             let targets = succ.get(&id).cloned().unwrap_or_default();
             if targets.is_empty() {
                 end.extend(scalar.flush());
+                if !strict {
+                    end.push(Event::CommitEnvironment);
+                }
             } else if carry_mode {
                 if linear.get(targets.first().unwrap_or(&id)).copied() != Some(id) {
                     transition(scalar, &targets, entry, &mut end)?;
@@ -555,6 +578,7 @@ pub fn prepare(s: &Ssa, modes: &ModeInput, options: &Options) -> Result<Plan, Re
     declarations.extend([env("cw"), env("sw"), env("top")]);
     Ok(Plan {
         used: true,
+        lazy_environment: !options.strict,
         declarations,
         programs,
     })

@@ -942,6 +942,9 @@ impl<'a> Emitter<'a> {
                         }
                     }
                     continues = self.value(value)?;
+                    let lines =
+                        self.x87_lines(|x87, names| x87.after_lines(self.clone, value, names))?;
+                    self.write_x87(lines);
                 }
                 self.materialize_defs(value)?;
             }

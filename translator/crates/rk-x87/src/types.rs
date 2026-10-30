@@ -315,6 +315,8 @@ pub enum Event {
     PublishTags(Vec<(Expr, Expr)>),
     Activation(Activation),
     Reset,
+    CommitEnvironment,
+    ReloadEnvironment,
     Declare(Expr),
     Conditional(Expr, Vec<Event>),
     EmptyTags(bool),
