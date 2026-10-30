@@ -4341,8 +4341,12 @@ fn flush_draws_with_gpu(device: &mut D3d9Device, gpu: &D3d9Gpu) -> Result<(), Re
 }
 
 fn device_gpu(device: &D3d9Device) -> Result<D3d9Gpu, Status> {
+    device_gpu_ref(device).cloned()
+}
+
+fn device_gpu_ref(device: &D3d9Device) -> Result<&D3d9Gpu, Status> {
     let gpu = match device.resource_gpu() {
-        Ok(gpu) => gpu.clone(),
+        Ok(gpu) => gpu,
         Err(error) => return Err(bridge_error(error)),
     };
     if gpu.is_physical() {
@@ -4921,7 +4925,7 @@ fn resolve_draw_views(
 
 fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<(), RenderError> {
     stats::record(|s| s.draws += 1);
-    let gpu = bridge_gpu(device)?;
+    device.resource_gpu()?;
     require_unlocked(device, device.render_target_id, "D3D9 surface")?;
     if device.depth_target_id != 0 {
         require_unlocked(device, device.depth_target_id, "D3D9 surface")?;
@@ -4960,11 +4964,15 @@ fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<
     };
     device.draw_views = Some(views);
     device.draw_textures = Some(textures);
+    let gpu = device
+        .d3d9_gpu
+        .as_ref()
+        .ok_or_else(|| RenderError::invalid("D3D9", "device is not initialized"))?;
     if gpu.is_physical() {
         return Err(RenderError::new("Draw", gpu.loss().physical_message()));
     }
     draw::execute(
-        &gpu,
+        gpu,
         &mut device.draw,
         &mut device.queries,
         &device.state,
@@ -5298,7 +5306,7 @@ fn draw_primitive(
             message: "DrawPrimitive requires BeginScene".into(),
         });
     }
-    device_gpu(device).map_err(api::ApiError::from)?;
+    device_gpu_ref(device).map_err(api::ApiError::from)?;
     let streams = collect_streams(device, &device.state)?;
     let command = draw::DrawCommand {
         primitive,
@@ -5343,7 +5351,7 @@ pub fn d3d9_draw_indexed_primitive(
             "DrawIndexedPrimitive requires BeginScene",
         );
     }
-    if let Err(status) = device_gpu(device) {
+    if let Err(status) = device_gpu_ref(device) {
         return status;
     }
     let index_id = device.state.bindings().indices;
@@ -5392,7 +5400,7 @@ pub fn d3d9_draw_primitive_up(
             "DrawPrimitiveUP requires BeginScene",
         );
     }
-    if let Err(status) = device_gpu(device) {
+    if let Err(status) = device_gpu_ref(device) {
         device.state.clear_up_stream();
         return status;
     }
@@ -5452,7 +5460,7 @@ pub fn d3d9_draw_indexed_primitive_up(
             "DrawIndexedPrimitiveUP requires BeginScene",
         );
     }
-    if let Err(status) = device_gpu(device) {
+    if let Err(status) = device_gpu_ref(device) {
         device.state.clear_up_indexed();
         return status;
     }

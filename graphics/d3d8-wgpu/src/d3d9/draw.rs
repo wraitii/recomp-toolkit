@@ -3151,31 +3151,37 @@ pub(crate) fn execute(
         textures: &snapshot.textures,
     });
     let memo_hit = memo.is_some();
-    let mut memo = match memo {
-        Some(memo) => memo,
-        None if covered => uber::resolve(
-            gpu,
-            draw,
-            state,
-            snapshot,
-            vs.ok_or_else(|| unsupported("InterpreterDraw", "missing vertex program"))?,
-            ps.ok_or_else(|| unsupported("InterpreterDraw", "missing pixel program"))?,
-            ready,
-            raw_inputs,
-        )?,
-        None => resolve_shading(
-            gpu,
-            draw,
-            state,
-            vs,
-            ps,
-            ff_key,
-            (ff_uniforms.len() / 4) as u32,
-            &snapshot,
-            target_key,
-            depth_key,
-            raw_inputs,
-        )?,
+    let (mut memo, memo_slot) = match memo {
+        Some((memo, slot)) => (memo, Some(slot)),
+        None if covered => (
+            uber::resolve(
+                gpu,
+                draw,
+                state,
+                snapshot,
+                vs.ok_or_else(|| unsupported("InterpreterDraw", "missing vertex program"))?,
+                ps.ok_or_else(|| unsupported("InterpreterDraw", "missing pixel program"))?,
+                ready,
+                raw_inputs,
+            )?,
+            None,
+        ),
+        None => (
+            resolve_shading(
+                gpu,
+                draw,
+                state,
+                vs,
+                ps,
+                ff_key,
+                (ff_uniforms.len() / 4) as u32,
+                &snapshot,
+                target_key,
+                depth_key,
+                raw_inputs,
+            )?,
+            None,
+        ),
     };
     let bindings = feedback_bindings(gpu, draw, queries, snapshot, &memo.bindings)?;
     if snapshot.command.primitive == 1
@@ -3632,7 +3638,11 @@ pub(crate) fn execute(
         blend_constant: blend,
         scissor,
     });
-    if draw.memos.insert(memo) {
+    let evicted = match memo_slot {
+        Some(slot) => draw.memos.put_back(slot, memo),
+        None => draw.memos.insert(memo),
+    };
+    if evicted {
         stats::record(|s| s.memo_evictions += 1);
     }
     if let Some(keys) = memo_trace_keys {
