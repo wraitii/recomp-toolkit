@@ -6,7 +6,7 @@ use crate::bridge::{
     D3dxEffectCreateResult, D3dxEffectDesc, D3dxEffectDescResult, D3dxEffectParamDesc,
     D3dxEffectParamDescResult, D3dxEffectPassDesc, D3dxEffectPassDescResult, D3dxEffectRunResult,
     D3dxEffectShadersResult, D3dxEffectTechniqueDesc, D3dxEffectTechniqueDescResult,
-    D3dxTextureRefCounts, Status, StatusCode, ValueResult, status,
+    D3dxEffectTextureSetResult, D3dxTextureRefCounts, Status, StatusCode, ValueResult, status,
 };
 use crate::d3d9::D3d9Device;
 use crate::d3d9::d3dx_shader;
@@ -450,6 +450,8 @@ pub struct D3dxEffect {
     spare_commands: Vec<D3dxEffectCommand>,
     spare_values: Vec<f32>,
     targets: RefCell<FastMap<u32, ParamTarget>>,
+    saved_keys: FastMap<(u32, bool), Result<EffectKeys, RenderError>>,
+    texture_params: OnceLock<Vec<usize>>,
 }
 
 impl Default for D3dxEffect {
@@ -479,6 +481,8 @@ impl Default for D3dxEffect {
             spare_commands: Vec::new(),
             spare_values: Vec::new(),
             targets: RefCell::default(),
+            saved_keys: Default::default(),
+            texture_params: OnceLock::new(),
         }
     }
 }
@@ -1654,8 +1658,98 @@ pub fn d3dx_effect_saved_bindings(effect: &D3dxEffect) -> D3d9BindingsResult {
     }
 }
 
+// Float-to-float conversion is the identity on bits, so the common float setters copy words
+// directly; anything else takes the generic path below.
+fn set_float_fast(effect: &mut D3dxEffect, handle: u32, setter: u32, data: &[u8]) -> bool {
+    let words = match setter {
+        SET_MATRIX | SET_MATRIX_TRANSPOSE => 16,
+        SET_VECTOR => 4,
+        SET_FLOAT => 1,
+        _ => return false,
+    };
+    if data.len() != words * 4 {
+        return false;
+    }
+    let (root, offset, len, rows, cols) = {
+        let targets = effect.targets.borrow();
+        let Some(target) = targets.get(&handle) else {
+            return false;
+        };
+        let ty = &target.ty;
+        let class_ok = match setter {
+            SET_VECTOR => matches!(ty.class, FXC_SCALAR | FXC_VECTOR),
+            SET_FLOAT => ty.class == FXC_SCALAR,
+            _ => matches!(
+                ty.class,
+                FXC_SCALAR | FXC_VECTOR | FXC_MATRIX_ROWS | FXC_MATRIX_COLUMNS
+            ),
+        };
+        let (Some(root), None) = (target.root, target.annot) else {
+            return false;
+        };
+        if !class_ok
+            || ty.type_ != FXT_FLOAT
+            || ty.count() != 1
+            || !(1..=4).contains(&ty.rows)
+            || !(1..=4).contains(&ty.cols)
+            || ty.bytes < ty.rows * ty.cols * 4
+        {
+            return false;
+        }
+        (
+            root,
+            target.offset,
+            ty.bytes as usize,
+            ty.rows as usize,
+            ty.cols as usize,
+        )
+    };
+    let EfxValue::Numeric(bytes) = &effect.params[root].value else {
+        return false;
+    };
+    let whole = offset == 0 && len == bytes.len();
+    if offset.checked_add(len).is_none_or(|end| end > bytes.len()) {
+        return false;
+    }
+    let written = match setter {
+        SET_FLOAT => 1,
+        SET_VECTOR => cols,
+        _ => rows * cols,
+    };
+    if !(whole && written * 4 == len) {
+        effect.sync_shared(Some(root));
+    }
+    let EfxValue::Numeric(bytes) = &mut effect.params[root].value else {
+        return false;
+    };
+    let dst = &mut bytes[offset..offset + len];
+    match setter {
+        SET_MATRIX if rows == 4 && cols == 4 => dst[..64].copy_from_slice(data),
+        SET_MATRIX | SET_MATRIX_TRANSPOSE => {
+            let transpose = setter == SET_MATRIX_TRANSPOSE;
+            for r in 0..rows {
+                for c in 0..cols {
+                    let (sr, sc) = if transpose { (c, r) } else { (r, c) };
+                    let from = (sr * 4 + sc) * 4;
+                    let at = (r * cols + c) * 4;
+                    dst[at..at + 4].copy_from_slice(&data[from..from + 4]);
+                }
+            }
+        }
+        _ => {
+            let n = written.min(len / 4) * 4;
+            dst[..n].copy_from_slice(&data[..n]);
+        }
+    }
+    effect.touch(Some(root));
+    true
+}
+
 pub fn d3dx_effect_set(effect: &mut D3dxEffect, handle: u32, setter: u32, data: &[u8]) -> Status {
     stats::record(|s| s.effect_setters += 1);
+    if set_float_fast(effect, handle, setter, data) {
+        return ok();
+    }
     if setter > SET_LAST {
         return invalid_call("ID3DXEffect::SetValue");
     }
@@ -2001,24 +2095,31 @@ fn get_string(effect: &D3dxEffect, target: &ParamTarget) -> D3dxBytesResult {
     }
 }
 
-pub fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) -> ValueResult {
+pub fn d3dx_effect_set_texture(
+    effect: &mut D3dxEffect,
+    handle: u32,
+    id: u32,
+) -> D3dxEffectTextureSetResult {
     stats::record(|s| s.effect_texture_setters += 1);
     let Some(target) = effect.target(handle) else {
-        return ValueResult {
+        return D3dxEffectTextureSetResult {
             status: invalid_call("ID3DXEffect::SetTexture"),
-            value: 0,
+            previous: 0,
+            shared: false,
         };
     };
     if !target.ty.texture() {
-        return ValueResult {
+        return D3dxEffectTextureSetResult {
             status: invalid_call("ID3DXEffect::SetTexture"),
-            value: 0,
+            previous: 0,
+            shared: false,
         };
     }
     let Some(root) = target.root else {
-        return ValueResult {
+        return D3dxEffectTextureSetResult {
             status: invalid_call("ID3DXEffect::SetTexture"),
-            value: 0,
+            previous: 0,
+            shared: false,
         };
     };
     effect.sync_shared(target.root);
@@ -2028,9 +2129,10 @@ pub fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) ->
             EfxValue::Object(ids) if index < ids.len() => ids[index] = id,
             EfxValue::Object(ids) => ids.push(id),
             _ => {
-                return ValueResult {
+                return D3dxEffectTextureSetResult {
                     status: invalid_call("ID3DXEffect::SetTexture"),
-                    value: 0,
+                    previous: 0,
+                    shared: false,
                 };
             }
         },
@@ -2043,25 +2145,20 @@ pub fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) ->
                 }
             }
             _ => {
-                return ValueResult {
+                return D3dxEffectTextureSetResult {
                     status: invalid_call("ID3DXEffect::SetTexture"),
-                    value: 0,
+                    previous: 0,
+                    shared: false,
                 };
             }
         },
     }
     effect.touch(target.root);
-    ValueResult {
+    D3dxEffectTextureSetResult {
         status: ok(),
-        value: previous,
+        previous,
+        shared: effect.shared(root),
     }
-}
-
-pub fn d3dx_effect_texture_shared(effect: &D3dxEffect, handle: u32) -> bool {
-    effect
-        .target(handle)
-        .and_then(|target| target.root)
-        .is_some_and(|root| effect.shared(root))
 }
 
 fn count_pair<'a>(
@@ -2086,13 +2183,16 @@ pub fn d3dx_effect_texture_ref_counts(
     second: u32,
 ) -> D3dxTextureRefCounts {
     let pooled = effect.pool.is_some();
+    let textures = effect.texture_params.get_or_init(|| {
+        (0..effect.params.len())
+            .filter(|&index| effect.params[index].type_.texture())
+            .collect()
+    });
     count_pair(
-        effect
-            .params
+        textures
             .iter()
-            .enumerate()
-            .filter(|(index, param)| !(effect.shared(*index) && pooled) && param.type_.texture())
-            .filter_map(|(_, param)| match &param.value {
+            .filter(|&&index| !(effect.shared(index) && pooled))
+            .filter_map(|&index| match &effect.params[index].value {
                 EfxValue::Object(ids) => Some(ids),
                 _ => None,
             })
@@ -4037,16 +4137,22 @@ pub fn d3dx_effect_begin(
     let skip_state = flags & 1 != 0;
     let skip_shader = flags & 2 != 0;
     if !skip_state && !effect.manager_mode {
-        let keys = match touched_keys(effect, skip_shader) {
+        let key = (effect.technique, skip_shader);
+        if !effect.saved_keys.contains_key(&key) {
+            let keys = touched_keys(effect, skip_shader);
+            effect.saved_keys.insert(key, keys);
+        }
+        let keys = match &effect.saved_keys[&key] {
             Ok(keys) => keys,
             Err(error) => {
+                let error = error.clone();
                 return ValueResult {
                     status: failed("ID3DXEffect::Begin", error),
                     value: 0,
                 };
             }
         };
-        match device.state.effect_capture(&keys) {
+        match device.state.effect_capture(keys) {
             Ok(snapshot) => {
                 effect.saved = Some(snapshot);
             }

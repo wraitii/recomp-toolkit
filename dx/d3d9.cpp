@@ -2587,11 +2587,11 @@ static void efx_reconcile_texture_ref(std::set<uint32_t> &refs, uint32_t id, uin
     }
 }
 
-static void efx_update_texture_refs(ComObj *fx, uint32_t handle, uint32_t old_id, uint32_t new_id) {
+static void efx_update_texture_refs(ComObj *fx, bool shared, uint32_t old_id, uint32_t new_id) {
     D3dxEffectHost *host = efx_host(fx);
     if (!host || old_id == new_id)
         return;
-    if (recomp::d3d::d3dx_effect_texture_shared(*host->value, handle) && host->pool_obj) {
+    if (shared && host->pool_obj) {
         if (ComObj *pool = com_get(host->pool_obj); pool && pool->d3dx_effect_pool) {
             auto counts = recomp::d3d::d3dx_effect_pool_texture_ref_counts(
                 *pool->d3dx_effect_pool->value, old_id, new_id);
@@ -3412,17 +3412,17 @@ void Efx_SetTexture(X86 *c) {
         return;
     }
     uint32_t id = tex ? tex->id : 0;
-    recomp::d3d::ValueResult result =
+    recomp::d3d::D3dxEffectTextureSetResult result =
         recomp::d3d::d3dx_effect_set_texture(*efx_host(fx)->value, handle, id);
     if (result.status.code != recomp::d3d::StatusCode::Ok) {
         efx_status(c, result.status);
         return;
     }
-    if (result.value == id) {
+    if (result.previous == id) {
         com_ret(c, D3D_OK9);
         return;
     }
-    efx_update_texture_refs(fx, handle, result.value, id);
+    efx_update_texture_refs(fx, result.shared, result.previous, id);
     com_ret(c, D3D_OK9);
 }
 

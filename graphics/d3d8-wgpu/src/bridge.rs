@@ -598,6 +598,12 @@ pub mod ffi {
         bindings_changed: bool,
     }
 
+    struct D3dxEffectTextureSetResult {
+        status: Status,
+        previous: u32,
+        shared: bool,
+    }
+
     struct D3dxTextureRefCounts {
         first: u32,
         second: u32,
@@ -1175,9 +1181,12 @@ pub mod ffi {
             data: &[u8],
         ) -> Status;
         fn d3dx_effect_get(effect: &D3dxEffect, handle: u32, kind: u32) -> D3dxBytesResult;
-        fn d3dx_effect_set_texture(effect: &mut D3dxEffect, handle: u32, id: u32) -> ValueResult;
+        fn d3dx_effect_set_texture(
+            effect: &mut D3dxEffect,
+            handle: u32,
+            id: u32,
+        ) -> D3dxEffectTextureSetResult;
         fn d3dx_effect_texture(effect: &D3dxEffect, handle: u32) -> ValueResult;
-        fn d3dx_effect_texture_shared(effect: &D3dxEffect, handle: u32) -> bool;
         fn d3dx_effect_texture_ref_counts(
             effect: &D3dxEffect,
             first: u32,
@@ -1908,7 +1917,7 @@ use crate::d3d9::d3dx_effect::{
     d3dx_effect_release, d3dx_effect_saved_bindings, d3dx_effect_set, d3dx_effect_set_raw,
     d3dx_effect_set_state_manager, d3dx_effect_set_technique, d3dx_effect_set_texture,
     d3dx_effect_shutdown, d3dx_effect_technique_desc, d3dx_effect_texture,
-    d3dx_effect_texture_ref_counts, d3dx_effect_texture_refs, d3dx_effect_texture_shared,
+    d3dx_effect_texture_ref_counts, d3dx_effect_texture_refs,
     d3dx_effect_validate_technique, new_d3dx_effect, new_d3dx_effect_pool,
 };
 use crate::d3d9::{
@@ -2004,7 +2013,8 @@ pub use ffi::{
     D3dxEffectPassDescResult, D3dxEffectRunResult, D3dxEffectShadersResult,
     D3dxEffectTechniqueDesc, D3dxEffectTechniqueDescResult, D3dxImageInfo, D3dxImageInfoResult,
     D3dxMatrixInverseResult, D3dxMatrixResult, D3dxProfilesResult, D3dxSemantic,
-    D3dxSemanticsResult, D3dxSurfaceReadResult, D3dxTextureRefCounts, DeviceInfo,
+    D3dxSemanticsResult, D3dxSurfaceReadResult, D3dxEffectTextureSetResult,
+    D3dxTextureRefCounts, DeviceInfo,
     DeviceInfoResult, FloatValuesResult, FrameHandoff, FrameHandoffResult, HandleResult,
     LevelLayout, LevelLayoutResult, Light, LightResult, Material, MaterialResult, PresentParams,
     Rect, ResourceConfigurationResult, ResourceGenerationResult, ResourceInfo, ResourceLevel,
