@@ -50,8 +50,8 @@ release and preparation steps.
 | --- | --- | --- |
 | [Black & White](games/black-and-white/README.md) | Playable (lightly tested) | CD with Fan Patch 1.42 |
 | [Tom Clancy's Ghost Recon](games/ghost-recon/README.md) | Playable (well tested) | GOG 1.4 |
-| [Civilization IV: Beyond the Sword](games/civ4-bts/README.md) | Playable (lightly tested) | GOG 3.19; additional DLL required |
-| [4x4 Evolution 2](games/4x4-evo2/README.md) | Playable (lightly tested) | PC 1.00.139 with matching renderer DLLs |
+| [Civilization IV: Beyond the Sword](games/civ4-bts/README.md) | Playable (lightly tested) | GOG 3.19 |
+| [4x4 Evolution 2](games/4x4-evo2/README.md) | Playable (lightly tested) | PC 1.00.139 |
 | [Railroad Tycoon 3](games/railroad-tycoon-3/README.md) | Playable (well tested) | GOG 1.05 |
 | [Spore](games/spore/README.md) | Playable (lightly tested) | GOG Collection, Galactic Adventures 3.1.0.22 |
 

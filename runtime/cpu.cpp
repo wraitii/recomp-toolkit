@@ -82,30 +82,10 @@ int32_t module_index(const RecompModule *m, uint32_t target) {
     return lo < m->func_count && m->func_addrs[lo] == target ? (int32_t)lo : -1;
 }
 bool module_is_call_return(const RecompModule *m, uint32_t target) {
-    uint32_t lo = 0, hi = m->call_return_count;
-    while (lo < hi) {
-        uint32_t mid = lo + (hi - lo) / 2;
-        if (m->call_returns[mid] < target)
-            lo = mid + 1;
-        else
-            hi = mid;
-    }
-    return lo < m->call_return_count && m->call_returns[lo] == target;
+    uint32_t off = target - m->call_return_min;
+    return off < m->call_return_span && ((m->call_return_bits[off >> 5] >> (off & 31)) & 1u);
 }
 
-const uint32_t kModuleCacheSize = 1u << 16;
-const uint32_t kNoModule = 31u;
-uint64_t g_module_return_cache[kModuleCacheSize];
-uint32_t g_module_cache_slot(uint32_t target) {
-    return (uint32_t)(target * 2654435761u) >> 16;
-}
-uint32_t module_position(const RecompModule *m) {
-    const std::vector<const RecompModule *> &v = modules();
-    for (uint32_t i = 0; i < v.size(); ++i)
-        if (v[i] == m)
-            return i;
-    return kNoModule;
-}
 struct ModuleEntry {
     const RecompModule *module;
     int32_t index;
@@ -119,21 +99,12 @@ int module_region_enter(X86 *c, uint32_t target) {
     return m ? recomp_region_call(c, m->regions, m->region_count, target) : 0;
 }
 bool module_call_return(uint32_t target) {
-    uint32_t slot = g_module_cache_slot(target);
-    uint64_t e = __atomic_load_n(&g_module_return_cache[slot], __ATOMIC_ACQUIRE);
-    if ((uint32_t)(e >> 32) == target && (uint32_t)e)
-        return (uint32_t)e & 1u;
     const RecompModule *m = recomp_module_containing(target);
-    bool ret = m && module_is_call_return(m, target);
-    uint32_t pos = m ? module_position(m) : kNoModule;
-    if (!m || pos < kNoModule) {
-        uint32_t mod = m ? pos + 1 : kNoModule;
-        __atomic_store_n(&g_module_return_cache[slot],
-                         ((uint64_t)target << 32) | (mod << 1) | (ret ? 1u : 0u), __ATOMIC_RELEASE);
-    }
-    return ret;
+    return m && module_is_call_return(m, target);
 }
-const RecompModule *g_last_module = nullptr;
+const RecompModule *g_module_slots[255];
+uint8_t g_module_pages[0x10000];
+bool g_module_pages_partial = false;
 } // namespace
 
 extern "C" {
@@ -161,6 +132,17 @@ RecompEntryFn recomp_icall_resolve(uint32_t target) {
     return entry ? entry->fn : nullptr;
 }
 
+void recomp_icall_miss(X86 *c, uint32_t target, uint32_t site) {
+#ifndef RECOMP_CHECK_CALL_FACTS
+    if (!recomp_observe_on && target - GUEST_SHIM_BASE >= GUEST_SHIM_END - GUEST_SHIM_BASE)
+        if (RecompEntryFn fn = recomp_icall_resolve(target)) {
+            fn(c);
+            return;
+        }
+#endif
+    recomp_icall_slow(c, target, site);
+}
+
 void recomp_icall_slow(X86 *c, uint32_t target, uint32_t site) {
 #ifndef RECOMP_CHECK_CALL_FACTS
     if (target - GUEST_SHIM_BASE < GUEST_SHIM_END - GUEST_SHIM_BASE && !recomp_frame_watch &&
@@ -176,8 +158,18 @@ void recomp_icall_slow(X86 *c, uint32_t target, uint32_t site) {
 
 void recomp_module_register(const RecompModule *m) {
     modules().push_back(m);
-    for (uint64_t &entry : g_module_return_cache)
-        __atomic_store_n(&entry, 0, __ATOMIC_RELEASE);
+    size_t slot = modules().size();
+    if (slot > sizeof g_module_slots / sizeof g_module_slots[0] || m->end <= m->base) {
+        g_module_pages_partial = true;
+        return;
+    }
+    g_module_slots[slot - 1] = m;
+    for (uint32_t page = m->base >> 16; page <= (m->end - 1) >> 16; ++page) {
+        if (g_module_pages[page])
+            g_module_pages_partial = true;
+        else
+            g_module_pages[page] = (uint8_t)slot;
+    }
 }
 uint32_t recomp_module_count(void) {
     return (uint32_t)modules().size();
@@ -186,14 +178,15 @@ const RecompModule *recomp_module_at(uint32_t i) {
     return i < modules().size() ? modules()[i] : nullptr;
 }
 const RecompModule *recomp_module_containing(uint32_t addr) {
-    const RecompModule *m = __atomic_load_n(&g_last_module, __ATOMIC_RELAXED);
-    if (m && addr >= m->base && addr < m->end)
-        return m;
-    for (const RecompModule *c : modules())
-        if (addr >= c->base && addr < c->end) {
-            __atomic_store_n(&g_last_module, c, __ATOMIC_RELAXED);
-            return c;
-        }
+    if (uint8_t slot = g_module_pages[addr >> 16]) {
+        const RecompModule *m = g_module_slots[slot - 1];
+        if (addr >= m->base && addr < m->end)
+            return m;
+    }
+    if (RECOMP_UNLIKELY(g_module_pages_partial))
+        for (const RecompModule *m : modules())
+            if (addr >= m->base && addr < m->end)
+                return m;
     return nullptr;
 }
 int32_t recomp_module_lookup(uint32_t target) {

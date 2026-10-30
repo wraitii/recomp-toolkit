@@ -309,6 +309,7 @@ def write_call_return_bitmap(fh, call_returns, prefix="recomp_"):
     for word in words:
         fh.write("    0x%08xu,\n" % word)
     fh.write("};\n")
+    return first, len(words) * 32
 
 
 def write_table(out, entry_names, functions, call_returns, private_masks=None, known_modes=(), regions=()):
@@ -585,11 +586,8 @@ def write_module_table(out, entry_names, functions, call_returns, module):
         fh.write("static const uint32_t %saddrs[] = {\n" % prefix)
         for addr in entry_names:
             fh.write("    0x%08xu,\n" % addr)
-        fh.write("};\nstatic const uint32_t %sreturns[] = {\n" % prefix)
-        for addr in call_returns or [0]:
-            fh.write("    0x%08xu,\n" % addr)
         fh.write("};\n")
-        write_call_return_bitmap(fh, call_returns, prefix)
+        return_min, return_span = write_call_return_bitmap(fh, call_returns, prefix)
         fh.write("static const char *const %snames[] = {\n" % prefix)
         for symbol in functions:
             fh.write("    %s,\n" % json.dumps(symbol["name"]))
@@ -621,7 +619,7 @@ def write_module_table(out, entry_names, functions, call_returns, module):
                  (json.dumps(module["name"]), module["base"], module["base"] + module["size"]))
         fh.write("    %saddrs, %d, %sbase, %shooks, %shooked,\n" %
                  (prefix, len(entry_names), prefix, prefix, prefix))
-        fh.write("    %sreturns, %d, %snames\n};\n" % (prefix, len(call_returns), prefix))
+        fh.write("    %scall_return_bits, 0x%08xu, %du, %snames\n};\n" % (prefix, return_min, return_span, prefix))
         fh.write("__attribute__((constructor)) static void %sregister(void)\n" % prefix)
         fh.write("{\n    recomp_module_register(&%smodule);\n}\n" % prefix)
 
