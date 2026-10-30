@@ -215,6 +215,20 @@ impl GpuContext {
         self.with_synchronized_queue(|_| ());
     }
 
+    /// Submit behind all queued D3D9 work, waiting for it without blocking D3D9 recording.
+    pub fn submit_after_d3d9(&self, command: wgpu::CommandBuffer) {
+        let Some(work) = self.d3d9_pending.get() else {
+            self.queue.submit([command]);
+            return;
+        };
+        let (done, wait) = std::sync::mpsc::channel();
+        work.lock().unwrap().submit_then(Box::new(move |queue| {
+            queue.submit([command]);
+            let _ = done.send(());
+        }));
+        let _ = wait.recv();
+    }
+
     pub fn with_synchronized_queue<T>(&self, submit: impl FnOnce(&wgpu::Queue) -> T) -> T {
         if let Some(work) = self.d3d9_pending.get() {
             let mut pending = work.lock().unwrap();

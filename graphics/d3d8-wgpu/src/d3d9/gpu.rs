@@ -218,6 +218,11 @@ impl PendingWork {
         self.submit();
         self.submitter.sync();
     }
+    pub(crate) fn submit_then(&mut self, work: Box<dyn FnOnce(&wgpu::Queue) + Send>) {
+        self.submit();
+        self.submitter.send(SubmitJob::After(work));
+    }
+
     fn apply_clear(&mut self) {
         if let Some(clear) = self.clear.take() {
             clear.record(frame_encoder(&self.device, &mut self.encoder));
@@ -375,9 +380,7 @@ impl D3d9Gpu {
     }
 
     pub(crate) fn submit_then(&self, work: impl FnOnce(&wgpu::Queue) + Send + 'static) {
-        let mut pending = self.pending.lock().unwrap();
-        pending.submit();
-        pending.submitter.send(SubmitJob::After(Box::new(work)));
+        self.pending.lock().unwrap().submit_then(Box::new(work));
     }
 
     pub fn record<R>(

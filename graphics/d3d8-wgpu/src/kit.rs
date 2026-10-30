@@ -53,6 +53,9 @@ impl QueueOwner {
     pub(crate) fn with<T>(&self, submit: impl FnOnce(&wgpu::Queue) -> T) -> T {
         self.0.with_synchronized_queue(submit)
     }
+    pub(crate) fn submit(&self, command: wgpu::CommandBuffer) {
+        self.0.submit_after_d3d9(command)
+    }
 }
 
 #[unsafe(no_mangle)]

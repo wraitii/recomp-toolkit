@@ -511,7 +511,7 @@ pub unsafe extern "C" fn host_gpu_texture_upload(
                 eprintln!("host GPU texture_upload: {error}");
                 return 0;
             }
-            g.queue_owner.with(|queue| queue.submit([encoder.finish()]));
+            g.queue_owner.submit(encoder.finish());
             return 1;
         }
         g.queue_owner.with(|queue| {
@@ -678,7 +678,7 @@ pub unsafe extern "C" fn host_gpu_buffer_update(
                 eprintln!("host GPU buffer_update: {error}");
                 return 0;
             }
-            g.queue_owner.with(|queue| queue.submit([encoder.finish()]));
+            g.queue_owner.submit(encoder.finish());
             return 1;
         }
         g.queue_owner
@@ -711,7 +711,7 @@ fn read_staging(
         report("readback device lost");
         return None;
     }
-    g.queue_owner.with(|queue| queue.submit([encoder.finish()]));
+    g.queue_owner.submit(encoder.finish());
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {

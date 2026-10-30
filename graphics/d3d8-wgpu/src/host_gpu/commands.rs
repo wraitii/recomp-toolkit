@@ -178,7 +178,7 @@ pub unsafe extern "C" fn host_gpu_commit(gpu: *mut HostGpu, cb: u64) {
         };
         let lost = g.context.loss.is_lost();
         if !lost {
-            g.queue_owner.with(|queue| queue.submit([encoder.finish()]));
+            g.queue_owner.submit(encoder.finish());
         }
         let mut presented = Vec::new();
         for present in presents {
