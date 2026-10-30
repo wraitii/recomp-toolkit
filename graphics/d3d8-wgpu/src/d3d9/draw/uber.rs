@@ -200,7 +200,7 @@ pub(super) fn select(
     }
     draw.specialization.selection = None;
     let coverage = coverage(gpu, state, snapshot, vs, ps);
-    let eligible = coverage.as_ref().is_ok_and(|eligible| *eligible);
+    let eligible = matches!(coverage, Ok(true));
     let family = if eligible {
         let descriptor = pipeline_descriptor(gpu, state, snapshot, topology(snapshot), None)?;
         gpu.interpreter
@@ -211,17 +211,19 @@ pub(super) fn select(
     } else {
         None
     };
-    let result = coverage.and_then(|eligible| {
-        if eligible && family.is_none() && mode != Mode::CompareFamily11 {
-            Err(unsupported("InterpreterDraw", "unprepared-pipeline-state"))
-        } else {
-            Ok(eligible)
-        }
-    });
+    let result = || {
+        coverage.map_err(Uncovered::error).and_then(|eligible| {
+            if eligible && family.is_none() && mode != Mode::CompareFamily11 {
+                Err(unsupported("InterpreterDraw", "unprepared-pipeline-state"))
+            } else {
+                Ok(eligible)
+            }
+        })
+    };
     let mut residual = None;
     if mode == Mode::Hybrid {
         if trace_compilation() {
-            residual = match &result {
+            residual = match &result() {
                 Ok(true) => None,
                 Ok(false) => Some("unsupported-instruction-or-interface".to_string()),
                 Err(error) => Some(error.cause.clone()),
@@ -231,7 +233,7 @@ pub(super) fn select(
             }
         }
     } else {
-        result?;
+        result()?;
     }
     let selection = Selection {
         eligible: Some(eligible),
@@ -256,14 +258,37 @@ pub(super) fn topology(snapshot: &DrawSnapshot) -> wgpu::PrimitiveTopology {
     }
 }
 
-fn coverage(
+// Draws outside interpreter coverage are common, so the reason is formatted only when used.
+enum Uncovered<'a> {
+    Error(RenderError),
+    Reason(&'static str),
+    Stage(&'static str, &'a dyn std::fmt::Display),
+    Sampler(&'static str, u32),
+}
+
+impl Uncovered<'_> {
+    fn error(self) -> RenderError {
+        match self {
+            Uncovered::Error(error) => error,
+            Uncovered::Reason(reason) => unsupported("InterpreterDraw", reason),
+            Uncovered::Stage(stage, why) => {
+                unsupported("InterpreterDraw", format!("{stage} {why}"))
+            }
+            Uncovered::Sampler(reason, stage) => {
+                unsupported("InterpreterDraw", format!("{reason} s{stage}"))
+            }
+        }
+    }
+}
+
+fn coverage<'a>(
     gpu: &D3d9Gpu,
     state: &D3d9State,
     snapshot: &DrawSnapshot,
-    vs: Option<&super::super::shader::ShaderRecord>,
-    ps: Option<&super::super::shader::ShaderRecord>,
-) -> Result<bool, RenderError> {
-    let mode = mode(gpu)?;
+    vs: Option<&'a super::super::shader::ShaderRecord>,
+    ps: Option<&'a super::super::shader::ShaderRecord>,
+) -> Result<bool, Uncovered<'a>> {
+    let mode = mode(gpu).map_err(Uncovered::Error)?;
     if mode == Mode::Specialized {
         return Ok(false);
     }
@@ -289,22 +314,16 @@ fn coverage(
         return Ok(false);
     }
     if let Some(reason) = exclusion {
-        return Err(unsupported("InterpreterDraw", reason));
+        return Err(Uncovered::Reason(reason));
     }
     for (stage, shader) in [("vertex", vs), ("pixel", ps)] {
-        let shader = shader.ok_or_else(|| {
-            unsupported("InterpreterDraw", format!("{stage} fixed-function-stage"))
-        })?;
-        shader
-            .interpreter
-            .as_ref()
-            .map_err(|why| unsupported("InterpreterDraw", format!("{stage} {why}")))?;
+        let shader = shader.ok_or(Uncovered::Stage(stage, &"fixed-function-stage"))?;
+        if let Err(why) = &shader.interpreter {
+            return Err(Uncovered::Stage(stage, why));
+        }
     }
     if rs(state, 152) != 0 || (rs(state, 28) != 0 && rs(state, 35) != 0) {
-        return Err(unsupported(
-            "InterpreterDraw",
-            "unsupported-clip-or-table-fog",
-        ));
+        return Err(Uncovered::Reason("unsupported-clip-or-table-fog"));
     }
     if snapshot.target.texture.sample_count() != 1
         || snapshot
@@ -312,7 +331,7 @@ fn coverage(
             .as_ref()
             .is_some_and(|d| d.texture.sample_count() != 1)
     {
-        return Err(unsupported("InterpreterDraw", "unsupported-multisample"));
+        return Err(Uncovered::Reason("unsupported-multisample"));
     }
     for (stage, kind) in ps.unwrap().program.sampled_samplers() {
         let Some(texture) = snapshot.textures.iter().find(|t| t.stage == stage) else {
@@ -322,27 +341,16 @@ fn coverage(
             || texture.depth
             || texture.cube != (kind == crate::shader::program::S_CUBE)
         {
-            return Err(unsupported(
-                "InterpreterDraw",
-                format!("unsupported-texture-type s{stage}"),
-            ));
+            return Err(Uncovered::Sampler("unsupported-texture-type", stage));
         }
         let format = super::super::format::device_format(texture.format, gpu.features())
-            .ok_or_else(|| {
-                unsupported(
-                    "InterpreterDraw",
-                    format!("unsupported-texture-format s{stage}"),
-                )
-            })?;
+            .ok_or(Uncovered::Sampler("unsupported-texture-format", stage))?;
         if !format
             .guaranteed_format_features(gpu.features())
             .flags
             .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
         {
-            return Err(unsupported(
-                "InterpreterDraw",
-                format!("nonfilterable-texture s{stage}"),
-            ));
+            return Err(Uncovered::Sampler("nonfilterable-texture", stage));
         }
     }
     Ok(true)

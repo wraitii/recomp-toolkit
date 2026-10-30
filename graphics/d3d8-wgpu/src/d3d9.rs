@@ -277,8 +277,10 @@ struct DrawViews {
 struct DrawTextures {
     epoch: u64,
     bindings: [Option<CachedBinding>; state::MAX_SAMPLERS],
+    by_id: FastMap<u32, CachedBinding>,
 }
 
+#[derive(Clone)]
 struct CachedBinding {
     id: u32,
     lod: Option<Arc<AtomicU32>>,
@@ -4784,8 +4786,13 @@ fn resolve_binding(device: &D3d9Device, id: u32, stage: u32) -> Result<CachedBin
 
 fn bound_textures_cached(
     device: &D3d9Device,
-    cache: &mut [Option<CachedBinding>; state::MAX_SAMPLERS],
+    textures: &mut DrawTextures,
 ) -> Result<draw::BoundTextures, RenderError> {
+    let DrawTextures {
+        bindings: cache,
+        by_id,
+        ..
+    } = textures;
     let mut out = draw::BoundTextures::new();
     for stage in 0..state::MAX_SAMPLERS as u32 {
         let id = device.state.texture(stage)?;
@@ -4809,7 +4816,24 @@ fn bound_textures_cached(
                         s.texture_cold_misses += 1;
                     }
                 });
-                resolve_binding(device, id, stage)?
+                match by_id.get(&id) {
+                    Some(known) => {
+                        let mut known = known.clone();
+                        known.binding.stage = stage;
+                        if let Some(lod) = &known.lod {
+                            known.binding.lod = lod.load(Ordering::Acquire);
+                        }
+                        known
+                    }
+                    None => {
+                        let resolved = resolve_binding(device, id, stage)?;
+                        if by_id.len() >= 4096 {
+                            by_id.clear();
+                        }
+                        by_id.insert(id, resolved.clone());
+                        resolved
+                    }
+                }
             }
         };
         out.push(cached.binding.clone());
@@ -4952,10 +4976,11 @@ fn dispatch_draw(device: &mut D3d9Device, command: draw::DrawCommand) -> Result<
             Box::new(DrawTextures {
                 epoch: device.registry_epoch,
                 bindings: Default::default(),
+                by_id: Default::default(),
             })
         }
     };
-    let bindings = bound_textures_cached(device, &mut textures.bindings)?;
+    let bindings = bound_textures_cached(device, &mut textures)?;
     let snapshot = draw::DrawSnapshot {
         command,
         target: views.target.clone(),
