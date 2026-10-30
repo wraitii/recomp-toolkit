@@ -1,16 +1,7 @@
-//! Isolated D3D8-semantics renderer prototype on [`wgpu`].
+//! Reusable D3D7/8/9 rendering on [`wgpu`], with recomp-kit adapters.
 //!
-//! The crate is layered so the D3D8 model stays independent of windowing and of
-//! any game integration:
-//!
-//! - [`d3d8`] — reusable D3D8 state, resources, fixed-function emulation
-//!   and device emulation. No Ghost Recon addresses, no guest CPU
-//!   types, no recomp-kit types.
-//! - [`backend`] — wgpu instance/adapter/device/surface and readback plumbing.
-//! - [`probe`] — the shared probe harness and its assertions.
-//!
-//! The isolated Metal probes have run;
-//! this does not establish game rendering or original-D3D8 equivalence.
+//! D3D semantics and GPU resources live in [`d3d8`], [`d3d9`] and [`backend`].
+//! [`guest`] supplies resource adapters; [`bridge`] supplies the native boundary.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
@@ -21,6 +12,8 @@ pub(crate) mod bridge_translate;
 pub mod d3d8;
 pub mod d3d9;
 pub mod guest;
+pub(crate) mod host_gpu;
+pub(crate) mod kit;
 pub(crate) mod fast_map;
 #[cfg(feature = "probe")]
 pub mod probe;

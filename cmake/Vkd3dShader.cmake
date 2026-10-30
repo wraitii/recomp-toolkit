@@ -1,3 +1,20 @@
+if(RECOMP_DEPENDENCIES)
+  set(VKD3D_STAGED "${RECOMP_DEPENDENCIES}/vkd3d")
+  foreach(VKD3D_FILE libvkd3d_shader.a include/vkd3d_shader.h include/vkd3d_types.h)
+    if(NOT EXISTS "${VKD3D_STAGED}/${VKD3D_FILE}")
+      message(FATAL_ERROR "Staged shader compiler input is missing: ${VKD3D_STAGED}/${VKD3D_FILE}")
+    endif()
+  endforeach()
+  find_package(Threads REQUIRED)
+  add_library(vkd3d_shader STATIC IMPORTED GLOBAL)
+  set_target_properties(vkd3d_shader PROPERTIES
+    IMPORTED_LOCATION "${VKD3D_STAGED}/libvkd3d_shader.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${VKD3D_STAGED}/include"
+    INTERFACE_COMPILE_DEFINITIONS LIBVKD3D_SHADER_SOURCE
+    INTERFACE_LINK_LIBRARIES Threads::Threads)
+  return()
+endif()
+
 include(FetchContent)
 include(CheckIncludeFile)
 include(CheckSymbolExists)
@@ -15,9 +32,9 @@ set(VKD3D_SHADER_INC "${vkd3d_shader_source_SOURCE_DIR}/include")
 set(VKD3D_SHADER_PRIVATE "${VKD3D_SHADER_INC}/private")
 set(VKD3D_SHADER_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/vkd3d-shader-generated")
 file(MAKE_DIRECTORY "${VKD3D_SHADER_GENERATED}/private")
-file(WRITE "${VKD3D_SHADER_GENERATED}/config.h"
+file(CONFIGURE OUTPUT "${VKD3D_SHADER_GENERATED}/config.h" CONTENT
   "#define HAVE_SPIRV_UNIFIED1_SPIRV_H 1\n#define HAVE_SPIRV_UNIFIED1_GLSL_STD_450_H 1\n")
-file(WRITE "${VKD3D_SHADER_GENERATED}/private/vkd3d_version.h" "#define VKD3D_VCS_ID \"\"\n")
+file(CONFIGURE OUTPUT "${VKD3D_SHADER_GENERATED}/private/vkd3d_version.h" CONTENT "#define VKD3D_VCS_ID \"\"\n")
 
 find_package(FLEX REQUIRED)
 if(APPLE AND NOT BISON_EXECUTABLE)
@@ -88,7 +105,7 @@ target_compile_definitions(vkd3d_shader PUBLIC LIBVKD3D_SHADER_SOURCE
   HAVE_SYNC_ADD_AND_FETCH HAVE_SYNC_BOOL_COMPARE_AND_SWAP HAVE_ATOMIC_EXCHANGE_N)
 if(WIN32)
   if(NOT MINGW)
-    file(WRITE "${VKD3D_SHADER_GENERATED}/unistd.h" "#include <io.h>\n")
+    file(CONFIGURE OUTPUT "${VKD3D_SHADER_GENERATED}/unistd.h" CONTENT "#include <io.h>\n")
   endif()
   target_compile_definitions(vkd3d_shader PRIVATE HAVE__STRTOF_L _USE_MATH_DEFINES)
 elseif(APPLE)

@@ -987,30 +987,6 @@ const _: () = {
 };
 
 /// The raw `MTLTexture*` behind a wgpu texture. Only the Metal backend has one.
-#[cfg(target_os = "macos")]
-fn native_texture_ptr(texture: &wgpu::Texture) -> Result<*const core::ffi::c_void, RenderError> {
-    // SAFETY: the pointer is only borrowed, never released or retained here;
-    // the texture outlives every use because the ring owns it.
-    unsafe {
-        let hal = texture
-            .as_hal::<wgpu::hal::api::Metal>()
-            .ok_or_else(|| RenderError::new("present_handoff", "texture is not a Metal texture"))?;
-        let raw = hal.raw_handle();
-        Ok(std::ptr::from_ref(raw).cast())
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn native_texture_ptr(_: &wgpu::Texture) -> Result<*const core::ffi::c_void, RenderError> {
-    Err(RenderError::new(
-        "present_handoff",
-        "native texture handoff is macOS-only",
-    ))
-}
-
-/// Slots in the present handoff ring. The host's staging blit of a slot runs
-/// asynchronously on its own queue; a slot is reused only after the host
-/// clears its busy flag, so the next frame never overwrites pixels in flight.
 const FRAME_RING_SLOTS: usize = 3;
 
 /// GPU copies of the backbuffer handed to the host presenter as raw native
@@ -1210,7 +1186,7 @@ pub struct Device {
     cpu_lighting: bool,
     pipelines: FastMap<DrawPipelineKey, wgpu::RenderPipeline>,
     pub state: DeviceState,
-    pub gpu: GpuContext,
+    pub gpu: std::sync::Arc<GpuContext>,
     target: OffscreenTarget,
     targets: Targets,
     /// Bound texture per stage; `None` means the default white texture.
@@ -1266,12 +1242,13 @@ pub struct Device {
 
 impl Device {
     pub fn new(
-        gpu: GpuContext,
+        gpu: impl Into<std::sync::Arc<GpuContext>>,
         width: u32,
         height: u32,
         format: u32,
         depth_format: u32,
     ) -> Result<Self, RenderError> {
+        let gpu = gpu.into();
         let target = gpu.create_target(width, height, format, depth_format)?;
         let white = create_white_texture(&gpu);
         let draw_layouts = DrawLayouts::new(&gpu.device);
@@ -2980,6 +2957,7 @@ impl Device {
                                 dimension: wgpu::TextureDimension::D2,
                                 format: b.format,
                                 usage: wgpu::TextureUsages::COPY_DST
+                                    | wgpu::TextureUsages::COPY_SRC
                                     | wgpu::TextureUsages::TEXTURE_BINDING
                                     | wgpu::TextureUsages::STORAGE_BINDING,
                                 view_formats: &[],
@@ -2993,7 +2971,6 @@ impl Device {
         let ring = ring.as_mut().expect("present ring is initialized");
         let index = ring.next;
         let slot = std::sync::Arc::clone(&ring.slots[index]);
-        let native = native_texture_ptr(&slot.texture)?;
         self.wait_slot(&slot.busy)?;
         if bpp == 16 && ring.converter.is_none() {
             ring.converter = Some(create_converter(&self.gpu.device)?);
@@ -3032,21 +3009,24 @@ impl Device {
                 "physical device is lost",
             ));
         }
-        submit_copy(
-            &self.gpu.queue,
-            &b.texture,
-            &slot.texture,
-            std::sync::Arc::clone(&readiness),
-            if bpp == 16 {
-                ring.converter.as_ref()
-            } else {
-                None
-            },
-        )?;
-        let lease = retain_slot(readiness, &self.gpu.device, &self.gpu.queue, None);
+        self.gpu.with_synchronized_queue(|queue| {
+            submit_copy(
+                &self.gpu.device,
+                queue,
+                &b.texture,
+                &slot.texture,
+                std::sync::Arc::clone(&readiness),
+                if bpp == 16 {
+                    ring.converter.as_ref()
+                } else {
+                    None
+                },
+            )
+        })?;
+        let lease = retain_slot(readiness, std::sync::Arc::clone(&self.gpu));
         ring.next = (index + 1) % FRAME_RING_SLOTS;
         Ok(FrameHandoff {
-            texture: native,
+            texture: lease as *const core::ffi::c_void,
             lease,
             width: b.width,
             height: b.height,
@@ -3233,7 +3213,16 @@ impl Device {
             ));
         }
         self.flush_draws();
-        self.gpu.present(&self.targets.backbuffer)?;
+        if self.gpu.has_surface() {
+            std::sync::Arc::get_mut(&mut self.gpu)
+                .ok_or_else(|| {
+                    RenderError::new(
+                        "Present",
+                        "shared window context requires host presentation",
+                    )
+                })?
+                .present(&self.targets.backbuffer)?;
+        }
         self.frame_index += 1;
         if self.draw_stats_enabled {
             let mut stats = std::mem::take(&mut self.frame_stats);

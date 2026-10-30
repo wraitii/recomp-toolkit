@@ -1,0 +1,11 @@
+[package]
+name = "recomp-compositor-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+recomp-compositor = { path = "..", default-features = false, features = ["gpu"] }
+recomp-gpu = { path = "../../gpu" }
+winit = "0.30"
+pollster = "0.4"

@@ -29,25 +29,4 @@ __attribute__((weak)) double host_present_refresh_delay(int) {
     return 0.0;
 }
 
-// Without a host GPU the Direct3D 11 shim rasterizes everything itself.
-__attribute__((weak)) int host_gpu2d_available(void) {
-    return 0;
-}
-__attribute__((weak)) void host_gpu2d_texture(uint32_t, int, int, const uint8_t *, int, int, int,
-                                              int) {}
-__attribute__((weak)) void host_gpu2d_forget(uint32_t) {}
-__attribute__((weak)) void host_gpu2d_reset(void) {}
-__attribute__((weak)) void host_gpu2d_clear(uint32_t, int, int, const float *) {}
-__attribute__((weak)) int host_gpu2d_draw(uint32_t, int, int, uint32_t,
-                                          const struct HostGpu2DQuad *) {
-    return 0;
-}
-__attribute__((weak)) uint32_t host_gpu2d_generation(void) {
-    return 0;
-}
-__attribute__((weak)) int host_gpu2d_readback(uint32_t, int, int, uint8_t *) {
-    return 0;
-}
-__attribute__((weak)) void host_display_present_gpu2d(uint32_t, int, int) {}
-
 } // extern "C"

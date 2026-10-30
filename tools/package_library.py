@@ -13,6 +13,20 @@ from build import rust_pcode_library, rust_translator
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def source_files():
+    names = subprocess.check_output(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT
+    ).decode().split("\0")
+    files = []
+    for name in sorted(set(filter(None, names))):
+        source = ROOT / name
+        if source.is_symlink():
+            raise ValueError(f"Unexpected source symlink: {name}")
+        if source.is_file():
+            files.append(name)
+    return files
+
+
 def bundle_extractors(resources, build_root):
     from sevenzip import provision, VERSION, URL, SHA256, SOURCE_URL, SOURCE_SHA256
     provision(build_root)
@@ -78,14 +92,13 @@ def package(bundle, build_root, python_root):
                     child.unlink()
     resources.mkdir(parents=True, exist_ok=True)
     kit = resources / "kit"
-    tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
-    for name in filter(None, tracked):
+    source_hashes = {}
+    for name in source_files():
         source = ROOT / name
-        if source.is_symlink():
-            raise ValueError(f"Unexpected source symlink: {name}")
         destination = kit / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
+        source_hashes[name] = hashlib.sha256(destination.read_bytes()).hexdigest()
     python = resources / "python"
     shutil.copytree(python_root, python, symlinks=True,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -131,7 +144,7 @@ def package(bundle, build_root, python_root):
     sources.mkdir()
     shutil.copy2(cmake_build / "ffmpeg-prefix/src/ffmpeg-7.1.1.tar.xz", sources)
     registry = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo"))) / "registry/src"
-    for lock in (ROOT / "desktop/library/Cargo.lock", ROOT / "graphics/d3d8-wgpu/Cargo.lock",
+    for lock in (ROOT / "desktop/library/Cargo.lock", ROOT / "graphics/Cargo.lock",
                  ROOT / "translator/Cargo.lock"):
         for entry in tomllib.loads(lock.read_text())["package"]:
             name = f"{entry['name']}-{entry['version']}"
@@ -147,8 +160,32 @@ def package(bundle, build_root, python_root):
         shutil.copy2(dependency_build / "d3d8-generated" / name, bridge / name)
     shutil.copytree(dependency_build / "d3d8-generated/rust", bridge / "rust")
     shutil.copy2(dependency_build / "d3d8-wgpu/rust/release/libd3d8_wgpu.a", bridge)
+    compositor = dependencies / "compositor"
+    compositor.mkdir()
+    compositor_build = dependency_build / "compositor/rust"
+    shutil.copy2(compositor_build / "release/librecomp_compositor.a", compositor)
+    shutil.copy2(compositor_build / "native-libs.rsp", compositor)
+    shader = dependencies / "vkd3d"
+    (shader / "include").mkdir(parents=True)
+    shutil.copy2(cmake_build / "dx/libvkd3d_shader.a", shader)
+    shader_source = cmake_build / "_deps/vkd3d_shader_source-src"
+    for name in ("vkd3d_shader.h", "vkd3d_types.h"):
+        shutil.copy2(shader_source / "include" / name, shader / "include" / name)
+    for name in ("COPYING", "LICENSE"):
+        shutil.copy2(shader_source / name, shader / name)
+    shutil.copy2(next(cmake_build.glob("_deps/**/vkd3d-2.1.tar.xz")), sources)
+    shutil.copytree(cmake_build / "_deps/spirv_headers-src", sources / "spirv-headers")
     source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    manifest = {"source": source_sha, "architecture": "arm64", "macosMinimum": "14.0"}
+    source_dirty = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT))
+    graphics_files = [path for directory in (bridge, compositor, shader) for path in directory.rglob("*")
+                      if path.is_file()]
+    manifest = {"source": source_sha, "sourceDirty": source_dirty,
+                "sourceFiles": source_hashes,
+                "graphicsFiles": {path.relative_to(dependencies).as_posix():
+                                  hashlib.sha256(path.read_bytes()).hexdigest()
+                                  for path in sorted(graphics_files)},
+                "graphicsLockSha256": source_hashes["graphics/Cargo.lock"],
+                "architecture": "arm64", "macosMinimum": "14.0"}
     (dependencies / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     for path in python.rglob("__pycache__"):
         shutil.rmtree(path)

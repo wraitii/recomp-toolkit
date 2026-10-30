@@ -18,7 +18,7 @@ native replacements come from the selected game's `game.toml` and build files.
 | `smoke_main.cpp` | Script-driven host for repeatable input and presentation capture. |
 | `present.{h,cpp}`, `present_thread.cpp`, `compositor.{h,cpp}`, `frame_pacing.h`, `performance_overlay.{h,cpp}` | Pixel conversion, frame composition, pacing metrics, overlays, and presentation. |
 | `ui_layer.{h,cpp}` | Reconstructs supported UI blits from recorded frame writes into owned RGBA pixels and masks, tracking elements across frames; the presenter scales this layer separately from the game image. |
-| `d3d_render.{h,cpp}`, `gpu2d.cpp`, `gpu/` | Host renderer and the device interface implemented by the available GPU backends. |
+| `d3d_render.{h,cpp}`, `gpu/` | Legacy host renderer, native device adapter, fake device, and wgpu host integration. |
 | `input.{h,cpp}`, `input_gate.{h,cpp}`, `input_touch.{h,cpp}`, `input_script*`, `sdl/keymap.cpp` | Input translation, gating, touch gestures, guest notifications, and timed scripted input. |
 | `audio/`, `audio.h` | Software audio mixer, SDL output, MIDI synthesis, offline rendering, and audio capture. |
 
@@ -30,11 +30,29 @@ source extents for stretched copies. Cross-format
 copies and fills without usable format evidence also cannot be reconstructed
 exactly; those cases need richer format metadata in the host ABI.
 
-The GPU code uses the shared interface in `gpu/gpu.h`. Vulkan is available on
-desktop platforms, Metal is added on Apple platforms, and WebGPU is used for
-web builds. The CPU fake device supports contract tests. Renderer code should
-depend on the shared interface where possible and keep backend-specific work
-inside its backend directory.
+The host uses `gpu/gpu.h` through the native wgpu adapter. GPU execution and
+surface presentation use the Rust renderer's shared wgpu context; layout and
+composition use `graphics/compositor`, and `graphics/gpu` owns shared device
+and queue handles. The SDL host owns the window. The CPU fake device remains
+available for host checks. Metal is the first qualification target; other wgpu
+backends require separate qualification.
+
+The graphics crates share `graphics/Cargo.toml` and `graphics/Cargo.lock`.
+CMake builds two archives: CPU composition/presenter FFI, and the renderer with
+GPU composition enabled. Separate Cargo output directories keep these feature
+sets distinct; consumers also use separate output directories. All share the same
+pinned dependencies and native target settings.
+Their bridge headers are private kit integration, with no stable external ABI.
+Native builds require Rust even when guest GPU rendering is disabled. Cross
+compilation fails explicitly until the complete graphics integration supports it.
+
+Portable toolkit packaging stages both archives, native linker response files
+and generated CXX headers, plus the vkd3d shader compiler library/public headers
+and corresponding licenses/source. Staged graphics builds need neither Cargo nor Flex/Bison. Sources include tracked and non-ignored new files,
+excluding removed files. The dependency manifest records the base Git commit,
+dirty status, bundled source hashes and graphics artifact hashes. Build outputs,
+profiles and game installations stay ignored. See [testing](../docs/testing.md)
+for the final source and packaged-kit verification commands.
 
 ## Boot and scheduling
 
@@ -63,7 +81,9 @@ The presenter expands indexed, RGB565, or supported packed-color pixels,
 composes the game frame and host-owned overlays, and fits the result to the
 drawable while preserving aspect ratio. The renderer keeps DirectX resource
 and synchronization behavior at the host boundary; GPU command and resource
-operations go through `gpu::Device`.
+operations go through `gpu::Device` and its Rust wgpu adapter. Frames retain
+texture leases through GPU completion; the input path consumes published layout
+snapshots.
 
 Audio calls feed a software mixer. The desktop output uses SDL, while the same
 mixer can render offline for tests and captures. MIDI music is synthesized

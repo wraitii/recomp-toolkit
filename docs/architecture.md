@@ -145,8 +145,76 @@ guest-owned D3D bytecode buffers; CMake fetches the pinned SPIRV-Headers input.
 2. `host/d3d_render.cpp` translates draws and texture revisions into GPU commands over `host/gpu/gpu.h`.
 3. `host/ui_layer.cpp` extracts UI elements from recorded blits.
 4. `host/present_thread.cpp` seals the frame, retains its resources and queues it.
-5. `host/compositor.cpp` combines world, UI and overlays for presentation.
-6. Completion acknowledgements release resources and update frame-pacing samples.
+5. `graphics/compositor` plans and renders world/UI composition through wgpu; native adapters draw the kit performance and controls overlays.
+6. Its shared surface presenter acquires/presents images; completion callbacks retire resources.
+
+`graphics/gpu` owns shared device/queue handles, context generations and physical
+loss. `graphics/d3d8-wgpu/src/kit.rs` owns the kit context registry and native
+texture-lease handoff. Host GPU execution holds `Arc<SharedContext>` plus an
+explicit `QueueOwner` retaining the renderer context, so a presenter that outlives
+a guest device still shares that physical context with the next guest device.
+Host queue operations flush and synchronize existing D3D9 batches before submitting;
+other paths do not create a D3D9 submit worker. The poller retains only the shared
+physical context. Imported textures must belong to that same context and satisfy
+the sampled/copy-source image contract. SDL supplies window handles; its Metal
+views remain owned by the native surface adapter until presenter teardown.
+Replaced native GPU backends and
+D3D11 rendering are removed. The independent compositor host uses the same Rust
+composition and surface APIs without the renderer or guest runtime.
+
+Rust owns the sealed-frame mailbox, submission/retirement queues, per-frame
+completion and prefix state, counters and retained repeat snapshot, alongside the
+presenter worker and refresh/offscreen scheduling. A single Rust `Presenter` owns
+the mailbox and timeline. Its turn driver controls admission, pacing permits,
+fallback checks, retries, composition reuse and encoding order, then registers
+completion callbacks before present and presents before commit. Native adapters
+translate individual GPU operations, draw kit overlays and publish runtime results.
+Native frame payloads retain
+sealed resources; every lease transferred into Rust is returned to native code
+or released once. Retirement waits for every prefix and GPU completion, preserves
+submission order and publishes only successful frames. Late callbacks cannot
+replace a newer repeat snapshot. Cancellation retains submitted resources until
+their work completes.
+
+The native bridge serializes queue operations with the host service mutex;
+per-frame snapshots are synchronized in Rust. Readiness and repeat-copy callbacks
+inspect owned payloads without guest access or presenter reentry. Layout publication
+and guest-resource release run after Rust returns retirement results.
+
+Rust coalesces pending window events and owns swapchain replacement, resize,
+acquire/present and teardown through the device adapter. Pending events can be
+published by window threads; surface operations run on the presenter thread,
+except initial attachment before it starts and teardown after it joins. Backend
+callbacks run without the surface controller's mutex held.
+
+Capture readback and delivery run in order on a separate Rust-owned queue, outside
+the host mutex and GPU completion thread. Submission backpressure bounds retained
+capture images. Each image lease is released after readback, before invoking its
+callback, which can query presenter APIs or request shutdown. External shutdown
+drains queued captures; capture-initiated shutdown cancels queued deliveries and
+releases their image leases without joining its own thread.
+
+The Rust worker retains its native callback context until it exits. It releases
+its wake mutex before invoking native callbacks; shutdown joins it without holding
+the host service mutex, then drains GPU callbacks and capture deliveries before
+releasing resources. Notifications remain valid during that drain. Shutdown
+drains queued frames through the same Rust owner; guest-resource release and
+layout publication remain native. Turn callbacks are synchronous and borrow their
+service context; submitted callbacks retain frame leases until completion.
+The native selection adapter holds the host service mutex while calling Rust's
+fallback/admission methods and publishing retirements. That round trip keeps
+runtime resource release serialized without holding a Rust mutable borrow across
+runtime callbacks; it does not duplicate selection policy.
+
+The wgpu host uses refresh-tick pacing and GPU-completion retirement. It has no
+drawable display timestamp, so the FPS overlay counts successful GPU completions
+and labels their rate CMP instead of DSP. Surface frames retain their owner
+through drop and resize.
+
+The wgpu host delivers completion callbacks on a separate worker. Shutdown stops
+the presenter and releases its mutex before destroying the GPU device, because
+destroying it cancels any remaining callbacks. A callback waiting for GPU work
+does not wait for another callback on the same delivery worker.
 
 The Classic profile aspect-fits the selected game resolution. Enhanced can
 render the world at drawable resolution with separately scaled UI. Wide view

@@ -61,3 +61,6 @@ void X_D3DXGetPixelShaderProfile(X86 *c);
 void X_D3DX33MatrixMultiply(X86 *c);
 void X_D3DX33MatrixTranspose(X86 *c);
 void X_D3DX33MatrixInverse(X86 *c);
+
+void X_D3DXMatrixMultiplyTranspose(X86 *c);
+void X_D3DXMatrixInverse(X86 *c);

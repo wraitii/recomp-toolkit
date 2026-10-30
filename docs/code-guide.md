@@ -11,9 +11,11 @@ translated locally into `build/recomp/gen/` and are never edited in place.
 | Host display settings | [display_settings.cpp](../mods/display_settings.cpp), [settings_page.cpp](../mods/settings_page.cpp) | `mods_display_init`, `mods_display_set` |
 | Mouse edges, coordinate mapping | [input_gate.cpp](../host/input_gate.cpp) | `take_layout`, `host_gate_pointer_event`, `host_gate_window_pointer` |
 | Window, focus, quit (SDL3) | [sdl/main.cpp](../host/sdl/main.cpp) | `handle_event`, `apply_focus`, `apply_window_mode`, `pump`, `applicationShouldTerminate` |
-| Frame lifetime and pacing | [present_thread.cpp](../host/present_thread.cpp) | `acquire`, `host_frame_seal`, `sweep` |
+| Frame lifetime and pacing | [present_thread.cpp](../host/present_thread.cpp), [Rust turn driver](../graphics/compositor/src/presenter/turn.rs), [Rust lifecycle](../graphics/compositor/src/presenter/lifecycle.rs), [Rust worker](../graphics/compositor/src/presenter/worker.rs) | `host_frame_seal`, `Presenter`, `run`, `submit`, `Timeline`, `FrameState`, `Worker` |
+| Surface changes and capture delivery | [Rust surface controller](../graphics/compositor/src/presenter/surface.rs), [Rust delivery queue](../graphics/compositor/src/presenter/delivery.rs), [device adapter](../host/present_surface.h) | `Surface`, `Deliveries`, `queue_capture` |
+| Shared GPU lifetime and queue ordering | [kit adapter](../graphics/d3d8-wgpu/src/kit.rs), [physical context](../graphics/gpu/src/lib.rs), [host execution](../graphics/d3d8-wgpu/src/host_gpu.rs) | `context`, `QueueOwner`, `SharedContext`, `HostGpu` |
 | World rendering, materials | [d3d_render.cpp](../host/d3d_render.cpp) | `host_d3d_expand`, `uploadTexture`, `drawSnapshot`, `d3d_fragment` |
-| UI separation and final composition | [ui_layer.cpp](../host/ui_layer.cpp), [compositor.cpp](../host/compositor.cpp) | `ui_layer_extract`, `replay`, `compositor_compose` |
+| UI separation and final composition | [ui_layer.cpp](../host/ui_layer.cpp), [Rust compositor](../graphics/compositor/src/lib.rs), [native GPU adapter](../host/compositor.cpp) | `ui_layer_extract`, `Compositor::build`, `compositor_compose` |
 | Audio streaming or gaps | [audio/mixer.cpp](../host/audio/mixer.cpp) | `ensure_engine`, `host_audio_stream`, `host_audio_queue`, `host_audio_queued_bytes` |
 | Sound evidence | [audio_capture.cpp](../host/audio_capture.cpp) | `host_capture_write`, `host_capture_stats` |
 | Original graphics API behavior | [DirectX adapters](../dx/README.md) | `Surface_Lock`, `Surface_Unlock`, `Surface_Blt`, `Surface_Flip`, `d3d_upload_texture` |

@@ -17,16 +17,7 @@ pub struct D3d9Loss {
     reset_required: Arc<AtomicBool>,
 }
 
-#[derive(Clone, Default)]
-pub struct PhysicalLoss {
-    state: Arc<PhysicalLossState>,
-}
-
-#[derive(Default)]
-struct PhysicalLossState {
-    lost: AtomicBool,
-    reason: Mutex<Option<String>>,
-}
+pub use recomp_gpu::PhysicalLoss;
 
 impl D3d9Loss {
     pub(crate) fn physical_loss(&self) -> PhysicalLoss {
@@ -64,12 +55,7 @@ impl D3d9Loss {
     }
 
     pub fn reason(&self) -> Option<String> {
-        self.physical
-            .state
-            .reason
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
+        self.physical.reason()
     }
 
     pub fn physical_message(&self) -> String {
@@ -77,23 +63,6 @@ impl D3d9Loss {
             .reason()
             .unwrap_or_else(|| "reason unknown".to_string());
         format!("the physical wgpu device was lost ({reason})")
-    }
-}
-
-impl PhysicalLoss {
-    pub(crate) fn same_context(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.state, &other.state)
-    }
-
-    pub fn mark(&self, reason: String) {
-        if let Ok(mut slot) = self.state.reason.lock() {
-            *slot = Some(reason);
-        }
-        self.state.lost.store(true, Ordering::Release);
-    }
-
-    pub fn is_lost(&self) -> bool {
-        self.state.lost.load(Ordering::Acquire)
     }
 }
 
@@ -314,6 +283,20 @@ impl Clone for D3d9Gpu {
     }
 }
 
+pub(crate) fn pending_work(gpu: &GpuContext) -> Arc<Mutex<PendingWork>> {
+    Arc::clone(gpu.d3d9_pending.get_or_init(|| {
+        Arc::new(Mutex::new(PendingWork {
+            device: gpu.device.clone(),
+            physical: gpu.physical_loss(),
+            encoder: None,
+            staging: wgpu::util::StagingBelt::new(gpu.device.clone(), STAGING_CHUNK),
+            clear: None,
+            submitter: Submitter::new(gpu.queue.clone(), gpu.physical_loss()),
+            flush_pending: Arc::new(AtomicBool::new(false)),
+        }))
+    }))
+}
+
 impl D3d9Gpu {
     pub(crate) fn same_owner(&self, other: &Self) -> bool {
         self.loss.physical.same_context(&other.loss.physical)
@@ -333,17 +316,7 @@ impl D3d9Gpu {
             tint: false,
             interpreter: Arc::new(std::sync::OnceLock::new()),
             queue: gpu.queue.clone(),
-            pending: Arc::clone(gpu.d3d9_pending.get_or_init(|| {
-                Arc::new(Mutex::new(PendingWork {
-                    device: gpu.device.clone(),
-                    physical: gpu.physical_loss(),
-                    encoder: None,
-                    staging: wgpu::util::StagingBelt::new(gpu.device.clone(), STAGING_CHUNK),
-                    clear: None,
-                    submitter: Submitter::new(gpu.queue.clone(), gpu.physical_loss()),
-                    flush_pending: Arc::new(AtomicBool::new(false)),
-                }))
-            })),
+            pending: pending_work(gpu),
             loss,
             mipgen: Arc::new(Mutex::new(MipGenState::default())),
             depth_upload: Arc::new(Mutex::new(None)),

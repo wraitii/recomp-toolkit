@@ -1,0 +1,17 @@
+[package]
+name = "recomp-compositor"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Kit composition, presenter lifecycle, pacing and surface presentation"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[features]
+default = ["ffi"]
+ffi = []
+gpu = ["dep:recomp-gpu"]
+
+[dependencies]
+recomp-gpu = { path = "../gpu", optional = true }

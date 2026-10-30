@@ -41,9 +41,9 @@ jobs:
             build/toolkit/source-archives
             ~/.cargo/registry
             ~/.cargo/git
-          key: toolkit-arm64-macos14-${{ steps.image.outputs.image }}-${{ hashFiles('cmake/Dependencies.cmake', 'dx/CMakeLists.txt', 'graphics/d3d8-wgpu/**', 'desktop/library/Cargo.lock', 'desktop/library/Cargo.toml', 'tools/build_d3d8_wgpu.py', 'tools/extractors/**', 'third_party/unshield/**') }}-${{ github.sha }}
+          key: toolkit-arm64-macos14-${{ steps.image.outputs.image }}-${{ hashFiles('cmake/Dependencies.cmake', 'dx/CMakeLists.txt', 'graphics/**', 'desktop/library/Cargo.lock', 'desktop/library/Cargo.toml', 'tools/build_d3d8_wgpu.py', 'tools/build_compositor.py', 'tools/cargo_build.py', 'tools/extractors/**', 'third_party/unshield/**') }}-${{ github.sha }}
           restore-keys: |
-            toolkit-arm64-macos14-${{ steps.image.outputs.image }}-${{ hashFiles('cmake/Dependencies.cmake', 'dx/CMakeLists.txt', 'graphics/d3d8-wgpu/**', 'desktop/library/Cargo.lock', 'desktop/library/Cargo.toml', 'tools/build_d3d8_wgpu.py', 'tools/extractors/**', 'third_party/unshield/**') }}-
+            toolkit-arm64-macos14-${{ steps.image.outputs.image }}-${{ hashFiles('cmake/Dependencies.cmake', 'dx/CMakeLists.txt', 'graphics/**', 'desktop/library/Cargo.lock', 'desktop/library/Cargo.toml', 'tools/build_d3d8_wgpu.py', 'tools/build_compositor.py', 'tools/cargo_build.py', 'tools/extractors/**', 'third_party/unshield/**') }}-
             toolkit-arm64-macos14-${{ steps.image.outputs.image }}-
       - name: Prepare pinned standalone Python
         run: |

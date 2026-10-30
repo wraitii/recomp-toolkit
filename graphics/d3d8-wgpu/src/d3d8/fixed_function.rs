@@ -804,7 +804,7 @@ pub fn camera_space_texcoord(cam_pos: [f32; 4], m: &Mat4, flags: u32) -> [f32; 2
 /// the normalized `z/w` depth: the guest sets FOGSTART=190 and FOGEND=240
 /// (survey `win4.log`), values that only make sense as eye-space distances.
 /// This matches the project's established D3D9 fixed-function reference
-/// (`recomp-kit/host/gpu/webgpu/shaders_wgsl.h`, `d3d_render.cpp`), which
+/// (`graphics/d3d8-wgpu/src/host_gpu/shaders.rs`, `d3d_render.cpp`), which
 /// computes `v_fogdist = abs(pos.w)` and documents it as the eye distance.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]

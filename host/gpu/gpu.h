@@ -12,6 +12,7 @@
 // one queue must enforce it with its own synchronisation.
 #pragma once
 #include <cstdint>
+#include <cstddef>
 #include <functional>
 #include <string>
 
@@ -138,6 +139,11 @@ struct RenderPass {
 struct Viewport {
     double x, y, w, h, near_z, far_z;
 };
+struct CompositionDraw {
+    uint64_t texture;
+    double rect[4], uv[4];
+    uint32_t blend, filter;
+};
 
 // Pending: begun or committed and not yet finished. Unknown ids read as Completed.
 enum class CommandStatus { Completed, Error, Pending };
@@ -145,6 +151,9 @@ enum class CommandStatus { Completed, Error, Pending };
 class Device {
   public:
     virtual ~Device() = default;
+    virtual bool compose_plan(CommandBuffer, Texture, int, int, const CompositionDraw *, size_t) {
+        return false;
+    }
 
     // --- textures ---
     virtual Texture create_texture(const TextureDesc &desc) = 0;
@@ -206,20 +215,9 @@ class Device {
                                         Buffer dst, uint64_t offset, int pitch) = 0;
     virtual void generate_mipmaps(CommandBuffer cb, Texture t) = 0;
 
-    // Wrap a texture another API created on this same GPU device (Metal: an
-    // `id<MTLTexture>` passed as `void *`, not retained by the caller after the
-    // wrapped handle is dropped). Empty when the backend cannot share it, in
-    // which case the caller copies through the CPU instead.
-    virtual Texture import_native_texture(void *native) {
-        (void)native;
+    virtual Texture import_shared_texture(void *lease) {
+        (void)lease;
         return {};
-    }
-
-    virtual bool wait_native_event(CommandBuffer cb, void *event, uint64_t value) {
-        (void)cb;
-        (void)event;
-        (void)value;
-        return false;
     }
 
     // Runs on a backend thread after the buffer finishes; `status` says how.
@@ -243,6 +241,12 @@ class Device {
     // in device-clock seconds, or 0 when the display never reported it.
     virtual void present(CommandBuffer cb, Swapchain s, Texture t, double min_duration_seconds,
                          std::function<void(double presented_seconds)> presented) = 0;
+    virtual bool presentation_timestamps() const {
+        return true;
+    }
+    virtual bool minimum_present_duration() const {
+        return true;
+    }
     virtual double refresh_period(Swapchain s) = 0; // seconds; 1/60 when unknown
     virtual void destroy(Swapchain s) = 0;
 

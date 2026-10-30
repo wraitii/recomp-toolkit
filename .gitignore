@@ -44,3 +44,5 @@ __pycache__/
 # A game directory's developer inputs, wherever it lives.
 original/
 analysis/
+
+/profile*.json.gz

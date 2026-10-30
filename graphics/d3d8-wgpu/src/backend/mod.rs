@@ -118,15 +118,7 @@ impl OffscreenTarget {
 pub struct GpuContext {
     pub(crate) d3d9_pending:
         std::sync::OnceLock<Arc<std::sync::Mutex<crate::d3d9::gpu::PendingWork>>>,
-    pub(crate) d3d9_physical_loss: crate::d3d9::gpu::PhysicalLoss,
-    /// The wgpu logical device.
-    pub device: wgpu::Device,
-    /// The queue used to submit work.
-    pub queue: wgpu::Queue,
-    /// Actual adapter details reported by wgpu.
-    pub adapter_info: wgpu::AdapterInfo,
-    /// Kept for surface-capability queries during presentation.
-    adapter: wgpu::Adapter,
+    shared: Arc<recomp_gpu::SharedContext>,
     /// Present surface, or `None` for a headless context.
     surface: Option<wgpu::Surface<'static>>,
     /// Window backing `surface`, kept so `present` can size the swapchain to the
@@ -145,6 +137,14 @@ pub struct GpuContext {
     readback: std::sync::Mutex<Option<wgpu::Buffer>>,
     /// Optional FXAA pipeline and scratch target; see `postprocess`.
     fxaa: std::sync::Mutex<Option<postprocess::FxaaState>>,
+}
+
+impl std::ops::Deref for GpuContext {
+    type Target = recomp_gpu::SharedContext;
+
+    fn deref(&self) -> &Self::Target {
+        &self.shared
+    }
 }
 
 #[derive(Default)]
@@ -206,15 +206,27 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 "#;
 
 impl GpuContext {
+    pub fn shared_context(&self) -> Arc<recomp_gpu::SharedContext> {
+        Arc::clone(&self.shared)
+    }
+
     /// Submit all queued D3D9 work before the owner submits directly to the queue.
     pub fn synchronize_d3d9(&self) {
-        if let Some(pending) = self.d3d9_pending.get() {
-            pending.lock().unwrap().synchronize();
+        self.with_synchronized_queue(|_| ());
+    }
+
+    pub fn with_synchronized_queue<T>(&self, submit: impl FnOnce(&wgpu::Queue) -> T) -> T {
+        if let Some(work) = self.d3d9_pending.get() {
+            let mut pending = work.lock().unwrap();
+            pending.synchronize();
+            submit(&self.queue)
+        } else {
+            submit(&self.queue)
         }
     }
 
-    pub fn physical_loss(&self) -> crate::d3d9::gpu::PhysicalLoss {
-        self.d3d9_physical_loss.clone()
+    pub fn physical_loss(&self) -> recomp_gpu::PhysicalLoss {
+        self.shared.loss.clone()
     }
     /// Wrap a caller-owned headless device and queue. The caller guarantees that
     /// both came from this adapter and imports each device only once; wgpu does
@@ -234,14 +246,13 @@ impl GpuContext {
                 "device capabilities exceed the supplied adapter capabilities",
             ));
         }
-        let adapter_info = adapter.get_info();
+        let shared = Arc::new(
+            recomp_gpu::SharedContext::new(adapter, device, queue)
+                .map_err(|message| RenderError::invalid("SuppliedContext", message))?,
+        );
         Ok(Self {
             d3d9_pending: Default::default(),
-            d3d9_physical_loss: Default::default(),
-            device,
-            queue,
-            adapter_info,
-            adapter,
+            shared,
             surface: None,
             #[cfg(feature = "windowing")]
             window: None,
@@ -331,7 +342,7 @@ impl GpuContext {
         .await
     }
 
-    async fn from_adapter(
+    pub(crate) async fn from_adapter(
         adapter: wgpu::Adapter,
         surface: Option<wgpu::Surface<'static>>,
         #[cfg(feature = "windowing")] window: Option<Arc<winit::window::Window>>,
@@ -359,12 +370,6 @@ impl GpuContext {
             panic!("d3d8-wgpu uncaptured wgpu error: {error}");
         });
         device.on_uncaptured_error(uncaptured);
-        let physical_loss = crate::d3d9::gpu::PhysicalLoss::default();
-        let callback_loss = physical_loss.clone();
-        device.set_device_lost_callback(move |reason, message| {
-            callback_loss.mark(format!("{reason:?}: {message}"));
-        });
-
         log::info!(
             "d3d8-wgpu adapter: backend={:?} name={:?} vendor=0x{:04x} device=0x{:04x}",
             adapter_info.backend,
@@ -373,13 +378,19 @@ impl GpuContext {
             adapter_info.device
         );
 
+        let shared = Arc::new(
+            recomp_gpu::SharedContext::new(adapter, device, queue)
+                .map_err(|message| RenderError::invalid("GpuContext", message))?,
+        );
+        let callback_loss = shared.loss.clone();
+        shared
+            .device
+            .set_device_lost_callback(move |reason, message| {
+                callback_loss.mark(format!("{reason:?}: {message}"));
+            });
         Ok(Self {
             d3d9_pending: Default::default(),
-            d3d9_physical_loss: physical_loss,
-            device,
-            queue,
-            adapter_info,
-            adapter,
+            shared,
             surface,
             #[cfg(feature = "windowing")]
             window,

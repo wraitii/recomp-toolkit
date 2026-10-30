@@ -2359,6 +2359,10 @@ int main(int argc, char **argv) {
         return configured ? 0 : 2;
     }
 
+    if (!host_input_script_load()) {
+        SDL_Quit();
+        return 2;
+    }
     g_gpu = gpu::create_default_device();
     if (!g_gpu) {
         fprintf(stderr, RECOMP_APP_NAME ": no GPU device is available (%s)\n",
@@ -2373,10 +2377,8 @@ int main(int argc, char **argv) {
             auto platform = launcher::make_platform(g_window);
             launcher::RunOptions options;
             options.known = game.exe;
-            options.unplayable =
-                std::string("This device has no usable ") + gpu::default_backend_name() +
-                " graphics, which the game needs" +
-                (strcmp(gpu::default_backend_name(), "vulkan") == 0 ? " (Vulkan 1.1)." : ".");
+            options.unplayable = std::string("This device has no usable ") +
+                                 gpu::default_backend_name() + " graphics, which the game needs.";
             if (const char *keys = recomp_env("LAUNCHER_KEYS"))
                 options.keys = keys;
             if (const char *dump = recomp_env("LAUNCHER_DUMP")) {
@@ -2391,10 +2393,7 @@ int main(int argc, char **argv) {
     }
 
     const HostWindowSize size = window_size_for(g_mode_w, g_mode_h);
-    const bool vulkan = strcmp(gpu::default_backend_name(), "vulkan") == 0;
-    if (vulkan && !SDL_Vulkan_LoadLibrary(gpu::vulkan_loader_path()))
-        fprintf(stderr, RECOMP_APP_NAME ": SDL_Vulkan_LoadLibrary: %s\n", SDL_GetError());
-    const SDL_WindowFlags surface_flag = vulkan ? SDL_WINDOW_VULKAN : SDL_WINDOW_METAL;
+    const SDL_WindowFlags surface_flag = gpu::window_surface_flags();
     g_window = platform_ui_create_window(RECOMP_GAME_NAME, size.w, size.h, size.min_w, size.min_h,
                                          surface_flag, &g_window_mode);
     if (!g_window) {
@@ -2523,8 +2522,6 @@ int main(int argc, char **argv) {
     options.close_watchdog_grace = 30.0;
 
     host_set_message_box_presenter(show_message_box);
-    if (!host_input_script_load())
-        return 2;
     if (!boot_load(options)) {
         host_present_stop();
         fprintf(stderr, RECOMP_APP_NAME ": %s\n", loader_error());

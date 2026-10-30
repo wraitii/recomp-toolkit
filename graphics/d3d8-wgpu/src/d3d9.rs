@@ -1658,7 +1658,19 @@ fn create_owned_device(
     device: &mut D3d9Device,
     request: &DeviceRequest,
 ) -> Result<PresentParams, DeviceCreateError> {
-    create_device(device, request, None, &DeviceConfig::from_environment())
+    let context = crate::kit::context().map_err(|error| {
+        create_error(
+            &request.present,
+            DeviceCreateErrorKind::Backend,
+            error.to_string(),
+        )
+    })?;
+    create_device(
+        device,
+        request,
+        Some(context),
+        &DeviceConfig::from_environment(),
+    )
 }
 
 fn create_device(

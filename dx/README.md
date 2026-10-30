@@ -1,7 +1,7 @@
 # `dx` — the graphics, audio, video and input shims
 
 The Windows API surface a recompiled game expects from the DirectX and media
-DLLs: DirectDraw through Direct3D 11, DirectSound and WinMM, DirectInput and
+DLLs: DirectDraw through Direct3D 9, DirectSound and WinMM, DirectInput and
 XInput, and the audio, video and networking libraries games of that era bundled
 (Miles, QMixer, FMOD, Bink, DirectShow, Media Foundation, MLDPlay). Each file
 implements a published API contract and nothing about a game: a shim answers
@@ -19,7 +19,8 @@ build does not select by game or era. A game reaches only the ones its imports
 name, so the rest cost registration, not behaviour. The work behind them is
 split three ways: the DX3-7 recorder, audio and input leave through callbacks
 in `host_api.h`; D3D8 and D3D9 hand their draws to the Rust
-`graphics/d3d8-wgpu` crate; D3D11 renders through `host/gpu2d` on the host GPU.
+`graphics/d3d8-wgpu` crate. D3D11, DXGI factory and D3DCompile entry points
+are retired and report unsupported calls by name; D3DX10 matrix helpers remain.
 
 ## By era and subsystem
 
@@ -29,7 +30,7 @@ in `host_api.h`; D3D8 and D3D9 hand their draws to the Rust
 | DirectDraw and Direct3D 2-7 (DX3-7) | `ddraw.cpp/.h`, `d3d.cpp`, `d3d7.cpp`, `dxtypes.h`, `dxt_decode.h` | IDirectDraw/2/4 with surfaces/2/3/4, palettes and clippers; IDirect3D/2 and IDirect3D7 devices, viewports, materials, lights and textures; DX6 constants and DXT decode |
 | Direct3D 8 (DX8) | `d3d8.cpp`, `d3d8_fpu.h`, `d3d8_bindings.json`, `d3d8_constants.json` | IDirect3D8 factory, device, surface, texture, vertex-buffer and index-buffer vtables behind the Rust renderer; the guest x87 control-word change `CreateDevice` implies |
 | Direct3D 9 (DX9) | `d3d9.cpp`, `d3dx9.cpp` | IDirect3D9 device and resources over the Rust renderer; D3DX9 matrix/vector maths and effect loading |
-| Direct3D 10/11 and DXGI | `d3d11.cpp/.h`, `dxgi.cpp`, `d3dx10.cpp`, `d3dcompiler.cpp` | ID3D11Device/context/resources for one fixed 2D quad pipeline; IDXGISwapChain over guest-owned back buffers; D3DX10 row-vector maths; a tagged-source `ID3DBlob` shim |
+| D3DX10 and retired Direct3D 11 | `d3d11.cpp/.h`, `dxgi.cpp`, `d3dx10.cpp`, `d3dcompiler.cpp` | D3DX10 row-vector matrix helpers; named unsupported D3D11, DXGI factory and D3DCompile imports |
 | DirectSound and WinMM audio | `dsound.cpp`, `waveout.cpp`, `audio3d.h` | IDirectSound, buffers, 3D buffer/listener and notification positions; WinMM `waveOut` queues; the 3D model shared with Miles |
 | DirectInput and XInput | `dinput.cpp`, `dinput_joystick.cpp/.h`, `xinput.cpp` | IDirectInputA mouse and keyboard; the virtual pad as a DirectInput joystick; the virtual pad as XInput user 0 across `xinput1_3`, `1_4` and `9_1_0` |
 | Bundled audio libraries | `mss32.cpp`, `redbook.cpp`, `qmixer.cpp`, `fmod.cpp`, `soundlib.cpp`, `galaxy_stub.cpp`, `mp3_source.cpp/.h`, `riff.cpp/.h` | Miles drivers, PCM/MP3 streams and CD audio; the 28 QMixer exports; FMOD 3 samples and streams; the Soundlib MIDI helper; a null Galaxy API; shared MP3 and RIFF readers |
@@ -48,8 +49,24 @@ are unsupported. Short periodic effects use their mean to avoid aliasing.
 | DX3-7 (`ddraw`, `d3d`, `d3d7`) | the kit's own, `host/d3d_render.cpp` over `host/gpu/` | fixed-function immediate mode; vertex lighting is recorded but not applied |
 | D3D8 (`d3d8.cpp`) | the Rust `graphics/d3d8-wgpu` crate (wgpu) | optional; without it the no-renderer path advertises no adapter |
 | D3D9 (`d3d9.cpp`) | the Rust `graphics/d3d8-wgpu` crate (wgpu) | base D3D9 (no D3D9Ex) and `d3dx9_33` effects; vs 1.1/2.0/2.1 and ps 1.1-2.1 instruction subsets without flow control or predication, so SM3, loops/branches, `texldl`/`sincos` and ps 1.x texture-register ops fail by name; also refused: multisampling, MIRRORONCE, point sprites, P8 palettes, effect struct parameters and pool-shared samplers. `EvictManagedResources` keeps residency; INTZ samples through the comparison sampler; occlusion counts on Metal are the covered viewport area |
-| D3D11 (`d3d11.cpp`) | the kit's own, `host/gpu2d.cpp` | one fixed 2D layered-quad pipeline; `d3dcompiler.cpp` is a tagged-source blob, not a compiler |
 | Video | FFmpeg (`mf_media.cpp`, `avi.cpp`, parts of `bink.cpp`, `waveout.cpp` ADPCM), minimp3 (`dshow.cpp`, `mp3_source.cpp`), Bink video in `bink.cpp` | containers, demux and frame helpers are kit code |
+
+## Graphics ownership
+
+| Family | Semantic owner | Native boundary |
+| --- | --- | --- |
+| DirectDraw/GDI and DX2–7 recording | `dx/ddraw.cpp`, `dx/d3d*.cpp`, `host/d3d_render.cpp` | CPU pixels, blits, coherence and recorded draws remain native. D3D7 device/resource state uses the Rust guest adapter. |
+| D3D7/8 state and resources | `graphics/d3d8-wgpu/src/d3d8/` and `guest/` | COM identity, guest staging and synchronous marshaling remain in `dx/`. GPU work uses the renderer bridge. |
+| D3D9 devices, resources and draws | `graphics/d3d8-wgpu/src/d3d9/` and `shader/` | Native COM views retain Rust holders; Rust owns storage, locks, API state, reset and execution. |
+| D3DX9 | Rust `d3d9/` owns matrix multiply/transpose/inverse, image and effect operations; vector/projection helpers stay native. | DLL versions share migrated arithmetic; native adapters preserve version-specific results and COM identities. |
+| D3DX10 matrix helpers | `dx/d3dx10.cpp` | Retained native arithmetic; no D3D11 rendering dependency. |
+| D3D11, DXGI factory and D3DCompile | Named unsupported imports in `dx/` | Retired API behavior, separate from ownership cleanup. |
+
+The kit context and native texture-lease handoff live in
+`graphics/d3d8-wgpu/src/kit.rs`. Generic host GPU execution uses
+`graphics/gpu::SharedContext`; composition and presentation live in
+`graphics/compositor`. See [graphics lifetime](../docs/architecture.md#a-frame-through-the-host)
+for queue ordering and shutdown.
 
 ## Audio
 
@@ -83,7 +100,8 @@ and gamma capability bits stay clear. `CreateDevice` also models the guest x87
 control-word change unless `D3DCREATE_FPU_PRESERVE` is set (`d3d8_fpu.h`).
 
 Native desktop builds require Rust and statically link `graphics/d3d8-wgpu`
-through CXX. A game's own crate at that path takes precedence. Rust owns D3D7/D3D8
+through CXX. The kit graphics workspace supplies both native headers and Rust
+libraries; per-game renderer overrides are rejected. Rust owns D3D7/D3D8
 CPU state and resources even with GPU rendering disabled; the null host uses the
 same CPU implementation. Enable GPU rendering with `[render] d3d8_wgpu = true`
 in the game configuration when building through `tools/build.py`. Cross builds require explicit Rust target

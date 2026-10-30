@@ -1,9 +1,3 @@
-// gpu_contract_tests.cpp - a backend against the gpu.h contract: bytes
-// round-trip, a clear and a draw land where expected, commands complete in
-// commit order, a compute kernel reads what a texture holds, and a native
-// surface makes a swapchain. Compiled once per backend with
-// RECOMP_GPU_TEST_BACKEND naming it; the factory override selects it.
-#include "../../../platform/os.h"
 #include "../gpu_factory.h"
 
 #include <math.h>
@@ -199,15 +193,10 @@ static void test_swapchain_from_surface() {
     CHECK(d->refresh_period(s) > 0.0 && d->refresh_period(s) < 0.1);
     CHECK(d->now_seconds() > 0.0);
     d->destroy(s);
+    release_window_surface(surface);
 }
 
 int main() {
-    os_setenv("RECOMP_GPU_BACKEND", RECOMP_GPU_TEST_BACKEND);
-    if (strcmp(default_backend_name(), RECOMP_GPU_TEST_BACKEND) != 0) {
-        fprintf(stderr, "backend %s is not available here (got %s)\n", RECOMP_GPU_TEST_BACKEND,
-                default_backend_name());
-        return 1;
-    }
     test_upload_readback();
     test_clear_and_compositor_draw();
     test_commit_order();
@@ -215,6 +204,6 @@ int main() {
     test_swapchain_from_surface();
     printf("%d checks, %d failures\n", g_checks, g_failures);
     if (!g_failures)
-        printf("all gpu %s tests passed\n", RECOMP_GPU_TEST_BACKEND);
+        printf("all gpu %s tests passed\n", default_backend_name());
     return g_failures ? 1 : 0;
 }

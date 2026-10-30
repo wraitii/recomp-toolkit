@@ -7,13 +7,11 @@
 #include "gpu/gpu.h"
 #include "present.h"
 #include "ui_layer.h"
+#include "../graphics/compositor/include/presenter.h"
 
 #include <memory>
 #include <vector>
 
-struct Fence {
-    bool done = true, success = true;
-};
 // A texture the presenter allocated, destroyed with the last reference.
 struct Composite {
     gpu::Device *device = nullptr;
@@ -70,21 +68,24 @@ struct PendingNativeTexture {
 struct Frame {
     uint64_t frame_id = 0, epoch = 0;
     HostScreenClass cls = HOST_SCREEN_MENU;
-    bool had_draws = false, supplied = false, gpu = false, shown = false;
-    bool released = false, dropped = false, success = true, repeat = false, staged_pixels = false;
-    bool completion_fallback = false;
+    RcFrameState *state = rc_frame_state_new();
+    Frame() = default;
+    Frame(const Frame &) = delete;
+    Frame &operator=(const Frame &) = delete;
+    ~Frame() {
+        rc_frame_state_free(state);
+    }
+    RcFrameSnapshot status() const {
+        return rc_frame_snapshot(state);
+    }
+    bool had_draws = false, supplied = false, staged_pixels = false;
     bool viewport = false;
     uint32_t viewport_style = 0;
     int32_t viewport_x = 0, viewport_y = 0;
-    double presented_ts = 0, gpu_ts = 0, submitted_ts = 0, sealed_ts = 0, gpu_ms = 0;
-    double acknowledgement_deadline = 0;
-    unsigned pending_prefixes = 0;
     std::shared_ptr<Target> target;
     std::shared_ptr<PendingNativeTexture> pending_native;
     // Scene history can advance before this drawable is acknowledged.
     std::shared_ptr<Target> scene_lease;
-    std::shared_ptr<Fence> prefix = std::make_shared<Fence>();
-    // Kept independently of the arena: no frame pointer crosses threads.
     UiFrame ui{};
     CompositorInput input{};
     LayoutSnapshot layout;
@@ -92,10 +93,4 @@ struct Frame {
     std::shared_ptr<Composite> composed;
     // The settings page texture behind input.settings_page, if any.
     std::shared_ptr<Composite> settings_page;
-};
-struct Message {
-    void *surface = nullptr;
-    int w = 640, h = 480;
-    bool install = false;
-    int viewport = -1;
 };

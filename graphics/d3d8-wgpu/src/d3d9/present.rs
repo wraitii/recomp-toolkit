@@ -35,30 +35,12 @@ fn wait_slot(busy: &AtomicU32, loss: &PhysicalLoss) -> Result<(), RenderError> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn native_texture(texture: &wgpu::Texture) -> Result<*mut u8, RenderError> {
-    let hal = unsafe { texture.as_hal::<wgpu::hal::api::Metal>() }.ok_or_else(|| {
-        RenderError::new("D3D9::PresentHandoff", "the texture is not a Metal texture")
-    })?;
-    let raw = hal.raw_handle();
-    Ok(std::ptr::from_ref(raw).cast_mut().cast())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn native_texture(_: &wgpu::Texture) -> Result<*mut u8, RenderError> {
-    Err(RenderError::new(
-        "D3D9::PresentHandoff",
-        "native texture handoff is unavailable on this backend",
-    ))
-}
-
 pub(crate) fn handoff(
     slot: &mut Option<PresentRing>,
     gpu: &D3d9Gpu,
     target: &OffscreenTarget,
     context: &Arc<GpuContext>,
 ) -> Result<FrameHandoff, RenderError> {
-    native_texture(&target.texture)?;
     let frame = gpu
         .validate("PresentHandoff", || prepare_handoff(slot, gpu, target))
         .map_err(|error| {
@@ -69,12 +51,8 @@ pub(crate) fn handoff(
             }
         })?;
     let (mut frame, readiness) = frame;
-    frame.lease = retain_slot(
-        readiness,
-        &context.device,
-        &context.queue,
-        Some(Arc::clone(context)),
-    );
+    frame.lease = retain_slot(readiness, Arc::clone(context));
+    frame.texture = frame.lease as *mut u8;
     Ok(frame)
 }
 
@@ -108,6 +86,7 @@ fn prepare_handoff(
                             dimension: wgpu::TextureDimension::D2,
                             format: target.format,
                             usage: wgpu::TextureUsages::COPY_DST
+                                | wgpu::TextureUsages::COPY_SRC
                                 | wgpu::TextureUsages::TEXTURE_BINDING,
                             view_formats: &[],
                         }),
@@ -120,7 +99,6 @@ fn prepare_handoff(
     let ring = slot.as_mut().expect("present ring is initialized");
     let index = ring.next;
     let slot = Arc::clone(&ring.slots[index]);
-    let texture = native_texture(&slot.texture)?;
     wait_slot(&slot.busy, &gpu.loss().physical_loss())?;
     let readiness = begin_slot(Arc::clone(&slot), Some(gpu.loss().physical_loss()));
     if gpu.is_physical() {
@@ -133,12 +111,13 @@ fn prepare_handoff(
         Arc::clone(&readiness),
         target.texture.clone(),
         slot.texture.clone(),
+        gpu.device.clone(),
     );
     gpu.submit_then(move |queue| submission.submit(queue));
     ring.next = (index + 1) % ring.slots.len();
     Ok((
         FrameHandoff {
-            texture,
+            texture: std::ptr::null_mut(),
             lease: 0,
             width: target.width,
             height: target.height,

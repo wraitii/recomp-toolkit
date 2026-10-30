@@ -3,6 +3,8 @@
 // Worker-owned swapchain and sealed-frame mailbox, over gpu.h. No window code here.
 #include "present.h"
 #include "present_frame.h"
+#include "present_state.h"
+#include "present_surface.h"
 #include "present_test.h"
 #include "performance_overlay.h"
 #include "d3d_render.h"
@@ -19,12 +21,10 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
-#include <thread>
 #include "../platform/os.h"
 #include "../platform/profile_markers.h"
 
@@ -73,12 +73,6 @@ template <class T> struct AtomicShared {
     void store(std::shared_ptr<T> p) {
         std::atomic_store(&value, std::move(p));
     }
-    std::shared_ptr<T> exchange(std::shared_ptr<T> p) {
-        return std::atomic_exchange(&value, std::move(p));
-    }
-    bool compare_exchange_weak(std::shared_ptr<T> &expected, std::shared_ptr<T> desired) {
-        return std::atomic_compare_exchange_weak(&value, &expected, std::move(desired));
-    }
 };
 struct Metric {
     double origin = -1, latest = -1;
@@ -108,12 +102,17 @@ struct Metric {
 struct Service : std::enable_shared_from_this<Service> {
     HostCaptureFactory capture_factory = nullptr;
     std::mutex mutex;
-    std::condition_variable wake, completed;
-    std::thread worker;
+    std::condition_variable completed;
+    RcPresenterWorker *worker = nullptr;
+    RcPresenterDeliveries *deliveries = nullptr;
+    size_t capture_backlog() const {
+        return rc_presenter_deliveries_pending(deliveries);
+    }
+    void notify_worker() const {
+        rc_presenter_worker_notify(worker);
+    }
     bool stop = false, fake = false, automatic = true, offscreen = false;
     bool duration_pacing = true;
-    bool tick_pending = false, seal_pending = false;
-    double last_link_tick = -1, window_started = -1;
     unsigned faults = 0, logged_faults = 0;
     double frame_period = 1.0 / 60, fake_now = 0, queued_flip = 0;
     void fault(unsigned bit, const char *reason) { // mutex held
@@ -122,28 +121,31 @@ struct Service : std::enable_shared_from_this<Service> {
         logged_faults |= bit;
         ++faults;
         fprintf(stderr, "presenter: FAULT: %s (unique=%llu drops=%llu flight=%llu mailbox=%zu)\n",
-                reason, (unsigned long long)unique, (unsigned long long)drops,
-                (unsigned long long)(flights.empty() ? 0 : flights.front()->frame_id),
+                reason, (unsigned long long)timeline.counters().unique,
+                (unsigned long long)timeline.counters().drops,
+                (unsigned long long)(timeline.size() == 0 ? 0 : timeline.frame(0)->frame_id),
                 mailbox.size());
     }
-    bool window_ready() const { // mutex held; first submission needs no completion or link tick
-        return tick_pending || message.load() != nullptr ||
-               (flights.size() < flight_limit && seal_pending && !mailbox.empty());
+    RcTurnInput turn_input(double ts) const {
+        return {ts,
+                frame_period,
+                flight_limit,
+                capture_backlog(),
+                surface.viewport(),
+                uint8_t(offscreen),
+                uint8_t(fake),
+                uint8_t(duration_pacing),
+                uint8_t(device && device->minimum_present_duration()),
+                uint8_t(surface.pending())};
+    }
+    bool window_ready() const {
+        return rc_presenter_ready(presenter.value, turn_input(now()));
     }
     void signal_tick(double ts) {
         std::lock_guard lock(mutex);
-        last_link_tick = timestamp = ts;
-        tick_pending = true;
-        wake.notify_one();
+        rc_presenter_signal(presenter.value, ts, true);
+        notify_worker();
     }
-    double timestamp = 0;
-    // A queued drawable can take several refreshes to reach the display. The
-    // old two-refresh deadline retired real frames before their positive
-    // presented callbacks arrived, making the native FPS counter undercount.
-    double acknowledgement_grace() const {
-        return (flight_limit + 2) * frame_period;
-    }
-    AtomicShared<Message> message;
     std::atomic<int> drawable_w{640}, drawable_h{480};
     int guest_w = 640, guest_h = 480, requested_w = 0;
     // The game rectangle's size as last told to the input gate; zero until a
@@ -184,14 +186,7 @@ struct Service : std::enable_shared_from_this<Service> {
     }
     unsigned fail_allocations = 0;
     gpu::Device *device = nullptr;
-    gpu::Swapchain chain;
-    void *surface = nullptr;
-    int surface_viewport = -1;
-    // The display pacer: a thread that wakes the worker once per refresh, in
-    // place of the CVDisplayLink the AppKit host used.
-    std::thread pacer;
-    bool pacer_stop = false;
-    std::condition_variable pacer_wake;
+    PresentSurface surface;
     uint64_t fake_texture_ids = 0x100000000ull; // fake mode: scene handles with no device
     double now() const {                        // mutex held
         return fake ? fake_now : device ? device->now_seconds() : 0.0;
@@ -201,28 +196,20 @@ struct Service : std::enable_shared_from_this<Service> {
     std::array<std::shared_ptr<Target>, 7> targets;
     size_t flight_limit = 1;
     std::shared_ptr<Frame> writing;
-    std::deque<std::shared_ptr<Frame>> flights;
-    std::deque<std::shared_ptr<Frame>> mailbox, retiring;
+    PresentOwner presenter;
+    PresentMailbox mailbox{rc_presenter_mailbox(presenter.value)};
+    PresentTimeline timeline{rc_presenter_timeline(presenter.value)};
     std::shared_ptr<Target> history_lease;
     CompositorSceneHistory history;
     uint64_t history_epoch = 0;
-    std::shared_ptr<Composite> cached;
-    std::shared_ptr<Composite> cached_settings;
     std::vector<std::shared_ptr<Composite>> composite_pool;
-    UiFrame cached_ui{};
 #ifdef RECOMP_PRESENT_HAS_UI_LAYER
     UiFrame previous_ui{}; // guest thread only, including sealed frames that were dropped
     uint64_t previous_ui_epoch = 0;
 #endif
-    CompositorInput cached_input{};
-    std::shared_ptr<Target> cached_target;
-    bool cached_viewport = false;
-    uint32_t cached_viewport_style = 0;
-    int32_t cached_viewport_x = 0, cached_viewport_y = 0;
     uint8_t last_pixel = 0;
-    uint64_t unique = 0, repeats = 0, drops = 0, waits = 0, last_id = 0;
+    uint64_t waits = 0;
     uint64_t settings_pages = 0; // sealed frames that carried the settings page
-    double cached_sealed_ts = 0;
     uint64_t epoch = 0;
     bool class_known = false;
     HostScreenClass last_class = HOST_SCREEN_MENU;
@@ -232,6 +219,8 @@ struct Service : std::enable_shared_from_this<Service> {
     unsigned timing_rows = 0;
     FILE *ack_trace = nullptr;
     ~Service() {
+        rc_presenter_worker_free(worker);
+        rc_presenter_deliveries_free(deliveries);
         if (timings)
             fclose(timings);
         if (ack_trace)
@@ -241,10 +230,11 @@ struct Service : std::enable_shared_from_this<Service> {
         if (!ack_trace)
             return;
         const double now = this->now();
+        const auto status = f.status();
         fprintf(ack_trace, "%llu,%d,%d,%s,%.9f,%.9f,%.9f,%.9f,%.9f,%d,%d,%d\n",
-                (unsigned long long)f.frame_id, int(f.cls), int(f.repeat), event, now, ts,
-                f.submitted_ts, f.gpu_ts, f.acknowledgement_deadline, int(f.shown),
-                int(f.completion_fallback), int(f.released));
+                (unsigned long long)f.frame_id, int(f.cls), int(status.repeat), event, now, ts,
+                status.submitted_ts, status.gpu_ts, status.acknowledgement_deadline,
+                int(status.shown), int(status.completion_fallback), int(status.released));
     }
     PerformanceOverlay performance_overlay;
     controls::Overlay controls_overlay;
@@ -254,13 +244,11 @@ struct Service : std::enable_shared_from_this<Service> {
     LayoutSnapshot sealed_layout;
     bool sealed_layout_valid = false;
     std::set<uint64_t> test_released;
-    unsigned pending_commands = 0;
 
     void release(const std::shared_ptr<Frame> &f) { // mutex held; never guest data access
-        if (f->released)
+        if (!rc_frame_release(f->state))
             return;
-        f->released = true;
-        if (!f->repeat) {
+        if (!f->status().repeat) {
             if (fake)
                 test_released.insert(f->frame_id);
             else
@@ -273,176 +261,179 @@ struct Service : std::enable_shared_from_this<Service> {
         f->scene_lease.reset();
         completed.notify_all();
     }
-    // Retire completed submissions in order and release their retained frame resources.
-    // Late completion callbacks must never replace the cached image with an older frame.
-    void sweep() {
-        for (auto it = retiring.begin(); it != retiring.end();) {
-            if ((*it)->prefix->done && (*it)->pending_prefixes == 0 && (*it)->gpu) {
-                release(*it);
-                it = retiring.erase(it);
-            } else
-                ++it;
+    struct CaptureDelivery {
+        gpu::Device *device;
+        std::shared_ptr<Composite> texture;
+        HostCompletedComposite result;
+        HostFrameCapture capture;
+        std::weak_ptr<Service> service;
+    };
+    void queue_capture(const std::shared_ptr<Frame> &frame) {
+        if (!deliveries) {
+            deliveries = rc_presenter_deliveries_new();
+            if (!deliveries)
+                abort();
         }
-        // Retire in submission order even if callbacks arrive out of order.
-        // An older acknowledgement must never replace a newer cached image.
-        while (!flights.empty() && flights.front()->gpu && flights.front()->shown &&
-               flights.front()->prefix->done && flights.front()->pending_prefixes == 0) {
-            auto f = flights.front();
-            if (f->success && f->prefix->success && !stop) {
-                if (!f->repeat)
-                    ++unique;
-                if (!offscreen && !f->completion_fallback)
-                    pacing.displayed(f->presented_ts, f->repeat, f->gpu_ms,
-                                     (f->presented_ts - f->sealed_ts) * 1000);
-                if (!f->repeat && !f->completion_fallback && f->cls == HOST_SCREEN_GAMEPLAY &&
-                    f->epoch == epoch)
-                    metric.complete(std::max(f->presented_ts, f->gpu_ts));
+        auto delivery = std::make_unique<CaptureDelivery>();
+        delivery->device = device;
+        delivery->texture = frame->composed;
+        delivery->capture = std::move(frame->capture);
+        delivery->service = shared_from_this();
+        auto &result = delivery->result;
+        result.w = frame->composed->w;
+        result.h = frame->composed->h;
+        result.guest_w = frame->input.guest_w;
+        result.guest_h = frame->input.guest_h;
+        result.cls = frame->cls;
+        result.frame_id = frame->frame_id;
+        result.layout = frame->layout;
+        RcPresenterDelivery task{};
+        task.context = delivery.release();
+        task.run = [](void *context) noexcept {
+            auto &delivery = *static_cast<CaptureDelivery *>(context);
+            auto texture = std::move(delivery.texture);
+            auto &result = delivery.result;
+            result.rgba.resize(size_t(result.w) * result.h * 4);
+            const bool success = delivery.device->readback(
+                texture->texture, {0, 0, result.w, result.h}, result.rgba.data(), result.w * 4);
+            texture.reset();
+            if (!success) {
+                fprintf(stderr, "presenter: capture readback failed for frame %llu\n",
+                        (unsigned long long)result.frame_id);
+                return;
+            }
+            auto capture = std::move(delivery.capture);
+            capture(result);
+        };
+        task.release = [](void *context) noexcept {
+            std::unique_ptr<CaptureDelivery> delivery(static_cast<CaptureDelivery *>(context));
+            if (auto service = delivery->service.lock())
+                service->notify_worker();
+        };
+        rc_presenter_deliveries_enqueue(deliveries, task);
+    }
+    void sweep() {
+        while (true) {
+            auto [f, publish] = timeline.retire(stop);
+            if (!f)
+                break;
+            if (publish) {
+                const auto status = f->status();
+                if (!offscreen &&
+                    (!status.completion_fallback || (device && !device->presentation_timestamps())))
+                    pacing.displayed(status.presented_ts, status.repeat, status.gpu_ms,
+                                     (status.presented_ts - status.sealed_ts) * 1000);
+                if (!status.repeat && !status.completion_fallback &&
+                    f->cls == HOST_SCREEN_GAMEPLAY && f->epoch == epoch)
+                    metric.complete(std::max(status.presented_ts, status.gpu_ts));
                 if (timings) {
                     fprintf(timings, "%llu,%d,%d,%.9f,%.9f,%.9f,%.3f,%llu,%d,%d,%d\n",
-                            (unsigned long long)f->frame_id, int(f->cls), int(f->repeat),
-                            f->sealed_ts, f->submitted_ts, f->presented_ts, f->gpu_ms,
-                            (unsigned long long)drops, int(!offscreen && !f->completion_fallback),
-                            f->input.drawable_w, f->input.drawable_h);
+                            (unsigned long long)f->frame_id, int(f->cls), int(status.repeat),
+                            status.sealed_ts, status.submitted_ts, status.presented_ts,
+                            status.gpu_ms, (unsigned long long)timeline.counters().drops,
+                            int(!offscreen && !status.completion_fallback), f->input.drawable_w,
+                            f->input.drawable_h);
                     // Keep diagnostics live without a synchronous write on
                     // every display callback while holding the queue mutex.
                     // fclose flushes the remaining rows during shutdown.
                     if (++timing_rows % 60 == 0)
                         fflush(timings);
                 }
-                cached = f->composed;
-                cached_settings = f->settings_page;
-                last_id = f->frame_id;
-                cached_sealed_ts = f->sealed_ts;
-                cached_ui = f->ui;
-                cached_input = f->input;
-                cached_input.ui = &cached_ui;
-                cached_viewport = f->viewport;
-                cached_viewport_style = f->viewport_style;
-                cached_viewport_x = f->viewport_x;
-                cached_viewport_y = f->viewport_y;
-                if (!f->repeat)
-                    cached_target = f->input.legacy ? f->target : f->scene_lease;
                 if (fake && f->target && !f->target->test_pixels.empty())
                     last_pixel = f->target->test_pixels[0];
                 layout_slot = (layout_slot + 1) % layouts.size();
                 layouts[layout_slot] = f->layout;
                 layout_valid = true;
                 host_gate_publish_layout(f->layout);
-                if (f->capture && f->composed && device) {
-                    HostCompletedComposite result;
-                    result.w = f->composed->w;
-                    result.h = f->composed->h;
-                    result.guest_w = f->input.guest_w;
-                    result.guest_h = f->input.guest_h;
-                    result.cls = f->cls;
-                    result.frame_id = f->frame_id;
-                    result.layout = f->layout;
-                    result.rgba.resize(size_t(result.w) * result.h * 4);
-                    device->readback(f->composed->texture, {0, 0, result.w, result.h},
-                                     result.rgba.data(), result.w * 4);
-                    f->capture(result);
-                    f->capture = {};
-                }
+                if (f->capture && f->composed && device)
+                    queue_capture(f);
             }
             release(f);
-            flights.pop_front();
-            wake.notify_one();
+            notify_worker();
         }
     }
     void drop(const std::shared_ptr<Frame> &f) {
-        ++drops;
-        f->dropped = true;
         f->pending_native.reset();
-        f->gpu = true;
-        retiring.push_back(f);
+        timeline.defer(f);
         sweep();
     }
-    void completion_fallback(const std::shared_ptr<Frame> &f, double ts) { // mutex held
-        if (!f || f->released || f->dropped || f->shown || !f->gpu || !f->success ||
-            ts < f->acknowledgement_deadline)
-            return;
-        fault(4,
-              "drawable acknowledgement exceeded queue grace; using command completion fallback");
-        f->shown = true;
-        f->completion_fallback = true;
-        f->presented_ts = f->gpu_ts;
-        trace_ack(*f, "timeout", ts);
-    }
-    void ack_command(const std::shared_ptr<Frame> &f, bool success, double ts) {
+    void ack_command(const std::shared_ptr<Frame> &f, bool success, double ts, double gpu_ms = 0) {
         std::lock_guard lock(mutex);
-        if (f->released)
+        const RcFrameCompletion completion{ts,
+                                           frame_period,
+                                           gpu_ms,
+                                           uint8_t(success),
+                                           uint8_t(offscreen),
+                                           uint8_t(stop),
+                                           uint8_t(device && !device->presentation_timestamps())};
+        if (!rc_frame_command(f->state, completion))
             return;
-        f->gpu = true;
-        f->success = f->success && success;
-        f->gpu_ts = ts;
-        // Slow GPU work is not a lost display callback. Give the ready
-        // drawable two more refreshes without releasing its target early.
-        f->acknowledgement_deadline = std::max(f->acknowledgement_deadline, ts + 2 * frame_period);
         trace_ack(*f, "gpu", ts);
-        if (offscreen || !success || stop) {
-            f->shown = true;
-            f->presented_ts = ts;
-        } else
-            completion_fallback(f, ts);
         sweep();
         completed.notify_all();
-        wake.notify_one();
+        notify_worker();
     }
     void ack_presented(const std::shared_ptr<Frame> &f, double ts) {
         std::lock_guard lock(mutex);
         trace_ack(*f, "presented", ts);
-        if (!(ts > 0) && !fake)
-            return; // zero presentedTime is not presentation
-        if (f->released || f->dropped || f->shown)
-            return;
-        f->shown = true;
-        f->presented_ts = ts;
-        sweep();
+        if (rc_frame_presented(f->state, ts, fake))
+            sweep();
     }
-    // Shared by the real device and the fake-device test. Register both
-    // acknowledgements before present, and enqueue present before commit. The
-    // shared pointer is captured by value: callbacks run after the worker's
-    // stack frame is gone.
-    void commit_present(std::shared_ptr<Frame> f, gpu::Texture drawable, gpu::CommandBuffer cb) {
-        auto self = shared_from_this();
-        std::weak_ptr<Service> weak = self;
-        double period;
+    void commit_present(std::shared_ptr<Frame> frame, gpu::Texture drawable,
+                        gpu::CommandBuffer cb) {
+        struct Submission {
+            std::shared_ptr<Service> service;
+            std::shared_ptr<Frame> frame;
+            gpu::CommandBuffer command;
+        } context{shared_from_this(), std::move(frame), cb};
+        RcSubmission submission{};
+        submission.context = &context;
+        submission.command = cb.id;
+        submission.drawable = drawable.id;
         {
             std::lock_guard lock(mutex);
-            ++pending_commands;
-            if (f->repeat)
-                ++repeats;
-            period = frame_period;
+            submission.period = frame_period;
         }
-        device->on_complete(cb, [self, f](gpu::CommandStatus status, double gpu_ms) {
-            double ts;
+        submission.duration_pacing = duration_pacing;
+        submission.arm = [](void *opaque) noexcept {
+            const auto &context = *static_cast<Submission *>(opaque);
+            auto self = context.service;
+            auto f = context.frame;
             {
                 std::lock_guard lock(self->mutex);
-                ts = self->now();
-                f->gpu_ms = self->fake ? 0 : std::max(0.0, gpu_ms);
+                self->timeline.command_started();
+                self->timeline.committed(f);
             }
-            self->ack_command(f, status == gpu::CommandStatus::Completed, ts);
-            std::lock_guard lock(self->mutex);
-            --self->pending_commands;
-            self->completed.notify_all();
-        });
-        if (drawable) {
-            // Keep each drawable for a refresh. Combined with queue-aware
-            // acknowledgement grace, this avoids retiring real displayed
-            // frames on timeout without slowing the pipeline to one flight.
-            device->present(cb, chain, drawable, duration_pacing ? period : 0.0,
-                            [weak, f](double ts) {
-                                if (auto service = weak.lock()) {
-                                    if (ts > 0)
-                                        service->ack_presented(f, ts);
-                                    else {
-                                        std::lock_guard lock(service->mutex);
-                                        service->trace_ack(*f, "presented", ts);
-                                    }
-                                }
-                            });
-        }
-        device->commit(cb);
+            self->device->on_complete(
+                context.command, [self, f](gpu::CommandStatus status, double gpu_ms) {
+                    double ts;
+                    {
+                        std::lock_guard lock(self->mutex);
+                        ts = self->now();
+                    }
+                    self->ack_command(f, status == gpu::CommandStatus::Completed, ts,
+                                      self->fake ? 0 : gpu_ms);
+                    std::lock_guard lock(self->mutex);
+                    self->timeline.command_finished();
+                    self->completed.notify_all();
+                });
+        };
+        submission.commit = [](void *opaque) noexcept {
+            const auto &context = *static_cast<Submission *>(opaque);
+            context.service->device->commit(context.command);
+        };
+        submission.presented = PresentSurface::callback(
+            [weak = std::weak_ptr<Service>(context.service), f = context.frame](double ts) {
+                if (auto service = weak.lock()) {
+                    if (ts > 0)
+                        service->ack_presented(f, ts);
+                    else {
+                        std::lock_guard lock(service->mutex);
+                        service->trace_ack(*f, "presented", ts);
+                    }
+                }
+            });
+        rc_presenter_submit(surface.get(), submission);
     }
     void seal(uint64_t id, HostScreenClass cls, bool had_draws, bool prefix_pending = false) {
         std::lock_guard lock(mutex);
@@ -452,7 +443,7 @@ struct Service : std::enable_shared_from_this<Service> {
         f->frame_id = id;
         f->cls = cls;
         f->had_draws = had_draws;
-        f->sealed_ts = now();
+        rc_frame_seal(f->state, now(), prefix_pending);
         if (class_known && last_class != cls) {
             ++epoch;
             metric = {};
@@ -479,11 +470,8 @@ struct Service : std::enable_shared_from_this<Service> {
         f->input.scale_override = mods_display_scale();
         f->input.presentation_filter =
             g_present_bilinear.load() ? gpu::Filter::Linear : gpu::Filter::Nearest;
-        if (prefix_pending)
-            f->prefix->done = false;
-        if (f->dropped) {
-            f->gpu = true;
-            retiring.push_back(f);
+        if (f->status().dropped) {
+            timeline.defer(f, false);
             sweep();
             return;
         }
@@ -510,30 +498,14 @@ struct Service : std::enable_shared_from_this<Service> {
             drop(f);
             return;
         }
-        if (mailbox.size() == 2) {
-            auto old = mailbox.end();
-            if (mailbox.front()->pending_native &&
-                (surface_viewport < 0 || mailbox.front()->viewport == bool(surface_viewport))) {
-                auto newest = std::prev(mailbox.end());
-                if (newest != mailbox.begin() && !(*newest)->capture)
-                    old = newest;
-            } else {
-                old = std::find_if(mailbox.begin(), mailbox.end(),
-                                   [](const auto &v) { return !v->capture; });
-            }
-            if (old == mailbox.end()) {
-                drop(f);
-                return;
-            }
-            auto discarded = *old;
-            mailbox.erase(old);
+        auto discarded = mailbox.enqueue(f, surface.viewport());
+        if (discarded)
             drop(discarded);
-        }
+        if (discarded == f)
+            return;
         sealed_layout = frame_layout(*f);
         sealed_layout_valid = true;
-        mailbox.push_back(std::move(f));
-        seal_pending = true;
-        wake.notify_one();
+        notify_worker();
     }
     gpu::Texture texture(int w, int h, gpu::Format format = gpu::Format::RGBA8) {
         if (!device || w <= 0 || h <= 0)
@@ -599,7 +571,7 @@ struct Service : std::enable_shared_from_this<Service> {
         int slot = free_slot();
         if (slot < 0) {
             ++waits;
-            wake.notify_one();
+            notify_worker();
             // Keep a stalled GPU/worker from trapping the guest forever. This
             // is a fault deadline, not the normal frame pacing mechanism.
             completed.wait_for(lock, std::chrono::milliseconds(250), [&] {
@@ -612,11 +584,11 @@ struct Service : std::enable_shared_from_this<Service> {
         if (slot < 0) {
             // Latch the drop until seal: later draws/CPU staging in this same
             // guest frame must neither retry acquisition nor count it twice.
-            ++drops;
-            fault(1, "target pool stalled for 250ms; guest frame dropped, check "
-                     "worker/GPU/presentation progress");
+            fault(RC_FAULT_POOL_STALLED,
+                  "target pool stalled for 250ms; guest frame dropped, check "
+                  "worker/GPU/presentation progress");
             writing = std::make_shared<Frame>();
-            writing->dropped = true;
+            timeline.mark_drop(writing);
             return {};
         }
         int w = std::max(gw, rw), h = std::max(gh, rh);
@@ -697,7 +669,6 @@ struct Service : std::enable_shared_from_this<Service> {
         }
         auto self = shared_from_this();
         gpu::CommandBuffer cb;
-        std::shared_ptr<Fence> fence;
         std::shared_ptr<std::atomic<bool>> finished;
         bool tracked = false;
         try {
@@ -706,31 +677,25 @@ struct Service : std::enable_shared_from_this<Service> {
                 return false;
             device->blit(cb, pending->source, {0, 0, pending->w, pending->h}, pending->destination,
                          0, 0);
-            fence = std::make_shared<Fence>();
             finished = std::make_shared<std::atomic<bool>>(false);
-            fence->done = false;
             {
                 std::lock_guard lock(mutex);
-                frame->prefix = fence;
-                ++frame->pending_prefixes;
-                ++pending_commands;
+                rc_frame_prefix_begin(frame->state);
+                timeline.command_started();
                 tracked = true;
             }
-            device->on_complete(cb, [self, frame, pending, fence,
-                                     finished](gpu::CommandStatus status, double) mutable {
-                pending.reset();
-                if (finished->exchange(true))
-                    return;
-                std::lock_guard lock(self->mutex);
-                fence->done = true;
-                fence->success = status == gpu::CommandStatus::Completed;
-                frame->success = frame->success && fence->success;
-                --frame->pending_prefixes;
-                --self->pending_commands;
-                self->sweep();
-                self->completed.notify_all();
-                self->wake.notify_one();
-            });
+            device->on_complete(
+                cb, [self, frame, pending, finished](gpu::CommandStatus status, double) mutable {
+                    pending.reset();
+                    if (finished->exchange(true))
+                        return;
+                    std::lock_guard lock(self->mutex);
+                    rc_frame_prefix_complete(frame->state, status == gpu::CommandStatus::Completed);
+                    self->timeline.command_finished();
+                    self->sweep();
+                    self->completed.notify_all();
+                    self->notify_worker();
+                });
             device->commit(cb);
             return true;
         } catch (...) {
@@ -741,423 +706,313 @@ struct Service : std::enable_shared_from_this<Service> {
             }
             if (tracked && !finished->exchange(true)) {
                 std::lock_guard lock(mutex);
-                fence->done = true;
-                fence->success = false;
-                --frame->pending_prefixes;
-                --pending_commands;
+                rc_frame_prefix_complete(frame->state, false);
+                timeline.command_finished();
             }
             return false;
         }
     }
 
-    void tick(double ts) {
-        if (!std::isfinite(ts) || ts < 0)
-            return;
-        if (auto m = message.exchange(nullptr)) {
-            if (m->install) {
-                const bool changed_surface = surface != m->surface;
-                if (device && chain) {
-                    device->destroy(chain);
-                    chain = {};
-                }
-                surface = m->surface;
-                surface_viewport = m->viewport;
-                if (device && surface && !fake)
-                    chain = device->create_swapchain(surface, m->w, m->h);
-                std::lock_guard lock(mutex);
-                if (!flights.empty()) {
-                    // A drawable on the detached layer may never present. Cancel
-                    // that presentation, retaining its slot until its GPU work ends.
-                    for (auto &f : flights) {
-                        ++drops;
-                        f->dropped = true;
-                        retiring.push_back(f);
-                    }
-                    flights.clear();
-                    sweep();
-                }
-                if (changed_surface) {
-                    cached.reset();
-                    cached_settings.reset();
-                    cached_target.reset();
-                    cached_ui = {};
-                    cached_input = {};
-                    cached_viewport = false;
-                    cached_viewport_style = 0;
-                    cached_viewport_x = cached_viewport_y = 0;
-                    last_id = 0;
-                    for (auto it = mailbox.begin(); it != mailbox.end();) {
-                        if (surface_viewport >= 0 && (*it)->viewport != bool(surface_viewport)) {
-                            auto old = *it;
-                            it = mailbox.erase(it);
-                            drop(old);
-                        } else
-                            ++it;
-                    }
-                }
-            } else if (!fake && device && chain)
-                device->resize(chain, m->w, m->h);
-        }
+    struct Turn {
+        std::shared_ptr<Frame> frame;
+        HostGameRect rect;
+        bool placed;
+        double ts;
+        std::shared_ptr<Composite> output;
+        gpu::TextureDesc drawable;
+        gpu::CommandBuffer command;
+        Clock::time_point started;
+    };
+    Turn *select_turn(double ts) {
         std::shared_ptr<Frame> f;
         HostGameRect rect{};
         bool placed = false;
         {
             std::lock_guard lock(mutex);
             if (stop)
-                return;
+                return nullptr;
             if (fake)
                 fake_now = ts;
             rect = game_rect(&placed);
             if (class_known && last_class == HOST_SCREEN_GAMEPLAY)
                 metric.tick(ts);
             sweep();
-            if (!offscreen) {
-                if (window_started < 0)
-                    window_started = ts;
-                if ((!flights.empty() || !mailbox.empty()) &&
-                    ts - std::max(window_started, last_link_tick) >= 1.0)
-                    fault(2, "display link is not firing; worker is using timed fallback");
-                for (auto &pending : flights) {
-                    completion_fallback(pending, ts);
-                    if (!pending->gpu && ts - pending->submitted_ts >= 1.0)
-                        fault(16, "GPU completion timed out; retaining target until completion");
-                }
-                sweep();
+            const auto input = turn_input(ts);
+            const auto check = rc_presenter_check(presenter.value, input);
+            if (check.faults & RC_FAULT_DISPLAY_STALLED)
+                fault(RC_FAULT_DISPLAY_STALLED,
+                      "display link is not firing; worker is using timed fallback");
+            if (check.faults & RC_FAULT_DISPLAY_FALLBACK)
+                fault(RC_FAULT_DISPLAY_FALLBACK,
+                      "drawable acknowledgement exceeded queue grace; using command completion "
+                      "fallback");
+            if (check.faults & RC_FAULT_GPU_TIMEOUT)
+                fault(RC_FAULT_GPU_TIMEOUT,
+                      "GPU completion timed out; retaining target until completion");
+            for (auto opaque : check.fallback)
+                if (auto pending = PresentFrameLease::borrow(opaque))
+                    trace_ack(*pending, "timeout", ts);
+            sweep();
+            const auto selection = rc_presenter_admit(presenter.value, input);
+            f = PresentFrameLease::borrow(selection.frame);
+            for (size_t i = 0; i < 2; ++i) {
+                auto old = PresentFrameLease::take(selection.discarded[i]);
+                if (!old)
+                    continue;
+                if (selection.readiness[i] > 1)
+                    fprintf(stderr, "presenter: native texture producer failed (%u)\n",
+                            selection.readiness[i]);
+                drop(old);
             }
-            if (flights.size() >= flight_limit)
-                return;
-            if (mailbox.empty()) {
-                // cached is the last acknowledged image. Repeating it behind
-                // a newer queued image would visibly move the game backwards.
-                if (!flights.empty())
-                    return;
-                if (!last_id ||
-                    (surface_viewport >= 0 && cached_viewport != bool(surface_viewport)))
-                    return;
-                f = std::make_shared<Frame>();
-                f->repeat = true;
-                f->frame_id = last_id;
-                f->sealed_ts = cached_sealed_ts;
-                f->cls = cached_input.cls;
+            if (!f)
+                return nullptr;
+            if (f->status().repeat) {
                 f->epoch = epoch;
-                f->input = cached_input;
-                f->ui = cached_ui;
-                f->input.ui = &f->ui;
-                f->target = cached_target;
-                f->viewport = cached_viewport;
-                f->viewport_style = cached_viewport_style;
-                f->viewport_x = cached_viewport_x;
-                f->viewport_y = cached_viewport_y;
-                // Retain the original guest domain and source texture. The
-                // cached composite is already drawable-sized; declaring that
-                // size to be guest coordinates corrupts picking on repeats.
-                // cached_target keeps the original texture out of the pool.
-                if (cached_input.drawable_w > 0 && cached_input.drawable_h > 0) {
-                    float sx = float(rect.w) / cached_input.drawable_w;
-                    float sy = float(rect.h) / cached_input.drawable_h;
+                if (f->input.drawable_w > 0 && f->input.drawable_h > 0) {
+                    float sx = float(rect.w) / f->input.drawable_w;
+                    float sy = float(rect.h) / f->input.drawable_h;
                     f->input.scene.scale_x *= sx;
                     f->input.scene.offset_x *= sx;
                     f->input.scene.scale_y *= sy;
                     f->input.scene.offset_y *= sy;
                 }
-            } else {
-                if (surface_viewport >= 0 && mailbox.back()->viewport != bool(surface_viewport))
-                    return;
-                auto requested = std::find_if(mailbox.begin(), mailbox.end(), [&](const auto &v) {
-                    return bool(v->capture) &&
-                           (surface_viewport < 0 || v->viewport == bool(surface_viewport));
-                });
-                auto chosen = mailbox.end();
-                uint32_t chosen_state = 0;
-                auto readiness = [](const std::shared_ptr<Frame> &frame) {
-                    const auto &pending = frame->pending_native;
-                    return pending ? pending->ready(pending->lease.get()) : 1u;
-                };
-                if (requested != mailbox.end()) {
-                    const uint32_t state = readiness(*requested);
-                    if (state == 0)
-                        return;
-                    chosen = requested;
-                    chosen_state = state;
-                } else {
-                    for (auto it = mailbox.end(); it != mailbox.begin();) {
-                        --it;
-                        if (surface_viewport >= 0 && (*it)->viewport != bool(surface_viewport))
-                            continue;
-                        const uint32_t state = readiness(*it);
-                        if (state == 0)
-                            continue;
-                        if (state == 1) {
-                            chosen = it;
-                            chosen_state = state;
-                            break;
-                        }
-                        fprintf(stderr, "presenter: native texture producer failed (%u)\n", state);
-                        auto failed = *it;
-                        it = mailbox.erase(it);
-                        chosen = mailbox.end();
-                        drop(failed);
-                    }
-                }
-                if (chosen == mailbox.end()) {
-                    seal_pending = !mailbox.empty();
-                    return;
-                }
-                if (chosen_state != 1) {
-                    fprintf(stderr, "presenter: native texture producer failed (%u)\n",
-                            chosen_state);
-                    auto failed = *chosen;
-                    mailbox.erase(chosen);
-                    drop(failed);
-                    seal_pending = !mailbox.empty();
-                    return;
-                }
-                const size_t older = std::distance(mailbox.begin(), chosen);
-                f = *chosen;
-                mailbox.erase(chosen);
-                size_t examined = 0;
-                for (auto it = mailbox.begin(); it != mailbox.end() && examined < older;
-                     ++examined) {
-                    if ((*it)->capture) {
-                        ++it;
-                        continue;
-                    }
-                    auto old = *it;
-                    it = mailbox.erase(it);
-                    drop(old);
-                }
             }
-            flights.push_back(f);
-            seal_pending = !mailbox.empty();
-            f->submitted_ts = ts;
-            f->acknowledgement_deadline = ts + acknowledgement_grace();
             f->input.drawable_w = rect.w;
             f->input.drawable_h = rect.h;
         }
-        if (f->pending_native) {
-            auto pending = std::move(f->pending_native);
-            if (!submit_native(f, std::move(pending))) {
-                std::lock_guard lock(mutex);
-                auto it = std::find(flights.begin(), flights.end(), f);
-                if (it != flights.end())
-                    flights.erase(it);
-                drop(f);
-                return;
+        return new Turn{std::move(f), rect, placed, ts};
+    }
+    void prepare_turn(Turn &turn) {
+        const auto &f = turn.frame;
+        std::lock_guard lock(mutex);
+        if (!f->status().repeat) {
+            if (history_epoch != f->epoch) {
+                history.world = {};
+                history.overlay = {};
+                history_lease.reset();
+                history_epoch = f->epoch;
             }
+            bool reused = compositor_resolve_scene(&history, &f->input, f->had_draws);
+            if (!reused)
+                history_lease = history.world ? f->target : nullptr;
+            f->scene_lease = history_lease;
         }
-        auto prepare = [&] {
-            std::lock_guard lock(mutex);
-            if (!f->repeat) {
-                if (history_epoch != f->epoch) {
-                    history.world = {};
-                    history.overlay = {};
-                    history_lease.reset();
-                    history_epoch = f->epoch;
-                }
-                bool reused = compositor_resolve_scene(&history, &f->input, f->had_draws);
-                if (!reused)
-                    history_lease = history.world ? f->target : nullptr;
-                f->scene_lease = history_lease;
-            }
-            publish_layout(*f);
-        };
-        if (fake) {
-            prepare();
+        publish_layout(*f);
+    }
+    RcTurnEncoding describe_turn(Turn &turn, gpu::Texture drawable) {
+        const auto &f = turn.frame;
+        const auto &rect = turn.rect;
+        turn.drawable = drawable ? device->describe(drawable) : gpu::TextureDesc{};
+        const auto format = offscreen ? gpu::Format::RGBA8 : turn.drawable.format;
+        const auto &previous = f->composed;
+        return {rect.w,
+                rect.h,
+                turn.drawable.width,
+                turn.drawable.height,
+                rect.x,
+                rect.y,
+                uint32_t(format),
+                uint32_t(turn.drawable.format),
+                previous ? previous->w : 0,
+                previous ? previous->h : 0,
+                previous ? uint32_t(previous->format) : 0,
+                uint8_t(bool(previous)),
+                f->status().repeat,
+                uint8_t(turn.placed)};
+    }
+    uint64_t begin_turn(Turn &turn, bool reuse) {
+        const auto format = offscreen ? gpu::Format::RGBA8 : turn.drawable.format;
+        turn.output =
+            reuse ? turn.frame->composed : pooled_composite(turn.rect.w, turn.rect.h, format);
+        if (!turn.output)
+            return 0;
+        turn.command = device->begin();
+        if (!turn.command)
+            return 0;
+        turn.started = Clock::now();
+        turn.frame->composed = turn.output;
+        return turn.command.id;
+    }
+    void encode_turn(Turn &turn, gpu::Texture drawable, uint32_t operation) {
+        const auto &f = turn.frame;
+        const auto &out = turn.output;
+        const auto cb = turn.command;
+        switch (operation) {
+        case RC_TURN_COMPOSE:
+            compositor_compose(device, &f->input, out->texture, cb);
+            break;
+        case RC_TURN_COPY:
+            device->blit(cb, out->texture, {0, 0, out->w, out->h}, drawable, 0, 0);
+            break;
+        case RC_TURN_PLACE: {
+            gpu::RenderPass clear;
+            clear.color_count = 1;
+            clear.color[0].texture = drawable;
+            clear.color[0].load = gpu::Load::Clear;
+            clear.color[0].store = gpu::Store::Store;
+            clear.color[0].clear[0] = 12 / 255.0f;
+            clear.color[0].clear[1] = 14 / 255.0f;
+            clear.color[0].clear[2] = 18 / 255.0f;
+            clear.color[0].clear[3] = 1;
+            device->begin_render_pass(cb, clear);
+            device->end_render_pass(cb);
+            device->blit(cb, out->texture, {0, 0, out->w, out->h}, drawable, turn.rect.x,
+                         turn.rect.y);
+            break;
+        }
+        case RC_TURN_FIT: {
+            CompositorInput in{};
+            in.presentation_filter = f->input.presentation_filter;
+            in.legacy = true;
+            in.legacy_frame = out->texture;
+            in.guest_w = out->w;
+            in.guest_h = out->h;
+            in.drawable_w = turn.drawable.width;
+            in.drawable_h = turn.drawable.height;
+            compositor_compose(device, &in, drawable, cb);
+            break;
+        }
+        case RC_TURN_OVERLAYS: {
+            FramePacingSnapshot snapshot;
             {
                 std::lock_guard lock(mutex);
-                if (f->repeat)
-                    ++repeats;
+                snapshot = pacing.snapshot(turn.ts, timeline.counters().drops);
             }
-            if (automatic) {
-                ack_command(f, true, ts);
-                if (!offscreen)
-                    ack_presented(f, ts);
-            }
-            return;
+            performance_overlay.draw(device, cb, drawable, turn.drawable.width,
+                                     turn.drawable.height, snapshot, turn.ts,
+                                     mods_display_overlay());
+            const auto controls = host_present_controls();
+            if (controls.wanted)
+                controls_overlay.draw(device, cb, drawable, turn.drawable.width,
+                                      turn.drawable.height, controls);
+            break;
         }
-        {
-            // The worker is the only caller of acquire and present.
-            // Suspended (iOS background): compose and complete, but never touch a drawable.
-            gpu::Texture drawable = offscreen || !chain || g_present_suspended.load()
-                                        ? gpu::Texture{}
-                                        : device->acquire(chain);
-            if (!offscreen && !drawable) {
-                if (f) {
-                    std::lock_guard lock(mutex);
-                    flights.erase(std::find(flights.begin(), flights.end(), f));
-                    fault(8, "swapchain returned no drawable; retrying newest frame");
-                    // Keep only a newest unpresented frame. A repeat has no arena.
-                    if (f->repeat)
-                        release(f);
-                    else if (!mailbox.empty())
-                        drop(f);
-                    else
-                        mailbox.push_front(f);
-                }
+        default:
+            fprintf(stderr, "presenter: unknown encoding operation %u\n", operation);
+            abort();
+        }
+    }
+    void tick(double ts) {
+        RcTurnCallbacks callbacks{};
+        callbacks.context = this;
+        callbacks.transition = [](void *opaque, RcSurfaceTransition transition) noexcept {
+            auto &s = *static_cast<Service *>(opaque);
+            if (!transition.installed)
                 return;
-            }
-            int w = rect.w, h = rect.h;
-            const gpu::TextureDesc drawable_desc =
-                drawable ? device->describe(drawable) : gpu::TextureDesc{};
-            const gpu::Format out_format = offscreen ? gpu::Format::RGBA8 : drawable_desc.format;
-            bool reuse_composition = f->repeat && cached && cached->w == w && cached->h == h &&
-                                     cached->format == out_format;
-            std::shared_ptr<Composite> out =
-                reuse_composition ? cached : pooled_composite(w, h, out_format);
-            gpu::CommandBuffer cb = device->begin();
-            if (!cb || !out) {
-                if (drawable)
-                    device->release_drawable(chain, drawable);
-                if (f) {
-                    std::lock_guard lock(mutex);
-                    flights.erase(std::find(flights.begin(), flights.end(), f));
-                    drop(f);
-                }
-                return;
-            }
-            auto start = Clock::now();
-            prepare();
-            if (!reuse_composition)
-                compositor_compose(device, &f->input, out->texture, cb);
-            f->composed = out;
-            if (drawable) {
-                if (out->w == drawable_desc.width && out->h == drawable_desc.height &&
-                    out->format == drawable_desc.format) {
-                    device->blit(cb, out->texture, {0, 0, out->w, out->h}, drawable, 0, 0);
-                } else if (placed && out->w == rect.w && out->h == rect.h &&
-                           rect.x + rect.w <= drawable_desc.width &&
-                           rect.y + rect.h <= drawable_desc.height &&
-                           out->format == drawable_desc.format) {
-                    // Portrait: the game sits at its rectangle. The rest takes
-                    // the controls area's colour, drawn or not.
-                    gpu::RenderPass clear;
-                    clear.color_count = 1;
-                    clear.color[0].texture = drawable;
-                    clear.color[0].load = gpu::Load::Clear;
-                    clear.color[0].store = gpu::Store::Store;
-                    clear.color[0].clear[0] = 12 / 255.0f;
-                    clear.color[0].clear[1] = 14 / 255.0f;
-                    clear.color[0].clear[2] = 18 / 255.0f;
-                    clear.color[0].clear[3] = 1;
-                    device->begin_render_pass(cb, clear);
-                    device->end_render_pass(cb);
-                    device->blit(cb, out->texture, {0, 0, out->w, out->h}, drawable, rect.x,
-                                 rect.y);
-                } else {
-                    CompositorInput in{};
-                    in.presentation_filter = f->input.presentation_filter;
-                    in.legacy = true;
-                    in.legacy_frame = out->texture;
-                    in.guest_w = out->w;
-                    in.guest_h = out->h;
-                    in.drawable_w = drawable_desc.width;
-                    in.drawable_h = drawable_desc.height;
-                    compositor_compose(device, &in, drawable, cb);
-                }
-                FramePacingSnapshot snapshot;
-                {
-                    std::lock_guard lock(mutex);
-                    snapshot = pacing.snapshot(ts, drops);
-                }
-                performance_overlay.draw(device, cb, drawable, drawable_desc.width,
-                                         drawable_desc.height, snapshot, ts,
-                                         mods_display_overlay());
-                const controls::ControlsView controls_view = host_present_controls();
-                if (controls_view.wanted)
-                    controls_overlay.draw(device, cb, drawable, drawable_desc.width,
-                                          drawable_desc.height, controls_view);
-            }
+            std::lock_guard lock(s.mutex);
+            const auto cancelled = rc_presenter_transition(s.presenter.value, s.surface.viewport(),
+                                                           transition.changed);
+            for (auto opaque : cancelled.discarded)
+                if (auto frame = PresentFrameLease::take(opaque))
+                    s.drop(frame);
+            s.sweep();
+        };
+        callbacks.select = [](void *opaque, double ts) noexcept -> void * {
+            return static_cast<Service *>(opaque)->select_turn(ts);
+        };
+        callbacks.prefix = [](void *opaque, void *payload) noexcept -> uint8_t {
+            auto &s = *static_cast<Service *>(opaque);
+            auto &f = static_cast<Turn *>(payload)->frame;
+            return !f->pending_native || s.submit_native(f, std::move(f->pending_native));
+        };
+        callbacks.prepare = [](void *opaque, void *payload) noexcept {
+            static_cast<Service *>(opaque)->prepare_turn(*static_cast<Turn *>(payload));
+        };
+        callbacks.describe = [](void *opaque, void *payload, uint64_t drawable) noexcept {
+            return static_cast<Service *>(opaque)->describe_turn(*static_cast<Turn *>(payload),
+                                                                 {drawable});
+        };
+        callbacks.begin = [](void *opaque, void *payload, uint8_t reuse) noexcept {
+            return static_cast<Service *>(opaque)->begin_turn(*static_cast<Turn *>(payload), reuse);
+        };
+        callbacks.encode = [](void *opaque, void *payload, uint64_t drawable,
+                              uint32_t operation) noexcept {
+            static_cast<Service *>(opaque)->encode_turn(*static_cast<Turn *>(payload), {drawable},
+                                                        operation);
+        };
+        callbacks.commit = [](void *opaque, void *payload, uint64_t drawable,
+                              uint64_t command) noexcept {
+            auto &s = *static_cast<Service *>(opaque);
+            auto &turn = *static_cast<Turn *>(payload);
             host_stats_note_phase(
                 HOST_PHASE_COMPOSITE,
-                std::chrono::duration<double, std::milli>(Clock::now() - start).count());
-            commit_present(f, drawable, cb);
-        }
-    }
-    // One wake per refresh, on the device clock. Replaces CVDisplayLink: it
-    // only schedules work, never acknowledges a submitted drawable.
-    void start_pacer() {
-        pacer = std::thread([this] {
-            std::unique_lock lock(mutex);
-            while (!pacer_stop && !stop) {
-                const double period = chain ? device->refresh_period(chain) : frame_period;
-                frame_period = period > 0 ? period : 1.0 / 60;
-                const double now = device->now_seconds();
-                const double next = (std::floor(now / frame_period) + 1) * frame_period;
-                pacer_wake.wait_for(lock, std::chrono::duration<double>(std::max(0.0, next - now)),
-                                    [&] { return pacer_stop || stop; });
-                if (pacer_stop || stop)
-                    break;
-                last_link_tick = timestamp = device->now_seconds();
-                tick_pending = true;
-                wake.notify_one();
+                std::chrono::duration<double, std::milli>(Clock::now() - turn.started).count());
+            s.commit_present(turn.frame, {drawable}, {command});
+        };
+        callbacks.complete = [](void *opaque, void *payload, double ts,
+                                uint8_t automatic) noexcept {
+            auto &s = *static_cast<Service *>(opaque);
+            const auto &f = static_cast<Turn *>(payload)->frame;
+            {
+                std::lock_guard lock(s.mutex);
+                s.timeline.committed(f);
             }
-        });
+            if (automatic) {
+                s.ack_command(f, true, ts);
+                if (!s.offscreen)
+                    s.ack_presented(f, ts);
+            }
+        };
+        callbacks.failed = [](void *opaque, void *payload, uint8_t reason) noexcept {
+            const bool retry = reason == RC_TURN_NO_DRAWABLE;
+            auto &s = *static_cast<Service *>(opaque);
+            const auto &f = static_cast<Turn *>(payload)->frame;
+            std::lock_guard lock(s.mutex);
+            if (retry)
+                s.fault(RC_FAULT_NO_DRAWABLE,
+                        "swapchain returned no drawable; retrying newest frame");
+            const auto rejected =
+                rc_presenter_reject(s.presenter.value, PresentFrameLease::retain(f), retry);
+            if (auto frame = PresentFrameLease::take(rejected.frame)) {
+                if (rejected.release)
+                    s.release(frame);
+                else
+                    s.drop(frame);
+            }
+        };
+        callbacks.release = [](void *payload) noexcept { delete static_cast<Turn *>(payload); };
+        rc_presenter_run(callbacks, surface.get(), ts, fake, automatic, offscreen,
+                         g_present_suspended.load());
     }
-    void stop_pacer() {
-        {
-            std::lock_guard lock(mutex);
-            pacer_stop = true;
-            pacer_wake.notify_all();
-        }
-        if (pacer.joinable())
-            pacer.join();
-    }
-    void run() {
-        {
-            auto synthetic_start = Clock::now();
-            double synthetic_origin = device ? device->now_seconds() : 0.0;
-            uint64_t synthetic_index = 0;
-            while (true) {
-                double ts;
-                {
-                    std::unique_lock lock(mutex);
-                    const bool native_pending =
-                        std::any_of(mailbox.begin(), mailbox.end(),
-                                    [](const auto &frame) { return bool(frame->pending_native); });
-                    if (offscreen) {
-                        // A synthetic link, tied to monotonic host time and independent
-                        // of the pinned simulation clock. The guest never waits here.
-                        if (native_pending) {
-                            wake.wait_for(lock, std::chrono::milliseconds(1));
-                            ts = this->now();
-                        } else {
-                            auto elapsed =
-                                std::chrono::duration<double>(Clock::now() - synthetic_start)
-                                    .count();
-                            synthetic_index =
-                                std::max(synthetic_index + 1, uint64_t(elapsed * kOffscreenHz) + 1);
-                            auto deadline =
-                                synthetic_start +
-                                std::chrono::duration_cast<Clock::duration>(
-                                    std::chrono::duration<double>(synthetic_index / kOffscreenHz));
-                            wake.wait_until(lock, deadline, [&] { return stop; });
-                            ts = synthetic_origin + synthetic_index / kOffscreenHz;
-                        }
-                    } else {
-                        // Seal is a bootstrap event, not an acknowledgement. A
-                        // bounded wait also services a stopped link and checks
-                        // lost presented callbacks without blocking the guest.
-                        double now = this->now();
-                        double delay = 0.016;
-                        for (auto &pending : flights)
-                            if (!pending->shown &&
-                                (pending->gpu || now < pending->acknowledgement_deadline))
-                                delay = std::max(
-                                    0.0, std::min(delay, pending->acknowledgement_deadline - now));
-                        // Recompute after every completion notification, even
-                        // without a display-link callback or a new guest seal.
-                        if (native_pending && !tick_pending && message.load() == nullptr)
-                            wake.wait_for(lock, std::chrono::milliseconds(1));
-                        else if (!window_ready())
-                            wake.wait_for(lock, std::chrono::duration<double>(delay));
-                        ts = this->now();
-                        tick_pending = false;
-                    }
-                    if (stop)
-                        break;
+    void start_worker() {
+        std::lock_guard lock(mutex);
+        auto context = new std::shared_ptr<Service>(shared_from_this());
+        RcPresenterWorkerCallbacks callbacks{};
+        callbacks.context = context;
+        callbacks.state = [](void *opaque) noexcept -> RcPresenterWorkerState {
+            auto &s = **static_cast<std::shared_ptr<Service> *>(opaque);
+            std::lock_guard lock(s.mutex);
+            s.frame_period = s.surface.refresh(s.frame_period);
+            const double now = s.now();
+            const double deadline = s.timeline.deadline(now);
+            const bool native_pending = rc_presenter_native_pending(s.presenter.value);
+            const bool poll_native = rc_presenter_poll_native(s.presenter.value, s.turn_input(now));
+            return {now,
+                    s.frame_period,
+                    deadline,
+                    uint8_t(s.window_ready()),
+                    uint8_t(native_pending),
+                    uint8_t(poll_native)};
+        };
+        callbacks.tick = [](void *opaque, double ts, uint8_t refresh) noexcept {
+            auto &s = **static_cast<std::shared_ptr<Service> *>(opaque);
+            {
+                std::lock_guard lock(s.mutex);
+                if (s.stop)
+                    return;
+                if (refresh) {
+                    rc_presenter_signal(s.presenter.value, ts, false);
                 }
-                tick(ts);
             }
+            s.tick(ts);
+        };
+        callbacks.release = [](void *opaque) noexcept {
+            delete static_cast<std::shared_ptr<Service> *>(opaque);
+        };
+        worker = rc_presenter_worker_start(callbacks, offscreen);
+        if (!worker) {
+            fprintf(stderr, "presenter: could not start presentation worker\n");
+            abort();
         }
     }
 };
@@ -1171,6 +1026,7 @@ std::shared_ptr<Service> begin(bool fake, bool automatic, bool offscreen) {
     s->automatic = automatic;
     s->offscreen = offscreen;
     s->device = g_device;
+    s->surface.configure(s->device, !fake);
     if (!fake && !s->device) {
         fprintf(stderr, "presenter: no GPU device installed; call host_present_set_device first\n");
         abort();
@@ -1210,29 +1066,23 @@ void test_ack(uint64_t id, int kind, double ts) {
     {
         std::lock_guard lock(s->mutex);
         if (kind == 2) {
-            for (auto &a : s->retiring)
+            auto complete = [&](const auto &a) {
                 if (a->frame_id == id)
-                    a->prefix->done = true;
-            for (auto &a : s->mailbox)
-                if (a->frame_id == id)
-                    a->prefix->done = true;
-            for (auto &a : s->flights)
-                if (a->frame_id == id)
-                    a->prefix->done = true;
+                    rc_frame_synthetic_prefix_complete(a->state);
+            };
+            s->timeline.each(complete, true);
+            s->mailbox.each(complete);
+            s->timeline.each(complete);
             s->sweep();
             return;
         }
-        for (auto &candidate : s->flights)
-            if (candidate->frame_id == id) {
+        auto find = [&](const auto &candidate) {
+            if (!f && candidate->frame_id == id)
                 f = candidate;
-                break;
-            }
+        };
+        s->timeline.each(find);
         if (!f)
-            for (auto &candidate : s->retiring)
-                if (candidate->frame_id == id) {
-                    f = candidate;
-                    break;
-                }
+            s->timeline.each(find, true);
     }
     if (!f)
         return;
@@ -1261,25 +1111,23 @@ void host_present_start(void *native_surface, int w, int h) {
         else if (!strcmp(value, "2"))
             s->flight_limit = 2;
     }
-    s->surface = native_surface;
     s->drawable_w = w;
     s->drawable_h = h;
-    s->chain =
-        native_surface ? s->device->create_swapchain(native_surface, w, h) : gpu::Swapchain{};
+    s->surface.install(native_surface, w, h);
+    s->surface.apply();
     fprintf(stderr, "presenter: %dx%d drawable, at most %zu display submissions in flight\n",
             int(s->drawable_w), int(s->drawable_h), s->flight_limit);
-    if (!s->chain || w <= 0 || h <= 0) {
+    if (!s->surface.attached() || w <= 0 || h <= 0) {
         fprintf(stderr, "presenter: requires an attached, sized surface on the renderer device\n");
         abort();
     }
-    s->frame_period = s->device->refresh_period(s->chain);
+    s->frame_period = s->surface.refresh(s->frame_period);
 #ifdef __EMSCRIPTEN__
     // The browser's main loop owns the GPU and calls host_present_pump once
     // per animation frame: no worker, no pacer.
     (void)0;
 #else
-    s->start_pacer();
-    s->worker = std::thread([s] { s->run(); });
+    s->start_worker();
 #endif
 }
 // One presenter turn on the calling thread: for hosts whose GPU belongs to a
@@ -1293,8 +1141,7 @@ void host_present_pump(void) {
         std::lock_guard lock(s->mutex);
         if (s->stop)
             return;
-        s->last_link_tick = s->timestamp = ts;
-        s->tick_pending = false;
+        rc_presenter_signal(s->presenter.value, ts, false);
     }
     s->tick(ts);
 }
@@ -1305,7 +1152,7 @@ void host_present_start_offscreen(int w, int h) {
     // The synthetic link below ticks at this rate; a Present that waits for a
     // refresh has to wait for the same one.
     s->frame_period = 1.0 / kOffscreenHz;
-    s->worker = std::thread([s] { s->run(); });
+    s->start_worker();
 }
 void host_present_resize(int w, int h) {
     auto s = active.load();
@@ -1319,17 +1166,8 @@ void host_present_resize(int w, int h) {
         s->drawable_h = h;
         s->publish_gate_size(s->game_rect());
     }
-    auto m = std::make_shared<Message>();
-    m->w = w;
-    m->h = h;
-    // Preserve an undelivered migration when a resize follows it in the same pump.
-    auto old = s->message.load();
-    do {
-        m->install = old && old->install;
-        m->surface = m->install ? old->surface : nullptr;
-        m->viewport = m->install ? old->viewport : -1;
-    } while (!s->message.compare_exchange_weak(old, m));
-    s->wake.notify_one();
+    s->surface.resize(w, h);
+    s->notify_worker();
 }
 void host_present_install_surface(void *native_surface, int w, int h, int viewport) {
     auto s = active.load();
@@ -1343,78 +1181,45 @@ void host_present_install_surface(void *native_surface, int w, int h, int viewpo
         s->drawable_h = h;
         s->publish_gate_size(s->game_rect());
     }
-    auto m = std::make_shared<Message>();
-    m->surface = native_surface;
-    m->w = w;
-    m->h = h;
-    m->install = true;
-    m->viewport = viewport;
-    s->message.store(m);
-    s->wake.notify_one();
+    s->surface.install(native_surface, w, h, viewport);
+    s->notify_worker();
 }
 extern "C" void host_present_stop() {
     auto s = active.load();
     if (!s)
         return;
-    host_gpu2d_release_device();
     {
         std::lock_guard lock(s->mutex);
         s->stop = true;
         if (s->writing)
             s->writing->pending_native.reset();
-        for (auto &frame : s->mailbox)
-            frame->pending_native.reset();
-        for (auto &frame : s->retiring)
-            frame->pending_native.reset();
-        s->wake.notify_all();
+        s->mailbox.each([](const auto &frame) { frame->pending_native.reset(); });
+        s->timeline.each([](const auto &frame) { frame->pending_native.reset(); }, true);
+        s->notify_worker();
         s->completed.notify_all();
     }
-    s->stop_pacer();
-    if (s->worker.joinable())
-        s->worker.join();
+    rc_presenter_worker_stop(s->worker);
     {
         std::unique_lock lock(s->mutex);
-        // Cancellation does not invent a presentedTime. On shutdown GPU completion
-        // suffices for safe retirement, and cancelled frames never count unique.
-        for (auto &f : s->flights) {
-            f->shown = true;
-            if (s->fake) {
-                f->gpu = true;
-                f->prefix->done = true;
-            }
-        }
-        for (auto &f : s->mailbox) {
-            f->gpu = true;
-            s->retiring.push_back(f);
-        }
-        s->mailbox.clear();
-        if (s->fake)
-            for (auto &f : s->retiring)
-                f->prefix->done = true;
+        rc_presenter_shutdown(s->presenter.value, s->fake);
         s->sweep();
         s->completed.wait(lock, [&] {
             s->sweep();
-            return s->flights.empty() && s->retiring.empty() && s->pending_commands == 0;
+            return s->timeline.empty() && s->timeline.counters().pending_commands == 0;
         });
+        lock.unlock();
+        rc_presenter_deliveries_stop(s->deliveries);
+        lock.lock();
         s->writing.reset();
         s->history_lease.reset();
-        s->cached_target.reset();
         s->history.world = {};
         s->history.overlay = {};
-        s->cached.reset();
-        s->cached_settings.reset();
+        s->timeline.clear_cached();
         s->composite_pool.clear();
-        s->cached_input = {};
-        s->cached_ui = {};
-        s->cached_viewport = false;
-        s->cached_viewport_x = s->cached_viewport_y = 0;
         s->sealed_layout = {};
         s->sealed_layout_valid = false;
         s->targets = {};
-        if (s->device && s->chain) {
-            s->device->destroy(s->chain);
-            s->chain = {};
-        }
+        s->surface.close();
     }
     if (!s->fake) {
         ddraw_set_present_callbacks(nullptr, nullptr);
@@ -1427,10 +1232,8 @@ void host_present_drop_current() {
     if (!s)
         return;
     std::lock_guard lock(s->mutex);
-    if (s->writing && !s->writing->dropped) {
-        s->writing->dropped = true;
-        ++s->drops;
-    }
+    if (s->writing)
+        s->timeline.mark_drop(s->writing);
 }
 bool host_present_running() {
     auto s = active.load();
@@ -1667,7 +1470,6 @@ void host_present_set_input(const CompositorInput *input) {
 namespace {
 struct PrefixHandle {
     std::shared_ptr<Service> service;
-    std::shared_ptr<Fence> fence;
     std::shared_ptr<Frame> frame;
 };
 } // namespace
@@ -1675,11 +1477,8 @@ void *host_present_prefix_begin() {
     auto s = active.load();
     if (!s)
         return nullptr;
-    auto fence = std::make_shared<Fence>();
-    fence->done = false;
     auto handle = std::make_unique<PrefixHandle>();
     handle->service = s;
-    handle->fence = fence;
     std::shared_ptr<Frame> frame;
     {
         std::lock_guard lock(s->mutex);
@@ -1687,9 +1486,8 @@ void *host_present_prefix_begin() {
             return nullptr;
         frame = s->writing;
         handle->frame = frame;
-        frame->prefix = fence;
-        ++frame->pending_prefixes;
-        ++s->pending_commands;
+        rc_frame_prefix_begin(frame->state);
+        s->timeline.command_started();
     }
     return handle.release();
 }
@@ -1698,11 +1496,8 @@ void host_present_prefix_done(void *handle, bool success) {
     if (!h)
         return;
     std::lock_guard lock(h->service->mutex);
-    h->fence->done = true;
-    h->fence->success = success;
-    h->frame->success = h->frame->success && h->fence->success;
-    --h->frame->pending_prefixes;
-    --h->service->pending_commands;
+    rc_frame_prefix_complete(h->frame->state, success);
+    h->service->timeline.command_finished();
     h->service->sweep();
     h->service->completed.notify_all();
 }
@@ -1753,7 +1548,7 @@ extern "C" void host_frame_seal() {
         bool eligible = false;
         {
             std::lock_guard lock(s->mutex);
-            eligible = s->writing && !s->writing->dropped && s->writing->target &&
+            eligible = s->writing && !s->writing->status().dropped && s->writing->target &&
                        s->writing->target->scene.w > 0;
         }
         // Pool exhaustion is not a completed present. Leave the request armed
@@ -1818,10 +1613,6 @@ extern "C" void host_present_tick_for_test(double ts) {
     if (!s || !s->fake)
         return;
     s->signal_tick(ts);
-    {
-        std::lock_guard lock(s->mutex);
-        s->tick_pending = false;
-    }
     s->tick(ts);
 }
 #define PRESENT_COUNTER(name, field)                                                               \
@@ -1832,9 +1623,9 @@ extern "C" void host_present_tick_for_test(double ts) {
         std::lock_guard lock(s->mutex);                                                            \
         return s->field;                                                                           \
     }
-PRESENT_COUNTER(host_present_unique_completed, unique)
-PRESENT_COUNTER(host_present_repeats, repeats)
-PRESENT_COUNTER(host_present_drops, drops)
+PRESENT_COUNTER(host_present_unique_completed, timeline.counters().unique)
+PRESENT_COUNTER(host_present_repeats, timeline.counters().repeats)
+PRESENT_COUNTER(host_present_drops, timeline.counters().drops)
 PRESENT_COUNTER(host_present_waits, waits)
 PRESENT_COUNTER(host_present_settings_pages, settings_pages)
 PRESENT_COUNTER(host_present_faults, faults)
@@ -1902,7 +1693,7 @@ void host_present_test_begin(bool automatic, bool offscreen, unsigned display_fr
 unsigned host_present_test_flight_count() {
     auto s = active.load();
     std::lock_guard lock(s->mutex);
-    return unsigned(s->flights.size());
+    return unsigned(s->timeline.size());
 }
 void host_present_test_seal(uint64_t id, HostScreenClass cls, bool had_draws, bool prefix_pending) {
     auto s = active.load();
@@ -1930,7 +1721,8 @@ bool host_present_test_released(uint64_t id) {
 uint64_t host_present_test_last_id() {
     auto s = active.load();
     std::lock_guard lock(s->mutex);
-    return s->last_id;
+    const auto cached = s->timeline.cached();
+    return cached ? cached->frame_id : 0;
 }
 uint8_t host_present_test_last_pixel() {
     auto s = active.load();
@@ -1955,7 +1747,8 @@ bool host_present_test_read_rgba(uint8_t *out, size_t bytes) {
     std::shared_ptr<Composite> texture;
     {
         std::lock_guard lock(s->mutex);
-        texture = s->cached;
+        const auto cached = s->timeline.cached();
+        texture = cached ? cached->composed : nullptr;
     }
     if (!texture || texture->format != gpu::Format::RGBA8 ||
         bytes < size_t(texture->w) * texture->h * 4)
@@ -1973,15 +1766,16 @@ bool host_present_copy_composite(HostCompletedComposite *out) {
     std::shared_ptr<Composite> texture;
     {
         std::lock_guard lock(s->mutex);
-        texture = s->cached;
+        const auto cached = s->timeline.cached();
+        texture = cached ? cached->composed : nullptr;
         if (!texture || texture->format != gpu::Format::RGBA8)
             return false;
         result.w = texture->w;
         result.h = texture->h;
-        result.guest_w = s->cached_input.guest_w;
-        result.guest_h = s->cached_input.guest_h;
-        result.cls = s->cached_input.cls;
-        result.frame_id = s->last_id;
+        result.guest_w = cached->input.guest_w;
+        result.guest_h = cached->input.guest_h;
+        result.cls = cached->input.cls;
+        result.frame_id = cached->frame_id;
         result.layout = s->layouts[s->layout_slot];
     }
     result.rgba.resize(size_t(result.w) * result.h * 4);
@@ -2005,9 +1799,10 @@ uint8_t host_present_test_last_ui_red() {
     if (!s)
         return 0;
     std::lock_guard lock(s->mutex);
-    return s->cached_ui.elements.empty() || s->cached_ui.elements[0].rgba.empty()
+    const auto cached = s->timeline.cached();
+    return !cached || cached->ui.elements.empty() || cached->ui.elements[0].rgba.empty()
                ? 0
-               : s->cached_ui.elements[0].rgba[0];
+               : cached->ui.elements[0].rgba[0];
 }
 
 // Deterministic fake link uses the production worker predicate and tick state
@@ -2022,7 +1817,6 @@ bool host_present_test_window_wake(double ts, bool display_tick, bool timeout) {
         std::lock_guard lock(s->mutex);
         if (!timeout && !s->window_ready())
             return false;
-        s->tick_pending = false;
     }
     s->tick(ts);
     return true;
@@ -2030,7 +1824,7 @@ bool host_present_test_window_wake(double ts, bool display_tick, bool timeout) {
 uint64_t host_present_test_in_flight() {
     auto s = active.load();
     std::lock_guard lock(s->mutex);
-    return s->flights.empty() ? 0 : s->flights.front()->frame_id;
+    return s->timeline.size() == 0 ? 0 : s->timeline.frame(0)->frame_id;
 }
 unsigned host_present_test_faults() {
     auto s = active.load();
@@ -2040,7 +1834,7 @@ unsigned host_present_test_faults() {
 bool host_present_test_input_legacy() {
     auto s = active.load();
     std::lock_guard lock(s->mutex);
-    return !s->flights.empty() && s->flights.front()->input.legacy;
+    return s->timeline.size() != 0 && s->timeline.frame(0)->input.legacy;
 }
 void host_present_test_commit_swapchain(gpu::Swapchain chain) {
     auto s = active.load();
@@ -2049,13 +1843,13 @@ void host_present_test_commit_swapchain(gpu::Swapchain chain) {
     std::shared_ptr<Frame> f;
     {
         std::lock_guard lock(s->mutex);
-        if (!s->flights.empty())
-            f = s->flights.back();
+        if (s->timeline.size() != 0)
+            f = s->timeline.frame(s->timeline.size() - 1);
     }
     if (!f)
         return;
-    s->chain = chain;
-    gpu::Texture drawable = s->device->acquire(chain);
+    s->surface.adopt(chain);
+    gpu::Texture drawable = s->surface.acquire();
     gpu::CommandBuffer cb = s->device->begin();
     s->commit_present(f, drawable, cb);
 }
@@ -2099,10 +1893,10 @@ void host_present_suspend(bool suspended) {
     if (!s)
         return;
     std::unique_lock lock(s->mutex);
-    s->wake.notify_all();
+    s->notify_worker();
     s->completed.wait_for(lock, std::chrono::seconds(1), [&] {
         s->sweep();
-        return s->flights.empty() && s->pending_commands == 0;
+        return s->timeline.size() == 0 && s->timeline.counters().pending_commands == 0;
     });
 }
 
@@ -2129,7 +1923,7 @@ bool host_present_suspended(void) {
 // it blocks only while the previously queued frame is still waiting for its
 // blank, so a renderer slower than the display never waits and one faster is
 // paced to it. This is how long until that earlier frame reaches the screen,
-// on the device clock the pacer keeps. The caller waits it out in the
+// on the device clock. The caller waits it out in the
 // scheduler: a host sleep here would hold the guest baton for the whole wait
 // and freeze every other guest thread with it. A headless presenter has no
 // display to wait for, so a smoke still runs as fast as it can.

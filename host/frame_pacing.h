@@ -1,12 +1,8 @@
 #pragma once
-#include <algorithm>
-#include <cmath>
+#include "../graphics/compositor/include/presenter.h"
 #include <cstdint>
-#include <deque>
 #include <vector>
 
-// Monotonic seconds; no display-link tick or GPU submission is counted as a
-// displayed frame. Offscreen/fallback completions are deliberately excluded.
 struct FramePacingSnapshot {
     double new_fps = 0, display_fps = 0, median_ms = 0, p95_ms = 0, gpu_ms = 0, age_ms = 0;
     double repeat_percent = 0;
@@ -14,67 +10,34 @@ struct FramePacingSnapshot {
     std::vector<double> intervals_ms;
 };
 class FramePacing {
-    struct Event {
-        double time, gpu_ms, age_ms;
-        bool repeat;
-    };
-    std::deque<Event> events;
-    std::deque<double> intervals;
-    double first = -1, last_new = -1;
-    uint64_t unique = 0, repeated = 0;
+    RcPacing *pacing = rc_pacing_new();
 
   public:
+    ~FramePacing() {
+        rc_pacing_free(pacing);
+    }
+    FramePacing(const FramePacing &) = delete;
+    FramePacing &operator=(const FramePacing &) = delete;
+    FramePacing() = default;
     void displayed(double ts, bool repeat, double gpu_ms, double age_ms) {
-        if (!std::isfinite(ts) || ts < 0 || (!events.empty() && ts < events.back().time))
-            return;
-        if (first < 0)
-            first = ts;
-        if (repeat)
-            ++repeated;
-        else {
-            ++unique;
-            if (last_new >= 0 && ts > last_new) {
-                intervals.push_back((ts - last_new) * 1000);
-                if (intervals.size() > 120)
-                    intervals.pop_front();
-            }
-            last_new = ts;
-        }
-        events.push_back({ts, std::max(0.0, gpu_ms), std::max(0.0, age_ms), repeat});
-        while (events.size() > 1024 || (!events.empty() && events.front().time < ts - 2))
-            events.pop_front();
+        rc_pacing_displayed(pacing, ts, repeat, gpu_ms, age_ms);
     }
     FramePacingSnapshot snapshot(double now, uint64_t drops) const {
+        double values[120];
+        size_t count = 120;
+        const auto p = rc_pacing_snapshot(pacing, now, drops, values, &count);
         FramePacingSnapshot s;
-        s.new_frames = unique;
-        s.repeats = repeated;
-        s.drops = drops;
-        int n = 0, r = 0;
-        double gpu = 0, age = 0;
-        for (const auto &e : events)
-            if (e.time > now - 2 && e.time <= now) {
-                ++n;
-                r += e.repeat;
-                gpu += e.gpu_ms;
-                age += e.age_ms;
-            }
-        const double span = first >= 0 ? std::min(2.0, std::max(0.0, now - first)) : 0;
-        if (span >= 0.25) {
-            s.new_fps = (n - r) / span;
-            s.display_fps = n / span;
-        }
-        if (n) {
-            s.gpu_ms = gpu / n;
-            s.age_ms = age / n;
-            s.repeat_percent = 100.0 * r / n;
-        }
-        if (last_new >= 0 && now - last_new < 2 && !intervals.empty()) {
-            s.intervals_ms.assign(intervals.begin(), intervals.end());
-            auto sorted = s.intervals_ms;
-            std::sort(sorted.begin(), sorted.end());
-            s.median_ms = sorted[sorted.size() / 2];
-            s.p95_ms = sorted[size_t(std::ceil(sorted.size() * .95)) - 1];
-        }
+        s.new_fps = p.new_fps;
+        s.display_fps = p.display_fps;
+        s.median_ms = p.median_ms;
+        s.p95_ms = p.p95_ms;
+        s.gpu_ms = p.gpu_ms;
+        s.age_ms = p.age_ms;
+        s.repeat_percent = p.repeat_percent;
+        s.new_frames = p.new_frames;
+        s.repeats = p.repeats;
+        s.drops = p.drops;
+        s.intervals_ms.assign(values, values + count);
         return s;
     }
 };

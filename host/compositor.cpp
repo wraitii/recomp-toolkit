@@ -1,137 +1,73 @@
 #include "compositor.h"
 #include "ui_layer.h"
+#include "../graphics/compositor/include/compositor.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <vector>
 
 namespace {
-using Registry = std::map<uint64_t, Anchor>;
-std::mutex registry_mutex;
-Registry anchors;
-std::mutex pointer_mutex;
-bool pointer_valid = false;
-int32_t pointer_x = 0, pointer_y = 0;
-struct CompositeRect {
-    double x, y, w, h;
+struct CompositorDeleter {
+    void operator()(RcCompositor *value) const {
+        rc_compositor_free(value);
+    }
 };
-
-Registry registry_snapshot() {
-    std::lock_guard lock(registry_mutex);
-    return anchors;
+struct ResultDeleter {
+    void operator()(RcResult *value) const {
+        rc_result_free(value);
+    }
+};
+using Result = std::unique_ptr<RcResult, ResultDeleter>;
+using CompositeRect = RcRect;
+RcCompositor *compositor() {
+    static const std::unique_ptr<RcCompositor, CompositorDeleter> value(rc_compositor_new());
+    if (!value) {
+        fprintf(stderr, "compositor: Rust state allocation failed\n");
+        abort();
+    }
+    return value.get();
 }
 bool valid(const CompositorInput *in) {
     return in && in->guest_w > 0 && in->guest_h > 0 && in->drawable_w > 0 && in->drawable_h > 0;
 }
-int8_t default_axis(int p, int extent, int domain) {
-    const double centre = double(p) + double(extent) / 2;
-    if (std::abs(centre - double(domain) / 2) <= 8)
-        return 0;
-    return centre <= double(domain) / 2 ? -1 : 1;
+RcElement element(const UiElement &e) {
+    return {e.id, e.last_seq, e.x, e.y, e.w, e.h, uint8_t(e.is_cursor), uint8_t(e.is_hud)};
 }
-double anchored_axis(int p, int domain, int drawable, int scale, int8_t a) {
-    if (a < 0)
-        return double(p) * scale;
-    if (a > 0)
-        return drawable - (double(domain) - p) * scale;
-    return (drawable - double(domain) * scale) / 2 + double(p) * scale;
+RcInput input(const CompositorInput &in) {
+    return {int32_t(in.cls),
+            in.guest_w,
+            in.guest_h,
+            in.drawable_w,
+            in.drawable_h,
+            in.scale_override,
+            {in.scene.scale_x, in.scene.scale_y, in.scene.offset_x, in.scene.offset_y,
+             in.scene.domain_w},
+            uint8_t(in.legacy),
+            uint8_t(in.classic),
+            uint8_t(in.narrow),
+            uint8_t(bool(in.world)),
+            uint8_t(bool(in.overlay)),
+            uint8_t(bool(in.legacy_frame)),
+            uint8_t(bool(in.settings_page))};
 }
-CompositeRect whole_rect(const CompositorInput &in, bool integer) {
-    const double scale =
-        integer ? compositor_ui_scale(in.drawable_h, in.guest_h, in.scale_override)
-                : std::min(double(in.drawable_w) / in.guest_w, double(in.drawable_h) / in.guest_h);
-    const double w = in.guest_w * scale, h = in.guest_h * scale;
-    return {(in.drawable_w - w) / 2, (in.drawable_h - h) / 2, w, h};
-}
-// Enhanced gameplay with Wide view off on a drawable wider than the guest's
-// aspect. Its world was projected for the guest's width, so it is shown boxed
-// at that aspect, with its HUD and input mapped through the same box, the way
-// Classic shows it.
-bool boxed_scene(const CompositorInput &in) {
-    return in.narrow && in.cls == HOST_SCREEN_GAMEPLAY && !in.legacy && !in.classic &&
-           int64_t(in.drawable_w) * in.guest_h > int64_t(in.drawable_h + 1) * in.guest_w;
-}
-CompositeRect pixel_rect(CompositeRect r) {
-    const double x = std::round(r.x), y = std::round(r.y);
-    return {x, y, std::round(r.x + r.w) - x, std::round(r.y + r.h) - y};
-}
-// The 640x480 settings page at the UI scale, but never larger than the
-// drawable: a saved scale that overflows would push the page's own UI scale
-// row off screen. A drawable under 640x480 fits the page instead.
-CompositeRect settings_page_rect(const CompositorInput &in) {
-    auto page = in;
-    page.guest_w = 640;
-    page.guest_h = 480;
-    const int fits = std::min(in.drawable_w / 640, in.drawable_h / 480);
-    if (fits < 1)
-        return pixel_rect(whole_rect(page, false));
-    page.scale_override =
-        std::min(compositor_ui_scale(in.drawable_h, 480, in.scale_override), fits);
-    return pixel_rect(whole_rect(page, true));
-}
-CompositeRect mapped_element_rect(const CompositorInput &in, const UiElement &e,
-                                  const Registry &registry) {
-    if (e.is_cursor) {
-        std::lock_guard lock(pointer_mutex);
-        if (pointer_valid) {
-            double sx, sy;
-            if (!in.legacy && !in.classic && in.cls == HOST_SCREEN_GAMEPLAY && !boxed_scene(in))
-                sx = sy = compositor_ui_scale(in.drawable_h, in.guest_h, in.scale_override);
-            else {
-                const auto whole =
-                    whole_rect(in, !in.legacy && !in.classic && in.cls == HOST_SCREEN_MENU);
-                sx = whole.w / in.guest_w;
-                sy = whole.h / in.guest_h;
-            }
-            return {double(pointer_x), double(pointer_y), e.w * sx, e.h * sy};
-        }
+Result build(const CompositorInput &in, uint32_t outputs) {
+    std::vector<RcElement> elements;
+    if (in.ui) {
+        elements.reserve(in.ui->elements.size());
+        for (const auto &e : in.ui->elements)
+            elements.push_back(element(e));
     }
-    if (in.legacy || in.classic || in.cls != HOST_SCREEN_GAMEPLAY || boxed_scene(in)) {
-        const auto whole = whole_rect(in, !in.legacy && !in.classic && in.cls == HOST_SCREEN_MENU);
-        const double sx = whole.w / in.guest_w, sy = whole.h / in.guest_h;
-        return {whole.x + e.x * sx, whole.y + e.y * sy, e.w * sx, e.h * sy};
+    const auto request = input(in);
+    Result result(rc_build(compositor(), &request, elements.data(), elements.size(), outputs));
+    if (!result) {
+        fprintf(stderr, "compositor: Rust composition planning failed\n");
+        abort();
     }
-    const int scale = compositor_ui_scale(in.drawable_h, in.guest_h, in.scale_override);
-    if (e.is_cursor) {
-        if (std::isfinite(in.scene.scale_x) && in.scene.scale_x > 0 &&
-            std::isfinite(in.scene.scale_y) && in.scene.scale_y > 0 &&
-            std::isfinite(in.scene.offset_x) && std::isfinite(in.scene.offset_y)) {
-            return {e.x * double(in.scene.scale_x) + in.scene.offset_x,
-                    e.y * double(in.scene.scale_y) + in.scene.offset_y, double(e.w) * scale,
-                    double(e.h) * scale};
-        }
-        const auto whole = whole_rect(in, true);
-        return {whole.x + double(e.x) * scale, whole.y + double(e.y) * scale, double(e.w) * scale,
-                double(e.h) * scale};
-    }
-    const auto found = registry.find(e.id);
-    const Anchor a = found == registry.end() ? compositor_default_anchor(&e, in.guest_w, in.guest_h)
-                                             : found->second;
-    return {anchored_axis(e.x, in.guest_w, in.drawable_w, scale, a.h),
-            anchored_axis(e.y, in.guest_h, in.drawable_h, scale, a.v), double(e.w) * scale,
-            double(e.h) * scale};
-}
-CompositeRect element_rect(const CompositorInput &in, const UiElement &e,
-                           const Registry &registry) {
-    // Use the same integral edges for rasterization and the published layout,
-    // including odd drawable dimensions and fractional scene-mapped cursors.
-    return pixel_rect(mapped_element_rect(in, e, registry));
-}
-std::vector<const UiElement *> ordered(const UiFrame *ui) {
-    std::vector<const UiElement *> result;
-    if (ui)
-        for (const auto &e : ui->elements)
-            result.push_back(&e);
-    std::stable_sort(result.begin(), result.end(),
-                     [](const auto *a, const auto *b) { return a->last_seq < b->last_seq; });
     return result;
 }
-
 enum Blend { Opaque, Straight, Premultiplied };
 struct Quad {
     float rect[4], uv[4];
@@ -203,78 +139,56 @@ gpu::Texture upload(Pass &pass, const UiElement &e) {
     return tex;
 }
 
-// An overlay was encoded in guest UI space. Crop it to its HUD owner and move
-// that crop with the owner's anchor. Subtract newer overlapping source rects
-// so one overlay pixel cannot be duplicated onto two independently moved HUDs.
-void subtract(std::vector<CompositeRect> &pieces, CompositeRect b) {
-    std::vector<CompositeRect> next;
-    for (auto a : pieces) {
-        const double x = std::max(a.x, b.x), y = std::max(a.y, b.y);
-        const double r = std::min(a.x + a.w, b.x + b.w), bottom = std::min(a.y + a.h, b.y + b.h);
-        if (x >= r || y >= bottom) {
-            next.push_back(a);
-            continue;
-        }
-        if (y > a.y)
-            next.push_back({a.x, a.y, a.w, y - a.y});
-        if (bottom < a.y + a.h)
-            next.push_back({a.x, bottom, a.w, a.y + a.h - bottom});
-        if (x > a.x)
-            next.push_back({a.x, y, x - a.x, bottom - y});
-        if (r < a.x + a.w)
-            next.push_back({r, y, a.x + a.w - r, bottom - y});
-    }
-    pieces.swap(next);
-}
 } // namespace
 
 int compositor_ui_scale(int drawable_h, int guest_h, int override_) {
-    return std::clamp(override_ ? override_ : drawable_h / std::max(1, guest_h), 1, 4);
+    return rc_ui_scale(drawable_h, guest_h, override_);
 }
 Anchor compositor_default_anchor(const UiElement *e, int guest_w, int guest_h) {
-    if (!e)
-        return {-1, -1};
-    return {default_axis(e->x, e->w, guest_w), default_axis(e->y, e->h, guest_h)};
+    const auto request = e ? element(*e) : RcElement{};
+    Anchor result;
+    rc_default_anchor(e ? &request : nullptr, guest_w, guest_h, &result.h, &result.v);
+    return result;
 }
 void compositor_set_anchor(uint64_t id, Anchor a) {
-    a.h = std::clamp<int>(a.h, -1, 1);
-    a.v = std::clamp<int>(a.v, -1, 1);
-    std::lock_guard lock(registry_mutex);
-    anchors[id] = a;
+    rc_set_anchor(compositor(), id, a.h, a.v);
 }
 void compositor_clear_anchor(uint64_t id) {
-    std::lock_guard lock(registry_mutex);
-    anchors.erase(id);
+    rc_clear_anchor(compositor(), id);
+}
+void compositor_set_pointer_position(bool valid, int32_t x, int32_t y) {
+    rc_set_pointer(compositor(), uint8_t(valid), x, y);
 }
 bool compositor_element_rect_on_drawable(const CompositorInput *in, uint64_t id, int *x, int *y,
                                          int *w, int *h) {
     if (!valid(in) || !in->ui)
         return false;
-    const auto registry = registry_snapshot();
+    const auto request = input(*in);
     for (const auto &e : in->ui->elements)
         if (e.id == id) {
-            if (e.w <= 0 || e.h <= 0)
+            const auto item = element(e);
+            RcRect rect;
+            if (!rc_element_rect(compositor(), &request, &item, &rect))
                 return false;
-            const auto r = element_rect(*in, e, registry);
-            const double values[] = {r.x, r.y, r.w, r.h};
-            for (double value : values)
-                if (!std::isfinite(value) || value < std::numeric_limits<int>::min() ||
-                    value > std::numeric_limits<int>::max())
-                    return false;
             if (x)
-                *x = int(std::lround(r.x));
+                *x = int(rect.x);
             if (y)
-                *y = int(std::lround(r.y));
+                *y = int(rect.y);
             if (w)
-                *w = int(std::lround(r.w));
+                *w = int(rect.w);
             if (h)
-                *h = int(std::lround(r.h));
+                *h = int(rect.h);
             return true;
         }
     return false;
 }
 uint32_t compositor_element_ids(const UiFrame *ui, uint64_t *out, uint32_t max) {
-    const auto elements = ordered(ui);
+    std::vector<const UiElement *> elements;
+    if (ui)
+        for (const auto &e : ui->elements)
+            elements.push_back(&e);
+    std::stable_sort(elements.begin(), elements.end(),
+                     [](const auto *a, const auto *b) { return a->last_seq < b->last_seq; });
     const size_t count = std::min(elements.size(), size_t(UINT32_MAX));
     if (out)
         for (size_t i = 0; i < std::min(count, size_t(max)); ++i)
@@ -318,6 +232,7 @@ void compositor_compose(gpu::Device *device, const CompositorInput *in, gpu::Tex
     const gpu::TextureDesc desc = device->describe(out);
     if (desc.width != in->drawable_w || desc.height != in->drawable_h)
         return;
+    const auto plan = build(*in, RC_OUTPUT_DRAWS);
     Pass pass{device, cb, desc.format, {}};
     gpu::RenderPass rp;
     rp.color_count = 1;
@@ -326,124 +241,90 @@ void compositor_compose(gpu::Device *device, const CompositorInput *in, gpu::Tex
     rp.color[0].store = gpu::Store::Store;
     rp.color[0].clear[0] = rp.color[0].clear[1] = rp.color[0].clear[2] = 0;
     rp.color[0].clear[3] = 1;
-    device->begin_render_pass(cb, rp);
-    const CompositeRect full_uv{0, 0, 1, 1};
-    auto finish = [&] {
+    size_t count = 0;
+    const auto *draws = rc_result_draws(plan.get(), &count);
+    std::vector<gpu::CompositionDraw> commands;
+    commands.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const auto &command = draws[i];
+        gpu::Texture texture;
+        switch (command.source) {
+        case RC_WORLD:
+            texture = in->world;
+            break;
+        case RC_UI:
+            texture = upload(pass, in->ui->elements.at(command.element_index));
+            break;
+        case RC_OVERLAY:
+            texture = in->overlay;
+            break;
+        case RC_LEGACY:
+            texture = in->legacy_frame;
+            break;
+        case RC_SETTINGS:
+            texture = in->settings_page;
+            break;
+        default:
+            fprintf(stderr, "compositor: unknown Rust image source %u\n", command.source);
+            abort();
+        }
+        if (texture)
+            commands.push_back({texture.id,
+                                {command.dst.x, command.dst.y, command.dst.w, command.dst.h},
+                                {command.uv.x, command.uv.y, command.uv.w, command.uv.h},
+                                command.blend,
+                                uint32_t(texture == in->settings_page ? gpu::Filter::Nearest
+                                                                      : in->presentation_filter)});
+    }
+    if (!device->compose_plan(cb, out, in->drawable_w, in->drawable_h, commands.data(),
+                              commands.size())) {
+        device->begin_render_pass(cb, rp);
+        for (const auto &command : commands)
+            draw(pass, *in, {command.texture},
+                 {command.rect[0], command.rect[1], command.rect[2], command.rect[3]},
+                 {command.uv[0], command.uv[1], command.uv[2], command.uv[3]},
+                 Blend(command.blend));
         device->end_render_pass(cb);
-        if (!pass.transient.empty()) {
-            auto transient = std::make_shared<std::vector<gpu::Texture>>(std::move(pass.transient));
-            device->on_complete(cb, [device, transient](gpu::CommandStatus, double) {
-                for (gpu::Texture t : *transient)
-                    device->destroy(t);
-            });
-        }
-    };
-    if (in->legacy) {
-        draw(pass, *in, in->legacy_frame, pixel_rect(whole_rect(*in, false)), full_uv, Opaque);
-        if (in->settings_page)
-            draw(pass, *in, in->settings_page, settings_page_rect(*in), full_uv, Straight);
-        finish();
-        return;
     }
-    const auto elements = ordered(in->ui);
-    const auto registry = registry_snapshot();
-    if (in->cls == HOST_SCREEN_GAMEPLAY)
-        draw(pass, *in, in->world,
-             in->classic || boxed_scene(*in)
-                 ? pixel_rect(whole_rect(*in, false))
-                 : CompositeRect{0, 0, double(in->drawable_w), double(in->drawable_h)},
-             full_uv, Opaque);
-    for (const auto *e : elements) {
-        const auto dst = element_rect(*in, *e, registry);
-        if (dst.x >= in->drawable_w || dst.y >= in->drawable_h || dst.x + dst.w <= 0 ||
-            dst.y + dst.h <= 0)
-            continue;
-        draw(pass, *in, upload(pass, *e), dst, full_uv, Straight);
+    if (!pass.transient.empty()) {
+        auto transient = std::make_shared<std::vector<gpu::Texture>>(std::move(pass.transient));
+        device->on_complete(cb, [device, transient](gpu::CommandStatus, double) {
+            for (gpu::Texture texture : *transient)
+                device->destroy(texture);
+        });
     }
-    if (in->cls == HOST_SCREEN_GAMEPLAY && in->overlay) {
-        for (size_t i = 0; i < elements.size(); ++i) {
-            const auto &e = *elements[i];
-            if (!e.is_hud || e.is_cursor || e.w <= 0 || e.h <= 0)
-                continue;
-            const double x = std::max(0, e.x), y = std::max(0, e.y);
-            const double r = std::min(double(in->guest_w), double(e.x) + e.w);
-            const double b = std::min(double(in->guest_h), double(e.y) + e.h);
-            if (r <= x || b <= y)
-                continue;
-            std::vector<CompositeRect> pieces{{x, y, r - x, b - y}};
-            for (size_t j = i + 1; j < elements.size(); ++j) {
-                const auto &later = *elements[j];
-                if (later.is_hud && !later.is_cursor && later.w > 0 && later.h > 0)
-                    subtract(pieces,
-                             {double(later.x), double(later.y), double(later.w), double(later.h)});
-            }
-            const auto dst = element_rect(*in, e, registry);
-            const double sx = dst.w / e.w, sy = dst.h / e.h;
-            for (auto part : pieces) {
-                draw(pass, *in, in->overlay,
-                     {dst.x + (part.x - e.x) * sx, dst.y + (part.y - e.y) * sy, part.w * sx,
-                      part.h * sy},
-                     {part.x / in->guest_w, part.y / in->guest_h, part.w / in->guest_w,
-                      part.h / in->guest_h},
-                     Premultiplied);
-            }
-        }
-    }
-    if (in->settings_page)
-        draw(pass, *in, in->settings_page, settings_page_rect(*in), full_uv, Straight);
-    finish();
-}
-
-void compositor_set_pointer_position(bool valid, int32_t x, int32_t y) {
-    std::lock_guard lock(pointer_mutex);
-    pointer_valid = valid;
-    pointer_x = x;
-    pointer_y = y;
 }
 
 LayoutSnapshot compositor_layout_snapshot(const CompositorInput *in) {
     LayoutSnapshot result;
     if (!valid(in))
         return result;
+    const auto plan = build(*in, RC_OUTPUT_LAYOUT);
+    const auto layout = rc_result_layout(plan.get());
     result.drawable_w = in->drawable_w;
     result.drawable_h = in->drawable_h;
     result.guest_w = in->guest_w;
     result.guest_h = in->guest_h;
-    result.ui_scale = compositor_ui_scale(in->drawable_h, in->guest_h, in->scale_override);
-    result.scene = in->scene;
+    result.ui_scale = layout.ui_scale;
+    result.scene = {layout.scene.scale_x, layout.scene.scale_y, layout.scene.offset_x,
+                    layout.scene.offset_y, layout.scene.domain_w};
     result.cls = in->cls;
     result.scale_override = in->scale_override;
     result.legacy = in->legacy;
     result.classic = in->classic;
     result.narrow = in->narrow;
-    if (in->legacy || in->classic || in->cls != HOST_SCREEN_GAMEPLAY || boxed_scene(*in) ||
-        !std::isfinite(result.scene.scale_x) || result.scene.scale_x <= 0 ||
-        !std::isfinite(result.scene.scale_y) || result.scene.scale_y <= 0 ||
-        !std::isfinite(result.scene.offset_x) || !std::isfinite(result.scene.offset_y) ||
-        result.scene.domain_w <= 0) {
-        const auto r = whole_rect(*in, !in->legacy && !in->classic && in->cls == HOST_SCREEN_MENU);
-        result.scene = {float(r.w / in->guest_w), float(r.h / in->guest_h), float(r.x), float(r.y),
-                        in->guest_w};
+    size_t count = 0;
+    const auto *elements = rc_result_elements(plan.get(), &count);
+    result.elements.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const auto &e = elements[i].element;
+        const auto &rect = elements[i].drawable;
+        result.elements.push_back({e.id,
+                                   e.last_seq,
+                                   {e.x, e.y, e.w, e.h},
+                                   {int(rect.x), int(rect.y), int(rect.w), int(rect.h)},
+                                   bool(e.is_cursor)});
     }
-    const auto registry = registry_snapshot();
-    if (in->ui)
-        for (const auto &e : in->ui->elements) {
-            if (e.w <= 0 || e.h <= 0)
-                continue;
-            const auto r = element_rect(*in, e, registry);
-            const double values[] = {r.x, r.y, r.w, r.h};
-            bool ok = r.w > 0 && r.h > 0;
-            for (double value : values)
-                ok &= std::isfinite(value) && value >= INT32_MIN && value <= INT32_MAX;
-            if (ok)
-                result.elements.push_back({e.id,
-                                           e.last_seq,
-                                           {e.x, e.y, e.w, e.h},
-                                           {int(r.x), int(r.y), int(r.w), int(r.h)},
-                                           e.is_cursor});
-        }
-    std::stable_sort(result.elements.begin(), result.elements.end(),
-                     [](const auto &a, const auto &b) { return a.last_seq < b.last_seq; });
     return result;
 }
 

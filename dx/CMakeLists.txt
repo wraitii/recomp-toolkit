@@ -112,15 +112,14 @@ recomp_link_video(recomp_dx)
 target_compile_options(recomp_dx PRIVATE ${RECOMP_WARN_HOST})
 recomp_optimize(recomp_dx 2)
 
-option(RECOMP_D3D8_WGPU "Build the Rust D3D8/wgpu renderer" OFF)
+option(RECOMP_D3D8_WGPU "Enable Rust GPU rendering in native shims" OFF)
 set(RECOMP_RENDERER_CARGO_TARGET "" CACHE STRING "Native Cargo target triple for the renderer")
-set(RECOMP_D3D8_WGPU_DIR "")
 if(EXISTS "${RECOMP_GAME_DIR}/graphics/d3d8-wgpu/Cargo.toml")
-  set(RECOMP_D3D8_WGPU_DIR "${RECOMP_GAME_DIR}/graphics/d3d8-wgpu")
-else()
-  set(RECOMP_D3D8_WGPU_DIR "${CMAKE_CURRENT_LIST_DIR}/../graphics/d3d8-wgpu")
-  get_filename_component(RECOMP_D3D8_WGPU_DIR "${RECOMP_D3D8_WGPU_DIR}" ABSOLUTE)
+  message(FATAL_ERROR "Per-game renderer overrides are unsupported; use the kit graphics workspace so native headers and Rust libraries agree")
 endif()
+set(RECOMP_GRAPHICS_DIR "${RECOMP_ROOT}/graphics")
+set(RECOMP_GRAPHICS_DIR "${RECOMP_GRAPHICS_DIR}" PARENT_SCOPE)
+set(RECOMP_D3D8_WGPU_DIR "${RECOMP_GRAPHICS_DIR}/d3d8-wgpu")
 if(RECOMP_DEPENDENCIES)
   if(RECOMP_RENDERER_CARGO_TARGET)
     message(FATAL_ERROR "An explicit renderer Cargo target cannot be used with staged dependencies")
@@ -128,40 +127,16 @@ if(RECOMP_DEPENDENCIES)
   target_include_directories(recomp_dx BEFORE PUBLIC "${RECOMP_DEPENDENCIES}/d3d8")
   add_custom_target(d3d_bridge_headers DEPENDS
     "${RECOMP_DEPENDENCIES}/d3d8/d3d_bridge.h" "${RECOMP_DEPENDENCIES}/d3d8/rust/cxx.h")
-elseif(RECOMP_D3D8_WGPU_DIR AND EXISTS "${RECOMP_D3D8_WGPU_DIR}/Cargo.toml")
-  find_program(CARGO_EXECUTABLE cargo)
-  if(NOT CARGO_EXECUTABLE)
-    message(FATAL_ERROR "D3D7/D3D8 host support requires Cargo")
-  endif()
-  if(CMAKE_CROSSCOMPILING OR (CMAKE_OSX_ARCHITECTURES AND
-      NOT CMAKE_OSX_ARCHITECTURES STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR))
-    message(FATAL_ERROR "D3D7/D3D8 Rust integration requires a native single-architecture build")
-  endif()
+elseif(EXISTS "${RECOMP_D3D8_WGPU_DIR}/Cargo.toml")
+  include(${RECOMP_ROOT}/cmake/RustGraphics.cmake)
   file(GLOB_RECURSE RECOMP_D3D8_WGPU_SOURCES CONFIGURE_DEPENDS
-    "${RECOMP_D3D8_WGPU_DIR}/src/*.rs")
+    "${RECOMP_D3D8_WGPU_DIR}/src/*.rs"
+    "${RECOMP_D3D8_WGPU_DIR}/src/*.wgsl"
+    "${RECOMP_GRAPHICS_DIR}/gpu/src/*.rs"
+    "${RECOMP_GRAPHICS_DIR}/compositor/src/*.rs"
+    "${RECOMP_GRAPHICS_DIR}/compositor/src/*.wgsl")
   set(RECOMP_D3D8_WGPU_TARGET_DIR "${RECOMP_BUILD_ROOT}/d3d8-wgpu/rust")
-  set(RECOMP_D3D8_TARGET_ARGS)
-  set(RECOMP_D3D8_OUTPUT_DIR "${RECOMP_D3D8_WGPU_TARGET_DIR}")
-  if(RECOMP_RENDERER_CARGO_TARGET)
-    if(NOT RECOMP_RENDERER_CARGO_TARGET MATCHES "^[A-Za-z0-9_+.-]+$")
-      message(FATAL_ERROR "Invalid renderer Cargo target triple: ${RECOMP_RENDERER_CARGO_TARGET}")
-    endif()
-    if(DEFINED ENV{RUSTC} AND NOT "$ENV{RUSTC}" STREQUAL "")
-      set(RECOMP_RUSTC "$ENV{RUSTC}")
-    else()
-      find_program(RECOMP_RUSTC rustc REQUIRED)
-    endif()
-    execute_process(COMMAND "${RECOMP_RUSTC}" -vV RESULT_VARIABLE RECOMP_RUSTC_STATUS
-      OUTPUT_VARIABLE RECOMP_RUSTC_VERSION ERROR_VARIABLE RECOMP_RUSTC_ERROR)
-    if(NOT RECOMP_RUSTC_STATUS EQUAL 0 OR NOT RECOMP_RUSTC_VERSION MATCHES "host: ([^\r\n]+)")
-      message(FATAL_ERROR "Could not determine Rust host target: ${RECOMP_RUSTC_ERROR}")
-    endif()
-    if(NOT RECOMP_RENDERER_CARGO_TARGET STREQUAL CMAKE_MATCH_1)
-      message(FATAL_ERROR "Renderer Cargo target ${RECOMP_RENDERER_CARGO_TARGET} does not match Rust host ${CMAKE_MATCH_1}")
-    endif()
-    list(APPEND RECOMP_D3D8_TARGET_ARGS --target "${RECOMP_RENDERER_CARGO_TARGET}")
-    string(APPEND RECOMP_D3D8_OUTPUT_DIR "/${RECOMP_RENDERER_CARGO_TARGET}")
-  endif()
+  set(RECOMP_D3D8_OUTPUT_DIR "${RECOMP_D3D8_WGPU_TARGET_DIR}${RECOMP_GRAPHICS_TARGET_SUFFIX}")
   set(RECOMP_D3D8_WGPU_LIB "${RECOMP_D3D8_OUTPUT_DIR}/release/${CMAKE_STATIC_LIBRARY_PREFIX}d3d8_wgpu${CMAKE_STATIC_LIBRARY_SUFFIX}")
   set(RECOMP_D3D8_BRIDGE_DIR "${RECOMP_D3D8_GENERATED_DIR}")
   if(RECOMP_RENDERER_CARGO_TARGET)
@@ -177,49 +152,23 @@ elseif(RECOMP_D3D8_WGPU_DIR AND EXISTS "${RECOMP_D3D8_WGPU_DIR}/Cargo.toml")
   else()
     set(RECOMP_D3D8_CXX "${CMAKE_CXX_COMPILER}")
   endif()
-  set(RECOMP_D3D8_DEPLOYMENT_ARGS)
-  if(APPLE)
-    set(RECOMP_D3D8_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}")
-    if(NOT RECOMP_D3D8_DEPLOYMENT_TARGET)
-      if(CMAKE_OTOOL)
-        set(RECOMP_D3D8_OTOOL "${CMAKE_OTOOL}")
-      else()
-        find_program(RECOMP_D3D8_OTOOL NAMES otool)
-      endif()
-      set(RECOMP_D3D8_COMPILER_ABI "${CMAKE_PLATFORM_INFO_DIR}/CMakeDetermineCompilerABI_CXX.bin")
-      if(RECOMP_D3D8_OTOOL AND EXISTS "${RECOMP_D3D8_COMPILER_ABI}")
-        execute_process(
-          COMMAND "${RECOMP_D3D8_OTOOL}" -l "${RECOMP_D3D8_COMPILER_ABI}"
-          RESULT_VARIABLE RECOMP_D3D8_OTOOL_STATUS
-          OUTPUT_VARIABLE RECOMP_D3D8_LOAD_COMMANDS
-          ERROR_QUIET)
-        if(RECOMP_D3D8_OTOOL_STATUS EQUAL 0 AND
-            RECOMP_D3D8_LOAD_COMMANDS MATCHES "minos[ \t]+([0-9]+(\\.[0-9]+)*)")
-          set(RECOMP_D3D8_DEPLOYMENT_TARGET "${CMAKE_MATCH_1}")
-        elseif(RECOMP_D3D8_OTOOL_STATUS EQUAL 0 AND
-            RECOMP_D3D8_LOAD_COMMANDS MATCHES "cmd LC_VERSION_MIN_MACOSX[\r\n]+[^\r\n]+[\r\n]+[ \t]*version[ \t]+([0-9]+(\\.[0-9]+)*)")
-          set(RECOMP_D3D8_DEPLOYMENT_TARGET "${CMAKE_MATCH_1}")
-        endif()
-      endif()
-      if(NOT RECOMP_D3D8_DEPLOYMENT_TARGET)
-        message(FATAL_ERROR "Could not determine the native macOS deployment target from CMAKE_OSX_DEPLOYMENT_TARGET or the CMake C++ ABI probe")
-      endif()
-    endif()
-    list(APPEND RECOMP_D3D8_DEPLOYMENT_ARGS --deployment-target "${RECOMP_D3D8_DEPLOYMENT_TARGET}")
-  endif()
   add_custom_command(
     OUTPUT "${RECOMP_D3D8_WGPU_LIB}"
            "${RECOMP_D3D8_BRIDGE_HEADER}" "${RECOMP_D3D8_CXX_HEADER}" "${RECOMP_D3D8_NATIVE_LIBS}"
     COMMAND ${Python3_EXECUTABLE} "${RECOMP_ROOT}/tools/build_d3d8_wgpu.py"
-            --cargo "${CARGO_EXECUTABLE}" --crate "${RECOMP_D3D8_WGPU_DIR}"
+            --cargo "${RECOMP_GRAPHICS_CARGO}" --crate "${RECOMP_D3D8_WGPU_DIR}"
             --target-dir "${RECOMP_D3D8_WGPU_TARGET_DIR}"
             --bridge-header "${RECOMP_D3D8_BRIDGE_HEADER}" --cxx-header "${RECOMP_D3D8_CXX_HEADER}"
             --native-libs "${RECOMP_D3D8_NATIVE_LIBS}" --cxx "${RECOMP_D3D8_CXX}"
-            ${RECOMP_D3D8_DEPLOYMENT_ARGS} ${RECOMP_D3D8_TARGET_ARGS}
+            ${RECOMP_GRAPHICS_DEPLOYMENT_ARGS} ${RECOMP_GRAPHICS_TARGET_ARGS}
     DEPENDS "${RECOMP_D3D8_WGPU_DIR}/Cargo.toml"
-            "${RECOMP_D3D8_WGPU_DIR}/Cargo.lock"
+            "${RECOMP_GRAPHICS_DIR}/Cargo.lock"
+            "${RECOMP_GRAPHICS_DIR}/Cargo.toml"
             "${RECOMP_D3D8_WGPU_DIR}/build.rs"
+            "${RECOMP_GRAPHICS_DIR}/gpu/Cargo.toml"
+            "${RECOMP_GRAPHICS_DIR}/compositor/Cargo.toml"
             "${RECOMP_ROOT}/tools/build_d3d8_wgpu.py"
+            "${RECOMP_ROOT}/tools/cargo_build.py"
             ${RECOMP_D3D8_WGPU_SOURCES}
     COMMENT "Building d3d8-wgpu Rust static library"
     VERBATIM)
@@ -239,8 +188,12 @@ if(RECOMP_DEPENDENCIES)
   set_target_properties(d3d8_wgpu PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${RECOMP_DEPENDENCIES}/d3d8")
 endif()
-set_target_properties(d3d8_wgpu PROPERTIES IMPORTED_LOCATION "${RECOMP_D3D8_WGPU_LIB}"
-  INTERFACE_LINK_OPTIONS "SHELL:-Wl,@\"${RECOMP_D3D8_NATIVE_LIBS}\"")
+set_target_properties(d3d8_wgpu PROPERTIES IMPORTED_LOCATION "${RECOMP_D3D8_WGPU_LIB}")
+if(MSVC)
+  set_target_properties(d3d8_wgpu PROPERTIES INTERFACE_LINK_OPTIONS "@${RECOMP_D3D8_NATIVE_LIBS}")
+else()
+  set_target_properties(d3d8_wgpu PROPERTIES INTERFACE_LINK_OPTIONS "SHELL:-Wl,@\"${RECOMP_D3D8_NATIVE_LIBS}\"")
+endif()
 if(TARGET d3d8_wgpu_rust)
   add_dependencies(d3d8_wgpu d3d8_wgpu_rust)
 endif()

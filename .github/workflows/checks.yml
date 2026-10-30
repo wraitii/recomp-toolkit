@@ -78,7 +78,7 @@ jobs:
             build/stub/recomp/*.dll
             ~/.cargo/registry
             ~/.cargo/git
-          key: native-deps-v1-${{ matrix.preset }}-${{ runner.arch }}-${{ steps.dependency-cache-key.outputs.image }}-${{ hashFiles('.github/workflows/checks.yml', 'cmake/**', 'CMakeLists.txt', 'CMakePresets.json', 'graphics/d3d8-wgpu/Cargo.lock') }}
+          key: native-deps-v1-${{ matrix.preset }}-${{ runner.arch }}-${{ steps.dependency-cache-key.outputs.image }}-${{ hashFiles('.github/workflows/checks.yml', 'cmake/**', 'CMakeLists.txt', 'CMakePresets.json', 'graphics/Cargo.lock') }}
       - name: Install macOS parser generators
         if: runner.os == 'macOS'
         run: brew install bison flex

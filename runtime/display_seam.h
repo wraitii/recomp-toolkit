@@ -81,45 +81,6 @@ void gdi_forget_surface(uint32_t owner);
 #ifdef __cplusplus
 extern "C" {
 #endif
-// The hardware side of the Direct3D 11 2D path (host/gpu2d.cpp). The shim sends
-// textures as RGBA8, clears, and axis-aligned textured rectangles; the host
-// keeps a GPU copy of each texture and render target, keyed by the shim's
-// object id, and draws on the presenter's device. Every call runs under the
-// guest baton. Without a host GPU, available() is 0 and nothing else is called.
-int host_gpu2d_available(void);
-// Advances whenever the host drops every copy (a reset, a new device): a copy
-// made under an older generation is gone.
-uint32_t host_gpu2d_generation(void);
-// Replace the (x, y, rw, rh) region of texture `id`, a w x h RGBA8 image,
-// with `rgba` (rw * rh pixels, tightly packed). Creates or resizes it first.
-void host_gpu2d_texture(uint32_t id, int w, int h, const uint8_t *rgba, int x, int y, int rw,
-                        int rh);
-void host_gpu2d_forget(uint32_t id);
-void host_gpu2d_reset(void);
-// Fill render target `id` (w x h) with an RGBA colour.
-void host_gpu2d_clear(uint32_t id, int w, int h, const float rgba[4]);
-// Blend factors are gpu.h's, in order: Zero, One, SrcAlpha, OneMinusSrcAlpha,
-// DstAlpha, OneMinusDstAlpha, SrcColor, OneMinusSrcColor, DstColor,
-// OneMinusDstColor.
-struct HostGpu2DQuad {
-    double x, y, w, h;   // destination, render-target pixels, y down
-    double u, v, uw, uh; // source, normalised, v down
-    int blend;           // 0: replace colour and alpha
-    int src_rgb, dst_rgb, src_alpha, dst_alpha;
-};
-// Draw `texture` into render target `target` (w x h). False, having drawn
-// nothing, when the texture does not exist or the draw cannot be encoded.
-int host_gpu2d_draw(uint32_t target, int w, int h, uint32_t texture,
-                    const struct HostGpu2DQuad *quad);
-// Waits for the target's pending work and copies it out, w x h RGBA8.
-int host_gpu2d_readback(uint32_t id, int w, int h, uint8_t *rgba);
-// Publish render target `id` as the window frame, as host_display_present_window
-// publishes a pixel snapshot. A host that presents on the GPU stages it there;
-// one that builds frames from CPU pixels reads it back with
-// host_gpu2d_present_readback, which hands them to host_display_present_window.
-void host_display_present_gpu2d(uint32_t id, int w, int h);
-void host_gpu2d_present_readback(uint32_t id, int w, int h);
-
 // A software presenter whose last frame is on the GPU: GDI keeps its place on
 // the screen and calls `fetch` for ARGB pixels only when it has to compose
 // over them. `fetch` fills w x h ARGB and returns false when it cannot.

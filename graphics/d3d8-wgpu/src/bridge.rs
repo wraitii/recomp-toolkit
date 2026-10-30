@@ -1953,9 +1953,7 @@ use crate::guest::texture::{
     guest_rect_unlock, guest_surface_desc, guest_surface_prepare_create,
     guest_texture_prepare_create, guest_texture_release, new_guest_texture,
 };
-use crate::{
-    RenderError, RenderErrorKind, backend::GpuContext, d3d8::device::Device as RenderDevice,
-};
+use crate::{RenderError, RenderErrorKind, d3d8::device::Device as RenderDevice};
 use std::collections::BTreeMap;
 
 pub use ffi::{
@@ -2320,7 +2318,7 @@ pub fn initialize_gpu(
             "initialize_gpu: dimensions must be nonzero",
         );
     }
-    let gpu = match pollster::block_on(GpuContext::new_headless()) {
+    let gpu = match crate::kit::context() {
         Ok(gpu) => gpu,
         Err(error) => return status(StatusCode::Backend, error.to_string()),
     };

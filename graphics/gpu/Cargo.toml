@@ -1,0 +1,9 @@
+[package]
+name = "recomp-gpu"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Shared wgpu context for renderer and compositor"
+
+[dependencies]
+wgpu.workspace = true

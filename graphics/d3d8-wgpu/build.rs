@@ -149,9 +149,21 @@ fn main() {
     interpreter_source();
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let mut hash = 0xcbf29ce484222325;
-    for input in ["src", "build.rs", "Cargo.toml", "Cargo.lock"] {
-        println!("cargo:rerun-if-changed={input}");
-        fingerprint(&root.join(input), &root, &mut hash);
+    let graphics = root.parent().unwrap();
+    for input in [
+        "d3d8-wgpu/src",
+        "d3d8-wgpu/build.rs",
+        "d3d8-wgpu/Cargo.toml",
+        "compositor/src",
+        "compositor/Cargo.toml",
+        "gpu/src",
+        "gpu/Cargo.toml",
+        "Cargo.toml",
+        "Cargo.lock",
+    ] {
+        let path = graphics.join(input);
+        println!("cargo:rerun-if-changed={}", path.display());
+        fingerprint(&path, graphics, &mut hash);
     }
     let mut features: Vec<_> = std::env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())

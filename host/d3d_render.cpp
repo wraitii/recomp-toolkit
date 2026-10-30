@@ -2256,7 +2256,7 @@ gpu::Pipeline D3DRenderer::Impl::pipelineForBlend(bool enabled, gpu::Blend src, 
     state.dst_rgb = dst;
     state.src_alpha = overlay_rendering_ ? gpu::Blend::One : src;
     state.dst_alpha = overlay_rendering_ ? gpu::Blend::OneMinusSrcAlpha : dst;
-    state.writes_point_size = true;
+    state.writes_point_size = false;
     gpu::Pipeline pipeline = device_->render_pipeline("d3d", state);
     if (!pipeline) {
         fprintf(stderr, "[host] Direct3D pipeline state failed\n");

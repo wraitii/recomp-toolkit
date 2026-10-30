@@ -19,9 +19,10 @@ interfaces, entry points and raster/output descriptors; prepared GPU handles sta
 separate. Draw parameters take explicit values and constant-bank slices, copied
 into existing batch storage before later state changes.
 
-- Lives in recomp-kit and is built by `dx/CMakeLists.txt` when `RECOMP_D3D8_WGPU` is on
-  (or a game ships its own `graphics/d3d8-wgpu`). Game-specific usage inventories and
-  execution evidence belong in the game repository, alongside its README and engine notes.
+- Lives in the kit graphics Cargo workspace and is built by `dx/CMakeLists.txt` for native hosts.
+  `RECOMP_D3D8_WGPU` enables rendering; CPU resource support still links the archive when it is off.
+  Per-game renderer overrides are rejected so native headers and Rust libraries agree.
+  Game-specific usage inventories and execution evidence belong in the game repository.
 - Some draw paths cover only what a game has needed so far (for example the lit
   `0x112`/`0x152` FVFs); anything else fails by name rather than approximating.
 - `reference/` is gitignored local material (Wine's D3D8 headers); the pinned copy the
@@ -51,16 +52,17 @@ submitted in queue order but may not be GPU-complete. Use `texture_for` with the
 same context, retain the lease through submission of reads, and do not mutate or
 destroy the exported texture. Serialize external queue submissions with renderer
 work. A lost context makes the lease unavailable; a replacement context cannot
-use an image from the old context. The kit's native presenter does not yet consume
-this lease.
+use an image from the old context. The kit presenter consumes retained Rust texture
+leases on the shared wgpu context.
 
 The kit's D3D7/8/9 native rings share an owned token retaining the slot and
 GPU handles; D3D9 also retains its context. A separate producer reference keeps
-the slot busy if the host cancels before production finishes. Native Metal blit
-or RGB565 conversion completion publishes pending/ready/failed state. The host
+the slot busy if the host cancels before production finishes. wgpu copy or
+RGB565 conversion completion publishes pending/ready/failed state. The host
 polls pending sealed frames at a 1 ms interval, submits copies only when ready,
 and cancels unsubmitted sources on replacement, frame drop or shutdown. It never
-enqueues a producer-event GPU wait. Submitted host copies retain their sources
+enqueues a producer-event GPU wait; the shared queue orders the copy after its producer.
+Submitted host copies retain their sources
 through completion. This does not bound stalled host GPU submissions or certify
 preceding wgpu draws whose errors have not surfaced as device loss. Direct host
 loss/resize/shutdown qualification and a matched latency profile remain open.
@@ -138,7 +140,9 @@ src/d3d8/            reusable D3D8 layer (no windowing, no game types)
   resource.rs        CPU storage, mip layouts, borrowed vertices, indexed preparation
   fixed_function.rs  FVF -> vertex layout and fixed-function WGSL
   device.rs          Clear / Draw* / Present / resource creation
-src/backend/         wgpu instance / adapter / device / surface / readback
+src/backend/         renderer context / surface / readback
+src/kit.rs           kit context registry / ordered host submissions / lease handoff
+src/host_gpu/        generic host command execution on the shared physical context
 src/d3d9/            D3D9 objects, state, resources and draw submission
 src/shader/          D3D9 decoding, admission, specialization and interpreter lowering
 src/render/          interfaces, pipeline recipes, compiler worker and prepared interpreter

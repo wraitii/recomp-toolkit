@@ -1,0 +1,12 @@
+[workspace]
+members = ["gpu", "compositor", "compositor/consumer", "d3d8-wgpu", "d3d8-wgpu/consumer"]
+default-members = ["gpu", "compositor", "d3d8-wgpu"]
+resolver = "3"
+
+[workspace.dependencies]
+pollster = "0.4"
+wgpu = "=30.0.1"
+naga = "=30.0.1"
+
+[profile.release]
+debug = "line-tables-only"

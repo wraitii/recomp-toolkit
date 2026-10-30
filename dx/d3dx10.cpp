@@ -3,6 +3,8 @@
 // Calculations use local matrices so pOut may alias either input. These
 // exports use the SDK stdcall ABI: 4 dwords for construction, 3 for products.
 #include "d3d11.h"
+#include "../runtime/memory.h"
+#include "../runtime/imports.h"
 #include <cstring>
 namespace {
 float scalar(X86 *c, int i) {
@@ -13,7 +15,7 @@ float scalar(X86 *c, int i) {
 }
 void build(X86 *c, bool translation) {
     uint32_t out = arg(c, 0);
-    if (!dx11::span(out, 64)) {
+    if (!(out && gm_fits(out, 64))) {
         set_eax(c, 0);
         return;
     }
@@ -32,7 +34,7 @@ void scaling(X86 *c) {
 }
 void product(X86 *c, bool transpose) {
     uint32_t out = arg(c, 0), a = arg(c, 1), b = arg(c, 2);
-    if (!dx11::span(out, 64) || !dx11::span(a, 64) || !dx11::span(b, 64)) {
+    if (!(out && gm_fits(out, 64)) || !(a && gm_fits(a, 64)) || !(b && gm_fits(b, 64))) {
         set_eax(c, 0);
         return;
     }

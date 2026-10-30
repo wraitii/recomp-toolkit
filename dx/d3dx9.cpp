@@ -47,107 +47,11 @@ static void write_matrix(uint32_t p, const float m[16]) {
         wf(p + 4u * (uint32_t)i, m[i]);
 }
 
-// D3DX matrices are row-major and the SDK's functions return their output
-// pointer, which callers chain on.
-void X_D3DXMatrixMultiply(X86 *c) {
-    uint32_t out = arg(c, 0), a = arg(c, 1), b = arg(c, 2);
-    float A[16], B[16], R[16];
-    read_matrix(a, A);
-    read_matrix(b, B);
-    for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < 4; ++k)
-                s += A[i * 4 + k] * B[k * 4 + j];
-            R[i * 4 + j] = s;
-        }
-    write_matrix(out, R);
-    set_eax(c, out);
-}
-
-void X_D3DXMatrixMultiplyTranspose(X86 *c) {
-    uint32_t out = arg(c, 0), a = arg(c, 1), b = arg(c, 2);
-    float A[16], B[16], R[16];
-    read_matrix(a, A);
-    read_matrix(b, B);
-    for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j) {
-            float s = 0.0f;
-            for (int k = 0; k < 4; ++k)
-                s += A[i * 4 + k] * B[k * 4 + j];
-            R[j * 4 + i] = s;
-        }
-    write_matrix(out, R);
-    set_eax(c, out);
-}
-
 void X_D3DXCheckVersion(X86 *c) {
     uint32_t d3d = arg(c, 0), d3dx = arg(c, 1);
     if (d3d != 32 || d3dx < 26)
         LOGW("d3dx9: D3DXCheckVersion(D3D %u, D3DX %u): unsupported SDK version", d3d, d3dx);
     set_eax(c, d3d == 32 && d3dx >= 26 ? 1 : 0);
-}
-
-void X_D3DXMatrixTranspose(X86 *c) {
-    uint32_t out = arg(c, 0), in = arg(c, 1);
-    float M[16], R[16];
-    read_matrix(in, M);
-    for (int i = 0; i < 4; ++i)
-        for (int j = 0; j < 4; ++j)
-            R[i * 4 + j] = M[j * 4 + i];
-    write_matrix(out, R);
-    set_eax(c, out);
-}
-
-// The cofactor expansion, with the determinant written out when asked for.
-void X_D3DXMatrixInverse(X86 *c) {
-    uint32_t out = arg(c, 0), pdet = arg(c, 1), in = arg(c, 2);
-    float m[16], inv[16];
-    read_matrix(in, m);
-    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] +
-             m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
-    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] -
-             m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
-    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] +
-             m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
-    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] -
-              m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
-    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] -
-             m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
-    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] +
-             m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
-    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] -
-             m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
-    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] +
-              m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
-    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] +
-             m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
-    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] -
-             m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
-    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] +
-              m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
-    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] -
-              m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
-    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] -
-             m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
-    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] +
-             m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
-    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] -
-              m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
-    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] +
-              m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
-    float det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
-    if (pdet)
-        wf(pdet, det);
-    if (det == 0.0f) {
-        set_eax(c, 0); // the SDK returns NULL for a singular matrix
-        return;
-    }
-    float r = 1.0f / det;
-    for (int i = 0; i < 16; ++i)
-        inv[i] *= r;
-    write_matrix(out, inv);
-    set_eax(c, out);
 }
 
 void X_D3DXMatrixTranslation(X86 *c) {
@@ -365,9 +269,9 @@ static const ImportShim g_d3dx9_27_exports[] = {
 static const ImportShim g_d3dx9_exports[] = {
     {"d3dx9_26.dll", "D3DXCreateEffectPool", 1, X_D3DX33CreateEffectPool},
     {"d3dx9_26.dll", "D3DXCreateEffectFromResourceA", 9, X_D3DXCreateEffectFromResourceA},
-    {"d3dx9_26.dll", "D3DXMatrixMultiply", 3, X_D3DXMatrixMultiply},
+    {"d3dx9_26.dll", "D3DXMatrixMultiply", 3, X_D3DX33MatrixMultiply},
     {"d3dx9_26.dll", "D3DXMatrixInverse", 3, X_D3DXMatrixInverse},
-    {"d3dx9_26.dll", "D3DXMatrixTranspose", 2, X_D3DXMatrixTranspose},
+    {"d3dx9_26.dll", "D3DXMatrixTranspose", 2, X_D3DX33MatrixTranspose},
     {"d3dx9_26.dll", "D3DXMatrixOrthoLH", 5, X_D3DXMatrixOrthoLH},
     {"d3dx9_26.dll", "D3DXMatrixPerspectiveLH", 5, X_D3DXMatrixPerspectiveLH},
     {"d3dx9_26.dll", "D3DXMatrixTranslation", 4, X_D3DXMatrixTranslation},

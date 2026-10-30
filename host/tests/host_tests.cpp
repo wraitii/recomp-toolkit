@@ -45,7 +45,6 @@
 #include "../../runtime/memory.h"
 #include "../../runtime/imports.h"
 #include "../../dx/dx.h"
-#include "../../dx/d3d11.h"
 #include "../../dx/com.h"
 #include "../../runtime/loader.h"
 #include "../../runtime/win32.h"
@@ -5859,59 +5858,6 @@ static void test_presenter_gpu_logical_coordinates(D3DRenderer *) {
 // The Direct3D 11 hardware path's host side on the real device: a texture
 // drawn a texel a pixel into a cleared target, then blended; read back, and
 // published through the presenter as a window frame.
-static void test_gpu2d_pixels(D3DRenderer *) {
-    host_present_start_offscreen(4, 4);
-    CHECK_EQ(host_gpu2d_available(), 1);
-    const uint32_t tex = 0x7001, target = 0x7002;
-    const uint8_t texels[16] = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 200, 100, 50, 128};
-    host_gpu2d_texture(tex, 2, 2, texels, 0, 0, 2, 2);
-    const float grey[4] = {0.5f, 0.5f, 0.5f, 1};
-    host_gpu2d_clear(target, 4, 4, grey);
-    HostGpu2DQuad copy{1, 1, 2, 2, 0, 0, 1, 1, 0, 1, 0, 1, 0};
-    CHECK_EQ(host_gpu2d_draw(target, 4, 4, tex, &copy), 1);
-    // The bottom-right texel alone, over the top-left pixel, alpha-blended.
-    HostGpu2DQuad blend{0, 0, 1, 1, 0.5, 0.5, 0.5, 0.5, 1, 2, 3, 0, 1};
-    CHECK_EQ(host_gpu2d_draw(target, 4, 4, tex, &blend), 1);
-    CHECK_EQ(host_gpu2d_draw(target, 4, 4, 0x7fff, &copy), 0); // no such texture
-    uint8_t out[64] = {};
-    CHECK_EQ(host_gpu2d_readback(target, 4, 4, out), 1);
-    auto at = [&](int x, int y) { return out + (y * 4 + x) * 4; };
-    for (int y = 0; y < 4; ++y)
-        for (int x = 0; x < 4; ++x) {
-            const uint8_t *p = at(x, y);
-            if (x == 0 && y == 0) {
-                // 200 * 128/255 + 128 * 127/255, and so on, to within rounding.
-                CHECK(std::abs(int(p[0]) - 164) <= 1);
-                CHECK(std::abs(int(p[1]) - 114) <= 1);
-                CHECK(std::abs(int(p[2]) - 89) <= 1);
-                continue;
-            }
-            const bool inside = x >= 1 && x <= 2 && y >= 1 && y <= 2;
-            const uint8_t *want = inside ? texels + ((y - 1) * 2 + (x - 1)) * 4 : nullptr;
-            for (int c = 0; c < 3; ++c)
-                CHECK(std::abs(int(p[c]) - int(want ? want[c] : 128)) <= (want ? 0 : 1));
-        }
-    // A window frame straight from the target.
-    const uint64_t before = host_present_unique_completed();
-    host_display_present_gpu2d(target, 4, 4);
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (host_present_unique_completed() == before && std::chrono::steady_clock::now() < deadline)
-        std::this_thread::yield();
-    CHECK(host_present_unique_completed() > before);
-    uint8_t shown[64] = {};
-    CHECK(host_present_test_read_rgba(shown, sizeof shown));
-    for (int i = 0; i < 16; ++i)
-        for (int c = 0; c < 3; ++c)
-            CHECK_EQ(shown[i * 4 + c], out[i * 4 + c]);
-    // A reset drops every copy and says so.
-    const uint32_t generation = host_gpu2d_generation();
-    host_gpu2d_reset();
-    CHECK(host_gpu2d_generation() != generation);
-    CHECK_EQ(host_gpu2d_readback(target, 4, 4, out), 0);
-    host_present_stop();
-    CHECK_EQ(host_gpu2d_available(), 0);
-}
-
 static void test_presenter_menu_ui_and_movie_pixels() {
     for (auto cls : {HOST_SCREEN_MENU, HOST_SCREEN_FMV}) {
         host_present_test_begin();
@@ -6362,7 +6308,6 @@ static void test_gdi_window_presentation() {
     host_present_stop();
 }
 
-static void test_d3d11_sealed_presentation();
 static void test_presentation_service() {
     // RGBA must preserve RGB, force alpha even on A8 input, and own its snapshot.
     host_present_test_begin();
@@ -6379,7 +6324,6 @@ static void test_presentation_service() {
     CHECK_EQ(host_present_test_last_pixel(), 23u);
     host_present_stop();
     test_gdi_window_presentation();
-    test_d3d11_sealed_presentation();
     test_windowed_first_blit_presents_without_prior_completion();
     test_windowed_drawable_handler_and_completion_fallback();
     test_windowed_duration_pacing_selector();
@@ -6740,55 +6684,6 @@ static uint32_t gate_call_method(X86 *c, uint32_t iface, uint32_t slot,
 static uint32_t gate_scratch(uint32_t off) {
     return STACK_LIMIT + 0x4000u + off;
 }
-// A real DXGI COM Present must publish a complete owned frame to the host
-// mailbox, not merely increment the legacy host_present call counter.
-static void test_d3d11_sealed_presentation() {
-    mem_init();
-    imports_init();
-    d3d11_reset();
-    com_reset();
-    d3d11_register();
-    dxgi_register();
-    d3dcompiler_register();
-    d3dx10_register();
-    host_present_test_begin();
-    X86 c;
-    loader_init_context(&c);
-    uint32_t s = gate_scratch(0x2000);
-    gm_zero(s, 1024);
-    wr32(s, 2);
-    wr32(s + 4, 2);
-    wr32(s + 16, 28);
-    wr32(s + 28, 1);
-    wr32(s + 36, 0x20);
-    wr32(s + 40, 1);
-    CHECK_EQ(gate_call_import(&c, "d3d11.dll", "D3D11CreateDeviceAndSwapChain",
-                              {0, 1, 0, 0, 0, 0, 7, s, s + 64, s + 68, s + 72, s + 76}),
-             S_OK);
-    uint32_t swap = rd32(s + 64), dev = rd32(s + 68), ctx = rd32(s + 76);
-    const uint8_t iid[] = {0xf2, 0xaa, 0x15, 0x6f, 0x08, 0xd2, 0x89, 0x4e,
-                           0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c};
-    memcpy(gm_ptr(s + 128), iid, 16);
-    gate_call_method(&c, swap, 9, {0, s + 128, s + 80});
-    uint32_t back = rd32(s + 80);
-    gate_call_method(&c, dev, 9, {back, 0, s + 84});
-    uint32_t view = rd32(s + 84);
-    float colour[] = {1, 0, 0, 1};
-    memcpy(gm_ptr(s + 160), colour, 16);
-    gate_call_method(&c, ctx, 50, {view, s + 160});
-    gate_call_method(&c, swap, 8, {0, 0});
-    colour[0] = 0;
-    colour[1] = 1;
-    memcpy(gm_ptr(s + 160), colour, 16);
-    gate_call_method(&c, ctx, 50, {view, s + 160});
-    host_present_tick_for_test(0);
-    CHECK_EQ(host_present_unique_completed(), 1u);
-    CHECK_EQ(host_present_test_last_pixel(), 255u);
-    for (uint32_t object : {view, back, ctx, dev, swap})
-        gate_call_method(&c, object, 2);
-    host_present_stop();
-}
-
 static uint32_t gate_put_str(const char *text) {
     static uint32_t cursor = 0;
     uint32_t a = gate_scratch(0x800 + cursor);
@@ -8398,9 +8293,6 @@ static void test_display_settings_bridge() {
     g_page_draws = false;
     CHECK(!host_page_rgba(&page));
     CHECK(page.empty());
-    // A window present - a D3D11 renderer's, a film's - carries the open page
-    // like a DirectDraw frame does; it used to seal without it, so F10 opened
-    // a page nobody could see.
     host_present_test_begin();
     g_page_draws = true;
     const uint8_t window_rgba[4] = {1, 2, 3, 255};
@@ -8747,7 +8639,6 @@ int main(int argc, char **argv) {
             {"offscreen presenter", test_presenter_real_offscreen},
             {"presenter GPU color order", test_presenter_gpu_color_order},
             {"presenter GPU logical coordinates", test_presenter_gpu_logical_coordinates},
-            {"Direct3D 11 hardware path", test_gpu2d_pixels},
             {"presenter world and overlay", test_presenter_incremental_world_and_overlay},
             {"wide scene clipping", test_wide_scene_pixels},
             {"native tile borders", test_native_tile_borders},

@@ -33,7 +33,7 @@ const Named kKeys[] = {
     {"UP", 0xc8},     {"DOWN", 0xd0},   {"LEFT", 0xcb},     {"RIGHT", 0xcd}, {"PAUSE", 0xc5},
     {"P", 0x19},      {"Y", 0x15},      {"N", 0x31},        {"F10", 0x44},   {"F1", 0x3b},
     {"F2", 0x3c},     {"F3", 0x3d},     {"F4", 0x3e},       {"1", 0x02},     {"2", 0x03},
-    {"3", 0x04},      {"LSHIFT", 0x2a}, {"LCONTROL", 0x1d}, {"LALT", 0x38},
+    {"3", 0x04},      {"LSHIFT", 0x2a}, {"LCONTROL", 0x1d}, {"LALT", 0x38},  {"F11", 0x57},
 };
 const int kKeyCount = (int)(sizeof kKeys / sizeof kKeys[0]);
 

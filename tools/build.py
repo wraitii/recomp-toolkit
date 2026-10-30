@@ -40,6 +40,9 @@ TARGETS = {
     "dispatch-tests": ["dispatch_tests"],
     "interp-tests": ["interp_tests"],
     "d3d9-guest-tests": ["d3d9_guest_tests"],
+    "compositor-tests": ["compositor_tests", "host_tests", "headless_tests", "gpu_wgpu_tests",
+                         "gpu_fake_tests", "dx_tests", "layout_tests", "d3d8_surface_tests",
+                         "d3d8_render_tests", "d3d9_guest_tests", "d3d7_mipmap_tests"],
     "plugins": ["plugins"],
     "ios": ["recomp_app"],
     "android": ["recomp_app"],
@@ -834,6 +837,9 @@ def parse_args(argv, system=None):
                         help="Explicit native Cargo target triple for the renderer")
     parser.add_argument("--renderer-consumer", choices=("build", "run", "gpu-build", "gpu-run", "probe-build"),
                         help="Build or run a renderer consumer, or build the headless probe without windowing")
+    parser.add_argument("--compositor-consumer", choices=("build", "run"),
+                        help="Build or run the independent Rust compositor window")
+    parser.add_argument("--compositor-frames", type=int, default=120)
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 2, 8))
     parser.add_argument("--translation-piece-mb", type=int,
                         help="Generated C source MB per macOS translation dylib (CMake default: 160)")
@@ -900,7 +906,7 @@ def parse_args(argv, system=None):
     if args.stub and (args.config == "Debug" or args.regenerate):
         parser.error("--stub cannot be combined with --config Debug or --regenerate")
     game_config.resolve_game_args(args)
-    if args.renderer_consumer:
+    if args.renderer_consumer or args.compositor_consumer:
         if args.jobs < 1:
             parser.error("--jobs must be at least 1")
         if any((args.regenerate, args.regen_function, args.stub, args.diff_harness,
@@ -954,27 +960,31 @@ def regenerate_selection(value, cfg, parser):
 def main():
     """Check inputs, translate under the build lock when needed, then configure and build."""
     args, parser = parse_args(sys.argv[1:])
-    if args.renderer_consumer:
-        from build_d3d8_wgpu import native_target_args
+    if args.renderer_consumer or args.compositor_consumer:
+        from cargo_build import native_target_args
         try:
             target_args = native_target_args(args.renderer_cargo_target)
         except ValueError as error:
             parser.error(str(error))
-        target_dir = args.build_root / "d3d8-wgpu/rust"
+        target_dir = args.build_root / ("compositor/consumer" if args.compositor_consumer else "d3d8-wgpu/consumer")
         probe = args.renderer_consumer == "probe-build"
-        binary = "probe-headless" if probe else ("d3d9-gpu-consumer" if args.renderer_consumer.startswith("gpu-") else "d3d9-cpu-consumer")
-        package = "d3d8-wgpu" if probe else "d3d9-cpu-consumer"
+        binary = "recomp-compositor-host" if args.compositor_consumer else ("probe-headless" if probe else ("d3d9-gpu-consumer" if args.renderer_consumer.startswith("gpu-") else "d3d9-cpu-consumer"))
+        package = "recomp-compositor-host" if args.compositor_consumer else ("d3d8-wgpu" if probe else "d3d9-cpu-consumer")
         features = ["--no-default-features", "--features", "probe"] if probe else []
+        manifest = ROOT / ("graphics/compositor/Cargo.toml" if args.compositor_consumer else "graphics/d3d8-wgpu/Cargo.toml")
         with buildlock.BuildLock(args.build_root.parent, "tools/build.py --renderer-consumer"):
             subprocess.run(["cargo", "build", "--release", "--locked", "--jobs", str(args.jobs), "-p", package,
                             "--bin", binary,
-                            "--manifest-path", str(ROOT / "graphics/d3d8-wgpu/Cargo.toml"),
+                            "--manifest-path", str(manifest),
                             "--target-dir", str(target_dir), *target_args, *features], check=True)
-            if args.renderer_consumer in ("run", "gpu-run"):
+            if args.renderer_consumer in ("run", "gpu-run") or args.compositor_consumer == "run":
                 output_dir = target_dir / args.renderer_cargo_target if args.renderer_cargo_target else target_dir
                 if os.name == "nt":
                     binary += ".exe"
-                subprocess.run([str(output_dir / "release" / binary)], check=True)
+                command = [str(output_dir / "release" / binary)]
+                if args.compositor_consumer:
+                    command += ["--frames", str(args.compositor_frames)]
+                subprocess.run(command, check=True)
         return
     if not args.function_corpus and not args.translator_harness:
         status = subprocess.call([sys.executable, str(ROOT / "tools/check_flag_state.py")])

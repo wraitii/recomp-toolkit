@@ -4091,7 +4091,7 @@ static void d3dx_matrix_write(uint32_t addr, const std::array<float, 16> &values
         d3dx_wf(addr + (uint32_t)i * 4, values[i]);
 }
 
-void X_D3DX33MatrixMultiply(X86 *c) {
+static void d3dx_matrix_multiply(X86 *c, bool transpose) {
     uint32_t out = arg(c, 0), a = arg(c, 1), b = arg(c, 2);
     float ma[16], mb[16];
     if (!d3dx_matrix_read(a, ma) || !d3dx_matrix_read(b, mb) || (!out || !gm_valid(out, 64))) {
@@ -4104,8 +4104,24 @@ void X_D3DX33MatrixMultiply(X86 *c) {
         set_eax(c, 0);
         return;
     }
+    if (transpose) {
+        result =
+            recomp::d3d::d3dx_matrix_transpose(rust::Slice<const float>(result.values.data(), 16));
+        if (result.status.code != recomp::d3d::StatusCode::Ok) {
+            set_eax(c, 0);
+            return;
+        }
+    }
     d3dx_matrix_write(out, result.values);
     set_eax(c, out);
+}
+
+void X_D3DX33MatrixMultiply(X86 *c) {
+    d3dx_matrix_multiply(c, false);
+}
+
+void X_D3DXMatrixMultiplyTranspose(X86 *c) {
+    d3dx_matrix_multiply(c, true);
 }
 
 void X_D3DX33MatrixTranspose(X86 *c) {
@@ -4125,7 +4141,7 @@ void X_D3DX33MatrixTranspose(X86 *c) {
     set_eax(c, out);
 }
 
-void X_D3DX33MatrixInverse(X86 *c) {
+static void d3dx_matrix_inverse(X86 *c, bool write_singular) {
     uint32_t out = arg(c, 0), pdet = arg(c, 1), in = arg(c, 2);
     float m[16];
     if (!d3dx_matrix_read(in, m) || (!out || !gm_valid(out, 64)) || (pdet && !gm_valid(pdet, 4))) {
@@ -4134,14 +4150,26 @@ void X_D3DX33MatrixInverse(X86 *c) {
     }
     recomp::d3d::D3dxMatrixInverseResult result =
         recomp::d3d::d3dx_matrix_inverse(rust::Slice<const float>(m, 16));
-    if (result.status.code != recomp::d3d::StatusCode::Ok || !result.valid) {
+    if (result.status.code != recomp::d3d::StatusCode::Ok) {
         set_eax(c, 0);
         return;
     }
-    if (pdet)
+    if (pdet && (result.valid || write_singular))
         d3dx_wf(pdet, result.determinant);
+    if (!result.valid) {
+        set_eax(c, 0);
+        return;
+    }
     d3dx_matrix_write(out, result.values);
     set_eax(c, out);
+}
+
+void X_D3DX33MatrixInverse(X86 *c) {
+    d3dx_matrix_inverse(c, false);
+}
+
+void X_D3DXMatrixInverse(X86 *c) {
+    d3dx_matrix_inverse(c, true);
 }
 
 static bool d3d9_guest_rect_owner(const ComObj *owner) {

@@ -670,7 +670,6 @@ void dx_reset() {
     ddraw_reset();
     d3d_reset();
     d3d7_reset();
-    d3d11_reset();
     d3d9_reset();
     d3d8_reset();
     d3dx9_reset();

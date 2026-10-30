@@ -29,8 +29,8 @@ else()
   set(RECOMP_OBJC_ARC "")
 endif()
 
-# The GPU interface, its test double, the Vulkan backend and (on Apple) Metal.
 add_subdirectory(gpu)
+include(${RECOMP_ROOT}/cmake/RustCompositor.cmake)
 
 if(NOT IOS AND NOT ANDROID)
 # Portable pieces built everywhere. compositor_tests needs a real device for
@@ -38,7 +38,7 @@ if(NOT IOS AND NOT ANDROID)
 add_executable(compositor_tests ${HOST}/compositor.cpp ${HOST}/tests/compositor_tests.cpp)
 target_include_directories(compositor_tests PRIVATE ${RECOMP_ROOT} ${HOST})
 target_compile_options(compositor_tests PRIVATE ${RECOMP_WARN_WERROR})
-target_link_libraries(compositor_tests PRIVATE gpu_backend)
+target_link_libraries(compositor_tests PRIVATE gpu_backend recomp_compositor)
 recomp_optimize(compositor_tests 1)
 recomp_test_binary(compositor_tests)
 add_test(NAME compositor_tests COMMAND compositor_tests WORKING_DIRECTORY ${RECOMP_ROOT})
@@ -166,7 +166,7 @@ set(RECOMP_AUDIO_SOURCES ${HOST}/audio/mixer.cpp ${HOST}/audio/sdl_sink.cpp
 if(RECOMP_AUDIO_MIDI)
   list(APPEND RECOMP_AUDIO_SOURCES ${HOST}/audio/midi_synth.cpp)
 endif()
-set(RECOMP_CORE_LIBS recomp_platform recomp_runtime recomp_dx recomp_mods lua host_common gpu_backend)
+set(RECOMP_CORE_LIBS recomp_platform recomp_runtime recomp_dx recomp_mods lua host_common gpu_backend recomp_compositor)
 # The on-screen controls the presenter draws (controls_host.cpp is the app's own).
 set(RECOMP_CONTROLS_SOURCES ${HOST}/controls/layout.cpp
                          ${HOST}/controls/builtin_layouts.cpp ${HOST}/controls/layout_store.cpp
@@ -181,7 +181,6 @@ set(RECOMP_CONTROLS_SOURCES ${HOST}/controls/layout.cpp
 set(RECOMP_PRESENT_SOURCES ${HOST}/present_pixels.cpp ${HOST}/present_thread.cpp ${HOST}/compositor.cpp
                         ${HOST}/ui_layer.cpp ${HOST}/performance_overlay.cpp ${RECOMP_CONTROLS_SOURCES}
                         ${HOST}/d3d_render.cpp
-                        ${HOST}/gpu2d.cpp
                         ${HOST}/indexed_frame.cpp)
 # The host's platform file: desktop or iPadOS (host/sdl/platform_ui.h), and
 # the launcher's (host/launcher/launcher_sdl.h; iPadOS keeps its own in
@@ -314,7 +313,7 @@ recomp_host(host_tests UI_LAYER
           ${RECOMP_ROOT}/dx/dinput_joystick.cpp
           ${RECOMP_ROOT}/dx/d3d11.cpp ${RECOMP_ROOT}/dx/dxgi.cpp
           ${RECOMP_ROOT}/dx/d3dcompiler.cpp ${RECOMP_ROOT}/dx/d3dx10.cpp
-  LIBS recomp_platform recomp_runtime gpu_backend gpu_fake
+  LIBS recomp_platform recomp_runtime gpu_backend gpu_fake recomp_compositor
   FRAMEWORKS ${FW_FOUNDATION} ${FW_METAL})
 recomp_link_sdl(host_tests)
 recomp_test_binary(host_tests)
@@ -329,7 +328,7 @@ recomp_host(headless_tests
           ${HOST}/input.cpp ${HOST}/input_gate.cpp ${HOST}/compositor.cpp ${HOST}/script.cpp
           ${HOST}/input_script.cpp ${HOST}/input_script_host.cpp
           ${HOST}/page_overlay.cpp ${RECOMP_AUDIO_SOURCES}
-  LIBS recomp_platform recomp_runtime recomp_dx host_common
+  LIBS recomp_platform recomp_runtime recomp_dx host_common recomp_compositor
   FRAMEWORKS ${FW_FOUNDATION})
 recomp_link_sdl(headless_tests)
 recomp_test_binary(headless_tests)

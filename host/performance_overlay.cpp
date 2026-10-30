@@ -50,7 +50,8 @@ void PerformanceOverlay::update(gpu::Device *device, const FramePacingSnapshot &
     Canvas c{pixels_, width, used};
     c.fill(0, 0, width, used, 6, 9, 15, 224);
     char line[64];
-    snprintf(line, sizeof line, "NEW %5.1f FPS  DSP %5.1f", s.new_fps, s.display_fps);
+    snprintf(line, sizeof line, "NEW %5.1f FPS  %s %5.1f", s.new_fps,
+             device->presentation_timestamps() ? "DSP" : "CMP", s.display_fps);
     c.text(10, 6, line, 115, 255, 196);
     snprintf(line, sizeof line, "FRAME %5.1f ms P95 %5.1f", s.median_ms, s.p95_ms);
     c.text(10, 24, line, 235, 242, 255);

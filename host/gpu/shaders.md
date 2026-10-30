@@ -1,9 +1,9 @@
 # Shader contract
 
-Every backend supplies these programs under these names. Slot numbers are the
-binding indices `gpu.h` calls use; layouts are the structs the portable code
-fills. A backend may implement a program in any language but must read exactly
-these inputs.
+The Rust wgpu host adapter supplies these WGSL programs under these names.
+Slot numbers are the binding indices `gpu.h` calls use; layouts are the
+structs the native host fills. Composition also uses the shared Rust compositor
+plan and shader.
 
 ## `d3d` (render pipeline)
 
@@ -31,9 +31,9 @@ these inputs.
 - No vertex buffer: 4 vertices by id, triangle strip.
 - Vertex and fragment bytes slot 0: `CompositorQuad { float rect[4]; float uv[4]; float drawable[2];
   uint32 opaque, pad; }` (48 bytes). rect in drawable pixels, y down; uv normalised.
-- Fragment texture 0, nearest, clamp to edge. Output: colour attachment 0 in the target's format;
-  `opaque` forces alpha to 1. `gpu2d.cpp` draws Direct3D 11 rectangles with it too, under any
-  blend factors, so the sample must be the texel itself, unfiltered.
+- Fragment texture 0, clamp to edge; the presentation filter selects nearest or linear sampling,
+  with settings pages using nearest. Output: colour attachment 0 in the target's format;
+  `opaque` forces alpha to 1.
 
 ## `hud` (render pipeline)
 
@@ -56,11 +56,11 @@ these inputs.
   A backend without subgroup operations may reduce through shared memory; the output layout is
   what matters.
 
-## Vulkan bindings
+## Bindings and sources
 
-The GLSL under `gpu/vulkan/shaders/` maps the slots above onto descriptor set 0: vertex-stage buffer
-slot s → binding s, fragment-stage buffer slot s → binding 4+s, texture slot t → combined image
-sampler binding 8+t; compute kernels use bindings 0..3 for buffers and 8+t for textures. Every
-buffer is a std430 storage buffer; compute local sizes are fixed at 8x8 (readback) and 16x16
-(brightness), the sizes the renderer dispatches with. `tools/recomp/shaders.py compile` regenerates
-`gpu/vulkan/shaders_spv.h`; `shader_drift_check` fails when the header and the sources disagree.
+WGSL lives in `graphics/d3d8-wgpu/src/host_gpu/shaders.rs`; the shared
+compositor shader lives in `graphics/compositor/src/compositor.wgsl`.
+Render buffer slots map to bindings 0–3 for vertex and 4–7 for fragment,
+textures to 16 and above, and samplers to 24 and above. Compute bindings use
+the host adapter's declared layouts. The wgpu implementation and shared
+compositor use the same named shader contracts.

@@ -345,9 +345,6 @@ HostSceneTarget host_present_acquire_target(int guest_w, int guest_h, int scene_
 void host_present_set_input(const CompositorInput *input);
 // A real device is presenting (not the fake one, not stopped).
 bool host_present_gpu_ready();
-// host/gpu2d.cpp: finish and drop the Direct3D 11 path's GPU work; the
-// presenter calls it before it stops.
-void host_gpu2d_release_device();
 // Stage the frame's pixels as a format-preserving copy of `src` (w x h),
 // encoded into `cb`, which the caller commits before sealing. The guest size
 // describes input coordinates and aspect, independently of GPU render scale.

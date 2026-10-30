@@ -3,17 +3,8 @@ name = "d3d8-wgpu"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "Isolated D3D8-semantics renderer prototype on wgpu (not a game integration)"
+description = "Reusable D3D7/8/9 renderer and recomp-kit graphics adapters on wgpu"
 license = "MIT OR Apache-2.0"
-
-[workspace]
-members = ["consumer"]
-default-members = ["."]
-resolver = "3"
-
-[workspace.dependencies]
-pollster = "0.4"
-wgpu = "30.0.1"
 
 [features]
 default = ["windowing", "probe"]
@@ -53,15 +44,18 @@ half = { version = "2", features = ["bytemuck"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tga", "bmp", "pnm"] }
 log = "0.4"
 pollster.workspace = true
+raw-window-handle = "0.6"
+recomp-gpu = { path = "../gpu" }
+recomp-compositor = { path = "../compositor", default-features = false, features = ["gpu"] }
 smallvec = { version = "1", features = ["union"] }
 texpresso = "2"
 wgpu.workspace = true
 winit = { version = "0.30", optional = true }
-naga = { version = "30", features = ["wgsl-in"] }
+naga = { workspace = true, features = ["wgsl-in"] }
 
 [build-dependencies]
 cxx-build = "=1.0.171"
-naga = { version = "30", features = ["wgsl-in", "msl-out", "termcolor", "stderr"] }
+naga = { workspace = true, features = ["wgsl-in", "msl-out", "termcolor", "stderr"] }
 
 [dependencies.cxx]
 version = "=1.0.171"
@@ -71,6 +65,3 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-metal = "0.3"
 block2 = "0.6"
-
-[profile.release]
-debug = "line-tables-only"
