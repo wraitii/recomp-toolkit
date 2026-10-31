@@ -5,8 +5,9 @@ use rk_core::Reason;
 
 use crate::lower::{copy, op};
 use crate::regs::Registers;
+use crate::{CgOp, Op, SimdOp};
 
-pub(crate) fn wide_lanes(
+pub fn wide_lanes(
     value: Varnode,
     lanes: &BTreeMap<Varnode, [Varnode; 4]>,
     regs: &Registers,
@@ -16,12 +17,9 @@ pub(crate) fn wide_lanes(
         return Ok(*lanes);
     }
     if value.space == Space::Register {
-        if !regs
-            .covering(value.offset)
-            .is_some_and(|(name, _)| name.starts_with("XMM"))
-        {
+        if !regs.vector(value.offset) {
             return Err(Reason::Unsupported {
-                detail: "wide non-XMM register".into(),
+                detail: "wide non-vector register".into(),
             });
         }
         return Ok(std::array::from_fn(|lane| {
@@ -41,7 +39,7 @@ pub(crate) fn wide_lanes(
     })
 }
 
-pub(crate) fn wide_output(
+pub fn wide_output(
     value: Varnode,
     regs: &Registers,
     fresh: &mut dyn FnMut(u32) -> Varnode,
@@ -57,7 +55,7 @@ pub(crate) fn wide_output(
     }
 }
 
-pub(crate) fn lane_address(
+fn lane_address(
     address: Varnode,
     lane: usize,
     fresh: &mut dyn FnMut(u32) -> Varnode,
@@ -77,7 +75,7 @@ pub(crate) fn lane_address(
     Ok(result)
 }
 
-pub(crate) fn half_lanes(
+fn half_lanes(
     value: Varnode,
     lanes: &BTreeMap<Varnode, [Varnode; 2]>,
     regs: &Registers,
@@ -86,12 +84,9 @@ pub(crate) fn half_lanes(
         return Ok(*lanes);
     }
     if value.space == Space::Register {
-        if !regs
-            .covering(value.offset)
-            .is_some_and(|(name, _)| name.starts_with("XMM"))
-        {
+        if !regs.vector(value.offset) {
             return Err(Reason::Unsupported {
-                detail: "wide non-XMM register".into(),
+                detail: "wide non-vector register".into(),
             });
         }
         return Ok(std::array::from_fn(|lane| {
@@ -124,9 +119,9 @@ fn half_output(
     }
 }
 
-pub(crate) fn split_wide(
+fn split_wide(
     ops: &[PcodeOp],
-    mnem: &str,
+    simd: Option<SimdOp>,
     regs: &Registers,
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
@@ -138,7 +133,7 @@ pub(crate) fn split_wide(
     let mut halves: BTreeMap<Varnode, [Varnode; 2]> = BTreeMap::new();
     for item in ops {
         if item.opcode == OpCode::CallOther {
-            if mnem == "MOVMSKPS" {
+            if simd == Some(SimdOp::SignMask { lane_bytes: 4 }) {
                 let output = item.output.ok_or_else(unsupported)?;
                 let source = wide_lanes(
                     *item.inputs.last().ok_or_else(unsupported)?,
@@ -173,15 +168,22 @@ pub(crate) fn split_wide(
                 out.push(copy(output, acc));
                 continue;
             }
-            if matches!(
-                mnem,
-                "MINPS" | "MAXPS" | "DIVPS" | "SQRTPS" | "RCPPS" | "RSQRTPS" | "RSQRTSS"
-            ) {
+            if let Some(SimdOp::Float {
+                opcode:
+                    code @ (OpCode::FloatMin
+                    | OpCode::FloatMax
+                    | OpCode::FloatDiv
+                    | OpCode::FloatSqrt
+                    | OpCode::FloatRcp
+                    | OpCode::FloatRsqrt),
+                lane_bytes: 4,
+            }) = simd
+            {
                 let output = item.output.ok_or_else(unsupported)?;
                 let source = *item.inputs.last().ok_or_else(unsupported)?;
                 if output.size == 16 {
                     let output_lanes = wide_output(output, regs, fresh)?;
-                    if matches!(mnem, "MINPS" | "MAXPS" | "DIVPS") {
+                    if matches!(code, OpCode::FloatMin | OpCode::FloatMax | OpCode::FloatDiv) {
                         let vectors: Vec<Varnode> = item
                             .inputs
                             .iter()
@@ -193,28 +195,18 @@ pub(crate) fn split_wide(
                         }
                         let left = wide_lanes(vectors[0], &lanes, regs, fresh)?;
                         let right = wide_lanes(vectors[1], &lanes, regs, fresh)?;
-                        let code = match mnem {
-                            "MINPS" => OpCode::FloatMin,
-                            "MAXPS" => OpCode::FloatMax,
-                            _ => OpCode::FloatDiv,
-                        };
                         for lane in 0..4 {
                             out.push(op(code, output_lanes[lane], vec![left[lane], right[lane]]));
                         }
                     } else {
                         let source_lanes = wide_lanes(source, &lanes, regs, fresh)?;
-                        let code = match mnem {
-                            "SQRTPS" => OpCode::FloatSqrt,
-                            "RCPPS" => OpCode::FloatRcp,
-                            _ => OpCode::FloatRsqrt,
-                        };
                         for lane in 0..4 {
                             out.push(op(code, output_lanes[lane], vec![source_lanes[lane]]));
                         }
                     }
                     lanes.insert(output, output_lanes);
                 } else if output.size == 4 && source.size == 4 {
-                    out.push(op(OpCode::FloatRsqrt, output, vec![source]));
+                    out.push(op(code, output, vec![source]));
                 } else {
                     return Err(unsupported());
                 }
@@ -404,7 +396,7 @@ fn split_psrldq(
     Ok(out)
 }
 
-pub(crate) fn temporary_start(ops: &[PcodeOp]) -> u64 {
+fn temporary_start(ops: &[PcodeOp]) -> u64 {
     ops.iter()
         .flat_map(|item| item.output.iter().chain(&item.inputs))
         .filter(|v| v.space == Space::Unique)
@@ -415,112 +407,20 @@ pub(crate) fn temporary_start(ops: &[PcodeOp]) -> u64 {
         & !15
 }
 
-pub fn required(ops: &[crate::CgOp]) -> bool {
+pub fn required(ops: &[CgOp]) -> bool {
     ops.iter().any(|item| match item.op {
-        crate::Op::Simd(_) => true,
-        crate::Op::P(_) => item.output.iter().chain(&item.inputs).any(|v| {
+        Op::Simd(_) => true,
+        Op::P(_) => item.output.iter().chain(&item.inputs).any(|v| {
             v.size > 8
-                || (v.size == 8
-                    && v.space == Space::Register
-                    && Registers::get()
-                        .covering(v.offset)
-                        .is_some_and(|(name, _)| name.starts_with("XMM")))
+                || (v.size == 8 && v.space == Space::Register && Registers::get().vector(v.offset))
         }),
         _ => false,
     })
 }
 
-pub fn deferred(mnemonic: &str) -> bool {
-    if mnemonic.starts_with("CMP") && mnemonic.ends_with("PS") {
-        return true;
-    }
-    matches!(
-        mnemonic,
-        "MOVAPS"
-            | "MOVUPS"
-            | "MOVNTPS"
-            | "MOVDQA"
-            | "MOVDQU"
-            | "MOVAPD"
-            | "XORPS"
-            | "ANDPS"
-            | "ORPS"
-            | "ANDNPS"
-            | "ADDPS"
-            | "SUBPS"
-            | "MULPS"
-            | "UNPCKLPS"
-            | "UNPCKHPS"
-            | "MOVLHPS"
-            | "MOVHLPS"
-            | "MOVLPS"
-            | "MOVHPS"
-            | "PUNPCKLQDQ"
-            | "PUNPCKHQDQ"
-            | "MINPS"
-            | "MAXPS"
-            | "DIVPS"
-            | "SQRTPS"
-            | "RCPPS"
-            | "RSQRTPS"
-            | "MOVMSKPS"
-            | "PSRLDQ"
-            | "SHUFPS"
-            | "PSHUFD"
-    )
-}
-
-pub fn semantic(mnemonic: &str) -> Option<crate::SimdOp> {
-    let opcode = match mnemonic {
-        "MINPS" => OpCode::FloatMin,
-        "MAXPS" => OpCode::FloatMax,
-        "DIVPS" => OpCode::FloatDiv,
-        "SQRTPS" => OpCode::FloatSqrt,
-        "RCPPS" => OpCode::FloatRcp,
-        "RSQRTPS" => OpCode::FloatRsqrt,
-        "MOVMSKPS" => return Some(crate::SimdOp::SignMask { lane_bytes: 4 }),
-        _ => return None,
-    };
-    Some(crate::SimdOp::Float {
-        opcode,
-        lane_bytes: 4,
-    })
-}
-
-fn semantic_name(op: crate::SimdOp) -> Option<&'static str> {
-    match op {
-        crate::SimdOp::Float {
-            opcode: OpCode::FloatMin,
-            lane_bytes: 4,
-        } => Some("MINPS"),
-        crate::SimdOp::Float {
-            opcode: OpCode::FloatMax,
-            lane_bytes: 4,
-        } => Some("MAXPS"),
-        crate::SimdOp::Float {
-            opcode: OpCode::FloatDiv,
-            lane_bytes: 4,
-        } => Some("DIVPS"),
-        crate::SimdOp::Float {
-            opcode: OpCode::FloatSqrt,
-            lane_bytes: 4,
-        } => Some("SQRTPS"),
-        crate::SimdOp::Float {
-            opcode: OpCode::FloatRcp,
-            lane_bytes: 4,
-        } => Some("RCPPS"),
-        crate::SimdOp::Float {
-            opcode: OpCode::FloatRsqrt,
-            lane_bytes: 4,
-        } => Some("RSQRTPS"),
-        crate::SimdOp::SignMask { lane_bytes: 4 } => Some("MOVMSKPS"),
-        _ => None,
-    }
-}
-
-pub fn legalize(ops: &[crate::CgOp], addr: u64) -> Result<Vec<crate::CgOp>, rk_core::Diagnostic> {
+pub fn legalize(ops: &[CgOp], addr: u64) -> Result<Vec<CgOp>, rk_core::Diagnostic> {
     if ops.iter().any(|item| {
-        matches!(item.op, crate::Op::P(OpCode::Branch | OpCode::CBranch))
+        matches!(item.op, Op::P(OpCode::Branch | OpCode::CBranch))
             && item.inputs.first().is_some_and(|v| v.space == Space::Const)
     }) {
         return Err(rk_core::Diagnostic::new(
@@ -532,18 +432,16 @@ pub fn legalize(ops: &[crate::CgOp], addr: u64) -> Result<Vec<crate::CgOp>, rk_c
     }
     let count = ops
         .iter()
-        .take_while(|item| matches!(item.op, crate::Op::P(_) | crate::Op::Simd(_)))
+        .take_while(|item| matches!(item.op, Op::P(_) | Op::Simd(_)))
         .count();
     if count == 0 {
         return Ok(ops.to_vec());
     }
     let mut prefix = Vec::new();
-    if let Some(item) = ops[..count].iter().find(|item| {
-        matches!(
-            item.op,
-            crate::Op::Simd(crate::SimdOp::ShiftBytesRight { .. })
-        )
-    }) {
+    if let Some(item) = ops[..count]
+        .iter()
+        .find(|item| matches!(item.op, Op::Simd(SimdOp::ShiftBytesRight { .. })))
+    {
         if count != 1 {
             return Err(rk_core::Diagnostic::new(
                 addr,
@@ -552,7 +450,7 @@ pub fn legalize(ops: &[crate::CgOp], addr: u64) -> Result<Vec<crate::CgOp>, rk_c
                 },
             ));
         }
-        let crate::Op::Simd(crate::SimdOp::ShiftBytesRight { bytes }) = item.op else {
+        let Op::Simd(SimdOp::ShiftBytesRight { bytes }) = item.op else {
             unreachable!()
         };
         let output = item.output.ok_or_else(|| {
@@ -592,7 +490,7 @@ pub fn legalize(ops: &[crate::CgOp], addr: u64) -> Result<Vec<crate::CgOp>, rk_c
             .saturating_add(15)
             & !15;
         for item in &ops[..count] {
-            if let crate::Op::Simd(crate::SimdOp::Shuffle {
+            if let Op::Simd(SimdOp::Shuffle {
                 lane_bytes: 4,
                 lanes,
             }) = item.op
@@ -638,8 +536,7 @@ pub fn legalize(ops: &[crate::CgOp], addr: u64) -> Result<Vec<crate::CgOp>, rk_c
                         source,
                     ));
                 }
-            } else if let crate::Op::Simd(crate::SimdOp::ShuffleScalars { lane_bytes: 4 }) = item.op
-            {
+            } else if let Op::Simd(SimdOp::ShuffleScalars { lane_bytes: 4 }) = item.op {
                 let output = item.output.ok_or_else(|| {
                     rk_core::Diagnostic::new(
                         addr,
@@ -665,8 +562,8 @@ pub fn legalize(ops: &[crate::CgOp], addr: u64) -> Result<Vec<crate::CgOp>, rk_c
             } else {
                 raw.push(PcodeOp {
                     opcode: match item.op {
-                        crate::Op::P(code) => code,
-                        crate::Op::Simd(_) => OpCode::CallOther,
+                        Op::P(code) => code,
+                        Op::Simd(_) => OpCode::CallOther,
                         _ => unreachable!(),
                     },
                     output: item.output,
@@ -685,19 +582,16 @@ pub fn legalize(ops: &[crate::CgOp], addr: u64) -> Result<Vec<crate::CgOp>, rk_c
         unique += 0x10;
         value
     };
-    let mnemonic = ops[..count]
-        .iter()
-        .find_map(|item| match item.op {
-            crate::Op::Simd(op) => semantic_name(op),
-            _ => None,
-        })
-        .unwrap_or("");
-    let expanded = split_wide(&raw, mnemonic, Registers::get(), &mut fresh)
+    let simd = ops[..count].iter().find_map(|item| match item.op {
+        Op::Simd(op) => Some(op),
+        _ => None,
+    });
+    let expanded = split_wide(&raw, simd, Registers::get(), &mut fresh)
         .map_err(|reason| rk_core::Diagnostic::new(addr, reason))?;
-    let mut result: Vec<crate::CgOp> = expanded
+    let mut result: Vec<CgOp> = expanded
         .into_iter()
-        .map(|item| crate::CgOp {
-            op: crate::Op::P(item.opcode),
+        .map(|item| CgOp {
+            op: Op::P(item.opcode),
             output: item.output,
             inputs: item.inputs,
         })

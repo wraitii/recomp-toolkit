@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use rk_core::contract::{Field, Fields};
 use rk_core::Lookup;
-use rk_ir::{CcKind, Op, StateKey};
+use rk_ir::{Op, StateKey};
 
 use crate::{BlockId, FlagId, FlagKind, Ssa, ValueId, DISPATCH_BLOCK};
 
@@ -283,7 +283,7 @@ fn merge_join_sources(
             let Some(kind) = cc_kind(record.kind) else {
                 return;
             };
-            kind_args.push(s.new_value(Op::CcKind(kind), 1, &[], addr));
+            kind_args.push(s.new_value(Op::Symbol(kind), 1, &[], addr));
         }
         let Some(result_value) = record.result else {
             return;
@@ -344,15 +344,15 @@ fn merge_join_sources(
     }
 }
 
-pub fn cc_kind(kind: FlagKind) -> Option<CcKind> {
+pub fn cc_kind(kind: FlagKind) -> Option<&'static str> {
     match kind {
-        FlagKind::Add => Some(CcKind::Add),
-        FlagKind::Sub | FlagKind::Cmp => Some(CcKind::Sub),
-        FlagKind::Logic => Some(CcKind::Logic),
-        FlagKind::Inc => Some(CcKind::Inc),
-        FlagKind::Dec => Some(CcKind::Dec),
-        FlagKind::Adc => Some(CcKind::Adc),
-        FlagKind::Sbb => Some(CcKind::Sbb),
+        FlagKind::Add => Some("X86_CC_ADD"),
+        FlagKind::Sub | FlagKind::Cmp => Some("X86_CC_SUB"),
+        FlagKind::Logic => Some("X86_CC_LOGIC"),
+        FlagKind::Inc => Some("X86_CC_INC"),
+        FlagKind::Dec => Some("X86_CC_DEC"),
+        FlagKind::Adc => Some("X86_CC_ADC"),
+        FlagKind::Sbb => Some("X86_CC_SBB"),
         FlagKind::Incoming | FlagKind::Join => None,
     }
 }

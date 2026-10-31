@@ -28,9 +28,12 @@ fact validation, output writing and any stack-policy fingerprint checks. Lifting
 analysis cover the whole supplied snapshot; `EmitOptions.only` selects emitted bodies. Apply
 `JobOutput.extra_entries` to the program before writing normal output.
 
-`rk-core` is the shared vocabulary. `rk-ir` is the lowering and the operation
-set that SSA, planning and emission share. Its SIMD operations retain wide values;
-the scalar SSA and interpreter consumers legalize them into lanes. `rk-analysis`
+`rk-core` is the shared vocabulary. `rk-ir` drives lowering through the `IsaLowering`
+hook and defines the operation set that SSA, planning and emission share: faulting
+`DivMod`, `Native` helpers that carry their field effects, named `Symbol` constants, lane
+`Simd` operations and the x87 vocabulary. `rk-x86` implements the hook with the mnemonic
+tables, flag shapes and `correct_*` p-code fixes. SIMD operations retain wide values; the
+scalar SSA and interpreter consumers legalize them into lanes of the spec's vector registers. `rk-analysis`
 is a separate offline binary that produces the facts the Facts stage reads (see
 below). `rk-x86` is the only ISA plug-in, a static `rk_core::isa::Machine` of plain
 data: the `Target` (address width, endianness), the SLEIGH `Spec` with register roles,

@@ -269,7 +269,7 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts) -> Option<FramePlan> {
         let op = s.value(id).op;
         if !matches!(
             op,
-            Op::Call { .. } | Op::CallInd | Op::Return | Op::Div { .. } | Op::Idiv { .. }
+            Op::Call { .. } | Op::CallInd | Op::Return | Op::DivMod { .. }
         ) {
             continue;
         }
@@ -280,7 +280,7 @@ pub(crate) fn plan(s: &Ssa, facts: &dyn crate::CallFacts) -> Option<FramePlan> {
         let mut site = Site::default();
         for (index, &slot) in slots.iter().enumerate() {
             let start = (slot.aligned, slot.offset);
-            if matches!(op, Op::Return | Op::Div { .. } | Op::Idiv { .. }) {
+            if matches!(op, Op::Return | Op::DivMod { .. }) {
                 site.publish.push(index);
                 continue;
             }

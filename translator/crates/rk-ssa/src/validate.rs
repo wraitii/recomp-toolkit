@@ -156,8 +156,8 @@ fn shape(s: &Ssa, id: ValueId) -> bool {
         }
         Op::StateReload(key) => n == 1 && state_width(key, z),
         Op::StateKeep(key) => n == 2 && state_width(key, z) && size(1) == z,
-        Op::CcKind(_) => n == 0 && z == 1,
-        Op::Call { .. } | Op::String(_) | Op::Seh(_) | Op::Slow(_) | Op::CallOther(_) => {
+        Op::Symbol(_) => n == 0 && z == 1,
+        Op::Call { .. } | Op::Native(_) | Op::Seh(_) | Op::Slow(_) | Op::CallOther(_) => {
             n == 1 && size(0) == 0 && z == 0
         }
         Op::CallInd => n == 2 && size(0) == 0 && size(1) == 4 && z == 0,
@@ -169,7 +169,7 @@ fn shape(s: &Ssa, id: ValueId) -> bool {
         | Op::Breakpoint => n == 0 && z == 0,
         Op::CBranch { .. } => n == 1 && size(0) == 1 && z == 0,
         Op::BranchInd => n == 1 && size(0) == 4 && z == 0,
-        Op::Div { size: width, .. } | Op::Idiv { size: width, .. } => {
+        Op::DivMod { size: width, .. } => {
             matches!(width, 1 | 2 | 4)
                 && n == 4
                 && size(0) == 0

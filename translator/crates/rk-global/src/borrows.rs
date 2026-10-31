@@ -107,7 +107,13 @@ fn prepare(
     {
         return None;
     }
-    let cg = rk_ir::lower(fir, &rk_x87::Recipes).ok()?;
+    let cg = rk_ir::lower(
+        fir,
+        &rk_x86::Lowering {
+            x87: &rk_x87::Recipes,
+        },
+    )
+    .ok()?;
     let mut s = rk_ssa::build(
         &cg,
         &BuildOptions {

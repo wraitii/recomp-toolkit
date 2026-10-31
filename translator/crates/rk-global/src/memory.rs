@@ -51,7 +51,13 @@ fn prepare(input: &GlobalInput<'_>, addr: Addr, facts: &dyn CallFacts) -> Option
     if !crate::cfg::closed(fir, &tail_indices) {
         return None;
     }
-    let cg = rk_ir::lower(fir, &rk_x87::Recipes).ok()?;
+    let cg = rk_ir::lower(
+        fir,
+        &rk_x86::Lowering {
+            x87: &rk_x87::Recipes,
+        },
+    )
+    .ok()?;
     let opts = BuildOptions {
         policy: Policy::Optimizing,
         call_facts: facts,

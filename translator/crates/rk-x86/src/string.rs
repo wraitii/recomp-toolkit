@@ -1,9 +1,10 @@
 use std::sync::OnceLock;
 
 use rk_core::contract::{Field, Fields};
+use rk_ir::Native;
 
-pub fn helper(raw: &[u8]) -> Option<&'static str> {
-    static TABLE: OnceLock<Vec<(Vec<u8>, &'static str)>> = OnceLock::new();
+pub fn helper(raw: &[u8]) -> Option<&'static Native> {
+    static TABLE: OnceLock<Vec<(Vec<u8>, &'static Native)>> = OnceLock::new();
     let table = TABLE.get_or_init(|| {
         let mut out = Vec::new();
         for (opcode, base) in [
@@ -22,14 +23,14 @@ pub fn helper(raw: &[u8]) -> Option<&'static str> {
                 let suffix = if opcode & 1 == 0 { "b" } else { wide };
                 let mut single = prefix.to_vec();
                 single.push(opcode);
-                out.push((single.clone(), leak(&format!("{base}{suffix}"))));
+                out.push((single.clone(), native(format!("{base}{suffix}"))));
                 let repeats = if matches!(base, "movs" | "stos" | "lods") {
                     [(0xf3u8, "rep"), (0xf2, "rep")]
                 } else {
                     [(0xf3u8, "repe"), (0xf2, "repne")]
                 };
                 for (byte, name) in repeats {
-                    let name = leak(&format!("{name}_{base}{suffix}"));
+                    let name = native(format!("{name}_{base}{suffix}"));
                     let mut rep = prefix.to_vec();
                     rep.extend_from_slice(&[byte, opcode]);
                     out.push((rep, name));
@@ -47,11 +48,16 @@ pub fn helper(raw: &[u8]) -> Option<&'static str> {
         .map(|(_, name)| *name)
 }
 
-fn leak(text: &str) -> &'static str {
-    Box::leak(text.to_string().into_boxed_str())
+fn native(name: String) -> &'static Native {
+    let (reads, writes) = effect(&name);
+    Box::leak(Box::new(Native {
+        name: Box::leak(name.into_boxed_str()),
+        reads,
+        writes,
+    }))
 }
 
-pub fn effect(name: &str) -> (Fields, Fields) {
+fn effect(name: &str) -> (Fields, Fields) {
     let base = name.rsplit('_').next().unwrap_or(name);
     let pointers: &[Field] = match base.get(..4).unwrap_or(base) {
         "movs" | "cmps" => &[Field::Esi, Field::Edi],

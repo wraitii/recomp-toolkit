@@ -97,9 +97,8 @@ fn op_name(op: Op) -> String {
         Op::Branch { target } => format!("Branch {}", Hex(target)),
         Op::CBranch { target } => format!("CBranch {}", Hex(target)),
         Op::Trap(addr) => format!("Trap {}", Hex(addr)),
-        Op::Div { addr, size } => format!("Div{size} {}", Hex(addr)),
-        Op::Idiv { addr, size } => format!("Idiv{size} {}", Hex(addr)),
-        Op::String(name) => format!("String {}", name.0),
+        Op::DivMod { signed, size } => format!("DivMod{}{size}", if signed { "S" } else { "U" }),
+        Op::Native(native) => format!("Native {}", native.name),
         Op::Slow(index) => format!("Slow#{index}"),
         _ => format!("{op:?}"),
     }

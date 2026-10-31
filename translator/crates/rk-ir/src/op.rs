@@ -1,3 +1,4 @@
+use rk_core::contract::Fields;
 use rk_core::ir::{Insn, OpCode, SehEffect, Varnode};
 use rk_core::Addr;
 
@@ -8,17 +9,6 @@ pub enum StateKey {
     Register(u32),
     Memory,
     Frame { offset: i32, aligned: bool },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CcKind {
-    Add,
-    Sub,
-    Logic,
-    Inc,
-    Dec,
-    Adc,
-    Sbb,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,8 +49,12 @@ pub enum SlowFamily {
     Unmodelled,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StringOp(pub &'static str);
+#[derive(Debug, PartialEq, Eq)]
+pub struct Native {
+    pub name: &'static str,
+    pub reads: Fields,
+    pub writes: Fields,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimdOp {
@@ -85,9 +79,8 @@ pub enum Op {
     Trap(Addr),
     Breakpoint,
     Seh(SehEffect),
-    Div { addr: Addr, size: u8 },
-    Idiv { addr: Addr, size: u8 },
-    String(StringOp),
+    DivMod { signed: bool, size: u8 },
+    Native(&'static Native),
     Slow(u32),
     CallOther(u64),
     Simd(SimdOp),
@@ -102,7 +95,7 @@ pub enum Op {
     Publish,
     StateReload(StateKey),
     StateKeep(StateKey),
-    CcKind(CcKind),
+    Symbol(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -252,13 +245,13 @@ pub fn properties(op: Op) -> Properties {
             ..Properties::new()
         },
         Op::Call { .. } | Op::CallInd => Properties::effect(),
-        Op::Div { .. } | Op::Idiv { .. } => Properties {
+        Op::DivMod { .. } => Properties {
             ordered: true,
             observes: true,
             faults: true,
             ..Properties::new()
         },
-        Op::String(_) => Properties::effect(),
+        Op::Native(_) => Properties::effect(),
         Op::Simd(_) => Properties::pure(),
         Op::Slow(_) | Op::CallOther(_) => Properties::effect(),
         Op::Tail { .. } | Op::ImportTail { .. } | Op::BranchInd | Op::Return => Properties {
@@ -305,7 +298,7 @@ pub fn properties(op: Op) -> Properties {
         | Op::Memory
         | Op::StateReload(_)
         | Op::StateKeep(_)
-        | Op::CcKind(_) => Properties {
+        | Op::Symbol(_) => Properties {
             pure: true,
             synthetic: true,
             ..Properties::new()

@@ -67,7 +67,7 @@ pub fn origins(s: &Ssa, roots: &[ValueId], facts: &dyn CallFacts) -> Origins {
             Op::P(rk_core::ir::OpCode::Load) => {
                 loads.insert(s.value_addr[id as usize]);
             }
-            Op::Const(_) | Op::Target(_) | Op::CcKind(_) => {}
+            Op::Const(_) | Op::Target(_) | Op::Symbol(_) => {}
             op if rk_ir::properties(op).pure && !s.args(id).is_empty() => {
                 pending.extend(s.args(id))
             }

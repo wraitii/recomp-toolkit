@@ -617,8 +617,10 @@ fn prepare(
             detail: "control flow is not closed".into(),
         });
     }
-    let cg = rk_ir::lower(fir, &Recipes).map_err(|error| Reason::Conservative {
-        detail: format!("lowering failed: {error}"),
+    let cg = rk_ir::lower(fir, &rk_x86::Lowering { x87: &Recipes }).map_err(|error| {
+        Reason::Conservative {
+            detail: format!("lowering failed: {error}"),
+        }
     })?;
     let n = fir.insns.len();
     let mut use_ = vec![0u64; n];
@@ -654,15 +656,14 @@ fn prepare(
                     });
                     continue;
                 }
-                Op::String(name) => {
-                    let (reads, writes_fields) = rk_ir::string::effect(name.0);
-                    use_[index] |= fields_mask(reads) & !local;
-                    let produced = fields_mask(writes_fields);
+                Op::Native(native) => {
+                    use_[index] |= fields_mask(native.reads) & !local;
+                    let produced = fields_mask(native.writes);
                     local |= produced;
                     defs[index] |= produced;
                     continue;
                 }
-                Op::Div { .. } | Op::Idiv { .. } => {
+                Op::DivMod { .. } => {
                     let regs = Registers::get();
                     for register in [regs.arch().x86.eax, regs.arch().x86.edx] {
                         use_[index] |= lanes.mask(&register) & !local;

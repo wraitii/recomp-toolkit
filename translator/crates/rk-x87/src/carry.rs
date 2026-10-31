@@ -10,9 +10,8 @@ use crate::types::Expr;
 pub fn reset_op(op: Op) -> bool {
     matches!(
         op,
-        Op::Div { .. }
-            | Op::Idiv { .. }
-            | Op::String(_)
+        Op::DivMod { .. }
+            | Op::Native(_)
             | Op::Call { .. }
             | Op::CallInd
             | Op::Seh(_)

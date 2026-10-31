@@ -359,7 +359,13 @@ pub(crate) fn prepare_ssa<'a>(
             fir.tables.remove(&(last as u32));
         }
     }
-    let cg = rk_ir::lower(&fir, &rk_x87::Recipes).map_err(|error| error.to_string())?;
+    let cg = rk_ir::lower(
+        &fir,
+        &rk_x86::Lowering {
+            x87: &rk_x87::Recipes,
+        },
+    )
+    .map_err(|error| error.to_string())?;
     let options = PrepareOptions::new(contracts);
     let ssa = prepare(&cg, &options).map_err(|error| error.to_string())?;
     Ok((fir, ssa))

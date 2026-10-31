@@ -271,15 +271,12 @@ fn interpreter_op(op: CgOp, insn: &Insn, slow: &[SlowInsn]) -> Result<RpOp, Stri
         Op::BranchInd => rp_op(code(OpCode::BranchInd), op.output, &op.inputs, None),
         Op::Return => rp_op(code(OpCode::Return), op.output, &op.inputs, None),
         Op::CallOther(id) => rp_op(code(OpCode::CallOther), op.output, &op.inputs, Some(id)),
-        Op::String(name) => native_userop(
-            string_userop(name.0).ok_or_else(|| format!("unknown string helper {}", name.0))?,
+        Op::Native(native) => native_userop(
+            string_userop(native.name)
+                .ok_or_else(|| format!("unknown native helper {}", native.name))?,
         ),
-        Op::Div { size, .. } | Op::Idiv { size, .. } => {
-            let opcode = if matches!(op.op, Op::Div { .. }) {
-                RP_OP_DIVMOD
-            } else {
-                RP_OP_SDIVMOD
-            };
+        Op::DivMod { signed, size } => {
+            let opcode = if signed { RP_OP_SDIVMOD } else { RP_OP_DIVMOD };
             let mut inputs = op.inputs;
             inputs.truncate(2);
             inputs.push(Varnode::constant(u64::from(size), 1));
@@ -347,7 +344,10 @@ fn lift_one(addr: u32, bytes: &[u8]) -> Result<(u8, String, Vec<RpOp>), String> 
     if insn.mnemonic == "SHRD" {
         return Err("x86 SHRD overflow-flag semantics are not modelled".into());
     }
-    let mut lowerer = InstructionLowerer::new(&rk_x87::Recipes).with_pcode_control();
+    let isa = rk_x86::Lowering {
+        x87: &rk_x87::Recipes,
+    };
+    let mut lowerer = InstructionLowerer::new(&isa).with_pcode_control();
     let (ops, _, _) = lowerer.lower_insn(&insn).map_err(|e| e.to_string())?;
     let ops = if rk_ir::wide::required(&ops) {
         rk_ir::wide::legalize(&ops, insn.addr).map_err(|e| e.to_string())?

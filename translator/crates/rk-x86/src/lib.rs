@@ -1,9 +1,17 @@
 //! The x86-32 plug-in: the pinned Ghidra SLEIGH specification and its lifting quirks, the
-//! Capstone structural decoder behind listings, typed operands, SEH idioms and x87 recipes, and
-//! the iced-x86 operand shapes discovery reads. No other crate names Capstone, iced or the spec.
+//! Capstone structural decoder behind listings, typed operands, SEH idioms and the iced-x86
+//! operand shapes discovery reads. Its `Lowering` implements the x86 instruction lowering hook
+//! of `rk-ir` (mnemonic tables, flag shapes, CMOV/CMPXCHG/SSE/DIV corrections, string helpers and
+//! SIMD semantics). No other crate names Capstone, iced or the spec.
 
+mod correct;
 mod decode;
+mod lower;
 mod shape;
+mod string;
+mod wide;
+
+pub use lower::Lowering;
 
 use std::cell::RefCell;
 
@@ -37,6 +45,9 @@ pub static MACHINE: Machine = Machine {
                 "FPUDataSelector",
             ],
             register_stack: &["ST0", "ST1", "ST2", "ST3", "ST4", "ST5", "ST6", "ST7"],
+            vector: &[
+                "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5", "XMM6", "XMM7",
+            ],
         },
         no_op: |bytes| bytes == [WAIT],
         internal_flow_allowed: |bytes| matches!(bytes, [0xda | 0xdb, 0xc0..=0xdf]),

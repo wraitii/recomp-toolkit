@@ -1115,16 +1115,16 @@ impl<'a> Emitter<'a> {
                 self.seh(kind, addr);
                 Ok(true)
             }
-            Op::Div { .. } | Op::Idiv { .. } => {
+            Op::DivMod { .. } => {
                 self.divide(value, addr)?;
                 if self.plan.settle_sites.contains(&value) {
                     self.out.push_str("x86_cc_settle(c);\n");
                 }
                 Ok(true)
             }
-            Op::String(name) => {
+            Op::Native(native) => {
                 self.publish(value)?;
-                let _ = writeln!(self.out, "{} (c);", name.0);
+                let _ = writeln!(self.out, "{} (c);", native.name);
                 self.out.push_str("x86_cc_settle(c);\n");
                 Ok(true)
             }
@@ -1978,8 +1978,11 @@ impl<'a> Emitter<'a> {
         let numerator = self.expr(numerator)?;
         let divisor = self.expr(divisor)?;
         let (helper, kind, size) = match self.s.value(value).op {
-            Op::Div { size, .. } => ("x86_divmod_u", "uint", size),
-            Op::Idiv { size, .. } => ("x86_divmod_s", "int", size),
+            Op::DivMod {
+                signed: false,
+                size,
+            } => ("x86_divmod_u", "uint", size),
+            Op::DivMod { signed: true, size } => ("x86_divmod_s", "int", size),
             _ => return Err(self.error(addr, "expected division")),
         };
         let bits = u32::from(size) * 8;
@@ -2460,7 +2463,7 @@ impl<'a> Emitter<'a> {
         let op = match (descriptor.kind, descriptor.kind_value) {
             (rk_ssa::FlagKind::Join, Some(value)) => self.expr(value)?,
             (kind, _) => match rk_ssa::cc_kind(kind) {
-                Some(kind) => support::cc_kind_name(kind).to_string(),
+                Some(kind) => kind.to_string(),
                 None => return Ok(()),
             },
         };
@@ -2878,7 +2881,7 @@ impl<'a> Emitter<'a> {
             Op::Const(data) => Ok(const_expr(data, item.size)),
             Op::Input(key) => self.field_expr(key, item.size, true),
             Op::StateReload(key) => self.field_expr(key, item.size, false),
-            Op::CcKind(kind) => Ok(cc_kind_name(kind).to_string()),
+            Op::Symbol(name) => Ok(name.to_string()),
             Op::Target(addr) => Ok(self.guest_addr(addr)),
             Op::Memory => Ok("0u".to_string()),
             Op::Byte(index) => Ok(format!(
@@ -3143,7 +3146,7 @@ impl<'a> Emitter<'a> {
         let result = match item.op {
             Op::Const(data) => const_expr(data, item.size),
             Op::Input(key) => self.field_expr(key, item.size, true)?,
-            Op::CcKind(kind) => cc_kind_name(kind).to_string(),
+            Op::Symbol(name) => name.to_string(),
             Op::Target(addr) => self.guest_addr(addr),
             Op::Byte(index) => format!("(({}) >> {})", a(0)?, index as u32 * 8),
             Op::Pack => match self.pack_lanes(args) {

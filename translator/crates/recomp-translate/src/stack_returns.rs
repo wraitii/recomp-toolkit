@@ -1487,7 +1487,13 @@ pub(super) fn write(
                 return (addr, prior, false);
             };
             let attempt = (|| -> rk_core::Result<Option<anyhow::Result<Body>>> {
-                let cg = rk_ir::lower_with(ir, &rk_x87::Recipes, ctx.reloc.is_some())?;
+                let cg = rk_ir::lower_with(
+                    ir,
+                    &rk_x86::Lowering {
+                        x87: &rk_x87::Recipes,
+                    },
+                    ctx.reloc.is_some(),
+                )?;
                 let mut view = None;
                 let mut options = ctx.plan_options(addr);
                 options.call_facts = &facts;

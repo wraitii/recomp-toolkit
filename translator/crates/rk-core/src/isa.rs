@@ -62,6 +62,7 @@ pub struct Registers {
     pub return_address: ReturnAddress,
     pub diagnostic: &'static [&'static str],
     pub register_stack: &'static [&'static str],
+    pub vector: &'static [&'static str],
 }
 
 pub struct Spec {

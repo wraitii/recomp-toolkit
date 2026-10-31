@@ -131,6 +131,7 @@ impl Arch {
 pub struct Registers {
     map: BTreeMap<String, Varnode>,
     covering: Vec<Option<(String, Varnode)>>,
+    vector: Vec<Varnode>,
     userops: BTreeMap<u64, String>,
     arch: Arch,
 }
@@ -173,6 +174,17 @@ impl Registers {
             })
             .collect();
         let arch = Arch::resolve(&map, lifter.address_bytes())?;
+        let vector = rk_core::isa::machine()
+            .spec
+            .registers
+            .vector
+            .iter()
+            .map(|name| {
+                map.get(*name)
+                    .copied()
+                    .ok_or_else(|| format!("SLEIGH register {name}"))
+            })
+            .collect::<Result<_, _>>()?;
         let target = rk_core::isa::machine().target.address_bytes;
         if arch.address_bytes != target {
             return Err(format!(
@@ -183,6 +195,7 @@ impl Registers {
         Ok(Self {
             map,
             covering,
+            vector,
             userops: lifter.userop_names().clone(),
             arch,
         })
@@ -199,6 +212,12 @@ impl Registers {
     pub fn covering(&self, offset: u64) -> Option<(&str, Varnode)> {
         let (name, v) = self.covering.get(usize::try_from(offset).ok()?)?.as_ref()?;
         Some((name.as_str(), *v))
+    }
+
+    pub fn vector(&self, offset: u64) -> bool {
+        self.vector
+            .iter()
+            .any(|v| v.offset <= offset && offset < v.offset + u64::from(v.size))
     }
 
     pub fn arch(&self) -> &Arch {

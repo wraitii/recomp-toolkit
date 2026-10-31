@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 rk-core.workspace = true
+rk-ir.workspace = true
 capstone.workspace = true
 iced-x86.workspace = true
 serde.workspace = true

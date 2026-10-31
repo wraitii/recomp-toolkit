@@ -179,7 +179,12 @@ fn dump_ssa(
         }
         if matches!(stage, Stage::Prepared | Stage::Stack) {
             let stack = stage == Stage::Stack;
-            let cg = rk_ir::lower(ir, &rk_x87::Recipes)?;
+            let cg = rk_ir::lower(
+                ir,
+                &rk_x86::Lowering {
+                    x87: &rk_x87::Recipes,
+                },
+            )?;
             let facts = global.call_facts();
             let options = rk_ssa::PrepareOptions {
                 call_facts: &facts,
@@ -203,7 +208,7 @@ fn dump_ssa(
             }
             continue;
         }
-        let cg = rk_ir::lower(ir, &rk_ir::NoX87)?;
+        let cg = rk_ir::lower(ir, &rk_x86::Lowering { x87: &rk_ir::NoX87 })?;
         let options = rk_ssa::BuildOptions {
             policy: rk_core::ir::Policy::Conservative,
             call_facts: &rk_ssa::ConservativeCallFacts,

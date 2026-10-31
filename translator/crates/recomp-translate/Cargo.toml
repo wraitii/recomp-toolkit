@@ -11,6 +11,7 @@ rk-discover.workspace = true
 rk-frontend.workspace = true
 rk-output.workspace = true
 rk-ir.workspace = true
+rk-x86.workspace = true
 rk-ssa.workspace = true
 rk-global.workspace = true
 rk-plan.workspace = true

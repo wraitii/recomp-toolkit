@@ -1127,17 +1127,16 @@ impl<'a> Builder<'a> {
                 self.reload_call(value, effect, state, block, ops)?;
                 ops.push(value);
             }
-            Op::String(string) => {
+            Op::Native(native) => {
                 let memory = self.state_slot(state, memory_index, block)?;
-                let value = self.value(Op::String(string), 0, &[memory]);
+                let value = self.value(Op::Native(native), 0, &[memory]);
                 self.boundary(value, state, block, false)?;
                 let token = self.value(Op::Memory, 0, &[value]);
                 state[memory_index] = Some(token);
-                let (_, writes) = rk_ir::string::effect(string.0);
-                self.reload_fields(value, writes, state, block)?;
+                self.reload_fields(value, native.writes, state, block)?;
                 ops.push(value);
             }
-            Op::Div { .. } | Op::Idiv { .. } => {
+            Op::DivMod { .. } => {
                 let memory = self.state_slot(state, memory_index, block)?;
                 let mut args = vec![memory];
                 for input in &cg_op.inputs {
@@ -1307,7 +1306,7 @@ impl<'a> Builder<'a> {
             | Op::Publish
             | Op::StateReload(_)
             | Op::StateKeep(_)
-            | Op::CcKind(_) => {
+            | Op::Symbol(_) => {
                 return Err(Diagnostic::new(
                     addr,
                     Reason::UnsupportedVarnode {

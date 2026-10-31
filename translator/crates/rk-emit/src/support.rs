@@ -182,16 +182,3 @@ pub(crate) fn signed_type(size: u8) -> &'static str {
         _ => "int64_t",
     }
 }
-
-pub(crate) fn cc_kind_name(kind: rk_ir::CcKind) -> &'static str {
-    use rk_ir::CcKind;
-    match kind {
-        CcKind::Add => "X86_CC_ADD",
-        CcKind::Sub => "X86_CC_SUB",
-        CcKind::Logic => "X86_CC_LOGIC",
-        CcKind::Inc => "X86_CC_INC",
-        CcKind::Dec => "X86_CC_DEC",
-        CcKind::Adc => "X86_CC_ADC",
-        CcKind::Sbb => "X86_CC_SBB",
-    }
-}

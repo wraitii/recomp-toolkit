@@ -256,7 +256,13 @@ impl<'a> BodyContext<'a> {
 }
 
 fn plan_one(ctx: &BodyContext<'_>, ir: &FunctionIr) -> rk_core::Result<rk_plan::PlannedFunction> {
-    let cg = rk_ir::lower_with(ir, &rk_x87::Recipes, ctx.reloc.is_some())?;
+    let cg = rk_ir::lower_with(
+        ir,
+        &rk_x86::Lowering {
+            x87: &rk_x87::Recipes,
+        },
+        ctx.reloc.is_some(),
+    )?;
     let options = ctx.plan_options(ir.addr);
     let enabled = match ctx.return_stack_policy {
         rk_core::settings::ReturnStackPolicy::Off => false,
@@ -591,7 +597,14 @@ fn build_bodies(
             };
             let mut view = None;
             let planned = if stack_return_report.is_some() {
-                rk_ir::lower_with(&ir, &rk_x87::Recipes, ctx.reloc.is_some()).and_then(|cg| {
+                rk_ir::lower_with(
+                    &ir,
+                    &rk_x86::Lowering {
+                        x87: &rk_x87::Recipes,
+                    },
+                    ctx.reloc.is_some(),
+                )
+                .and_then(|cg| {
                     rk_plan::plan_function_with_view(
                         &cg,
                         &ctx.plan_options(ir.addr),

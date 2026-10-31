@@ -597,7 +597,7 @@ fn walk_block(
         let current: BTreeMap<StateKey, ValueId> = state.iter().copied().collect();
         let escape_only = matches!(
             s.value(value).op,
-            rk_ir::Op::BranchInd | rk_ir::Op::Div { .. } | rk_ir::Op::Idiv { .. }
+            rk_ir::Op::BranchInd | rk_ir::Op::DivMod { .. }
         );
         for key in keys {
             let Some(&state_value) = current.get(key) else {
@@ -709,7 +709,7 @@ fn boundary_writes(s: &Ssa, call_facts: &dyn CallFacts, value: ValueId) -> Field
                 .writes
         }
         rk_ir::Op::CallInd => call_facts.call(s.value_addr[value as usize], None).writes,
-        rk_ir::Op::String(name) => rk_ir::string::effect(name.0).1,
+        rk_ir::Op::Native(native) => native.writes,
         rk_ir::Op::Slow(_) => Fields::ALL,
         rk_ir::Op::P(rk_core::ir::OpCode::Call)
         | rk_ir::Op::P(rk_core::ir::OpCode::CallInd)
