@@ -1314,32 +1314,6 @@ impl<'a> Emitter<'a> {
         let Some(dst) = operands.first() else {
             return self.unsupported(addr, &mnemonic);
         };
-        if let Some(operator) = sse_logic(&mnemonic) {
-            let (SlowOperand::Xmm(destination), Some(source)) = (dst, operands.get(1)) else {
-                return self.unsupported(addr, &mnemonic);
-            };
-            for lane in 0..4u32 {
-                let source = match source {
-                    SlowOperand::Xmm(index) => format!("c->xmm[{index}][{lane}]"),
-                    SlowOperand::Mem(address) => {
-                        format!("recomp_rd32_(g_mem, (uint32_t)({address}) + {}u)", lane * 4)
-                    }
-                    _ => {
-                        return self.unsupported(addr, &mnemonic);
-                    }
-                };
-                let invert = if matches!(mnemonic.as_str(), "ANDNPS" | "ANDNPD") {
-                    "~"
-                } else {
-                    ""
-                };
-                let _ = writeln!(
-                    self.out,
-                    "c->xmm[{destination}][{lane}] = {invert}c->xmm[{destination}][{lane}] {operator} {source};"
-                );
-            }
-            return Ok(true);
-        }
         match mnemonic.as_str() {
             "MOVD" => return self.slow_movd(dst, operands.get(1), addr),
             "MOVQ" => return self.slow_movq(dst, operands.get(1), addr),

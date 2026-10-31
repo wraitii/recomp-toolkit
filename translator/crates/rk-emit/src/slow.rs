@@ -123,15 +123,6 @@ pub(crate) fn mmx_source(operand: &SlowOperand, width: u32) -> Option<String> {
     }
 }
 
-pub(crate) fn sse_logic(mnemonic: &str) -> Option<&'static str> {
-    Some(match mnemonic {
-        "ORPS" | "ORPD" => "|",
-        "XORPS" | "XORPD" => "^",
-        "ANDPS" | "ANDPD" | "ANDNPS" | "ANDNPD" => "&",
-        _ => return None,
-    })
-}
-
 pub(crate) fn mmx_shift(mnemonic: &str) -> Option<(&'static str, u32)> {
     Some(match mnemonic {
         "PSRLW" => ("mmx_psrl", 16),
@@ -184,10 +175,6 @@ pub(crate) fn mmx_binary(mnemonic: &str) -> Option<(&'static str, u32)> {
         "PUNPCKHBW" => ("mmx_punpckh", 8),
         "PUNPCKHWD" => ("mmx_punpckh", 16),
         "PUNPCKHDQ" => ("mmx_punpckh", 32),
-        "PAND" => ("mmx_pand", 0),
-        "PANDN" => ("mmx_pandn", 0),
-        "POR" => ("mmx_por", 0),
-        "PXOR" => ("mmx_pxor", 0),
         _ => return None,
     })
 }
@@ -221,10 +208,6 @@ pub(crate) fn xmm_binary(mnemonic: &str) -> Option<(&'static str, Option<u32>)> 
         "PCMPGTD" => ("xmm_pcmpgt", Some(32)),
         "PMINUB" => ("xmm_pminub", None),
         "PMAXUB" => ("xmm_pmaxub", None),
-        "PAND" => ("xmm_pand", None),
-        "PANDN" => ("xmm_pandn", None),
-        "POR" => ("xmm_por", None),
-        "PXOR" => ("xmm_pxor", None),
         _ => return None,
     })
 }

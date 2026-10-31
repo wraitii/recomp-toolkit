@@ -699,6 +699,14 @@ const SUPPORTED: &[&str] = &[
     "ANDPS",
     "ORPS",
     "ANDNPS",
+    "ORPD",
+    "XORPD",
+    "ANDPD",
+    "ANDNPD",
+    "PAND",
+    "PANDN",
+    "POR",
+    "PXOR",
     "CMOVA",
     "CMOVAE",
     "CMOVB",
@@ -743,10 +751,6 @@ fn is_media(mnemonic: &str) -> bool {
             | "EMMS"
             | "FEMMS"
             | "PSHUFW"
-            | "ORPD"
-            | "XORPD"
-            | "ANDPD"
-            | "ANDNPD"
             | "PADDB"
             | "PADDW"
             | "PADDD"
@@ -783,10 +787,6 @@ fn is_media(mnemonic: &str) -> bool {
             | "PUNPCKHBW"
             | "PUNPCKHWD"
             | "PUNPCKHDQ"
-            | "PAND"
-            | "PANDN"
-            | "POR"
-            | "PXOR"
             | "PSRLW"
             | "PSRLD"
             | "PSRLQ"
