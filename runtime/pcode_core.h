@@ -5,13 +5,14 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 struct PcodeInstruction {
     uint32_t length = 0;
     std::vector<RpOp> ops;
     bool preflighted = false;
+    size_t unique_chunks = 0;
+    void prepare_unique();
 };
 
 struct PcodeHost {
@@ -66,18 +67,12 @@ class PcodeMachine {
         uint64_t value = 0;
         uint8_t defined = 0;
     };
-    struct UniqueSlot {
-        uint64_t offset = 0;
-        UniqueChunk *chunk = nullptr;
-    };
-    std::unordered_map<uint64_t, UniqueChunk> unique_;
-    std::array<UniqueSlot, 256> unique_slots_{};
+    std::vector<UniqueChunk> unique_;
     uint64_t unique_generation_ = 0;
     uint64_t pc_ = 0;
     uint32_t len_ = 0;
 
     [[noreturn]] void fail(const std::string &why) const;
-    UniqueChunk *unique_chunk(uint64_t offset, bool write);
     bool load(const RpVarnode &v, uint64_t &out);
     void store(const RpVarnode &v, uint64_t value);
     void preflight(const std::vector<RpOp> &ops);

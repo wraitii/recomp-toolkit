@@ -15,16 +15,21 @@ thread_local char g_error[512];
 
 extern "C" int interp_call(X86 *c, uint32_t target) {
     g_error[0] = 0;
-    const char *mode = getenv("RECOMP_INTERP");
-    if (mode && strcmp(mode, "off") == 0) {
+    static const bool enabled = [] {
+        const char *mode = getenv("RECOMP_INTERP");
+        if (mode && strcmp(mode, "off") == 0)
+            return false;
+        if (mode && *mode && strcmp(mode, "pcode") != 0) {
+            snprintf(g_error, sizeof g_error, "unsupported RECOMP_INTERP=%s", mode);
+            fprintf(stderr, "[recomp] %s\n", g_error);
+            abort();
+        }
+        return true;
+    }();
+    if (!enabled) {
         snprintf(g_error, sizeof g_error, "interpreter disabled by RECOMP_INTERP=off");
         fprintf(stderr, "[recomp] interp: %s (target %08x)\n", g_error, target);
         return 0;
-    }
-    if (mode && *mode && strcmp(mode, "pcode") != 0) {
-        snprintf(g_error, sizeof g_error, "unsupported RECOMP_INTERP=%s", mode);
-        fprintf(stderr, "[recomp] %s\n", g_error);
-        abort();
     }
 #if RECOMP_PCODE_FALLBACK
     if (pcode_interp_call(c, target) == 1)

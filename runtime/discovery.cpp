@@ -34,7 +34,8 @@ std::map<uint32_t, Find> &finds() {
 // file as one that returns from its main loop, and a run that finds nothing
 // writes an empty file rather than leaving a stale one behind.
 const char *path() {
-    return recomp_env("DISCOVERY");
+    static const char *value = recomp_env("DISCOVERY");
+    return value;
 }
 
 bool g_registered = false;

@@ -35,6 +35,13 @@ bool in_arena(uint32_t addr, uint32_t size) {
 }
 
 uint64_t read_words(const uint32_t *words, uint64_t offset, uint32_t size) {
+    uint32_t byte = offset % 4;
+    if (size == 4 && byte == 0)
+        return words[offset / 4];
+    if (size >= 1 && size <= 4 - byte)
+        return (words[offset / 4] >> (byte * 8)) & (UINT32_MAX >> ((4 - size) * 8));
+    if (size == 8 && byte == 0)
+        return words[offset / 4] | (uint64_t)words[offset / 4 + 1] << 32;
     uint64_t value = 0;
     for (uint32_t i = 0; i < size; ++i) {
         uint64_t byte = offset + i;
@@ -44,6 +51,23 @@ uint64_t read_words(const uint32_t *words, uint64_t offset, uint32_t size) {
 }
 
 void write_words(uint32_t *words, uint64_t offset, uint32_t size, uint64_t value) {
+    uint32_t byte = offset % 4;
+    if (size == 4 && byte == 0) {
+        words[offset / 4] = (uint32_t)value;
+        return;
+    }
+    if (size >= 1 && size <= 4 - byte) {
+        uint32_t shift = byte * 8;
+        uint32_t mask = UINT32_MAX >> ((4 - size) * 8);
+        uint32_t &word = words[offset / 4];
+        word = (word & ~(mask << shift)) | (((uint32_t)value & mask) << shift);
+        return;
+    }
+    if (size == 8 && byte == 0) {
+        words[offset / 4] = (uint32_t)value;
+        words[offset / 4 + 1] = (uint32_t)(value >> 32);
+        return;
+    }
     for (uint32_t i = 0; i < size; ++i) {
         uint64_t byte = offset + i;
         uint32_t shift = (byte % 4) * 8;
@@ -58,9 +82,20 @@ int flag_bit(uint64_t offset) {
     return (int)(offset - 0x200) + (offset > 0x20c);
 }
 
-enum class RegisterKind { Invalid, Gpr, Fs, Eflags, EflagsMisc, Eip, Flag, X87Control, Mm, Xmm };
+enum class RegisterKind : uint8_t {
+    Invalid,
+    Gpr,
+    Fs,
+    Eflags,
+    EflagsMisc,
+    Eip,
+    Flag,
+    X87Control,
+    Mm,
+    Xmm
+};
 
-RegisterKind register_kind(const RpVarnode &v, const char *&what) {
+RegisterKind classify_register(const RpVarnode &v, const char *&what) {
     if (v.space != RP_SPACE_REGISTER) {
         what = "not a register";
         return RegisterKind::Invalid;
@@ -90,6 +125,27 @@ RegisterKind register_kind(const RpVarnode &v, const char *&what) {
         return RegisterKind::Flag;
     what = "unsupported guest register";
     return RegisterKind::Invalid;
+}
+
+const auto g_register_kinds = [] {
+    std::array<std::array<RegisterKind, 8>, 0x1400> kinds{};
+    for (uint32_t offset = 0; offset < kinds.size(); ++offset) {
+        for (uint32_t size = 1; size <= 8; ++size) {
+            const char *what = nullptr;
+            kinds[offset][size - 1] = classify_register({RP_SPACE_REGISTER, size, offset}, what);
+        }
+    }
+    return kinds;
+}();
+
+RegisterKind register_kind(const RpVarnode &v, const char *&what) {
+    if (v.space == RP_SPACE_REGISTER && v.size >= 1 && v.size <= 8 &&
+        v.offset < g_register_kinds.size()) {
+        RegisterKind kind = g_register_kinds[v.offset][v.size - 1];
+        if (kind != RegisterKind::Invalid)
+            return kind;
+    }
+    return classify_register(v, what);
 }
 
 class X86Host final : public PcodeHost {
@@ -644,6 +700,14 @@ class X86Host final : public PcodeHost {
     uint32_t continuation_ = 0;
 };
 
+struct InterpreterFrame {
+    explicit InterpreterFrame(X86 *c) : host(c), machine(host) {}
+    X86Host host;
+    PcodeMachine machine;
+};
+
+thread_local std::vector<std::unique_ptr<InterpreterFrame>> g_frames;
+
 void report_fault(const PcodeFault &fault) {
     snprintf(g_error, sizeof g_error, "%s at %08llx (pc %08llx, bytes", fault.why.c_str(),
              (unsigned long long)fault.addr, (unsigned long long)fault.pc);
@@ -666,8 +730,14 @@ extern "C" int pcode_interp_call(X86 *c, uint32_t target) {
         }
     } leave;
     x86_cc_settle(c);
-    X86Host host(c);
-    PcodeMachine machine(host);
+    if (g_frames.size() <= g_depth)
+        g_frames.resize(g_depth + 1);
+    if (!g_frames[g_depth])
+        g_frames[g_depth] = std::make_unique<InterpreterFrame>(c);
+    auto &frame = *g_frames[g_depth];
+    frame.host = X86Host(c);
+    auto &host = frame.host;
+    auto &machine = frame.machine;
     uint64_t pc = target;
     try {
         for (;;) {

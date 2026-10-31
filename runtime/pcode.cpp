@@ -1,5 +1,6 @@
 #include "pcode_core.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 
@@ -170,19 +171,43 @@ void PcodeMachine::fail(const std::string &why) const {
     throw PcodeFault{why, pc_, pc_, len_};
 }
 
-PcodeMachine::UniqueChunk *PcodeMachine::unique_chunk(uint64_t offset, bool write) {
-    UniqueSlot &slot =
-        unique_slots_[(offset ^ (offset >> 8) ^ (offset >> 16)) % unique_slots_.size()];
-    if (slot.chunk && slot.offset == offset)
-        return slot.chunk;
-    auto it = unique_.find(offset);
-    if (it == unique_.end()) {
-        if (!write)
-            return nullptr;
-        it = unique_.try_emplace(offset).first;
+void PcodeInstruction::prepare_unique() {
+    std::vector<uint64_t> offsets;
+    auto collect = [&](const RpVarnode &v) {
+        if (v.space == RP_SPACE_UNIQUE) {
+            offsets.push_back(v.offset >> 3);
+            offsets.push_back((v.offset + v.size - 1) >> 3);
+        }
+    };
+    for (const auto &op : ops) {
+        for (uint32_t i = 0; i < op.input_count; ++i)
+            collect(op.inputs[i]);
+        if (op.has_output)
+            collect(op.output);
     }
-    slot = {offset, &it->second};
-    return slot.chunk;
+    std::sort(offsets.begin(), offsets.end());
+    offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+    size_t rotation = 0;
+    if (!offsets.empty() && offsets.front() == 0 && offsets.back() == (UINT64_MAX >> 3)) {
+        auto gap = std::adjacent_find(offsets.begin(), offsets.end(),
+                                      [](uint64_t a, uint64_t b) { return b != a + 1; });
+        rotation = gap + 1 - offsets.begin();
+    }
+    auto remap = [&](RpVarnode &v) {
+        if (v.space != RP_SPACE_UNIQUE)
+            return;
+        size_t index =
+            std::lower_bound(offsets.begin(), offsets.end(), v.offset >> 3) - offsets.begin();
+        index = (index + offsets.size() - rotation) % offsets.size();
+        v.offset = index * 8 + (v.offset & 7);
+    };
+    for (auto &op : ops) {
+        for (uint32_t i = 0; i < op.input_count; ++i)
+            remap(op.inputs[i]);
+        if (op.has_output)
+            remap(op.output);
+    }
+    unique_chunks = offsets.size();
 }
 
 bool PcodeMachine::load(const RpVarnode &v, uint64_t &out) {
@@ -198,6 +223,15 @@ bool PcodeMachine::load(const RpVarnode &v, uint64_t &out) {
         return true;
     }
     case RP_SPACE_UNIQUE: {
+        uint32_t byte = v.offset & 7;
+        if (v.size <= 8 - byte) {
+            const UniqueChunk &chunk = unique_[v.offset >> 3];
+            uint32_t defined = ((1u << v.size) - 1) << byte;
+            if (chunk.generation != unique_generation_ || (chunk.defined & defined) != defined)
+                fail("undefined unique read");
+            out = (chunk.value >> (8 * byte)) & width_mask(v.size);
+            return true;
+        }
         out = 0;
         for (uint32_t i = 0; i < v.size;) {
             uint64_t offset = v.offset + i;
@@ -205,10 +239,9 @@ bool PcodeMachine::load(const RpVarnode &v, uint64_t &out) {
             uint32_t count = v.size - i;
             if (count > 8 - byte)
                 count = 8 - byte;
-            const UniqueChunk *found = unique_chunk(offset >> 3, false);
-            if (!found || found->generation != unique_generation_)
+            const UniqueChunk &chunk = unique_[offset >> 3];
+            if (chunk.generation != unique_generation_)
                 fail("undefined unique read");
-            const UniqueChunk &chunk = *found;
             uint32_t defined = ((1u << count) - 1) << byte;
             if ((chunk.defined & defined) != defined)
                 fail("undefined unique read");
@@ -236,13 +269,25 @@ void PcodeMachine::store(const RpVarnode &v, uint64_t value) {
         return;
     }
     if (v.space == RP_SPACE_UNIQUE) {
+        uint32_t byte = v.offset & 7;
+        if (v.size <= 8 - byte) {
+            UniqueChunk &chunk = unique_[v.offset >> 3];
+            if (chunk.generation != unique_generation_) {
+                chunk.generation = unique_generation_;
+                chunk.defined = 0;
+            }
+            uint64_t mask = width_mask(v.size) << (8 * byte);
+            chunk.value = (chunk.value & ~mask) | ((value << (8 * byte)) & mask);
+            chunk.defined |= ((1u << v.size) - 1) << byte;
+            return;
+        }
         for (uint32_t i = 0; i < v.size;) {
             uint64_t offset = v.offset + i;
             uint32_t byte = offset & 7;
             uint32_t count = v.size - i;
             if (count > 8 - byte)
                 count = 8 - byte;
-            UniqueChunk &chunk = *unique_chunk(offset >> 3, true);
+            UniqueChunk &chunk = unique_[offset >> 3];
             if (chunk.generation != unique_generation_) {
                 chunk.generation = unique_generation_;
                 chunk.defined = 0;
@@ -425,11 +470,13 @@ bool PcodeMachine::step(uint64_t &pc) {
     const auto &ops = instruction->ops;
     if (!instruction->preflighted) {
         preflight(ops);
+        instruction->prepare_unique();
         instruction->preflighted = true;
     }
-    if (++unique_generation_ == 0 || unique_.size() > 65536) {
-        unique_slots_.fill({});
-        unique_.clear();
+    if (unique_.size() < instruction->unique_chunks)
+        unique_.resize(instruction->unique_chunks);
+    if (++unique_generation_ == 0) {
+        std::fill(unique_.begin(), unique_.end(), UniqueChunk{});
         unique_generation_ = 1;
     }
     uint64_t next = pc + len_;
