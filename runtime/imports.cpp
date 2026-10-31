@@ -293,6 +293,12 @@ uint32_t imports_trampoline_for(const char *dll, const char *name) {
     return TRAMP_BASE + TRAMP_STRIDE * it->second;
 }
 
+bool imports_implemented(const char *dll, const char *name) {
+    auto it = registry().find(key_of(dll, name));
+    return it != registry().end() && it->second.fn && it->second.fn != imports_unsupported &&
+           it->second.argc_stdcall != ARGC_UNKNOWN;
+}
+
 uint32_t imports_resolve(const char *dll, const char *name) {
     uint32_t a = imports_trampoline_for(dll, name);
     if (a)

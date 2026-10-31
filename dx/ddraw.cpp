@@ -1414,7 +1414,7 @@ const uint32_t kCursorSurfacePtr[RECOMP_HOOK_CURSOR_SURFACE_PTRS_COUNT] =
 // rather than learning something wrong.
 HostSurfaceId cursor_surface_now() {
     for (uint32_t at : kCursorSurfacePtr) {
-        if (!gm_valid(at, 4))
+        if (!at || !gm_valid(at, 4))
             continue;
         uint32_t iface = rd32(at);
         if (!iface)

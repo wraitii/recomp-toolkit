@@ -143,7 +143,14 @@ continuing would run the guest past a point Windows never reaches.
 - **The image hash is a hard gate.** `loader_load` refuses any EXE whose
   SHA-256 is not the expected one, with no override, because everything after
   it trusts that exact layout. PE parsing bounds-checks the headers, the
-  section table and every import RVA against the image.
+  section table and every import RVA against the image. The separate manual
+  runner uses an empty dispatch and the interpreter instead: build it with
+  `python3 tools/build.py --target run`, then run
+  `build/manual/recomp/recomp-run /path/to/program.exe [arguments...]`.
+  It supports x86 PE32 GUI and console images at their preferred base, with
+  imports provided by runtime shims. Unimplemented imports fail by name only
+  when called; guest DLL files are not loaded. Unsupported startup features
+  fail during loading. It runs headlessly and inherits interpreter limitations.
 - **`GetMessageA` blocks, and owns the wait.** It drives the multimedia
   timers, calls the host's pump, and yields the scheduler baton, round and
   round until a message matching the filter arrives. The host's pump services

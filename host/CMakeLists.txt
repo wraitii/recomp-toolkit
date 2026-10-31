@@ -197,6 +197,18 @@ else()
   set(RECOMP_PLATFORM_UI ${HOST}/sdl/platform_ui_desktop.cpp ${HOST}/launcher/launcher_platform_desktop.cpp)
 endif()
 
+if(NOT IOS AND NOT ANDROID AND NOT EMSCRIPTEN AND RECOMP_PCODE_LIB)
+  recomp_host(recomp_run
+    SOURCES ${HOST}/headless_main.cpp ${HOST}/input.cpp ${HOST}/input_gate.cpp ${HOST}/compositor.cpp
+            ${HOST}/script.cpp ${HOST}/input_script.cpp ${HOST}/input_script_host.cpp ${HOST}/page_overlay.cpp ${RECOMP_AUDIO_SOURCES}
+            ${RECOMP_ROOT}/runtime/interpreted_dispatch.cpp
+    LIBS ${RECOMP_CORE_LIBS}
+    FRAMEWORKS ${FW_FOUNDATION})
+  target_compile_definitions(recomp_run PRIVATE RECOMP_MANUAL_RUNNER=1)
+  set_target_properties(recomp_run PROPERTIES OUTPUT_NAME recomp-run)
+  recomp_link_sdl(recomp_run)
+endif()
+
 if(TARGET recomp_gen)
   if(NOT IOS AND NOT ANDROID)
   recomp_host(recomp_headless GEN

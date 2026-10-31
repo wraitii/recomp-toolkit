@@ -24,6 +24,7 @@ namespace {
 
 std::string g_error;
 std::string g_exe_path;
+bool g_interpreted = false;
 uint32_t g_base = 0, g_size = 0, g_entry = 0, g_iat_patched = 0, g_iat_data = 0;
 std::vector<SectionInfo> g_sections;
 LoaderModule g_main;
@@ -182,6 +183,8 @@ bool patch_iat(const std::vector<uint8_t> &file, size_t opt_off, uint16_t opt_ma
                uint32_t g_base, uint32_t g_size) {
     auto rva_ok = [g_size](uint32_t rva, uint32_t len) { return rva_in(g_size, rva, len); };
     size_t dd_off = opt_off + (opt_magic == 0x20b ? 112 : 96);
+    if (g_interpreted && rd<uint32_t>(file, opt_off + 92) <= 1)
+        return true;
     if (dd_off + 16 > file.size()) {
         g_error = "PE data directories are truncated";
         return false;
@@ -189,9 +192,11 @@ bool patch_iat(const std::vector<uint8_t> &file, size_t opt_off, uint16_t opt_ma
     uint32_t imp_rva = rd<uint32_t>(file, dd_off + 8 * 1 + 0);
     uint32_t imp_size = rd<uint32_t>(file, dd_off + 8 * 1 + 4);
     if (!imp_rva || !imp_size) {
-        // A self-contained auxiliary module (pure code, no imports) is fine;
-        // the game's executable always imports at least kernel32.
-        if (g_base != loader_image_base())
+        if (g_interpreted && bool(imp_rva) != bool(imp_size)) {
+            g_error = "incomplete import directory";
+            return false;
+        }
+        if (g_interpreted || g_base != loader_image_base())
             return true;
         g_error = "image has no import directory";
         return false;
@@ -202,7 +207,8 @@ bool patch_iat(const std::vector<uint8_t> &file, size_t opt_off, uint16_t opt_ma
     }
 
     // One descriptor per DLL, bounded by the directory size.
-    uint32_t max_desc = imp_size / 20 + 1;
+    uint32_t max_desc = imp_size / 20 + (g_interpreted ? 0 : 1);
+    bool terminated = false;
     uint32_t desc_rva = imp_rva;
     for (uint32_t d = 0; d < max_desc; ++d, desc_rva += 20) {
         if (!rva_ok(desc_rva, 20)) {
@@ -213,8 +219,10 @@ bool patch_iat(const std::vector<uint8_t> &file, size_t opt_off, uint16_t opt_ma
         uint32_t orig_thunk = rd32(desc + 0);
         uint32_t name_rva = rd32(desc + 12);
         uint32_t first_thunk = rd32(desc + 16);
-        if (!name_rva && !first_thunk && !orig_thunk)
+        if (!name_rva && !first_thunk && !orig_thunk) {
+            terminated = true;
             break;
+        }
         if (!rva_ok(name_rva, 1) || !rva_ok(first_thunk, 4)) {
             g_error = "import descriptor points outside the image";
             return false;
@@ -248,6 +256,10 @@ bool patch_iat(const std::vector<uint8_t> &file, size_t opt_off, uint16_t opt_ma
             // must hold the original guest address, not a host trampoline or
             // a separately allocated copy of an exported global.
             if (const LoaderModule *module = loader_module_named(dll.c_str())) {
+                if (g_interpreted) {
+                    g_error = "unsupported guest module import " + dll;
+                    return false;
+                }
                 uint32_t address = (t & 0x80000000u)
                                        ? loader_module_export_ordinal(*module, t & 0xffff)
                                        : loader_module_export(*module, namebuf);
@@ -274,7 +286,10 @@ bool patch_iat(const std::vector<uint8_t> &file, size_t opt_off, uint16_t opt_ma
             // not return zero. A DLL with no table at all is not merely
             // unimplemented either: calling into it must stop with the name of
             // the missing dll!function rather than returning zero.
-            uint32_t tramp = imports_resolve(dll.c_str(), namebuf);
+            uint32_t tramp = g_interpreted && !imports_implemented(dll.c_str(), namebuf)
+                                 ? imports_alloc_trampoline(dll.c_str(), namebuf,
+                                                            imports_unsupported, ARGC_UNKNOWN)
+                                 : imports_resolve(dll.c_str(), namebuf);
             if (!tramp) {
                 void (*unknown)(X86 *) =
                     (imports_has_dll(dll.c_str()) && !imports_is_strict_dll(dll.c_str()))
@@ -289,6 +304,10 @@ bool patch_iat(const std::vector<uint8_t> &file, size_t opt_off, uint16_t opt_ma
             wr32(slot, tramp);
             ++g_iat_patched;
         }
+    }
+    if (g_interpreted && !terminated) {
+        g_error = "import directory lacks a terminating descriptor";
+        return false;
     }
     return true;
 }
@@ -403,7 +422,7 @@ bool pe_layout(const std::vector<uint8_t> &file, const std::string &path, PeLayo
         return false;
     }
     uint32_t pe_off = rd<uint32_t>(file, 0x3c);
-    if (pe_off + 24 > file.size() || rd<uint32_t>(file, pe_off) != 0x00004550) {
+    if ((uint64_t)pe_off + 24 > file.size() || rd<uint32_t>(file, pe_off) != 0x00004550) {
         g_error = path + " is not a PE image";
         return false;
     }
@@ -838,6 +857,9 @@ const std::vector<SectionInfo> &loader_sections() {
 const std::string &loader_exe_path() {
     return g_exe_path;
 }
+const std::string &loader_exe_name() {
+    return g_main.name;
+}
 uint32_t loader_iat_patched() {
     return g_iat_patched;
 }
@@ -853,7 +875,8 @@ const LoaderTls &loader_tls() {
 
 // Verify the supported executable hash, map PE sections and bind its imports.
 // All later address-based translation assumes this exact image; a mismatch is a hard failure.
-bool loader_load(const char *exe_path) {
+static bool loader_load_impl(const char *exe_path, bool interpreted) {
+    g_interpreted = interpreted;
     g_error.clear();
     g_sections.clear();
     g_aux.clear();
@@ -879,7 +902,7 @@ bool loader_load(const char *exe_path) {
     // against. It is the digest of what was really mapped, not of what was
     // expected, which is why it is recorded here and not made a constant.
     g_exe_sha = digest;
-    if (digest != LOADER_EXPECTED_SHA256) {
+    if (!interpreted && digest != LOADER_EXPECTED_SHA256) {
         g_error = g_exe_path + " has SHA-256 " + digest + ", expected " + LOADER_EXPECTED_SHA256;
         return false;
     }
@@ -889,7 +912,7 @@ bool loader_load(const char *exe_path) {
         return false;
     }
     uint32_t pe_off = rd<uint32_t>(file, 0x3c);
-    if (pe_off + 24 > file.size() || rd<uint32_t>(file, pe_off) != 0x00004550) {
+    if ((uint64_t)pe_off + 24 > file.size() || rd<uint32_t>(file, pe_off) != 0x00004550) {
         g_error = "not a PE image";
         return false;
     }
@@ -919,7 +942,7 @@ bool loader_load(const char *exe_path) {
     uint32_t size_image = rd<uint32_t>(file, opt_off + 56);
     uint32_t size_hdrs = rd<uint32_t>(file, opt_off + 60);
 
-    if (image_base != IMAGE_BASE) {
+    if (!interpreted && image_base != IMAGE_BASE) {
         char buf[128];
         snprintf(buf, sizeof buf,
                  "image base %08x is not the expected %08x (no relocation support)", image_base,
@@ -927,7 +950,45 @@ bool loader_load(const char *exe_path) {
         g_error = buf;
         return false;
     }
-    if ((uint64_t)image_base + size_image > HEAP_BASE) {
+    if (interpreted) {
+        uint64_t end = (uint64_t)image_base + size_image;
+        auto overlaps = [&](uint32_t start, uint32_t limit) {
+            return image_base < limit && end > start;
+        };
+        if (!size_image || image_base < GUEST_NULL_LIMIT || end > GUEST_SIZE ||
+            overlaps(HEAP_BASE, HEAP_LIMIT) || overlaps(0x0e000000u, GUEST_SHIM_END)) {
+            g_error = "image overlaps the heap or fixed runtime region (0x0e000000..0x10000000), "
+                      "or lies outside the guest arena";
+            return false;
+        }
+        if (size_hdrs > size_image || size_hdrs > file.size() || !entry_rva ||
+            entry_rva >= size_image) {
+            g_error = "invalid image headers or entry point";
+            return false;
+        }
+        uint32_t directories = rd<uint32_t>(file, opt_off + 92);
+        if (directories > (opt_size - 96) / 8) {
+            g_error = "PE data directories are truncated";
+            return false;
+        }
+        for (uint32_t index : {11u, 13u, 14u}) {
+            if (index < directories && rd<uint32_t>(file, opt_off + 96 + index * 8)) {
+                g_error = "unsupported PE startup directory " + std::to_string(index);
+                return false;
+            }
+        }
+        uint16_t subsystem = rd<uint16_t>(file, opt_off + 68);
+        if (subsystem != 2 && subsystem != 3) {
+            g_error = "unsupported PE subsystem " + std::to_string(subsystem);
+            return false;
+        }
+        uint16_t characteristics = rd<uint16_t>(file, fh_off + 18);
+        if (!(characteristics & 0x0002) || (characteristics & 0x2000)) {
+            g_error = "PE image is not an executable program";
+            return false;
+        }
+    }
+    if (!interpreted && (uint64_t)image_base + size_image > HEAP_BASE) {
         char buf[128];
         snprintf(buf, sizeof buf,
                  "image ends at %08x, above the heap arena start %08x; raise [game] heap_base",
@@ -940,7 +1001,8 @@ bool loader_load(const char *exe_path) {
     g_base = image_base;
     g_size = size_image;
     g_entry = image_base + entry_rva;
-    g_main.name = RECOMP_EXECUTABLE;
+    g_main.name =
+        interpreted ? g_exe_path.substr(g_exe_path.find_last_of("\\/") + 1) : RECOMP_EXECUTABLE;
     g_main.path = g_exe_path;
     g_main.sha256 = digest;
     g_main.base = g_base;
@@ -992,6 +1054,19 @@ bool loader_load(const char *exe_path) {
         g_sections.push_back(si);
     }
 
+    if (interpreted) {
+        bool executable_entry = false;
+        for (const auto &section : g_sections) {
+            uint32_t span = section.vsize ? section.vsize : section.raw_size;
+            if ((section.characteristics & 0x20000000u) && g_entry >= section.va &&
+                g_entry - section.va < span)
+                executable_entry = true;
+        }
+        if (!executable_entry) {
+            g_error = "entry point is outside an executable section";
+            return false;
+        }
+    }
     imports_init();
     win32_init(dirname_of(g_exe_path));
 
@@ -1048,7 +1123,7 @@ bool loader_load(const char *exe_path) {
     // Map and rebase every auxiliary module before binding any IAT: the
     // executable's Lionhead imports resolve to translated export addresses,
     // not to trampolines. DLL-to-DLL imports are bound in dependency order.
-    for (uint32_t i = 0; i < RECOMP_AUX_MODULE_COUNT; ++i)
+    for (uint32_t i = 0; !interpreted && i < RECOMP_AUX_MODULE_COUNT; ++i)
         if (!map_aux_module(g_aux_specs[i]))
             return false;
     if (!bind_aux_imports())
@@ -1065,7 +1140,8 @@ bool loader_load(const char *exe_path) {
         size_t dd = opt_off + 96;
         uint32_t imp_rva = rd<uint32_t>(file, dd + 8);
         uint32_t imp_size = rd<uint32_t>(file, dd + 12);
-        if (imp_rva && imp_size && rva_ok(imp_rva, imp_size)) {
+        if ((!interpreted || rd<uint32_t>(file, opt_off + 92) > 1) && imp_rva && imp_size &&
+            rva_ok(imp_rva, imp_size)) {
             for (uint32_t d = 0; d < imp_size / 20 + 1; ++d) {
                 uint32_t desc = imp_rva + d * 20;
                 if (!rva_ok(desc, 20))
@@ -1100,7 +1176,7 @@ bool loader_load(const char *exe_path) {
     // guest addresses.
     msvcr90_init();
 
-    if (g_entry != LOADER_EXPECTED_ENTRY)
+    if (!interpreted && g_entry != LOADER_EXPECTED_ENTRY)
         LOGW("entry point is %08x, expected %08x", g_entry, LOADER_EXPECTED_ENTRY);
 
     loader_init_context(&g_ctx);
@@ -1111,6 +1187,27 @@ bool loader_load(const char *exe_path) {
     LOGV("loaded %s: base %08x size %08x entry %08x, %u IAT slots, %u trampolines",
          g_exe_path.c_str(), g_base, g_size, g_entry, g_iat_patched, imports_count());
     return true;
+}
+
+bool loader_load(const char *exe_path) {
+    return loader_load_impl(exe_path, false);
+}
+
+extern "C" __attribute__((weak)) int recomp_interpreter_dispatch_ready() {
+    return 0;
+}
+
+bool loader_load_interpreted(const char *exe_path) {
+    if (!recomp_interpreter_dispatch_ready() || recomp_func_count || recomp_dispatch.count ||
+        recomp_dispatch.span || recomp_module_count()) {
+        g_error = "interpreted loading requires an empty translated dispatch";
+        return false;
+    }
+    if (!exe_path || !*exe_path) {
+        g_error = "no executable path supplied";
+        return false;
+    }
+    return loader_load_impl(exe_path, true);
 }
 
 void loader_init_context(X86 *c) {

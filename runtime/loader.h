@@ -32,6 +32,7 @@ static const uint32_t LOADER_EXPECTED_ENTRY = RECOMP_ENTRY_POINT;
 // does not match LOADER_EXPECTED_SHA256. There is no hash bypass.
 // Returns false and leaves loader_error() set on failure.
 bool loader_load(const char *exe_path = nullptr);
+bool loader_load_interpreted(const char *exe_path);
 
 const char *loader_error();
 uint32_t loader_image_base();
@@ -86,6 +87,7 @@ uint32_t loader_module_export_ordinal(const LoaderModule &m, uint32_t ordinal);
 // True inside the main image or any auxiliary module.
 bool loader_in_image(uint32_t addr);
 const std::string &loader_exe_path();
+const std::string &loader_exe_name();
 // IAT slots patched: trampolines for code imports, guest storage for data ones.
 uint32_t loader_iat_patched();
 uint32_t loader_iat_data_imports();

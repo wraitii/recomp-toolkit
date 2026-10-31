@@ -706,7 +706,7 @@ void win32_init(const std::string &game_dir) {
     vm_regions().clear();
     dir_cache().clear();
     g_next_handle = 0x00010004;
-    modules()[lower(std::string(RECOMP_EXECUTABLE))] = IMAGE_BASE;
+    modules()[lower(loader_exe_name())] = loader_image_base();
     g_process_heap = handle_new(H_HEAP);
     // Standard handles exist from the start.
     for (int i = 0; i < 3; ++i) {
@@ -1365,8 +1365,8 @@ void k_SetCurrentDirectoryA(X86 *c) {
 
 // Both encodings expose the same guest path, never a host filesystem path.
 std::string module_file_name(uint32_t hmod) {
-    std::string path = RECOMP_GUEST_ROOT "\\" RECOMP_EXECUTABLE;
-    if (hmod && hmod != IMAGE_BASE) {
+    std::string path = std::string(RECOMP_GUEST_ROOT "\\") + loader_exe_name();
+    if (hmod && hmod != loader_image_base()) {
         for (const auto &kv : modules())
             if (kv.second == hmod) {
                 path = RECOMP_GUEST_ROOT "\\" + kv.first;
@@ -1434,7 +1434,7 @@ void get_module_handle_named(X86 *c, const std::string &module_name) {
 void k_DisableThreadLibraryCalls(X86 *c) {
     const LoaderModule *found = loader_module_containing(arg(c, 0));
     LoaderModule *module = found ? loader_module_named(found->name.c_str()) : nullptr;
-    if (!module || module->base != arg(c, 0) || module->base == IMAGE_BASE) {
+    if (!module || module->base != arg(c, 0) || module->base == loader_image_base()) {
         set_last_error(ERROR_INVALID_HANDLE_);
         set_eax(c, 0);
         return;
@@ -1452,7 +1452,7 @@ void k_DisableThreadLibraryCalls(X86 *c) {
 void k_GetModuleHandleA(X86 *c) {
     uint32_t p = arg(c, 0);
     if (!p) {
-        set_eax(c, IMAGE_BASE);
+        set_eax(c, loader_image_base());
         return;
     }
     get_module_handle_named(c, gm_str(p));
@@ -1461,7 +1461,7 @@ void k_GetModuleHandleA(X86 *c) {
 void k_GetModuleHandleW(X86 *c) {
     uint32_t p = arg(c, 0);
     if (!p) {
-        set_eax(c, IMAGE_BASE);
+        set_eax(c, loader_image_base());
         return;
     }
     get_module_handle_named(c, gm_wstr(p));
@@ -5859,7 +5859,7 @@ void k_CreateProcessA(X86 *c) {
     }
     size_t args = line.find_first_not_of(" \t", end);
     std::string extra = args == std::string::npos ? "" : line.substr(args);
-    std::string host_exe = g_game_dir + "/" RECOMP_EXECUTABLE;
+    std::string host_exe = loader_exe_path();
     OsChildProcess *child = g_process_launcher(host_exe.c_str(), extra.c_str());
     if (!child) {
         LOGW("CreateProcessA: native child launch failed for %s", executable.c_str());
@@ -5905,7 +5905,7 @@ uint32_t win32_command_line() {
     if (!g_cmdline_addr) {
         // The CRT skips argv[0] before passing lpCmdLine to WinMain. Quote
         // the executable so whitespace in its path never becomes game args.
-        std::string line = "\"" RECOMP_GUEST_ROOT "\\" RECOMP_EXECUTABLE "\"";
+        std::string line = "\"" + module_file_name(0) + "\"";
         if (const char *extra = recomp_env("GUEST_ARGS"); extra && *extra)
             line += std::string(" ") + extra;
         g_cmdline_addr = guest_strdup(line.c_str());

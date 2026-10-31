@@ -514,9 +514,14 @@ bool boot_load(const BootOptions &opts) {
     const char *exe = g_opt.exe;
     if (!exe)
         exe = recomp_env("EXE");
-    if (!loader_load(exe))
+    if (g_opt.interpreted) {
+        imports_init();
+        dx_register_shims();
+    }
+    if (!(g_opt.interpreted ? loader_load_interpreted(exe) : loader_load(exe)))
         return false;
-    load_extra_code();
+    if (!g_opt.interpreted)
+        load_extra_code();
     dx_register_shims();
 
     // GetTickCount and timeGetTime keep telling the truth; installing the
@@ -624,7 +629,7 @@ void boot_run() {
     // absent cannot be told from a run that was never made. With mods loaded
     // the loader's own shutdown writes it, and writing here as well would
     // record the set twice.
-    if (!g_loader_ran)
+    if (!g_loader_ran && !g_opt.interpreted)
         mods_write_run_record(host_state_file("mods/run.json").c_str());
 
     mods_shutdown_request();
@@ -644,7 +649,7 @@ void boot_run() {
     // bound. This expires deadlines and hands the baton to a thread that can
     // actually run, until every worker has stopped or the bound elapses.
     sched_drive_until_stopped(2.0);
-    bool torn_down = mods_shutdown_complete();
+    bool torn_down = g_opt.interpreted || mods_shutdown_complete();
     g_mods_torn_down = torn_down;
     // Every host returns from here before ending audio or other host state.
     // Only close players once no guest worker can still access them.

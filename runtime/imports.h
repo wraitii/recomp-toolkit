@@ -42,6 +42,7 @@ void imports_register_strict(const char *dll);
 bool imports_is_strict_dll(const char *dll_lower);
 // True if a shim table registered an entry for this DLL (case-insensitive).
 bool imports_has_dll(const char *dll_lower);
+bool imports_implemented(const char *dll, const char *name);
 
 // ---------------------------------------------------------------------------
 // Return observer for import capture and diagnostics. Runs after the shim with

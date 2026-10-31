@@ -38,6 +38,7 @@ TARGETS = {
     "app": ["recomp_app"],
     "smoke": ["recomp_smoke"],
     "headless": ["recomp_headless"],
+    "run": ["recomp_run"],
     "gen": ["recomp_gen"],
     "dispatch-tests": ["dispatch_tests"],
     "interp-tests": ["interp_tests"],
@@ -960,6 +961,14 @@ def parse_args(argv, system=None):
         parser.error("--target ios needs --team or RECOMP_IOS_TEAM")
     if args.stub and (args.config == "Debug" or args.regenerate):
         parser.error("--stub cannot be combined with --config Debug or --regenerate")
+    if args.target == "run":
+        if args.game or args.game_dir or args.stub or args.no_pcode or args.regenerate:
+            parser.error("--target run uses the neutral configuration and requires p-code")
+        if (system or platform.system()) == "Windows" or args.preset.startswith("windows-cross"):
+            parser.error("--target run requires the desktop p-code interpreter, unavailable on Windows")
+        args.game_dir = ROOT / "tools/recomp/manual"
+        if args.build_root is None:
+            args.build_root = ROOT / "build/manual"
     game_config.resolve_game_args(args)
     if args.renderer_consumer or args.compositor_consumer:
         if args.jobs < 1:
@@ -1102,6 +1111,8 @@ def main():
         "-DRECOMP_RENDERER_CARGO_TARGET=" + args.renderer_cargo_target,
         "-DRECOMP_CHECK_CALL_FACTS=" + ("ON" if args.check_call_facts else "OFF"),
         "-DRECOMP_OBSERVE=" + ("OFF" if args.no_observe else "ON")]
+    if args.target == "run":
+        defines.append("-DRECOMP_TRANSLATE=OFF")
     if args.translation_piece_mb is not None:
         defines.append("-DRECOMP_SPLIT_TRANSLATION=ON")
         defines.append("-DRECOMP_GEN_PIECE_BUDGET=" + str(args.translation_piece_mb * 1000000))
@@ -1168,7 +1179,7 @@ def main():
             # Generated sources include the adjacent runtime header. Refresh
             # it under the same lock even when their translation is unchanged.
             header = args.build_root / "recomp/gen/x86.h"
-            if header.parent.is_dir():
+            if args.target != "run" and header.parent.is_dir():
                 current = (ROOT / "runtime/x86.h").read_bytes()
                 if not header.is_file() or header.read_bytes() != current:
                     temporary = header.with_suffix(".h.new")

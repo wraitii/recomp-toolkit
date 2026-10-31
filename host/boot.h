@@ -23,6 +23,7 @@
 struct BootOptions {
     // Image to load. Null means RECOMP_EXE, then the loader's default.
     const char *exe = nullptr;
+    bool interpreted = false;
     // Name used in the run header, e.g. "headless" -> "== headless run ==".
     const char *name = "host";
 

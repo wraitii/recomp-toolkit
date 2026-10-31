@@ -371,16 +371,24 @@ void split_command_line(const std::string &line, std::vector<std::string> &out) 
         std::string token;
         bool quoted = false;
         while (i < line.size()) {
-            char ch = line[i];
-            if (ch == '"') {
-                quoted = !quoted;
+            size_t slashes = 0;
+            while (i < line.size() && line[i] == '\\') {
+                ++slashes;
+                ++i;
+            }
+            if (i < line.size() && line[i] == '"') {
+                token.append(slashes / 2, '\\');
+                if (slashes % 2)
+                    token += '"';
+                else
+                    quoted = !quoted;
                 ++i;
                 continue;
             }
-            if (!quoted && (ch == ' ' || ch == '\t'))
+            token.append(slashes, '\\');
+            if (i == line.size() || (!quoted && (line[i] == ' ' || line[i] == '\t')))
                 break;
-            token += ch;
-            ++i;
+            token += line[i++];
         }
         out.push_back(token);
     }
@@ -695,33 +703,32 @@ void crt_qsort(X86 *c) {
                 goto split;
         }
 
-    split:
-        {
-            const int32_t left = (int32_t)(high - low_bound);
-            const int32_t right = (int32_t)(high_bound - low);
-            if (left < right) {
-                if (low < high_bound) {
-                    stack_low[stack_count] = low;
-                    stack_high[stack_count] = high_bound;
-                    ++stack_count;
-                }
-                if (low_bound >= high)
-                    goto pop;
-                low = low_bound;
-                high_bound = high;
-            } else {
-                if (low_bound < high) {
-                    stack_low[stack_count] = low_bound;
-                    stack_high[stack_count] = high;
-                    ++stack_count;
-                }
-                if (low >= high_bound)
-                    goto pop;
-                low_bound = low;
-                high = high_bound;
+    split: {
+        const int32_t left = (int32_t)(high - low_bound);
+        const int32_t right = (int32_t)(high_bound - low);
+        if (left < right) {
+            if (low < high_bound) {
+                stack_low[stack_count] = low;
+                stack_high[stack_count] = high_bound;
+                ++stack_count;
             }
-            continue;
+            if (low_bound >= high)
+                goto pop;
+            low = low_bound;
+            high_bound = high;
+        } else {
+            if (low_bound < high) {
+                stack_low[stack_count] = low_bound;
+                stack_high[stack_count] = high;
+                ++stack_count;
+            }
+            if (low >= high_bound)
+                goto pop;
+            low_bound = low;
+            high = high_bound;
         }
+        continue;
+    }
 
     pop:
         if (--stack_count < 0) {

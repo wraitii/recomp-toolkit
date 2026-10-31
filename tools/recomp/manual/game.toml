@@ -1,0 +1,10 @@
+[game]
+id = "manual"
+name = "Manual runner"
+app_name = "RecompRun"
+bundle_id = "dev.recompkit.run"
+executable = "PROGRAM.EXE"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+image_base = 0x00400000
+entry_point = 0x00401000
+guest_root = 'C:\Program'
