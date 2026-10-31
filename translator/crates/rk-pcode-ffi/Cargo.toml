@@ -9,6 +9,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rk-core.workspace = true
+rk-ir.workspace = true
+rk-x86.workspace = true
+rk-x87.workspace = true
 rk-sleigh.workspace = true
 rk-discover.workspace = true
 rk-image.workspace = true

@@ -1,27 +1,138 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use rk_core::ir::{Space, Varnode};
+use rk_core::flow::{Effect, Value};
+use rk_core::ir::{Insn, OpCode, Space, Varnode};
+use rk_core::isa::ReturnAddress;
 use rk_sleigh::Lifter;
+
+#[derive(Clone, Copy, Debug)]
+pub struct Arch {
+    pub address_bytes: u8,
+    pub word: u32,
+    pub link: Option<Varnode>,
+    pub stack_pointer: Varnode,
+    pub frame_pointer: Varnode,
+    pub program_counter: Varnode,
+    pub thread_base: Varnode,
+    pub fpu_control: Varnode,
+    pub eax: Varnode,
+    pub ecx: Varnode,
+    pub edx: Varnode,
+    pub ebx: Varnode,
+    pub esi: Varnode,
+    pub edi: Varnode,
+    pub cf: Varnode,
+    pub pf: Varnode,
+    pub af: Varnode,
+    pub zf: Varnode,
+    pub sf: Varnode,
+    pub of: Varnode,
+    pub df: Varnode,
+    pub segments: [Varnode; 6],
+}
+
+impl Arch {
+    fn resolve(map: &BTreeMap<String, Varnode>, address_bytes: u8) -> Result<Self, String> {
+        let machine = rk_core::isa::machine();
+        let roles = machine.registers();
+        let get = |name: &str| {
+            map.get(name)
+                .copied()
+                .ok_or_else(|| format!("SLEIGH register {name}"))
+        };
+        let stack_pointer = get(roles.stack_pointer)?;
+        Ok(Self {
+            address_bytes,
+            word: stack_pointer.size,
+            link: match machine.return_address() {
+                ReturnAddress::Stack => None,
+                ReturnAddress::Register(name) => Some(get(name)?),
+            },
+            stack_pointer,
+            frame_pointer: get(roles.frame_pointer)?,
+            program_counter: get(roles.program_counter)?,
+            thread_base: get(roles.thread_base)?,
+            fpu_control: get("FPUControlWord")?,
+            eax: get("EAX")?,
+            ecx: get("ECX")?,
+            edx: get("EDX")?,
+            ebx: get("EBX")?,
+            esi: get("ESI")?,
+            edi: get("EDI")?,
+            cf: get("CF")?,
+            pf: get("PF")?,
+            af: get("AF")?,
+            zf: get("ZF")?,
+            sf: get("SF")?,
+            of: get("OF")?,
+            df: get("DF")?,
+            segments: [
+                get("CS")?,
+                get("DS")?,
+                get("ES")?,
+                get("SS")?,
+                get("FS")?,
+                get("GS")?,
+            ],
+        })
+    }
+
+    pub fn general(&self) -> [Varnode; 8] {
+        [
+            self.eax,
+            self.ecx,
+            self.edx,
+            self.ebx,
+            self.stack_pointer,
+            self.frame_pointer,
+            self.esi,
+            self.edi,
+        ]
+    }
+
+    pub fn return_pop(&self, insn: &Insn) -> Option<i32> {
+        if insn
+            .ops
+            .iter()
+            .filter(|op| op.opcode == OpCode::Load)
+            .count()
+            != 1
+        {
+            return None;
+        }
+        let effect = Effect::of(&insn.ops, self.stack_pointer, self.frame_pointer);
+        match effect.value(self.stack_pointer)? {
+            Value::Stack(top) => i32::try_from(top - i64::from(self.word)).ok(),
+            _ => None,
+        }
+    }
+
+    pub fn arithmetic_flags(&self) -> [Varnode; 6] {
+        [self.cf, self.pf, self.af, self.zf, self.sf, self.of]
+    }
+}
 
 #[derive(Debug)]
 pub struct Registers {
     map: BTreeMap<String, Varnode>,
     covering: Vec<Option<(String, Varnode)>>,
+    userops: BTreeMap<u64, String>,
+    arch: Arch,
 }
 
 static REGISTERS: OnceLock<Registers> = OnceLock::new();
 
 impl Registers {
     pub fn get() -> &'static Registers {
-        REGISTERS.get_or_init(|| Self::scan().expect("SLEIGH x86 register table"))
+        REGISTERS.get_or_init(|| Self::scan().expect("SLEIGH register table"))
     }
 
     fn scan() -> Result<Self, String> {
         let lifter = Lifter::new().map_err(|e| e.to_string())?;
         let mut named: Vec<(&str, u64, u32)> = lifter
             .registers()
-            .filter(|&(_, offset, size)| offset < 0x2000 && [1, 2, 4, 8, 10, 16].contains(&size))
+            .filter(|&(name, _, size)| name != "contextreg" && size <= 16)
             .collect();
         named.sort_by_key(|&(_, offset, size)| (size, offset));
         let mut map = BTreeMap::new();
@@ -47,7 +158,24 @@ impl Registers {
                     .map(|(name, v)| (name.clone(), *v))
             })
             .collect();
-        Ok(Self { map, covering })
+        let arch = Arch::resolve(&map, lifter.address_bytes())?;
+        let target = rk_core::isa::target().address_bytes;
+        if arch.address_bytes != target {
+            return Err(format!(
+                "SLEIGH addresses are {} bytes but the target's are {target}",
+                arch.address_bytes
+            ));
+        }
+        Ok(Self {
+            map,
+            covering,
+            userops: lifter.userop_names().clone(),
+            arch,
+        })
+    }
+
+    pub fn userop(&self, id: Option<u64>) -> Option<&str> {
+        self.userops.get(&id?).map(String::as_str)
     }
 
     pub fn register(&self, name: &str) -> Option<Varnode> {
@@ -59,9 +187,13 @@ impl Registers {
         Some((name.as_str(), *v))
     }
 
+    pub fn arch(&self) -> &Arch {
+        &self.arch
+    }
+
     pub fn require(&self, name: &str) -> Varnode {
         self.register(name)
-            .unwrap_or_else(|| panic!("SLEIGH x86 register {name}"))
+            .unwrap_or_else(|| panic!("SLEIGH register {name}"))
     }
 }
 

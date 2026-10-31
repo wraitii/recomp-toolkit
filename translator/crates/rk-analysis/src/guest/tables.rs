@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use rk_core::program::Program;
 use rk_core::Addr;
-use rk_decode::{Decoder, OperandKind};
+use rk_x86::OperandKind;
 
 use super::summary::{FunctionSummary, ShapeForm};
 use super::{ObservedSite, Options, Site};
@@ -21,9 +21,7 @@ pub struct Bounds {
 }
 
 pub fn raw_census(program: &Program, constant_stores: bool) -> BTreeMap<Addr, Vec<Addr>> {
-    let Ok(decoder) = Decoder::new() else {
-        return BTreeMap::new();
-    };
+    let decoder = rk_core::isa::machine();
     let mut candidates = BTreeSet::new();
     for function in program.functions.values() {
         for span in &function.spans {
@@ -32,7 +30,7 @@ pub fn raw_census(program: &Program, constant_stores: bool) -> BTreeMap<Addr, Ve
                 for &length in lengths {
                     let length = length as usize;
                     if let Some(raw) = program.image.bytes(at, length) {
-                        if let Some(insn) = decoder.decode_span(at, raw) {
+                        if let Some(insn) = decoder.decode(at, raw) {
                             scan_operands(program, &insn, constant_stores, &mut candidates);
                         }
                     }
@@ -41,13 +39,13 @@ pub fn raw_census(program: &Program, constant_stores: bool) -> BTreeMap<Addr, Ve
             } else {
                 let mut at = span.start;
                 while at < span.end() {
-                    let available = (span.end() - at).min(15) as usize;
+                    let available = (span.end() - at).min(u64::from(decoder.max_length())) as usize;
                     let Some(bytes) = program.image.bytes(at, available) else {
                         break;
                     };
                     let mut next = None;
                     for length in 1..=available {
-                        if let Some(insn) = decoder.decode_span(at, &bytes[..length]) {
+                        if let Some(insn) = decoder.decode(at, &bytes[..length]) {
                             next = Some(insn);
                             break;
                         }
@@ -101,7 +99,7 @@ pub fn census(
 
 fn scan_operands(
     program: &Program,
-    insn: &rk_decode::DecodedInsn,
+    insn: &rk_core::isa::Decoded,
     constant_stores: bool,
     candidates: &mut BTreeSet<Addr>,
 ) {

@@ -168,10 +168,12 @@ impl State {
                 },
             );
         }
-        if let Some(thread) = Registers::get().register("FS_OFFSET") {
-            state.registers.insert(thread, Value::Thread);
-        }
-        state.slots.insert((0, 4), Value::ReturnAddress);
+        state
+            .registers
+            .insert(Registers::get().arch().thread_base, Value::Thread);
+        state
+            .slots
+            .insert((0, Registers::get().arch().word), Value::ReturnAddress);
         state
     }
 
@@ -188,9 +190,11 @@ impl State {
         if output.space != Space::Register {
             return Err("non-register output");
         }
-        if ["CS", "DS", "ES", "SS", "FS", "GS", "FS_OFFSET"]
-            .iter()
-            .filter_map(|name| Registers::get().register(name))
+        let arch = Registers::get().arch();
+        if arch
+            .segments
+            .into_iter()
+            .chain([arch.thread_base])
             .any(|segment| register_overlap(output, segment))
         {
             return Err("segment base write");
@@ -230,11 +234,11 @@ impl State {
     }
 
     fn returning(&self) -> Checked<(Fields, ReturnEffect)> {
-        let esp = Registers::get().require("ESP");
+        let esp = Registers::get().arch().stack_pointer;
         if self.registers.get(&esp) != Some(&Value::Stack(0)) {
             return Err("unproved ESP balance");
         }
-        let returns = match self.slots.get(&(0, 4)) {
+        let returns = match self.slots.get(&(0, Registers::get().arch().word)) {
             Some(Value::ReturnAddress) => ReturnEffect::Exact,
             Some(Value::ReturnOffset(delta)) => ReturnEffect::Adjust(*delta),
             _ => ReturnEffect::Unknown,
@@ -317,7 +321,7 @@ fn exact(op: &PcodeOp, state: &State, locals: &BTreeMap<Varnode, Value>) -> Opti
             }
             Some(Value::Constant(data & mask(output.size)))
         }
-        OpCode::IntAdd | OpCode::IntSub if output.size == 4 => {
+        OpCode::IntAdd | OpCode::IntSub if output.size == Registers::get().arch().word => {
             let b = state.read(*op.inputs.get(1)?, locals)?;
             let subtract = op.opcode == OpCode::IntSub;
             let offset = |value, delta: i64| match value {
@@ -456,7 +460,7 @@ fn import_fact<T: Copy>(facts: &BTreeMap<String, T>, import: &Import) -> Option<
 }
 
 fn import_call(state: &mut State, pop: i32, private: bool) -> Checked<()> {
-    let esp = Registers::get().require("ESP");
+    let esp = Registers::get().arch().stack_pointer;
     let Some(Value::Stack(offset)) = state.registers.get(&esp).copied() else {
         return Err("unknown call frame");
     };
@@ -517,7 +521,7 @@ impl Walk<'_> {
     }
 
     fn pass_registers(&mut self, state: &State) {
-        let esp = Registers::get().require("ESP");
+        let esp = Registers::get().arch().stack_pointer;
         if fields().any(|(_, register)| {
             register != esp && self.caller_pointer(state.registers.get(&register).copied())
         }) {
@@ -534,7 +538,7 @@ impl Walk<'_> {
                 if mode == Mode::Cleanup
                     && op.opcode == OpCode::Copy
                     && input.space == Space::Ram
-                    && input.size == 4
+                    && input.size == Registers::get().arch().word
                     && program.image.imports.contains_key(&(input.offset as Addr))
                 {
                     value = Some(Value::Import(input.offset as Addr));
@@ -598,8 +602,8 @@ impl Walk<'_> {
                     }
                     if mode == Mode::Cleanup && self.context.probes.contains(&target) {
                         let (esp, eax) = (
-                            Registers::get().require("ESP"),
-                            Registers::get().require("EAX"),
+                            Registers::get().arch().stack_pointer,
+                            Registers::get().arch().eax,
                         );
                         let (Some(Value::Stack(offset)), Some(Value::Constant(size))) = (
                             state.registers.get(&esp).copied(),
@@ -611,7 +615,9 @@ impl Walk<'_> {
                         state.write(
                             esp,
                             Some(Value::Stack(
-                                offset.wrapping_add(4).wrapping_sub(size as u32),
+                                offset
+                                    .wrapping_add(Registers::get().arch().word)
+                                    .wrapping_sub(size as u32),
                             )),
                         )?;
                         continue;
@@ -628,7 +634,7 @@ impl Walk<'_> {
                         }
                     }
                     let callee = self.known.get(&target).ok_or("unresolved direct call")?;
-                    let esp = Registers::get().require("ESP");
+                    let esp = Registers::get().arch().stack_pointer;
                     let Some(Value::Stack(offset)) = state.registers.get(&esp).copied() else {
                         return Err("unknown call frame");
                     };
@@ -716,9 +722,11 @@ impl Walk<'_> {
                 return Err("unmodeled helper");
             }
             if insn.mnemonic.eq_ignore_ascii_case("RET") {
-                let pop =
-                    return_pop(self.context.program, insn).ok_or("unsupported return encoding")?;
-                let esp = Registers::get().require("ESP");
+                let pop = Registers::get()
+                    .arch()
+                    .return_pop(insn)
+                    .ok_or("unsupported return encoding")?;
+                let esp = Registers::get().arch().stack_pointer;
                 let Some(Value::Stack(offset)) = state.registers.get(&esp).copied() else {
                     return Err("unknown call frame");
                 };
@@ -798,12 +806,7 @@ fn summarize(
                 return Err("return has successors");
             }
             let (preserved, effect) = state.returning()?;
-            if walk.caller_pointer(
-                state
-                    .registers
-                    .get(&Registers::get().require("EAX"))
-                    .copied(),
-            ) {
+            if walk.caller_pointer(state.registers.get(&Registers::get().arch().eax).copied()) {
                 walk.escapes = true;
             }
             preserves = preserves & preserved;
@@ -812,8 +815,13 @@ fn summarize(
                 (Some(a), b) if a == b => a,
                 _ => ReturnEffect::Unknown,
             });
-            cleanups.insert(return_pop(program, insn).ok_or("unsupported return encoding")?);
-            walk.reads.insert((0, 4));
+            cleanups.insert(
+                Registers::get()
+                    .arch()
+                    .return_pop(insn)
+                    .ok_or("unsupported return encoding")?,
+            );
+            walk.reads.insert((0, Registers::get().arch().word));
             continue;
         }
         let tail = fir.exits.get(&index).filter(|targets| !targets.is_empty());
@@ -852,7 +860,7 @@ fn summarize(
                 &mut walk.writes,
                 private,
             )?;
-            state.write(Registers::get().require("ESP"), Some(Value::Stack(0)))?;
+            state.write(Registers::get().arch().stack_pointer, Some(Value::Stack(0)))?;
             let (preserved, _) = state.returning()?;
             preserves = preserves & preserved;
             let effect = match (effect, callee.returns) {
@@ -908,16 +916,6 @@ fn summarize(
         returns: returns.unwrap_or(ReturnEffect::Unknown),
         escapes: walk.escapes,
     })
-}
-
-pub fn return_pop(program: &Program, insn: &Insn) -> Option<i32> {
-    let raw = program.image.bytes(insn.addr, insn.length as usize)?;
-    let raw = raw.strip_prefix(&[0xf3]).unwrap_or(raw);
-    match raw {
-        [0xc3] => Some(0),
-        [0xc2, low, high] => Some(i32::from(u16::from_le_bytes([*low, *high]))),
-        _ => None,
-    }
 }
 
 pub fn analyze(
@@ -1106,7 +1104,7 @@ fn infer_cleanups(context: &Context<'_>, output: &mut Analysis) {
                 .insns
                 .iter()
                 .filter(|insn| insn.mnemonic.eq_ignore_ascii_case("RET"))
-                .map(|insn| return_pop(program, insn))
+                .map(|insn| Registers::get().arch().return_pop(insn))
                 .collect();
             pops.extend(
                 fir.exits

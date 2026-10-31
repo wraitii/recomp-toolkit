@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use rk_core::ir::{FunctionIr, Insn, OpCode, SehEffect, Space};
+use rk_core::flow::{Effect, Flow, Value};
+use rk_core::ir::{FunctionIr, Insn, OpCode, SehEffect, Space, Varnode};
 use rk_core::program::Program;
 use rk_core::{Addr, Diagnostic, Result};
-use rk_decode::{branch_target, gpr32, imm, DecodedInsn, Decoder, OperandKind, JCC};
+use rk_ir::Registers;
 use rk_sleigh::Lifter;
 
 use crate::seh::{
@@ -11,14 +12,14 @@ use crate::seh::{
     MSVC_EH3_FRAME_LEN,
 };
 use crate::tables::{recover_tables, table_jumps};
-use crate::{R_EBP, R_ESP};
+use crate::R_ESP;
 
-const TERMINATORS: [&str; 2] = ["RET", "JMP"];
 #[derive(Clone)]
 pub(crate) struct RawFunction {
     pub(crate) addr: Addr,
-    pub(crate) decoded: Vec<DecodedInsn>,
     pub(crate) insns: Vec<Insn>,
+    pub(crate) flows: Vec<Flow>,
+    effects: Vec<Effect>,
     register_writes: Vec<Option<BTreeSet<u8>>>,
     pub(crate) index: BTreeMap<Addr, u32>,
     pub(crate) contiguous: Vec<bool>,
@@ -57,40 +58,60 @@ impl RawFunction {
         self.index.get(&addr).copied()
     }
 
-    fn first(&self, i: usize) -> Option<&rk_decode::Operand> {
-        self.decoded.get(i)?.operands.first()
+    fn flow(&self, i: usize) -> Flow {
+        self.flows.get(i).copied().unwrap_or(Flow::Fall)
+    }
+
+    fn jump_register(&self, i: usize) -> Option<u8> {
+        let Flow::Jump(rk_core::flow::Target::Indirect(target)) = self.flow(i) else {
+            return None;
+        };
+        general_index(target)
+    }
+
+    fn pushed_constant(&self, i: usize) -> Option<Addr> {
+        if self.flow(i) != Flow::Fall {
+            return None;
+        }
+        self.effects.get(i)?.pushed_constant(stack_pointer())
     }
 
     pub(crate) fn push_ret_target(&self, i: usize) -> Option<Addr> {
-        let ins = self.decoded.get(i)?;
-        if ins.mnemonic != "PUSH" || i + 1 >= self.decoded.len() || !self.contiguous[i] {
+        if i + 1 >= self.insns.len() || !self.contiguous[i] {
             return None;
         }
-        if self.decoded[i + 1].mnemonic != "RET" || !self.decoded[i + 1].operands.is_empty() {
+        if self.flow(i + 1) != Flow::Return
+            || self.effects[i + 1].value(stack_pointer())
+                != Some(Value::Stack(i64::from(stack_pointer().size)))
+        {
             return None;
         }
-        let target = imm(ins.operands.first()?)?;
-        (operand_size(&ins.operands, Some(32))? == 32).then_some(target as Addr)
+        self.pushed_constant(i)
     }
 
     pub(crate) fn branch_target(&self, i: usize) -> Option<Addr> {
-        branch_target(self.decoded.get(i)?)
+        self.flow(i).target()
+    }
+
+    pub(crate) fn direct_call(&self, i: usize) -> Option<Addr> {
+        let flow = self.flow(i);
+        flow.is_call().then(|| flow.target()).flatten()
     }
 
     fn import_tail_slot(&self, program: &Program, i: usize) -> Option<Addr> {
-        let ins = self.decoded.get(i)?;
-        if ins.mnemonic != "JMP" || ins.length != 6 || ins.raw[..2] != [0xff, 0x25] {
+        let Flow::Jump(rk_core::flow::Target::Indirect(slot)) = self.flow(i) else {
             return None;
-        }
-        let slot = u32::from_le_bytes([ins.raw[2], ins.raw[3], ins.raw[4], ins.raw[5]]);
-        program.image.imports.contains_key(&slot).then_some(slot)
+        };
+        (slot.space == Space::Ram && slot.size == stack_pointer().size)
+            .then_some(slot.offset)
+            .filter(|slot| program.image.imports.contains_key(slot))
     }
 
     pub(crate) fn successors(&self, program: &Program, i: usize) -> Vec<u32> {
-        let Some(ins) = self.decoded.get(i) else {
+        let Some(ins) = self.insns.get(i) else {
             return Vec::new();
         };
-        let m = ins.mnemonic.as_str();
+        let flow = self.flow(i);
         if let Some(target) = self.push_ret_target(i) {
             if !self.pushed_continuations.contains(&target) {
                 return self.idx(target).into_iter().collect();
@@ -109,10 +130,10 @@ impl RawFunction {
                 .into_iter()
                 .collect();
         }
-        if m == "INT3" {
+        if flow == Flow::Trap {
             return Vec::new();
         }
-        if m == "RET" {
+        if flow == Flow::Return {
             return self
                 .pushed_continuations
                 .iter()
@@ -120,16 +141,14 @@ impl RawFunction {
                 .filter_map(|target| self.idx(*target))
                 .collect();
         }
-        if JCC.contains(&m) {
+        if let Flow::Branch(target) = flow {
             let mut out: Vec<u32> = next.into_iter().collect();
-            if let Some(target) = self.branch_target(i) {
-                if let Some(index) = self.idx(target) {
-                    out.push(index);
-                }
+            if let Some(index) = self.idx(target) {
+                out.push(index);
             }
             return out;
         }
-        if m == "JMP" {
+        if flow.is_jump() {
             if self.import_tail_slot(program, i).is_some() {
                 return Vec::new();
             }
@@ -151,17 +170,15 @@ impl RawFunction {
     }
 
     pub(crate) fn popped_return_jumps(&self, entries: &[Addr]) -> BTreeSet<u32> {
-        if !self.decoded.iter().any(|ins| ins.mnemonic == "POP") {
+        if !self
+            .effects
+            .iter()
+            .any(|effect| effect.writes.values().any(|v| matches!(v, Value::Slot(_))))
+        {
             return BTreeSet::new();
         }
-        let candidates: Vec<usize> = self
-            .decoded
-            .iter()
-            .enumerate()
-            .filter(|(_, ins)| {
-                ins.mnemonic == "JMP" && ins.operands.first().and_then(gpr32).is_some()
-            })
-            .map(|(i, _)| i)
+        let candidates: Vec<usize> = (0..self.insns.len())
+            .filter(|&i| self.jump_register(i).is_some())
             .collect();
         if candidates.is_empty() {
             return BTreeSet::new();
@@ -210,24 +227,26 @@ impl RawFunction {
         }
         while let Some(i) = pending.pop() {
             let index = i as usize;
-            let Some(ins) = self.decoded.get(index) else {
+            if index >= self.insns.len() {
                 continue;
-            };
+            }
             let Some(state) = states.get(&i).cloned() else {
                 continue;
             };
             if candidates.contains(&index)
                 && self
-                    .first(index)
-                    .and_then(gpr32)
+                    .jump_register(index)
                     .is_some_and(|r| state.saved.contains(&r))
             {
                 continue;
             }
             let out = self.transfer(index, state);
-            if ins.mnemonic == "JMP" && self.branch_target(index).is_none() {
+            if matches!(
+                self.flow(index),
+                Flow::Jump(rk_core::flow::Target::Indirect(_))
+            ) {
                 if !unknown_indirect_seen {
-                    for j in 0..self.decoded.len() as u32 {
+                    for j in 0..self.insns.len() as u32 {
                         merge(&mut states, &mut pending, j, ReturnState::unknown());
                     }
                     unknown_indirect_seen = true;
@@ -242,8 +261,7 @@ impl RawFunction {
             .into_iter()
             .filter(|&i| {
                 states.get(&(i as u32)).is_some_and(|state| {
-                    self.first(i)
-                        .and_then(gpr32)
+                    self.jump_register(i)
                         .is_some_and(|r| state.saved.contains(&r))
                 })
             })
@@ -252,10 +270,10 @@ impl RawFunction {
     }
 
     fn successors_during_proof(&self, i: usize) -> Vec<u32> {
-        let Some(ins) = self.decoded.get(i) else {
+        if i >= self.insns.len() {
             return Vec::new();
-        };
-        let m = ins.mnemonic.as_str();
+        }
+        let flow = self.flow(i);
         let next = self
             .fallthrough
             .get(i)
@@ -268,23 +286,17 @@ impl RawFunction {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect()
-        } else if m == "INT3" {
+        } else if flow == Flow::Trap {
             Vec::new()
-        } else if m == "RET" {
+        } else if flow == Flow::Return {
             self.pushed_continuations
                 .iter()
                 .chain(self.intra_call_returns.iter())
                 .filter_map(|t| self.idx(*t))
                 .collect()
-        } else if JCC.contains(&m) {
-            let mut out: Vec<u32> = next.into_iter().collect();
-            if let Some(target) = self.branch_target(i) {
-                if let Some(index) = self.idx(target) {
-                    out.push(index);
-                }
-            }
-            out
-        } else if m == "JMP" {
+        } else if let Flow::Branch(target) = flow {
+            next.into_iter().chain(self.idx(target)).collect()
+        } else if flow.is_jump() {
             if let Some(target) = self.branch_target(i) {
                 self.idx(target).into_iter().collect()
             } else if self.push_ret_target(i).is_some() {
@@ -305,66 +317,35 @@ impl RawFunction {
     }
 
     fn transfer(&self, index: usize, state: ReturnState) -> ReturnState {
-        let ins = &self.decoded[index];
-        let m = ins.mnemonic.as_str();
-        if m == "CALL" {
+        if self.flow(index).is_call() {
             return ReturnState::unknown();
         }
         let Some(writes) = &self.register_writes[index] else {
             return ReturnState::unknown();
         };
+        let effect = &self.effects[index];
+        let stack = stack_pointer();
+        let resolve = |value: Option<Value>, unchanged: Option<i32>| match value {
+            None => unchanged,
+            Some(Value::Stack(at)) => state.delta.map(|delta| delta + at as i32),
+            Some(Value::Frame(at)) => state.frame.map(|frame| frame + at as i32),
+            Some(_) => None,
+        };
+        let new_delta = resolve(effect.value(stack), state.delta);
         let mut saved = state.saved.clone();
-        let ops = &ins.operands;
         for reg in writes {
             saved.remove(reg);
         }
-        if m == "POP" && state.delta == Some(0) {
-            if let Some(reg) = ops.first().and_then(gpr32) {
-                if reg != R_ESP {
-                    saved.insert(reg);
+        if let Some(Value::Stack(top)) = effect.value(stack) {
+            for (&register, &value) in &effect.writes {
+                if let (Value::Slot(at), Some(reg)) = (value, general_index(register)) {
+                    if reg != R_ESP && state.delta.map(|d| d + at as i32) == Some(0) && top > at {
+                        saved.insert(reg);
+                    }
                 }
             }
         }
-        let adjustment = if matches!(m, "PUSH" | "POP") {
-            operand_size(ops, Some(32))
-                .map(|size| size as i32 / 8 * if m == "PUSH" { -1 } else { 1 })
-        } else if matches!(m, "PUSHAD" | "PUSHFD" | "PUSHF" | "POPFD" | "POPF") {
-            Some(match m {
-                "PUSHAD" => -32,
-                "PUSHFD" => -4,
-                "PUSHF" => -2,
-                "POPFD" => 4,
-                _ => 2,
-            })
-        } else if m == "RET" {
-            Some(4 + ops.first().and_then(imm).unwrap_or(0) as i32)
-        } else if matches!(m, "ADD" | "SUB") && ops.first().and_then(gpr32) == Some(R_ESP) {
-            ops.get(1).and_then(imm).map(|value| {
-                let signed = value as u32 as i32;
-                signed * if m == "SUB" { -1 } else { 1 }
-            })
-        } else {
-            None
-        };
-        let new_delta = if m == "LEAVE" {
-            state.frame.map(|frame| frame + 4)
-        } else if m == "POP" && ops.first().and_then(gpr32) == Some(R_ESP) {
-            None
-        } else if let Some(adjustment) = adjustment {
-            state.delta.map(|delta| delta + adjustment)
-        } else if writes.contains(&R_ESP) {
-            None
-        } else {
-            state.delta
-        };
-        let mut new_frame = if writes.contains(&R_EBP) {
-            None
-        } else {
-            state.frame
-        };
-        if m == "MOV" && ops.len() == 2 && ops[0].display == "EBP" && ops[1].display == "ESP" {
-            new_frame = state.delta;
-        }
+        let new_frame = resolve(effect.value(frame_pointer()), state.frame);
         ReturnState {
             delta: new_delta,
             frame: new_frame,
@@ -373,14 +354,13 @@ impl RawFunction {
     }
 
     fn reached(&self, program: &Program, roots: &BTreeSet<Addr>) -> BTreeSet<u32> {
-        if self.decoded.iter().enumerate().any(|(i, ins)| {
-            ins.mnemonic == "JMP"
-                && self.branch_target(i).is_none()
+        if self.insns.iter().enumerate().any(|(i, ins)| {
+            matches!(self.flow(i), Flow::Jump(rk_core::flow::Target::Indirect(_)))
                 && !program.tables.contains_key(&(self.addr, ins.addr))
                 && !self.recovered_tables.contains_key(&ins.addr)
                 && !popped_jump(self, i)
         }) {
-            return (0..self.decoded.len() as u32).collect();
+            return (0..self.insns.len() as u32).collect();
         }
         let mut work: Vec<u32> = roots
             .iter()
@@ -393,8 +373,7 @@ impl RawFunction {
                 continue;
             }
             let index = i as usize;
-            let ins = &self.decoded[index];
-            if never_returns(program, ins) {
+            if never_returns(program, self, index) {
                 continue;
             }
             if popped_jump(self, index) {
@@ -405,7 +384,7 @@ impl RawFunction {
                 );
                 continue;
             }
-            if !TERMINATORS.contains(&ins.mnemonic.as_str()) && !self.contiguous[index] {
+            if !self.flow(index).ends_block() && !self.contiguous[index] {
                 if let Some(target) = self.idx(self.fallthrough[index]) {
                     work.push(target);
                 }
@@ -417,7 +396,7 @@ impl RawFunction {
     }
 
     fn dead_after_noreturn(&self, program: &Program, entries: &[Addr]) -> BTreeSet<Addr> {
-        if !self.decoded.iter().any(|ins| never_returns(program, ins)) {
+        if !(0..self.insns.len()).any(|i| never_returns(program, self, i)) {
             return BTreeSet::new();
         }
         let roots = std::iter::once(self.addr)
@@ -426,9 +405,9 @@ impl RawFunction {
         let live = self.reached(program, &roots);
         let mut dead = BTreeSet::new();
         let mut after_noreturn = false;
-        for (i, ins) in self.decoded.iter().enumerate() {
+        for (i, ins) in self.insns.iter().enumerate() {
             if live.contains(&(i as u32)) {
-                after_noreturn = never_returns(program, ins);
+                after_noreturn = never_returns(program, self, i);
             } else if after_noreturn {
                 dead.insert(ins.addr);
             }
@@ -436,40 +415,30 @@ impl RawFunction {
         dead
     }
 
-    pub(crate) fn index_of(&self, addr: Addr) -> usize {
-        self.index.get(&addr).copied().unwrap_or(0) as usize
-    }
-
     fn prepare(&mut self, program: &Program, relocated: &BTreeMap<Addr, Addr>) {
         self.index = self
-            .decoded
+            .insns
             .iter()
             .enumerate()
             .map(|(i, ins)| (ins.addr, i as u32))
             .collect();
         self.fallthrough = self
-            .decoded
+            .insns
             .iter()
-            .map(|ins| ins.addr + ins.length as u32)
+            .map(|ins| ins.addr + u64::from(ins.length))
             .collect();
-        for i in 0..self.decoded.len() {
+        for i in 0..self.insns.len() {
             let next = self
-                .decoded
+                .insns
                 .get(i + 1)
                 .map(|ins| ins.addr)
                 .unwrap_or(self.end);
             self.contiguous[i] = self.fallthrough[i] == next;
         }
         self.recovered_tables = recover_tables(program, relocated, self);
-        self.intra_calls = self
-            .decoded
-            .iter()
-            .enumerate()
-            .filter_map(|(i, ins)| {
-                if ins.mnemonic != "CALL" {
-                    return None;
-                }
-                let target = self.branch_target(i)?;
+        self.intra_calls = (0..self.insns.len())
+            .filter_map(|i| {
+                let target = self.direct_call(i)?;
                 (self.index.contains_key(&target) && !program.entries.contains_key(&target))
                     .then_some((i as u32, target))
             })
@@ -485,24 +454,10 @@ impl RawFunction {
     }
 
     fn pushed_continuations(&self) -> BTreeSet<Addr> {
-        let mut targets = BTreeSet::new();
-        for ins in &self.decoded {
-            if ins.mnemonic != "PUSH" {
-                continue;
-            }
-            let Some(op) = ins.operands.first() else {
-                continue;
-            };
-            let Some(target) = imm(op) else {
-                continue;
-            };
-            let target = target as Addr;
-            if operand_size(&ins.operands, Some(32)) == Some(32) && self.index.contains_key(&target)
-            {
-                targets.insert(target);
-            }
-        }
-        targets
+        (0..self.insns.len())
+            .filter_map(|i| self.pushed_constant(i))
+            .filter(|target| self.index.contains_key(target))
+            .collect()
     }
 
     fn analyze(&mut self, program: &Program, entries: &[Addr], helpers: &BTreeSet<Addr>) {
@@ -515,13 +470,13 @@ pub(crate) fn build_raw(
     program: &Program,
     addr: Addr,
     lifter: &mut Lifter,
-    decoder: &Decoder,
     relocated: &BTreeMap<Addr, Addr>,
 ) -> Result<RawFunction> {
     let function = program
         .functions
         .get(&addr)
         .ok_or_else(|| Diagnostic::error(addr, rk_core::Reason::EntryOutsideFunctions))?;
+    let machine = rk_core::isa::machine();
     let mut decoded = Vec::new();
     for span in &function.spans {
         let raw = program.image.bytes_at(span.start, span.size as usize)?;
@@ -538,14 +493,14 @@ pub(crate) fn build_raw(
             let raw = program.image.bytes(at, length as usize).ok_or_else(|| {
                 Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: span.start })
             })?;
-            let ins = decoder.decode_span(at, raw).ok_or_else(|| {
+            let ins = machine.decode(at, raw).ok_or_else(|| {
                 Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: span.start })
             })?;
-            decoded.push(ins);
-            at += length as u32;
+            decoded.push((at, raw, ins));
+            at += u64::from(length);
         }
     }
-    let starts: BTreeSet<Addr> = decoded.iter().map(|ins| ins.addr).collect();
+    let starts: BTreeSet<Addr> = decoded.iter().map(|&(at, _, _)| at).collect();
     for entry in program.configured_entries.iter().copied() {
         if starts.contains(&entry) || program.containing(entry) != Some(addr) {
             continue;
@@ -559,19 +514,22 @@ pub(crate) fn build_raw(
                     rk_core::Reason::OverlappingEntryDoesNotRejoin { entry },
                 ));
             }
-            let bytes = program.image.bytes(at, 15).ok_or_else(|| {
-                Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
-            })?;
-            let length = lifter.length(at, bytes)?;
-            lengths.push(length);
-            at += length as u32;
-            let instruction = program
+            let bytes = program
                 .image
-                .bytes(at - length as u32, length as usize)
+                .bytes(at, usize::from(machine.max_length()))
                 .ok_or_else(|| {
                     Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
                 })?;
-            if lifter.ends_flow(at - length as u32, instruction)? {
+            let length = lifter.length(at, bytes)?;
+            lengths.push(length);
+            at += u64::from(length);
+            let instruction = program
+                .image
+                .bytes(at.wrapping_sub(u64::from(length)), length as usize)
+                .ok_or_else(|| {
+                    Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
+                })?;
+            if lifter.ends_flow(at.wrapping_sub(u64::from(length)), instruction)? {
                 break;
             }
         }
@@ -580,33 +538,31 @@ pub(crate) fn build_raw(
             let raw = program.image.bytes(at, length as usize).ok_or_else(|| {
                 Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
             })?;
-            let ins = decoder.decode_span(at, raw).ok_or_else(|| {
+            let ins = machine.decode(at, raw).ok_or_else(|| {
                 Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
             })?;
-            decoded.push(ins);
-            at += length as u32;
+            decoded.push((at, raw, ins));
+            at += u64::from(length);
         }
     }
-    decoded.sort_by_key(|ins| ins.addr);
-    if !decoded.iter().any(|ins| ins.addr == addr) {
+    decoded.sort_by_key(|&(at, _, _)| at);
+    if !decoded.iter().any(|&(at, _, _)| at == addr) {
         return Err(Diagnostic::error(
             addr,
             rk_core::Reason::EntryNotInstructionBoundary,
         ));
     }
-    let gprs: Vec<(u8, u64, u32)> = lifter
-        .registers()
-        .filter_map(|(name, offset, size)| {
-            rk_decode::REG32
-                .iter()
-                .position(|&reg| reg == name)
-                .map(|index| (index as u8, offset, size))
-        })
+    let gprs: Vec<(u8, u64, u32)> = Registers::get()
+        .arch()
+        .general()
+        .iter()
+        .enumerate()
+        .map(|(index, v)| (index as u8, v.offset, v.size))
         .collect();
     let mut register_writes = Vec::with_capacity(decoded.len());
     let mut insns = Vec::with_capacity(decoded.len());
-    for ins in &decoded {
-        let lifted = lifter.lift(ins.addr, &ins.raw[..ins.length as usize])?;
+    for (at, bytes, ins) in decoded {
+        let lifted = lifter.lift(at, bytes)?;
         register_writes.push(
             if lifted
                 .ops
@@ -632,32 +588,24 @@ pub(crate) fn build_raw(
                 )
             },
         );
-        insns.push(Insn {
-            addr: ins.addr,
-            length: lifted.length,
-            raw: ins.raw[..ins.length as usize].to_vec(),
-            address_size: ins.address_size,
-            mnemonic: ins.mnemonic.clone(),
-            operands: ins
-                .operands
-                .iter()
-                .map(|o| o.display.clone())
-                .collect::<Vec<_>>()
-                .join(","),
-            typed_operands: ins.operands.clone(),
-            repeat: ins.rep,
-            text: ins.text.clone(),
-            ops: lifted.ops,
-            x87: lifted.x87,
-        });
+        insns.push(Insn::new(at, bytes, ins, lifted.ops, lifted.x87));
     }
-    let end = (addr + function.spans.iter().map(|s| s.size).sum::<u32>())
-        .max(decoded.last().map(|ins| ins.addr + 1).unwrap_or(addr + 1));
-    let contiguous = vec![true; decoded.len()];
+    let flows = insns
+        .iter()
+        .map(|ins| Flow::of(&ins.ops, ins.addr, ins.end()))
+        .collect();
+    let effects = insns
+        .iter()
+        .map(|ins| Effect::of(&ins.ops, stack_pointer(), frame_pointer()))
+        .collect();
+    let end = (addr + u64::from(function.spans.iter().map(|s| s.size).sum::<u32>()))
+        .max(insns.last().map(|ins| ins.addr + 1).unwrap_or(addr + 1));
+    let contiguous = vec![true; insns.len()];
     let mut raw = RawFunction {
         addr,
-        decoded,
         insns,
+        flows,
+        effects,
         register_writes,
         index: BTreeMap::new(),
         contiguous,
@@ -689,37 +637,34 @@ pub(crate) fn finalize(
         .cloned()
         .unwrap_or_default();
     raw.analyze(program, &entries, helpers);
-    let mut succ = Vec::with_capacity(raw.decoded.len());
-    for i in 0..raw.decoded.len() {
+    let mut succ = Vec::with_capacity(raw.insns.len());
+    for i in 0..raw.insns.len() {
         succ.push(raw.successors(program, i));
     }
     let mut noreturn = BTreeMap::new();
-    for (i, ins) in raw.decoded.iter().enumerate() {
-        if never_returns(program, ins) {
-            noreturn.insert(i as u32, ins.addr + ins.length as u32);
+    for (i, ins) in raw.insns.iter().enumerate() {
+        if never_returns(program, &raw, i) {
+            noreturn.insert(i as u32, ins.addr + u64::from(ins.length));
             succ[i] = Vec::new();
         }
     }
     let exits = external_exits(program, &raw);
     let tables = table_jumps(&raw);
     let dynamic: BTreeSet<u32> = raw
-        .decoded
+        .insns
         .iter()
         .enumerate()
         .filter(|(i, ins)| {
-            ins.mnemonic == "JMP"
-                && raw.branch_target(*i).is_none()
+            matches!(raw.flow(*i), Flow::Jump(rk_core::flow::Target::Indirect(_)))
                 && !program.tables.contains_key(&(raw.addr, ins.addr))
                 && !raw.recovered_tables.contains_key(&ins.addr)
                 && !raw.return_jumps.contains(&(*i as u32))
         })
         .map(|(i, _)| i as u32)
         .collect();
-    let call_returns = raw
-        .decoded
-        .iter()
-        .filter(|ins| ins.mnemonic == "CALL")
-        .map(|ins| raw.fallthrough[raw.index[&ins.addr] as usize])
+    let call_returns = (0..raw.insns.len())
+        .filter(|&i| raw.flow(i).is_call())
+        .map(|i| raw.fallthrough[i])
         .collect();
     let seh = raw.seh_effects(program, helpers)?;
     entries.extend(seh.iter().filter_map(|(index, kinds)| {
@@ -733,18 +678,18 @@ pub(crate) fn finalize(
     entries.sort_unstable();
     entries.dedup();
     let eh3 = msvc_eh3_finally_only(&program.image, addr, eh3_trylevels(&raw, program).as_ref())
-        .then_some(addr + MSVC_EH3_FRAME_LEN - 7);
+        .then_some(addr + u64::from(MSVC_EH3_FRAME_LEN) - 7);
     let seh_unwind_only: BTreeSet<u32> = raw
         .seh_sites
         .iter()
         .filter_map(|(i, handler)| {
             (msvc_unwind_only(&program.image, Some(*handler))
-                || raw.decoded[*i as usize].addr == eh3.unwrap_or(0))
+                || raw.insns[*i as usize].addr == eh3.unwrap_or(0))
             .then_some(*i)
         })
         .collect();
     let import_tails = raw
-        .decoded
+        .insns
         .iter()
         .enumerate()
         .filter_map(|(i, _)| {
@@ -775,18 +720,18 @@ pub(crate) fn finalize(
 
 fn external_exits(program: &Program, raw: &RawFunction) -> BTreeMap<u32, Vec<Addr>> {
     let mut exits = BTreeMap::new();
-    for (i, ins) in raw.decoded.iter().enumerate() {
-        let m = ins.mnemonic.as_str();
-        if m == "INT3"
+    for (i, ins) in raw.insns.iter().enumerate() {
+        let flow = raw.flow(i);
+        if flow == Flow::Trap
             || raw.push_ret_target(i).is_some()
-            || never_returns(program, ins)
+            || never_returns(program, raw, i)
             || raw.dead_addrs.contains(&ins.addr)
         {
             continue;
         }
         let mut out = Vec::new();
-        if m == "JMP" {
-            if let Some(target) = raw.branch_target(i) {
+        if flow.is_jump() {
+            if let Some(target) = flow.target() {
                 out.push(target);
             } else if !raw.return_jumps.contains(&(i as u32)) {
                 let table = program
@@ -801,12 +746,10 @@ fn external_exits(program: &Program, raw: &RawFunction) -> BTreeMap<u32, Vec<Add
                     }
                 }
             }
-        } else if JCC.contains(&m) {
-            if let Some(target) = raw.branch_target(i) {
-                out.push(target);
-            }
+        } else if let Flow::Branch(target) = flow {
+            out.push(target);
         }
-        if m != "RET" && m != "JMP" && !(i + 1 < raw.decoded.len() && raw.contiguous[i]) {
+        if !flow.ends_block() && !(i + 1 < raw.insns.len() && raw.contiguous[i]) {
             out.push(raw.fallthrough[i]);
         }
         let out: BTreeSet<Addr> = out
@@ -820,43 +763,46 @@ fn external_exits(program: &Program, raw: &RawFunction) -> BTreeMap<u32, Vec<Add
     exits
 }
 
-fn never_returns(program: &Program, ins: &DecodedInsn) -> bool {
-    if ins.mnemonic != "CALL" {
+fn never_returns(program: &Program, raw: &RawFunction, i: usize) -> bool {
+    if !raw.flow(i).is_call() {
         return false;
     }
-    if program.noreturn_calls.contains(&ins.addr) {
+    if raw
+        .insns
+        .get(i)
+        .is_some_and(|ins| program.noreturn_calls.contains(&ins.addr))
+    {
         return true;
     }
-    let Some(target) = branch_target(ins) else {
-        return false;
-    };
-    program.is_noreturn(target)
+    raw.direct_call(i)
+        .is_some_and(|target| program.is_noreturn(target))
 }
 
 fn popped_jump(raw: &RawFunction, i: usize) -> bool {
-    let Some(ins) = raw.decoded.get(i) else {
+    let Some(register) = raw.jump_register(i) else {
         return false;
     };
-    ins.mnemonic == "JMP"
-        && ins.operands.first().and_then(gpr32).is_some()
-        && i > 0
+    i > 0
         && raw.contiguous[i - 1]
-        && raw.decoded[i - 1].mnemonic == "POP"
-        && raw.decoded[i - 1].operands.first().map(|o| &o.display)
-            == ins.operands.first().map(|o| &o.display)
+        && raw.effects[i - 1].writes.iter().any(|(&written, &value)| {
+            matches!(value, Value::Slot(0)) && general_index(written) == Some(register)
+        })
+        && matches!(raw.effects[i - 1].value(stack_pointer()), Some(Value::Stack(top)) if top > 0)
 }
 
-fn operand_size(ops: &[rk_decode::Operand], hint: Option<u16>) -> Option<u16> {
-    ops.iter()
-        .find_map(|o| match o.kind {
-            OperandKind::Reg { .. } => o.size,
-            _ => None,
-        })
-        .or_else(|| {
-            ops.iter().find_map(|o| match o.kind {
-                OperandKind::Mem { .. } => o.size,
-                _ => None,
-            })
-        })
-        .or(hint)
+fn general_index(register: Varnode) -> Option<u8> {
+    Registers::get()
+        .arch()
+        .general()
+        .iter()
+        .position(|&general| general == register)
+        .map(|index| index as u8)
+}
+
+fn stack_pointer() -> Varnode {
+    Registers::get().arch().stack_pointer
+}
+
+fn frame_pointer() -> Varnode {
+    Registers::get().arch().frame_pointer
 }

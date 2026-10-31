@@ -8,7 +8,6 @@ publish.workspace = true
 rk-core.workspace = true
 rk-image.workspace = true
 rk-sleigh.workspace = true
-iced-x86.workspace = true
 serde.workspace = true
 rayon.workspace = true
 

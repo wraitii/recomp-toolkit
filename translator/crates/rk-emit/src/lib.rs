@@ -23,7 +23,7 @@ use crate::slow::*;
 use crate::support::*;
 use crate::x87::{External, PlanLines, St0Text};
 use rk_core::contract::{DirectArguments, Field, Fields};
-use rk_core::ir::{FunctionIr, Insn, OpCode, SehEffect};
+use rk_core::ir::{FunctionIr, Insn, OpCode, SehEffect, Varnode};
 use rk_core::{Addr, Diagnostic, Reason, Result};
 use rk_ir::{field_lane, Op, Registers, SlowFamily, StateKey};
 use rk_plan::PlannedFunction;
@@ -308,7 +308,10 @@ impl<'a> Emitter<'a> {
                 let start = *plan.block_addrs.iter().min()?;
                 let end = *plan.block_addrs.iter().max()?;
                 let span = end.checked_sub(start)?.checked_add(1)?;
-                (span <= (1 << 20)).then_some(Dispatch { start, span })
+                (span <= (1 << 20)).then_some(Dispatch {
+                    start,
+                    span: span as u32,
+                })
             })
             .flatten();
         let inline_ok = (0..s.blocks.len())
@@ -497,7 +500,7 @@ impl<'a> Emitter<'a> {
 
     fn guest_addr(&self, addr: Addr) -> String {
         if let Some(reloc) = self.ctx.reloc {
-            if addr >= reloc.image_base && addr < reloc.image_base + reloc.local_size {
+            if addr >= reloc.image_base && addr < reloc.image_base + u64::from(reloc.local_size) {
                 return format!("(base_ + 0x{:x}u)", addr - reloc.image_base);
             }
         }
@@ -506,7 +509,7 @@ impl<'a> Emitter<'a> {
 
     fn reloc_internal(&self, addr: Addr) -> bool {
         self.ctx.reloc.is_some_and(|reloc| {
-            addr >= reloc.image_base && addr < reloc.image_base + reloc.local_size
+            addr >= reloc.image_base && addr < reloc.image_base + u64::from(reloc.local_size)
         })
     }
 
@@ -561,7 +564,7 @@ impl<'a> Emitter<'a> {
             for entry in &self.s.entries {
                 let seh_callback = self.ctx.ir.seh.iter().any(|(&index, kinds)| {
                     let insn = &self.ctx.ir.insns[index as usize];
-                    insn.addr + Addr::from(insn.length) == entry.addr
+                    insn.end() == entry.addr
                         && kinds
                             .iter()
                             .any(|kind| matches!(kind, SehEffect::Enter | SehEffect::Adopt))
@@ -770,7 +773,7 @@ impl<'a> Emitter<'a> {
         let mut slots = BTreeMap::new();
         for (block, &addr) in self.plan.block_addrs.iter().enumerate() {
             if let Some(offset) = addr.checked_sub(dispatch.start) {
-                if offset < dispatch.span {
+                if offset < Addr::from(dispatch.span) {
                     slots.insert(offset, block);
                 }
             }
@@ -1094,7 +1097,7 @@ impl<'a> Emitter<'a> {
                     let insn = self
                         .insn_at(addr)
                         .ok_or_else(|| self.error(addr, "SEH site without instruction"))?;
-                    let next = insn.addr + Addr::from(insn.length);
+                    let next = insn.end();
                     let callback = if self.ctx.ir.index_of(next).is_some() {
                         format!("raw_{next:08x}")
                     } else if self.ctx.known_entries.contains(&next) {
@@ -2612,8 +2615,14 @@ impl<'a> Emitter<'a> {
                 };
                 let _ = writeln!(self.out, "c->xmm[{reg}][{lane}] = (uint32_t)({expr});");
             }
-            Location::Eip => self.publish_register("eip", "EIP", state, keys)?,
-            Location::Fs => self.publish_register("fs_base", "FS_OFFSET", state, keys)?,
+            Location::Eip => {
+                let register = Registers::get().arch().program_counter;
+                self.publish_register("eip", register, state, keys)?
+            }
+            Location::Fs => {
+                let register = Registers::get().arch().thread_base;
+                self.publish_register("fs_base", register, state, keys)?
+            }
             Location::Frame(key) => {
                 let Some(value) = self.listed_value(state, keys, key)? else {
                     return Ok(());
@@ -2629,7 +2638,7 @@ impl<'a> Emitter<'a> {
                 );
             }
             Location::Df => {
-                let key = StateKey::Register(Registers::get().require("DF").offset as u32);
+                let key = StateKey::Register(Registers::get().arch().df.offset as u32);
                 let value = self.listed_value(state, keys, key)?;
                 let expr = match value {
                     Some(value) => self.expr(value)?,
@@ -2672,11 +2681,10 @@ impl<'a> Emitter<'a> {
     fn publish_register(
         &mut self,
         field: &str,
-        register: &str,
+        varnode: Varnode,
         state: &BTreeMap<StateKey, ValueId>,
         keys: &[StateKey],
     ) -> Result<()> {
-        let varnode = Registers::get().require(register);
         let mut values = Vec::with_capacity(varnode.size as usize);
         for lane in 0..varnode.size {
             let key = StateKey::Register((varnode.offset + lane as u64) as u32);
@@ -2752,7 +2760,7 @@ impl<'a> Emitter<'a> {
         (end > 0)
             .then(|| insns.get(end as usize - 1))
             .flatten()
-            .map(|insn| insn.addr + insn.length as Addr)
+            .map(|insn| insn.end())
     }
 
     fn edge(&mut self, source: Option<usize>, target: usize) -> Result<()> {
@@ -3478,15 +3486,22 @@ impl<'a> Emitter<'a> {
         };
         let (name, register) = Registers::get().covering(offset as u64)?;
         let lane = (offset as u64 - register.offset) as u32;
-        let base = match name {
-            "EIP" | "IP" => "c->eip",
-            "FS_OFFSET" => "c->fs_base",
-            "DF" => "c->eflags_df",
-            "ES" | "DS" | "SS" => "0x23u",
-            "CS" => "0x1bu",
-            "FS" => "0x3bu",
-            "GS" | "GS_OFFSET" => "0u",
-            _ => return None,
+        let arch = Registers::get().arch();
+        let offset = offset as u64;
+        let base = if within(arch.program_counter, offset) {
+            "c->eip"
+        } else if within(arch.thread_base, offset) {
+            "c->fs_base"
+        } else if within(arch.df, offset) {
+            "c->eflags_df"
+        } else {
+            match name {
+                "ES" | "DS" | "SS" => "0x23u",
+                "CS" => "0x1bu",
+                "FS" => "0x3bu",
+                "GS" | "GS_OFFSET" => "0u",
+                _ => return None,
+            }
         };
         Some((base.to_string(), lane, register.size))
     }

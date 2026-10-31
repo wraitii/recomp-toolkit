@@ -7,7 +7,7 @@ use rk_core::contract::{DirectArguments, Field, Fields};
 use rk_core::ir::{FunctionIr, OpCode, Space};
 use rk_core::program::Program;
 use rk_core::settings::Settings;
-use rk_core::{Addr, Diagnostic, Hex};
+use rk_core::{wrap_addr, Addr, Diagnostic, Hex};
 use rk_emit::{Body, Requires};
 
 pub mod facts;
@@ -422,7 +422,7 @@ pub fn prepare_return_entries(
         let mut invalid = None;
         let mut added = false;
         for insn in &fir.insns {
-            if insn.mnemonic != "CALL" {
+            if !insn.flow().is_call() {
                 continue;
             }
             let target = insn.ops.iter().find_map(|op| {
@@ -438,8 +438,8 @@ pub fn prepare_return_entries(
             let rk_global::stack::ReturnEffect::Adjust(delta) = summary.returns else {
                 continue;
             };
-            let continuation = insn.addr + insn.length as Addr;
-            let adjusted = continuation.wrapping_add(delta as u32);
+            let continuation = insn.end();
+            let adjusted = wrap_addr(continuation.wrapping_add(delta as i64 as u64));
             if fir.index_of(adjusted).is_none() {
                 invalid = Some(Diagnostic::new(
                     insn.addr,

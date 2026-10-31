@@ -133,43 +133,6 @@ class X86Host final : public PcodeHost {
         auto &ops = instruction->ops;
         ops.assign(raw.ops, raw.ops + raw.op_count);
         rp_free(raw.ops, raw.op_count);
-        const char *mnemonic = rp_mnemonic();
-        if (mnemonic && (strcmp(mnemonic, "RDTSC") == 0 || strcmp(mnemonic, "CPUID") == 0)) {
-            RpOp op{};
-            op.opcode = RP_OP_CALLOTHER;
-            op.userop = strcmp(mnemonic, "RDTSC") == 0 ? kNativeRdtsc : kNativeCpuid;
-            op.has_userop = 1;
-            op.input_count = 1;
-            op.inputs[0] = {RP_SPACE_CONST, 8, op.userop};
-            ops.assign(1, op);
-        }
-        if (mnemonic && strcmp(mnemonic, "SHRD") == 0) {
-            why = "x86 SHRD overflow-flag semantics are not modelled";
-            return nullptr;
-        }
-        if (mnemonic && strcmp(mnemonic, "SHR") == 0) {
-            const RpOp *shift = nullptr;
-            for (const RpOp &op : ops) {
-                if (op.opcode == RP_OP_INT_RIGHT) {
-                    shift = &op;
-                    break;
-                }
-            }
-            for (RpOp &op : ops) {
-                if (op.has_output && op.output.space == RP_SPACE_REGISTER &&
-                    op.output.offset == 0x20b && op.opcode == RP_OP_COPY && op.input_count == 1 &&
-                    op.inputs[0].space == RP_SPACE_CONST && op.inputs[0].offset == 0) {
-                    if (!shift || &op >= shift || shift->input_count != 2) {
-                        why = "unrecognized x86 SHR overflow-flag p-code";
-                        return nullptr;
-                    }
-                    op.opcode = RP_OP_INT_SLESS;
-                    op.input_count = 2;
-                    op.inputs[0] = shift->inputs[0];
-                    op.inputs[1] = {RP_SPACE_CONST, shift->inputs[0].size, 0};
-                }
-            }
-        }
         if (it == g_cache.end()) {
             if (g_cache.size() >= kMaxCache) {
                 g_cache.erase(g_cache_order.front());
@@ -342,8 +305,8 @@ class X86Host final : public PcodeHost {
     }
 
     bool userop_supported(uint64_t id, const RpOp &op, std::string &why) override {
-        if ((id == kNativeRdtsc || id == kNativeCpuid) && op.input_count == 1 && !op.has_output &&
-            op.inputs[0].offset == id)
+        if ((id == kNativeRdtsc || id == kNativeCpuid || (id >= 0x1000 && id < 0x102d)) &&
+            op.input_count == 1 && !op.has_output && op.inputs[0].offset == id)
             return true;
         char message[128];
         snprintf(message, sizeof message,
@@ -356,10 +319,39 @@ class X86Host final : public PcodeHost {
     bool execute_userop(const RpOp &op, std::string &why) override {
         if (!userop_supported(op.userop, op, why))
             return false;
-        if (op.userop == kNativeRdtsc)
+        if (op.userop == kNativeRdtsc) {
             recomp_rdtsc(c_);
-        else
+            return true;
+        }
+        if (op.userop == kNativeCpuid) {
             recomp_cpuid(c_);
+            return true;
+        }
+        using StringOp = void (*)(X86 *);
+        static const StringOp functions[5][3] = {
+            {movsb, movsw, movsd}, {stosb, stosw, stosd}, {lodsb, lodsw, lodsd},
+            {cmpsb, cmpsw, cmpsd}, {scasb, scasw, scasd},
+        };
+        uint32_t code = (uint32_t)(op.userop - 0x1000);
+        uint32_t family = code / 9, width = (code % 9) / 3, mode = code % 3;
+        uint32_t size = 1u << width;
+        uint32_t iterations = 0;
+        while (mode == 0 || c_->r[R_ECX]) {
+            if ((family == 0 || family == 2 || family == 3) &&
+                !memory_supported(c_->r[R_ESI], size, false, why))
+                return false;
+            if ((family == 0 || family == 1 || family == 3 || family == 4) &&
+                !memory_supported(c_->r[R_EDI], size, family < 2, why))
+                return false;
+            functions[family][width](c_);
+            if (!mode)
+                break;
+            --c_->r[R_ECX];
+            if ((++iterations & 1023u) == 0)
+                recomp_execution_checkpoint(c_);
+            if (family >= 3 && ((mode == 1 && !c_->eflags_zf) || (mode == 2 && c_->eflags_zf)))
+                break;
+        }
         return true;
     }
 

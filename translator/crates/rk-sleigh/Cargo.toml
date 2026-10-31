@@ -7,7 +7,7 @@ publish.workspace = true
 [dependencies]
 rk-core.workspace = true
 libsla.workspace = true
-sleigh-config.workspace = true
+miniz_oxide.workspace = true
 
 [lints]
 workspace = true

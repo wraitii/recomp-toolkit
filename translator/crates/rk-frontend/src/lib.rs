@@ -12,7 +12,6 @@ use rayon::prelude::*;
 use rk_core::ir::FunctionIr;
 use rk_core::program::Program;
 use rk_core::{Addr, Result};
-use rk_decode::Decoder;
 use rk_sleigh::Lifter;
 
 mod cfg;
@@ -38,19 +37,13 @@ pub struct Analysis {
 }
 
 thread_local! {
-    static LIFTERS: std::cell::RefCell<Option<(Lifter, Decoder)>> = const { std::cell::RefCell::new(None) };
+    static LIFTER: std::cell::RefCell<Option<Lifter>> = const { std::cell::RefCell::new(None) };
 }
 
-fn with_lifters<R>(f: impl FnOnce(&mut Lifter, &Decoder) -> R) -> R {
-    LIFTERS.with(|slot| {
+fn with_lifter<R>(f: impl FnOnce(&mut Lifter) -> R) -> R {
+    LIFTER.with(|slot| {
         let mut slot = slot.borrow_mut();
-        let (lifter, decoder) = slot.get_or_insert_with(|| {
-            (
-                Lifter::new().expect("SLEIGH initialization"),
-                Decoder::new().expect("capstone initialization"),
-            )
-        });
-        f(lifter, decoder)
+        f(slot.get_or_insert_with(|| Lifter::new().expect("SLEIGH initialization")))
     })
 }
 
@@ -65,9 +58,7 @@ pub fn analyze(program: &Program) -> Analysis {
     let mut raw: Vec<(Addr, Result<RawFunction>)> = addresses
         .par_iter()
         .map(|&addr| {
-            let result = with_lifters(|lifter, decoder| {
-                build_raw(program, addr, lifter, decoder, &relocated)
-            });
+            let result = with_lifter(|lifter| build_raw(program, addr, lifter, &relocated));
             (addr, result)
         })
         .collect();

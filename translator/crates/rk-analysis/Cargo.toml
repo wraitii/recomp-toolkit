@@ -7,7 +7,7 @@ publish.workspace = true
 [dependencies]
 rk-core.workspace = true
 rk-image.workspace = true
-rk-decode.workspace = true
+rk-x86.workspace = true
 rk-discover.workspace = true
 rk-frontend.workspace = true
 rk-ir.workspace = true

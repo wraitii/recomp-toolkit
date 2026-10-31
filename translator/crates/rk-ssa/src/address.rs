@@ -188,7 +188,7 @@ impl<'a> Addresses<'a> {
         self.active[id as usize] = true;
         self.depth += 1;
         let computed = self.compute(id);
-        let result = if computed == Address::Unknown && self.ssa.value(id).size == 4 {
+        let result = if computed == Address::Unknown && self.ssa.value(id).size == pointer() {
             Address::exact(Base::Value(id), 0)
         } else {
             computed
@@ -230,7 +230,7 @@ impl<'a> Addresses<'a> {
             .args(id)
             .first()
             .copied()
-            .filter(|&root| self.ssa.value(root).size == 4)
+            .filter(|&root| self.ssa.value(root).size == pointer())
     }
 
     fn packed(&mut self, args: &[ValueId]) -> Address {
@@ -356,11 +356,11 @@ impl<'a> Addresses<'a> {
                     let value = self.ssa.value(id);
                     let args = self.ssa.args(id);
                     match value.op {
-                        Op::Phi if value.size == 4 && !args.is_empty() => {
+                        Op::Phi if value.size == pointer() && !args.is_empty() => {
                             pending.extend(args.iter().map(|&arg| (Origin::Value(arg), offset)));
                             continue;
                         }
-                        Op::Pack if value.size == 4 => {
+                        Op::Pack if value.size == pointer() => {
                             let Ok(lanes) = args.try_into() else {
                                 return Address::Unknown;
                             };
@@ -372,12 +372,13 @@ impl<'a> Addresses<'a> {
                             continue;
                         }
                         Op::P(OpCode::Copy)
-                            if value.size == 4 && self.ssa.value(args[0]).size == 4 =>
+                            if value.size == pointer()
+                                && self.ssa.value(args[0]).size == pointer() =>
                         {
                             pending.push((Origin::Value(args[0]), offset));
                             continue;
                         }
-                        Op::P(OpCode::IntAdd | OpCode::IntSub) if value.size == 4 => {
+                        Op::P(OpCode::IntAdd | OpCode::IntSub) if value.size == pointer() => {
                             let term = match (
                                 value.op,
                                 self.ssa.value(args[0]).op,
@@ -485,20 +486,24 @@ impl<'a> Addresses<'a> {
             Op::StateKeep(_) if self.parameters || self.ssa.assume_private_stack => {
                 self.infer(args[1])
             }
-            Op::StateKeep(key) if value.size == 4 && key == rk_ir::lanes(Field::Esp)[0] => {
+            Op::StateKeep(key) if value.size == pointer() && key == rk_ir::lanes(Field::Esp)[0] => {
                 Address::exact(Base::Stack(id), 0)
             }
-            Op::P(OpCode::Load) if self.parameters && value.size == 4 => {
+            Op::P(OpCode::Load) if self.parameters && value.size == pointer() => {
                 let address = self.infer(args[1]);
                 self.memory_value(args[0], address, &mut LookupSet::default(), 0)
             }
-            Op::Const(data) if value.size == 4 => Address::exact(Base::Absolute, data as u32),
-            Op::Pack if value.size == 4 => self.packed(args),
-            Op::Phi if value.size == 4 => self.joined(Origin::Value(id)),
-            Op::P(OpCode::Copy) if value.size == 4 && self.ssa.value(args[0]).size == 4 => {
+            Op::Const(data) if value.size == pointer() => {
+                Address::exact(Base::Absolute, data as u32)
+            }
+            Op::Pack if value.size == pointer() => self.packed(args),
+            Op::Phi if value.size == pointer() => self.joined(Origin::Value(id)),
+            Op::P(OpCode::Copy)
+                if value.size == pointer() && self.ssa.value(args[0]).size == pointer() =>
+            {
                 self.infer(args[0])
             }
-            Op::P(OpCode::IntAdd) if value.size == 4 => {
+            Op::P(OpCode::IntAdd) if value.size == pointer() => {
                 let a = self.infer(args[0]);
                 let b = self.infer(args[1]);
                 match (a, b) {
@@ -529,12 +534,12 @@ impl<'a> Addresses<'a> {
                     _ => a.add(b),
                 }
             }
-            Op::P(OpCode::IntSub) if value.size == 4 => {
+            Op::P(OpCode::IntSub) if value.size == pointer() => {
                 let a = self.infer(args[0]);
                 let b = self.infer(args[1]);
                 a.sub(b)
             }
-            Op::P(OpCode::IntAnd) if value.size == 4 => {
+            Op::P(OpCode::IntAnd) if value.size == pointer() => {
                 for (input, mask) in [(args[0], args[1]), (args[1], args[0])] {
                     if let Op::Const(mask) = self.ssa.value(mask).op {
                         let cleared = !(mask as u32);
@@ -567,7 +572,7 @@ impl<'a> Addresses<'a> {
                 }
                 Address::Unknown
             }
-            Op::P(OpCode::IntMult | OpCode::IntLeft) if value.size == 4 => {
+            Op::P(OpCode::IntMult | OpCode::IntLeft) if value.size == pointer() => {
                 let a = self.infer(args[0]);
                 let Op::Const(scale) = self.ssa.value(args[1]).op else {
                     return Address::Unknown;
@@ -671,17 +676,17 @@ impl<'a> Addresses<'a> {
                     Op::P(OpCode::Store) => {
                         let at = self.get(inputs[1]);
                         let size = u32::from(self.ssa.value(inputs[2]).size);
-                        if size == 4
-                            && self
-                                .relations
-                                .offset_of(Range::new(at, size), Range::new(address, 4))
-                                == Some(0)
+                        if size == u32::from(pointer())
+                            && self.relations.offset_of(
+                                Range::new(at, size),
+                                Range::new(address, u32::from(pointer())),
+                            ) == Some(0)
                         {
                             self.get(inputs[2])
-                        } else if self
-                            .relations
-                            .disjoint(Range::new(at, size), Range::new(address, 4))
-                        {
+                        } else if self.relations.disjoint(
+                            Range::new(at, size),
+                            Range::new(address, u32::from(pointer())),
+                        ) {
                             self.memory_value(inputs[0], address, active, depth + 1)
                         } else {
                             Address::Unknown
@@ -702,4 +707,8 @@ impl<'a> Addresses<'a> {
         active.remove(&token);
         result
     }
+}
+
+fn pointer() -> u8 {
+    rk_ir::Registers::get().arch().address_bytes
 }

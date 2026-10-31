@@ -1,28 +1,10 @@
-//! Capstone-backed structural decoder for one instruction whose bytes are already known; a `WAIT`
-//! followed by an `FN*` instruction is fused into one. Produces the canonical mnemonics, typed
-//! operands and listing text that the frontend, x87 recipes and slow-path emission read.
-
 use capstone::arch::x86::{ArchMode, X86OperandType};
 use capstone::prelude::*;
 use capstone::{Capstone, Insn};
+use rk_core::isa::Decoded;
 use rk_core::{Addr, Result};
-use serde::{Deserialize, Serialize};
 
-pub use rk_core::ir::{Operand, OperandKind, Part, Repeat};
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DecodedInsn {
-    pub addr: Addr,
-    pub length: u8,
-    pub mnemonic: String,
-    pub raw_mnemonic: String,
-    pub rep: Option<Repeat>,
-    pub operands: Vec<Operand>,
-    pub raw: [u8; 15],
-    pub text: String,
-    pub opcode: u16,
-    pub address_size: u8,
-}
+use rk_core::ir::{Operand, OperandKind, Part, Repeat};
 
 pub const REG32: [&str; 8] = ["EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI"];
 pub const REG16: [&str; 8] = ["AX", "CX", "DX", "BX", "SP", "BP", "SI", "DI"];
@@ -55,12 +37,12 @@ const X87_INT: [&str; 20] = [
 ];
 const STRUCTURED: [&str; 6] = ["FNSTENV", "FSTENV", "FLDENV", "FNSAVE", "FSAVE", "FRSTOR"];
 
-pub struct Decoder {
+pub(crate) struct Decoder {
     md: Capstone,
 }
 
 impl Decoder {
-    pub fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let md = Capstone::new()
             .x86()
             .mode(ArchMode::Mode32)
@@ -70,8 +52,8 @@ impl Decoder {
         Ok(Self { md })
     }
 
-    pub fn decode_span(&self, addr: Addr, raw: &[u8]) -> Option<DecodedInsn> {
-        let decoded = self.md.disasm_count(raw, addr as u64, 2).ok()?;
+    pub(crate) fn decode_span(&self, addr: Addr, raw: &[u8]) -> Option<Decoded> {
+        let decoded = self.md.disasm_count(raw, addr, 2).ok()?;
         let instructions: Vec<&Insn> = decoded.iter().collect();
         if instructions.len() == 1 && instructions[0].len() == raw.len() {
             return self.record(instructions[0], raw, addr, None);
@@ -97,8 +79,8 @@ impl Decoder {
         source_bytes: &[u8],
         address: Addr,
         mnemonic_override: Option<&str>,
-    ) -> Option<DecodedInsn> {
-        let raw_mnemonic = ci.mnemonic()?.to_owned();
+    ) -> Option<Decoded> {
+        let raw_mnemonic = ci.mnemonic()?;
         let mut words: Vec<&str> = raw_mnemonic.split_whitespace().collect();
         let rep = words
             .first()
@@ -222,19 +204,13 @@ impl Decoder {
         );
         let operands = if hidden { Vec::new() } else { operands };
         let length = u8::try_from(source_bytes.len()).ok().filter(|&n| n <= 15)?;
-        let mut raw = [0u8; 15];
-        raw[..source_bytes.len()].copy_from_slice(source_bytes);
-        Some(DecodedInsn {
-            addr: address,
+        Some(Decoded {
             length,
-            mnemonic,
-            raw_mnemonic,
-            rep,
-            operands,
-            raw,
-            text,
-            opcode: ci.id().0 as u16,
             address_size,
+            mnemonic,
+            operands,
+            repeat: rep,
+            text,
         })
     }
 
@@ -409,11 +385,4 @@ pub fn mem<'a>(op: &'a Operand) -> Option<MemOperand<'a>> {
 
 pub fn is_xmm(op: &Operand) -> bool {
     matches!(op.kind, OperandKind::Xmm(_))
-}
-
-pub fn branch_target(ins: &DecodedInsn) -> Option<Addr> {
-    match ins.operands.first()?.kind {
-        OperandKind::Imm(value) => Some(value as Addr),
-        _ => None,
-    }
 }

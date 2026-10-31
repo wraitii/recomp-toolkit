@@ -3,10 +3,15 @@ use std::collections::BTreeMap;
 use std::ffi::{c_char, CString};
 use std::slice;
 
-use rk_core::ir::{OpCode, Space, Varnode};
-use rk_sleigh::{Lifter, RawLifted};
+use rk_core::ir::{Insn, OpCode, PcodeOp, Space, Varnode};
+use rk_core::Addr;
+use rk_ir::{InstructionLowerer, Op};
+use rk_sleigh::Lifter;
 
 mod jit;
+
+const RP_OP_DIVMOD: u32 = 70;
+const RP_OP_SDIVMOD: u32 = 71;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -140,9 +145,8 @@ fn op_code(code: OpCode) -> u32 {
     }
 }
 
-fn encode(value: &RawLifted) -> Vec<RpOp> {
+fn encode(value: &[PcodeOp]) -> Vec<RpOp> {
     value
-        .ops
         .iter()
         .map(|op| {
             let mut inputs = [RpVarnode {
@@ -199,23 +203,191 @@ pub unsafe extern "C" fn rp_lift(addr: u32, data: *const u8, len: usize, out: *m
     if changed {
         LIFTER.with(|l| *l.borrow_mut() = None);
     }
-    let result = LIFTER.with(|l| {
-        let mut l = l.borrow_mut();
-        let lifter = match l.as_mut() {
-            Some(lifter) => lifter,
-            None => l.insert(Lifter::new().map_err(|e| e.to_string())?),
-        };
-        lifter.lift_raw(addr, bytes).map_err(|e| e.to_string())
-    });
+    let result: Result<_, String> = (|| {
+        rk_x86::install().map_err(|e| e.to_string())?;
+        let raw = LIFTER.with(|l| {
+            let mut l = l.borrow_mut();
+            let lifter = match l.as_mut() {
+                Some(lifter) => lifter,
+                None => l.insert(Lifter::new().map_err(|e| e.to_string())?),
+            };
+            let raw = lifter
+                .lift_raw(Addr::from(addr), bytes)
+                .map_err(|e| e.to_string())?;
+            let lifted = lifter
+                .lift(Addr::from(addr), &bytes[..raw.length as usize])
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>((raw, lifted))
+        })?;
+        let (raw, lifted) = raw;
+        let length = raw.length as usize;
+        let decoded = rk_core::isa::machine()
+            .decode(Addr::from(addr), &bytes[..length])
+            .ok_or_else(|| "instruction decoder rejected lifted bytes".to_owned())?;
+        let insn = Insn::new(
+            Addr::from(addr),
+            &bytes[..length],
+            decoded,
+            lifted.ops,
+            lifted.x87,
+        );
+        let mut lowerer = InstructionLowerer::new(&rk_x87::Recipes);
+        let (ops, _, _) = lowerer.lower_insn(&insn).map_err(|e| e.to_string())?;
+        if insn.mnemonic == "SHRD" {
+            return Err("x86 SHRD overflow-flag semantics are not modelled".into());
+        }
+        let internal = insn.ops.iter().any(|op| {
+            matches!(op.opcode, OpCode::Branch | OpCode::CBranch)
+                && op.inputs.first().is_some_and(|v| v.space == Space::Const)
+        });
+        if internal
+            && ops.iter().any(|op| {
+                matches!(op.op, Op::P(OpCode::Branch | OpCode::CBranch))
+                    && op.inputs.first().is_some_and(|v| v.space == Space::Const)
+            })
+        {
+            let unchanged = ops.len() == insn.ops.len()
+                && ops.iter().zip(&insn.ops).all(|(a, b)| {
+                    a.op == Op::P(b.opcode) && a.output == b.output && a.inputs == b.inputs
+                });
+            if unchanged {
+                if raw.ops.iter().any(|op| op.inputs.len() > 4) {
+                    return Err("p-code operation has more than four inputs".into());
+                }
+                return Ok((raw.length, insn.mnemonic, encode(&raw.ops)));
+            }
+            return Err(format!(
+                "{}: corrected internal p-code control flow is not modelled",
+                insn.mnemonic
+            ));
+        }
+        let mut result = Vec::new();
+        for op in ops {
+            if let Op::Branch { target } | Op::CBranch { target } | Op::Call { target } = op.op {
+                if target > u64::from(u32::MAX) {
+                    return Err("control target exceeds 32-bit guest address space".into());
+                }
+            }
+            let (opcode, inputs, userop) = match op.op {
+                Op::P(code) => (code, op.inputs, None),
+                Op::Branch { target } => (
+                    OpCode::Branch,
+                    vec![Varnode::new(Space::Ram, target, 4)],
+                    None,
+                ),
+                Op::CBranch { target } => {
+                    let mut v = vec![Varnode::new(Space::Ram, target, 4)];
+                    v.extend(op.inputs);
+                    (OpCode::CBranch, v, None)
+                }
+                Op::Call { target } => (
+                    OpCode::Call,
+                    vec![Varnode::new(Space::Ram, target, 4)],
+                    None,
+                ),
+                Op::CallInd => (OpCode::CallInd, op.inputs, None),
+                Op::BranchInd => (OpCode::BranchInd, op.inputs, None),
+                Op::Return => (OpCode::Return, op.inputs, None),
+                Op::CallOther(id) => (OpCode::CallOther, op.inputs, Some(id)),
+                Op::String(name) => {
+                    let (mode, base) = if let Some(v) = name.0.strip_prefix("repne_") {
+                        (2, v)
+                    } else if let Some(v) = name
+                        .0
+                        .strip_prefix("repe_")
+                        .or_else(|| name.0.strip_prefix("rep_"))
+                    {
+                        (1, v)
+                    } else {
+                        (0, name.0)
+                    };
+                    let unknown = || format!("unknown string helper {}", name.0);
+                    let (root, suffix) = base.split_at_checked(4).ok_or_else(unknown)?;
+                    let family = match root {
+                        "movs" => 0,
+                        "stos" => 1,
+                        "lods" => 2,
+                        "cmps" => 3,
+                        "scas" => 4,
+                        _ => return Err(unknown()),
+                    };
+                    let width = match suffix {
+                        "b" => 0,
+                        "w" => 1,
+                        "d" => 2,
+                        _ => return Err(unknown()),
+                    };
+                    let id = 0x1000 + family * 9 + width * 3 + mode;
+                    (OpCode::CallOther, vec![Varnode::constant(id, 8)], Some(id))
+                }
+                Op::Div { size, .. } | Op::Idiv { size, .. } => {
+                    let opcode = if matches!(op.op, Op::Div { .. }) {
+                        RP_OP_DIVMOD
+                    } else {
+                        RP_OP_SDIVMOD
+                    };
+                    let mut inputs = op.inputs;
+                    inputs.truncate(2);
+                    inputs.push(Varnode::constant(u64::from(size), 1));
+                    let mut encoded = encode(&[PcodeOp {
+                        opcode: OpCode::Unknown,
+                        output: op.output,
+                        inputs,
+                        userop: None,
+                    }])
+                    .remove(0);
+                    encoded.opcode = opcode;
+                    result.push(encoded);
+                    continue;
+                }
+                Op::X87(_) => {
+                    return Err(format!("{}: x87 operation is not modelled", insn.mnemonic))
+                }
+                Op::Slow(_) if matches!(insn.mnemonic.as_str(), "RDTSC" | "CPUID") => {
+                    let id = if insn.mnemonic == "RDTSC" {
+                        u64::MAX
+                    } else {
+                        u64::MAX - 1
+                    };
+                    (OpCode::CallOther, vec![Varnode::constant(id, 8)], Some(id))
+                }
+                Op::Slow(i) => {
+                    return Err(format!(
+                        "{}: unsupported {:?}",
+                        insn.mnemonic,
+                        lowerer.slow_insns()[i as usize].family
+                    ))
+                }
+                other => {
+                    return Err(format!(
+                        "{}: unsupported corrected operation {:?}",
+                        insn.mnemonic, other
+                    ))
+                }
+            };
+            let mut inputs = inputs;
+            if matches!(opcode, OpCode::Load | OpCode::Store) {
+                inputs.insert(0, Varnode::new(Space::Ram, 0, 4));
+            }
+            if inputs.len() > 4 {
+                return Err("p-code operation has more than four inputs".into());
+            }
+            result.extend(encode(&[PcodeOp {
+                opcode,
+                output: op.output,
+                inputs,
+                userop,
+            }]));
+        }
+        Ok((raw.length, insn.mnemonic, result))
+    })();
     match result {
-        Ok(lifted) => {
-            MNEMONIC.with(|m| {
-                *m.borrow_mut() = Some(CString::new(lifted.mnemonic.clone()).unwrap_or_default())
-            });
-            if let Some(op) = lifted.ops.iter().find(|op| op.inputs.len() > 4) {
+        Ok((length, mnemonic, ops)) => {
+            MNEMONIC.with(|m| *m.borrow_mut() = Some(CString::new(mnemonic).unwrap_or_default()));
+            if let Some(op) = ops.iter().find(|op| op.input_count > 4) {
                 set_error(format!(
                     "p-code operation has {} inputs; C ABI supports 4",
-                    op.inputs.len()
+                    op.input_count
                 ));
                 (*out).length = 0;
                 (*out).op_count = 0;
@@ -223,9 +395,9 @@ pub unsafe extern "C" fn rp_lift(addr: u32, data: *const u8, len: usize, out: *m
                 (*out).error = std::ptr::null_mut();
                 return 0;
             }
-            let encoded = encode(&lifted).into_boxed_slice();
+            let encoded = ops.into_boxed_slice();
             let count = encoded.len();
-            (*out).length = lifted.length as u32;
+            (*out).length = length as u32;
             (*out).op_count = count as u32;
             (*out).ops = Box::into_raw(encoded) as *mut RpOp;
             (*out).error = std::ptr::null_mut();

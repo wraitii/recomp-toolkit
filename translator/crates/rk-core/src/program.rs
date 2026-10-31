@@ -4,8 +4,35 @@ use serde::Serialize;
 
 use crate::{Addr, Error, Hex, Result};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Isa {
+    X86,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Endian {
+    Little,
+    Big,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub isa: Isa,
+    pub address_bytes: u8,
+    pub endian: Endian,
+}
+
+impl Target {
+    pub const X86_32: Self = Self {
+        isa: Isa::X86,
+        address_bytes: 4,
+        endian: Endian::Little,
+    };
+}
+
 #[derive(Clone, Debug)]
 pub struct Image {
+    pub target: Target,
     pub base: Addr,
     pub size: u32,
     pub data: Vec<u8>,
@@ -34,7 +61,7 @@ pub struct Relocation {
 
 impl Image {
     pub fn end(&self) -> Addr {
-        self.base + self.size
+        self.base + Addr::from(self.size)
     }
 
     pub fn is_exec(&self, va: Addr) -> bool {
@@ -55,9 +82,9 @@ impl Image {
         self.bytes(va, 1).map(|b| b[0])
     }
 
-    pub fn rd32(&self, va: Addr) -> Option<u32> {
+    pub fn rd32(&self, va: Addr) -> Option<Addr> {
         self.bytes(va, 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .map(|b| Addr::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])))
     }
 
     pub fn relocated_pointers(&self) -> BTreeMap<Addr, Addr> {
@@ -86,7 +113,7 @@ pub struct Span {
 
 impl Span {
     pub fn end(&self) -> Addr {
-        self.start + self.size
+        self.start + Addr::from(self.size)
     }
 }
 
@@ -184,7 +211,7 @@ impl Program {
         if raw[..2] != [0xff, 0x25] {
             return None;
         }
-        let slot = u32::from_le_bytes([raw[2], raw[3], raw[4], raw[5]]);
+        let slot = Addr::from(u32::from_le_bytes([raw[2], raw[3], raw[4], raw[5]]));
         self.image.imports.get(&slot)
     }
 
@@ -201,7 +228,12 @@ impl Program {
         if at + 6 != raw.len() || raw[at] != 0xff || raw[at + 1] != 0x15 {
             return None;
         }
-        let slot = u32::from_le_bytes([raw[at + 2], raw[at + 3], raw[at + 4], raw[at + 5]]);
+        let slot = Addr::from(u32::from_le_bytes([
+            raw[at + 2],
+            raw[at + 3],
+            raw[at + 4],
+            raw[at + 5],
+        ]));
         self.image.imports.get(&slot)
     }
 

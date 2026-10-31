@@ -1,6 +1,6 @@
-//! Wraps the pinned Ghidra x86-32 SLEIGH specification embedded by `sleigh-config`: instruction
-//! lengths, flow ends, and p-code lifting into `rk_core::ir`. Unknown address spaces fail with a
-//! diagnostic and unmapped opcodes become `OpCode::Unknown`. Callers keep one `Lifter` per thread.
+//! Wraps the SLEIGH specification of the installed `rk_core::isa::Machine`: instruction lengths,
+//! flow ends, and p-code lifting into `rk_core::ir`. Unknown address spaces fail with a diagnostic
+//! and unmapped opcodes become `OpCode::Unknown`. Callers keep one `Lifter` per thread.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -8,19 +8,12 @@ use libsla::{
     Address, AddressSpace, BoolOp, FloatOp, GhidraSleigh, InstructionLoader, IntOp, IntSign,
     OpCode as SleighOp, PcodeInstruction, Sleigh, VarnodeData,
 };
+use rk_core::flow::Flow;
 use rk_core::ir::{OpCode, PcodeOp, Space, Varnode};
+use rk_core::isa::Machine;
 use rk_core::{Addr, Diagnostic, Reason, Result};
 
-const ST_BASE: u64 = 0x1100;
-const ST_STRIDE: u64 = 0x10;
-const ST_SIZE: u32 = 10;
-const DIAGNOSTIC_REGISTERS: [&str; 5] = [
-    "FPUInstructionPointer",
-    "FPUDataPointer",
-    "FPULastInstructionOpcode",
-    "FPUPointerSelector",
-    "FPUDataSelector",
-];
+mod sla;
 
 #[derive(Clone, Debug)]
 pub struct Lifted {
@@ -38,10 +31,13 @@ pub struct RawLifted {
 }
 
 pub struct Lifter {
+    machine: &'static dyn Machine,
     sleigh: GhidraSleigh,
     code_space: AddressSpace,
     register_names: BTreeMap<(u64, u32), String>,
+    userop_names: BTreeMap<u64, String>,
     diagnostic: BTreeSet<(u64, u32)>,
+    register_stack: BTreeSet<(u64, u32)>,
 }
 
 struct SliceLoader<'a> {
@@ -65,10 +61,12 @@ impl InstructionLoader for SliceLoader<'_> {
 
 impl Lifter {
     pub fn new() -> Result<Self> {
+        let machine = rk_core::isa::machine();
+        let spec = machine.spec();
         let sleigh = GhidraSleigh::builder()
-            .processor_spec(sleigh_config::processor_x86::PSPEC_X86)
-            .and_then(|b| b.build(sleigh_config::processor_x86::SLA_X86))
-            .map_err(|e| rk_core::Error::input(format!("cannot initialize SLEIGH x86: {e}")))?;
+            .processor_spec(spec.processor)
+            .and_then(|b| b.build(spec.sla))
+            .map_err(|e| rk_core::Error::input(format!("cannot initialize SLEIGH: {e}")))?;
         let code_space = sleigh.default_code_space();
         let mut register_names = BTreeMap::new();
         for (varnode, name) in sleigh.register_name_map() {
@@ -76,23 +74,44 @@ impl Lifter {
                 .entry((varnode.address.offset, varnode.size as u32))
                 .or_insert(name);
         }
-        let diagnostic = DIAGNOSTIC_REGISTERS
+        let named = |name: &str| {
+            let v = sleigh.register_from_name(name).ok()?;
+            Some((v.address.offset, v.size as u32))
+        };
+        let registers = machine.registers();
+        let diagnostic = registers
+            .diagnostic
             .iter()
-            .filter_map(|name| {
-                let v = sleigh.register_from_name(*name).ok()?;
-                Some((v.address.offset, v.size as u32))
-            })
+            .copied()
+            .filter_map(named)
+            .collect();
+        let register_stack = registers
+            .register_stack
+            .iter()
+            .copied()
+            .filter_map(named)
             .collect();
         Ok(Self {
+            machine,
             sleigh,
             code_space,
             register_names,
+            userop_names: sla::userop_names(spec.sla)?,
             diagnostic,
+            register_stack,
         })
     }
 
     pub fn register_name(&self, offset: u64, size: u32) -> Option<&str> {
         self.register_names.get(&(offset, size)).map(String::as_str)
+    }
+
+    pub fn address_bytes(&self) -> u8 {
+        u8::try_from(self.code_space.address_size).unwrap_or(u8::MAX)
+    }
+
+    pub fn userop_names(&self) -> &BTreeMap<u64, String> {
+        &self.userop_names
     }
 
     pub fn registers(&self) -> impl Iterator<Item = (&str, u64, u32)> {
@@ -137,11 +156,12 @@ impl Lifter {
                 },
             ));
         }
-        if length > 15 {
+        let limit = self.machine.max_length();
+        if length > limit {
             return Err(Diagnostic::error(
                 addr,
                 Reason::LiftFailed {
-                    detail: format!("x86 instruction length {length} exceeds 15"),
+                    detail: format!("instruction length {length} exceeds {limit}"),
                 },
             ));
         }
@@ -214,7 +234,7 @@ impl Lifter {
         let mut out = Vec::new();
         let mut pos = 0;
         while pos < data.len() {
-            let length = self.length(addr + pos as u32, &data[pos..])?;
+            let length = self.length(addr + pos as u64, &data[pos..])?;
             out.push(length);
             pos += length as usize;
         }
@@ -256,6 +276,20 @@ impl Lifter {
         Ok(length)
     }
 
+    pub fn flow(&self, addr: Addr, data: &[u8]) -> Result<(u8, Flow)> {
+        let length = self.length(addr, data)?;
+        let decoded = self.translate_one(addr, data).map_err(|e| {
+            Diagnostic::error(
+                addr,
+                Reason::LiftFailed {
+                    detail: e.to_string(),
+                },
+            )
+        })?;
+        let ops = self.convert_all(decoded.instructions)?;
+        Ok((length, Flow::of(&ops, addr, addr + u64::from(length))))
+    }
+
     pub fn ends_flow(&self, addr: Addr, data: &[u8]) -> Result<bool> {
         let decoded = self.translate_one(addr, data).map_err(|e| {
             Diagnostic::error(
@@ -278,7 +312,7 @@ impl Lifter {
     }
 
     pub fn lift(&mut self, addr: Addr, data: &[u8]) -> Result<Lifted> {
-        if data == [0x9b] {
+        if self.machine.no_op(data) {
             return Ok(Lifted {
                 length: 1,
                 ops: Vec::new(),
@@ -289,7 +323,7 @@ impl Lifter {
         let mut x87 = false;
         let mut pos = 0usize;
         while pos < data.len() {
-            let at = addr + pos as u32;
+            let at = addr + pos as u64;
             let decoded = self.translate_one(at, &data[pos..]).map_err(|e| {
                 Diagnostic::error(
                     at,
@@ -316,16 +350,16 @@ impl Lifter {
                     && op.inputs.first().is_some_and(|v| {
                         v.space == Space::Const
                             || (v.space == Space::Ram
-                                && addr as u64 <= v.offset
-                                && v.offset <= (addr + data.len() as u32) as u64)
+                                && addr <= v.offset
+                                && v.offset <= addr + data.len() as u64)
                     })
             });
             if sub.iter().any(|op| {
-                st_index(op.output.as_ref()).is_some()
-                    || op.inputs.iter().any(|v| st_index(Some(v)).is_some())
+                op.output.iter().chain(&op.inputs).any(|v| {
+                    v.space == Space::Register && self.register_stack.contains(&(v.offset, v.size))
+                })
             }) {
-                let conditional_move = matches!(&data[pos..pos + size], [0xda | 0xdb, 0xc0..=0xdf]);
-                if sub_flow && !conditional_move {
+                if sub_flow && !self.machine.internal_flow_allowed(&data[pos..pos + size]) {
                     return Err(Diagnostic::error(
                         at,
                         Reason::Unsupported {
@@ -362,12 +396,9 @@ impl Lifter {
         addr: Addr,
         data: &[u8],
     ) -> std::result::Result<libsla::PcodeDisassembly, libsla::Error> {
-        let loader = SliceLoader {
-            base: addr as u64,
-            data,
-        };
+        let loader = SliceLoader { base: addr, data };
         self.sleigh
-            .disassemble_pcode(&loader, Address::new(self.code_space.clone(), addr as u64))
+            .disassemble_pcode(&loader, Address::new(self.code_space.clone(), addr))
     }
 
     fn translate_native_one(
@@ -375,12 +406,9 @@ impl Lifter {
         addr: Addr,
         data: &[u8],
     ) -> std::result::Result<libsla::NativeDisassembly, libsla::Error> {
-        let loader = SliceLoader {
-            base: addr as u64,
-            data,
-        };
+        let loader = SliceLoader { base: addr, data };
         self.sleigh
-            .disassemble_native(&loader, Address::new(self.code_space.clone(), addr as u64))
+            .disassemble_native(&loader, Address::new(self.code_space.clone(), addr))
     }
 
     fn convert_all(&self, raw: Vec<PcodeInstruction>) -> Result<Vec<PcodeOp>> {
@@ -469,7 +497,7 @@ impl Lifter {
             "ram" => Space::Ram,
             other => {
                 return Err(Diagnostic::error(
-                    v.address.offset as Addr,
+                    v.address.offset,
                     Reason::Unsupported {
                         detail: format!("unexpected SLEIGH space {other}"),
                     },
@@ -499,19 +527,6 @@ fn raw_varnode(v: &VarnodeData) -> Result<Varnode> {
         v.address.offset,
         u32::try_from(v.size).unwrap_or(u32::MAX),
     ))
-}
-
-fn st_index(v: Option<&Varnode>) -> Option<u32> {
-    let v = v?;
-    if v.space != Space::Register || v.size != ST_SIZE || v.offset < ST_BASE {
-        return None;
-    }
-    let rel = v.offset - ST_BASE;
-    if rel < 8 * ST_STRIDE && rel.is_multiple_of(ST_STRIDE) {
-        Some((rel / ST_STRIDE) as u32)
-    } else {
-        None
-    }
 }
 
 fn map_opcode(op: SleighOp) -> OpCode {

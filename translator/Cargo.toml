@@ -13,7 +13,7 @@ rk-discover = { path = "crates/rk-discover" }
 rk-image = { path = "crates/rk-image" }
 rk-output = { path = "crates/rk-output" }
 rk-sleigh = { path = "crates/rk-sleigh" }
-rk-decode = { path = "crates/rk-decode" }
+rk-x86 = { path = "crates/rk-x86" }
 rk-frontend = { path = "crates/rk-frontend" }
 rk-ir = { path = "crates/rk-ir" }
 rk-ssa = { path = "crates/rk-ssa" }
@@ -24,6 +24,7 @@ rk-x87 = { path = "crates/rk-x87" }
 anyhow = "1"
 capstone = { version = "0.14", default-features = false, features = ["std", "full", "arch_x86"] }
 libsla = "1.2"
+miniz_oxide = "0.8"
 sleigh-config = { version = "1.0", default-features = false, features = ["x86"] }
 clap = { version = "4", features = ["derive"] }
 goblin = { version = "0.9", default-features = false, features = ["pe32", "std"] }

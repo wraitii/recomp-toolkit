@@ -8,5 +8,8 @@ publish.workspace = true
 rk-core.workspace = true
 rk-ir.workspace = true
 
+[dev-dependencies]
+rk-x86.workspace = true
+
 [lints]
 workspace = true

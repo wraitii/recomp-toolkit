@@ -74,7 +74,10 @@ pub fn initialized_reads(body: &InitializationGraph) -> BTreeMap<(usize, usize),
             if index == 0 {
                 if block == body.entry {
                     if body.return_slot_proven {
-                        let slot = Range::new(Address::exact(Base::Frame, 0), 4);
+                        let slot = Range::new(
+                            Address::exact(Base::Frame, 0),
+                            rk_ir::Registers::get().arch().word,
+                        );
                         let before = remaining.len();
                         remaining.retain(|&byte| {
                             body.relations

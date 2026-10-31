@@ -265,7 +265,7 @@ void PcodeMachine::preflight(const std::vector<RpOp> &ops) {
     for (const RpOp &op : ops) {
         if (op.opcode == 0)
             fail("unsupported p-code opcode");
-        if (is_float(op.opcode) || op.opcode >= RP_OP_FLOAT_MIN)
+        if (is_float(op.opcode) || (op.opcode >= RP_OP_FLOAT_MIN && op.opcode <= RP_OP_FLOAT_RSQRT))
             fail("floating-point p-code is not modelled");
         if (op.input_count > 4)
             fail("too many p-code inputs");
@@ -321,6 +321,15 @@ void PcodeMachine::preflight(const std::vector<RpOp> &ops) {
             if (op.input_count != 1 || op.has_output || !width(op.inputs[0]))
                 fail("malformed indirect control transfer");
             break;
+        case RP_OP_DIVMOD:
+        case RP_OP_SDIVMOD:
+            if (op.input_count != 3 || !op.has_output || op.output.size != 8 ||
+                op.inputs[0].size != op.inputs[1].size || op.inputs[2].space != RP_SPACE_CONST ||
+                (op.inputs[2].offset != 1 && op.inputs[2].offset != 2 &&
+                 op.inputs[2].offset != 4) ||
+                op.inputs[0].size != op.inputs[2].offset * 2)
+                fail("malformed x86 division");
+            break;
         case RP_OP_PIECE:
             if (op.input_count != 2 || !op.has_output ||
                 op.inputs[0].size + op.inputs[1].size != op.output.size || op.output.size > 8)
@@ -355,7 +364,7 @@ void PcodeMachine::preflight(const std::vector<RpOp> &ops) {
                      op.output.size != op.inputs[0].size))
                     fail("malformed unary p-code operation");
             } else if (is_binary(op.opcode)) {
-                if (op.input_count != 2 || !op.has_output || op.output.size != op.inputs[0].size)
+                if (op.input_count != 2 || !op.has_output || op.output.size > op.inputs[0].size)
                     fail("malformed binary p-code operation");
                 if (op.opcode != RP_OP_INT_LEFT && op.opcode != RP_OP_INT_RIGHT &&
                     op.opcode != RP_OP_INT_SRIGHT)
@@ -505,6 +514,35 @@ bool PcodeMachine::step(uint64_t &pc) {
             while (n < bits && ((v >> (bits - 1 - n)) & 1) == 0)
                 ++n;
             store(op.output, n);
+            break;
+        }
+        case RP_OP_DIVMOD:
+        case RP_OP_SDIVMOD: {
+            load(op.inputs[0], a);
+            load(op.inputs[1], b);
+            unsigned bits = (unsigned)op.inputs[2].offset * 8;
+            uint64_t mask = (1ull << bits) - 1;
+            uint64_t q, r;
+            if (!b)
+                fail("x86 division by zero");
+            if (op.opcode == RP_OP_SDIVMOD) {
+                int64_t n = (int64_t)sign_extend(a, op.inputs[0].size);
+                int64_t d = (int64_t)sign_extend(b, op.inputs[1].size);
+                if (n == INT64_MIN && d == -1)
+                    fail("x86 division quotient overflow");
+                int64_t sq = n / d;
+                int64_t limit = 1ll << (bits - 1);
+                if (sq < -limit || sq >= limit)
+                    fail("x86 division quotient overflow");
+                q = (uint64_t)sq & mask;
+                r = (uint64_t)(n % d) & mask;
+            } else {
+                q = a / b;
+                if (q > mask)
+                    fail("x86 division quotient overflow");
+                r = a % b;
+            }
+            store(op.output, q | (r << (bits == 8 ? 8 : 32)));
             break;
         }
         case RP_OP_PIECE:

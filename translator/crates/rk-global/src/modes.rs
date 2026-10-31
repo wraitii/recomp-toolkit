@@ -286,8 +286,8 @@ fn key_registers(
     }
 }
 
-fn control_word() -> Option<Varnode> {
-    rk_ir::Registers::get().register("FPUControlWord")
+fn control_word() -> Varnode {
+    rk_ir::Registers::get().arch().fpu_control
 }
 
 fn traces_to(
@@ -326,7 +326,7 @@ fn store_keys(insn: &rk_core::ir::Insn) -> Vec<StoreKey> {
             stores.push((
                 key_of(address, &defs, 8),
                 regs,
-                control_word().is_some_and(|cw| traces_to(value, cw, &defs)),
+                traces_to(value, control_word(), &defs),
             ));
         }
     }
@@ -349,15 +349,14 @@ fn load_keys(insn: &rk_core::ir::Insn) -> Vec<LoadKey> {
             .first()
             .copied()
             .unwrap_or(Varnode::constant(0, 0));
-        if control_word().is_none_or(|cw| {
-            !insn.ops.iter().any(|candidate| {
-                candidate.output == Some(cw)
-                    && traces_to(
-                        candidate.inputs.first().copied().unwrap_or(loaded),
-                        loaded,
-                        &defs,
-                    )
-            })
+        let cw = control_word();
+        if !insn.ops.iter().any(|candidate| {
+            candidate.output == Some(cw)
+                && traces_to(
+                    candidate.inputs.first().copied().unwrap_or(loaded),
+                    loaded,
+                    &defs,
+                )
         }) {
             continue;
         }
@@ -447,10 +446,9 @@ fn prepare(
     let mut jumps_used = 0;
     for (&index, targets) in &fir.exits {
         let insn = &fir.insns[index as usize];
-        let mnemonic = mnemonic(insn);
-        let indirect_jump =
-            mnemonic == "JMP" && insn.ops.iter().any(|op| op.opcode == OpCode::BranchInd);
-        if mnemonic != "JMP" || !fir.succ[index as usize].is_empty() {
+        let flow = insn.flow();
+        let indirect_jump = flow.is_jump() && flow.indirect().is_some();
+        if !flow.is_jump() || !fir.succ[index as usize].is_empty() {
             continue;
         }
         if indirect_jump {

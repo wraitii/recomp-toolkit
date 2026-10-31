@@ -372,7 +372,7 @@ fn checkpoints(
     indirect: &BTreeMap<Addr, Vec<Addr>>,
     known: &BTreeMap<Addr, u32>,
 ) -> Option<u32> {
-    let flow = CallGraph::from_succ((0..fir.insns.len() as u32).collect(), fir.succ.clone());
+    let flow = CallGraph::from_succ((0..fir.insns.len() as Addr).collect(), fir.succ.clone());
     let mut costs = vec![0u32; fir.insns.len()];
     for (index, insn) in fir.insns.iter().enumerate() {
         for op in &insn.ops {

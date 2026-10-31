@@ -6,7 +6,8 @@ publish.workspace = true
 
 [dependencies]
 rk-core.workspace = true
-rk-decode.workspace = true
+rk-x86.workspace = true
+rk-ir.workspace = true
 rk-sleigh.workspace = true
 rayon.workspace = true
 

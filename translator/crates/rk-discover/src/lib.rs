@@ -2,8 +2,8 @@
 //! callbacks, relocated pointers, mapped flow, analysis-fact targets and `discovery_evidence`.
 //! Discovery traces direct flow, pointer runs and switch tables, then sweeps unclaimed executable
 //! bytes; higher-ranked evidence retracts lower-ranked evidence. Fragment filters discard padding,
-//! stubs and low-entropy bodies, and passes repeat until nothing changes. iced-x86 decodes,
-//! with every length cross-checked against SLEIGH. The map stays authoritative: `merge`
+//! stubs and low-entropy bodies, and passes repeat until nothing changes. Flow comes from SLEIGH
+//! p-code and operand shapes from the installed machine, whose lengths must agree. The map stays authoritative: `merge`
 //! adds only new, provisional functions, and every rejection is reported with its pass and reason.
 
 pub mod report;
@@ -11,11 +11,12 @@ pub mod report;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
-use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register};
 use rayon::prelude::*;
 use rk_core::facts::{AnalysisFacts, TransferKind};
+use rk_core::flow::{Flow, Target};
+use rk_core::isa::{Reg, Shape, Step};
 use rk_core::program::{Function, Image, InteriorKind, Program, Span};
 use rk_core::settings::Settings;
 use rk_core::{parse_hex, Addr, Error, Hex, Result};
@@ -37,16 +38,16 @@ const RANK_SWEEP: u16 = 30;
 const RANK_INTERIOR_POINTER: u16 = 20;
 const RANK_SINGLE_POINTER: u16 = 15;
 const BODY_BYTES: Addr = 4096;
-const SHORT_FRAGMENT_MIN: Addr = 4;
-const SHORT_FRAGMENT_MAX: Addr = 8;
+const SHORT_FRAGMENT_MIN: u32 = 4;
+const SHORT_FRAGMENT_MAX: u32 = 8;
 const SHORT_FRAGMENT_REPEAT_LIMIT: usize = 10;
-const DATA_ENTROPY_MIN_BYTES: Addr = 512;
+const DATA_ENTROPY_MIN_BYTES: u32 = 512;
 const DATA_ENTROPY_MAX: f64 = 3.5;
 const DATA_ZERO_RATIO_MIN: f64 = 0.4;
 const MAX_DISCOVERY_PASSES: usize = 8;
 const SWITCH_LOOKBACK: usize = 6;
 const SWITCH_SLOTS: u32 = 4096;
-const SWITCH_REACH: u32 = 0x10000;
+const SWITCH_REACH: Addr = 0x10000;
 const NORETURN_IMPORTS: &[&str] = &[
     "ExitProcess",
     "ExitThread",
@@ -64,17 +65,76 @@ const NORETURN_IMPORTS: &[&str] = &[
 type Functions = BTreeMap<Addr, Vec<Span>>;
 type Entries = BTreeMap<Addr, (Addr, InteriorKind)>;
 
+const TARGET_SHARDS: usize = 64;
+
+type Targets = Mutex<BTreeMap<Addr, Addr>>;
+
 #[derive(Default)]
 struct SleighLengths {
     cache: OnceLock<Box<[AtomicU8]>>,
+    targets: OnceLock<Box<[Targets]>>,
 }
 
 thread_local! {
     static LIFTER: std::cell::RefCell<Option<rk_sleigh::Lifter>> = const { std::cell::RefCell::new(None) };
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Fall,
+    Jump,
+    IndirectJump,
+    Branch,
+    Call,
+    IndirectCall,
+    Return,
+    Trap,
+}
+
+const KINDS: [Kind; 8] = [
+    Kind::Fall,
+    Kind::Jump,
+    Kind::IndirectJump,
+    Kind::Branch,
+    Kind::Call,
+    Kind::IndirectCall,
+    Kind::Return,
+    Kind::Trap,
+];
+
+impl Kind {
+    fn of(flow: Flow) -> Self {
+        match flow {
+            Flow::Fall => Kind::Fall,
+            Flow::Jump(Target::Direct(_)) => Kind::Jump,
+            Flow::Jump(Target::Indirect(_)) => Kind::IndirectJump,
+            Flow::Branch(_) => Kind::Branch,
+            Flow::Call(Target::Direct(_)) => Kind::Call,
+            Flow::Call(Target::Indirect(_)) => Kind::IndirectCall,
+            Flow::Return => Kind::Return,
+            Flow::Trap => Kind::Trap,
+        }
+    }
+
+    fn direct(self) -> bool {
+        matches!(self, Kind::Jump | Kind::Branch | Kind::Call)
+    }
+}
+
+fn sleigh_flow(image: &Image, at: Addr) -> Option<(u8, Flow)> {
+    let limit = u64::from(rk_core::isa::machine().max_length());
+    let available = image.end().saturating_sub(at).min(limit) as usize;
+    let bytes = image.bytes(at, available)?;
+    LIFTER.with(|lifter| {
+        let mut lifter = lifter.borrow_mut();
+        let lifter =
+            lifter.get_or_insert_with(|| rk_sleigh::Lifter::new().expect("SLEIGH initialization"));
+        lifter.flow(at, bytes).ok()
+    })
+}
+
 impl SleighLengths {
-    fn length(&self, image: &Image, at: Addr) -> Option<u8> {
+    fn entry(&self, image: &Image, at: Addr) -> Option<u8> {
         let cache = self
             .cache
             .get_or_init(|| (0..image.size).map(|_| AtomicU8::new(0)).collect());
@@ -83,146 +143,99 @@ impl SleighLengths {
         if cached != 0 {
             return (cached != u8::MAX).then_some(cached);
         }
-        let available = image.end().saturating_sub(at).min(15) as usize;
-        let bytes = image.bytes(at, available)?;
-        let out = LIFTER.with(|lifter| {
-            let mut lifter = lifter.borrow_mut();
-            let lifter = lifter
-                .get_or_insert_with(|| rk_sleigh::Lifter::new().expect("SLEIGH initialization"));
-            lifter.length(at, bytes).ok()
-        });
+        let found = sleigh_flow(image, at).filter(|&(length, _)| length < 16);
+        if let Some(target) = found.and_then(|(_, flow)| flow.target()) {
+            self.targets(at).insert(at, target);
+        }
+        let out = found.map(|(length, flow)| length | (Kind::of(flow) as u8) << 4);
         slot.store(out.unwrap_or(u8::MAX), Ordering::Relaxed);
         out
     }
-}
 
-#[derive(Clone, Copy, Debug)]
-enum SimpleOp {
-    None,
-    Reg(Register),
-    Mem(Mem),
-    Imm(u32),
-}
+    fn targets(&self, at: Addr) -> std::sync::MutexGuard<'_, BTreeMap<Addr, Addr>> {
+        let shards = self.targets.get_or_init(|| {
+            (0..TARGET_SHARDS)
+                .map(|_| Mutex::new(BTreeMap::new()))
+                .collect()
+        });
+        shards[at as usize % TARGET_SHARDS]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
-#[derive(Clone, Copy, Debug)]
-struct Mem {
-    base: Register,
-    index: Register,
-    scale: u32,
-    displacement: u32,
-    size: u32,
+    fn length(&self, image: &Image, at: Addr) -> Option<u8> {
+        Some(self.entry(image, at)? & 0xf)
+    }
+
+    fn flow(&self, image: &Image, at: Addr) -> Option<(Kind, Option<Addr>)> {
+        let kind = KINDS[usize::from(self.entry(image, at)? >> 4)];
+        let target = if kind.direct() {
+            let cached = self.targets(at).get(&at).copied();
+            Some(match cached {
+                Some(target) => target,
+                None => sleigh_flow(image, at)?.1.target()?,
+            })
+        } else {
+            None
+        };
+        Some((kind, target))
+    }
 }
 
 #[derive(Clone, Debug)]
 struct Insn {
     addr: Addr,
     size: u8,
-    flow: FlowControl,
-    mnemonic: Mnemonic,
-    ops: [SimpleOp; 4],
-    op_count: u8,
+    flow: Kind,
     direct: Option<(Addr, bool)>,
-    imm4: Option<(u8, u32)>,
-    disp4: Option<(u8, u32)>,
-    padding: bool,
+    shape: Shape,
 }
 
 impl Insn {
     fn is_call(&self) -> bool {
-        matches!(self.flow, FlowControl::Call | FlowControl::IndirectCall)
+        matches!(self.flow, Kind::Call | Kind::IndirectCall)
     }
 
     fn is_jump(&self) -> bool {
-        matches!(
-            self.flow,
-            FlowControl::ConditionalBranch
-                | FlowControl::UnconditionalBranch
-                | FlowControl::IndirectBranch
-        )
-    }
-
-    fn is_ret(&self) -> bool {
-        self.flow == FlowControl::Return
+        matches!(self.flow, Kind::Jump | Kind::IndirectJump | Kind::Branch)
     }
 
     fn end(&self) -> Addr {
-        self.addr + self.size as u32
+        self.addr + u64::from(self.size)
     }
 
-    fn signature(&self) -> String {
-        format!(
-            "{}:{:?}:{:?}:{:?}:{}:{:?}:{:?}:{:?}:{}",
-            self.size,
-            self.mnemonic,
-            self.flow,
-            self.ops,
-            self.op_count,
-            self.direct,
-            self.imm4,
-            self.disp4,
-            self.padding
-        )
+    fn signature(&self, image: &Image) -> Option<String> {
+        let shape = rk_core::isa::machine()
+            .signature(self.addr, image.bytes(self.addr, usize::from(self.size))?)?;
+        Some(format!(
+            "{}:{:?}:{:?}:{shape}",
+            self.size, self.flow, self.direct
+        ))
     }
 
     fn seeds_flow(&self) -> bool {
-        self.is_call()
-            || (self.is_jump()
-                && !matches!(
-                    self.mnemonic,
-                    Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne
-                ))
+        self.is_call() || (self.is_jump() && !self.shape.counter)
     }
 
     fn ends_flow(&self) -> bool {
-        self.is_ret()
-            || matches!(
-                self.mnemonic,
-                Mnemonic::Jmp | Mnemonic::Int3 | Mnemonic::Ud0 | Mnemonic::Ud1 | Mnemonic::Ud2
-            )
+        matches!(
+            self.flow,
+            Kind::Return | Kind::Jump | Kind::IndirectJump | Kind::Trap
+        )
     }
 
     fn flow_target(&self) -> Option<(Addr, bool)> {
         self.direct.filter(|_| self.seeds_flow())
     }
 
-    fn absolute_slot(&self) -> Option<Addr> {
-        match self.ops[0] {
-            SimpleOp::Mem(m) if m.base == Register::None && m.index == Register::None => {
-                Some(m.displacement)
-            }
-            _ => None,
-        }
+    fn switch_jump(&self) -> Option<(Reg, Addr)> {
+        self.shape
+            .table_jump
+            .filter(|_| self.flow == Kind::IndirectJump)
     }
 
-    fn pointer_immediate(&self) -> Option<Addr> {
-        matches!(self.mnemonic, Mnemonic::Push | Mnemonic::Mov)
-            .then_some(self.imm4)
-            .flatten()
-            .map(|(_, value)| value)
-    }
-
-    fn switch_jump(&self) -> Option<(Register, Addr)> {
-        if self.flow != FlowControl::IndirectBranch || self.op_count != 1 {
-            return None;
-        }
-        match self.ops[0] {
-            SimpleOp::Mem(m)
-                if m.base == Register::None
-                    && m.index != Register::None
-                    && m.scale == 4
-                    && m.size == 4 =>
-            {
-                Some((m.index.full_register(), m.displacement))
-            }
-            _ => None,
-        }
-    }
-
-    fn writes(&self, register: Register) -> bool {
-        !matches!(
-            self.mnemonic,
-            Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Push
-        ) && matches!(self.ops[0], SimpleOp::Reg(r) if r.full_register() == register)
+    fn writes(&self, register: Reg) -> bool {
+        self.shape.written == Some(register)
     }
 }
 
@@ -621,7 +634,8 @@ impl<'a> Recovery<'a> {
                         .is_some_and(|slot| self.noreturn_import(slot))
             }
             None => ins
-                .absolute_slot()
+                .shape
+                .slot
                 .is_some_and(|slot| self.noreturn_import(slot)),
         }
     }
@@ -820,7 +834,8 @@ impl<'a> Recovery<'a> {
             }
         }
         if let Some(target) = ins
-            .pointer_immediate()
+            .shape
+            .pointer
             .filter(|&t| !self.jit && self.clean_start(t))
         {
             let (immediate_rank, root) = if self.clean_pointer_start(target) {
@@ -855,7 +870,7 @@ impl<'a> Recovery<'a> {
     fn switch_extent(
         &self,
         previous: &[Insn],
-        index: Register,
+        index: Reg,
         table: Addr,
         known: Option<&BTreeSet<Addr>>,
     ) -> Option<Switch> {
@@ -867,30 +882,24 @@ impl<'a> Recovery<'a> {
         let mut bound = None;
         let mut inclusive = true;
         for ins in previous {
-            match (ins.mnemonic, ins.ops[0], ins.ops[1]) {
-                (Mnemonic::Movzx | Mnemonic::Mov, SimpleOp::Reg(dest), SimpleOp::Mem(m))
-                    if index_table.is_none()
-                        && dest.full_register() == index
-                        && m.size == 1
-                        && m.scale <= 1 =>
-                {
-                    let register = match (m.base, m.index) {
-                        (base, Register::None) if base != Register::None => base,
-                        (Register::None, index) if index != Register::None => index,
-                        _ => return None,
-                    };
-                    index_table = Some(m.displacement);
-                    index = register.full_register();
+            match ins.shape.step {
+                Step::IndexLoad {
+                    dest,
+                    source,
+                    table,
+                } if index_table.is_none() && dest == index => {
+                    index_table = Some(table);
+                    index = source?;
                 }
-                (Mnemonic::Cmp, SimpleOp::Reg(left), SimpleOp::Imm(right)) => {
-                    if left.full_register() == index {
+                Step::Compare { reg, bound: right } => {
+                    if reg == index {
                         bound = Some(right);
                     }
                     break;
                 }
-                (Mnemonic::Jae | Mnemonic::Jb, _, _) => inclusive = false,
-                (Mnemonic::Ja | Mnemonic::Jbe, _, _) => inclusive = true,
-                _ if ins.flow != FlowControl::Next || ins.writes(index) => break,
+                Step::Exclusive => inclusive = false,
+                Step::Inclusive => inclusive = true,
+                _ if ins.flow != Kind::Fall || ins.writes(index) => break,
                 _ => {}
             }
         }
@@ -916,7 +925,12 @@ impl<'a> Recovery<'a> {
                     }
                 };
                 let mut count = 0;
-                while count < SWITCH_SLOTS && self.image.rd32(table + count * 4).is_some_and(fits) {
+                while count < SWITCH_SLOTS
+                    && self
+                        .image
+                        .rd32(table + u64::from(count) * 4)
+                        .is_some_and(fits)
+                {
                     count += 1;
                 }
                 if count < 2 && known.is_none() {
@@ -930,7 +944,7 @@ impl<'a> Recovery<'a> {
         }
         if !(0..slots).all(|i| {
             self.image
-                .rd32(table + i * 4)
+                .rd32(table + u64::from(i) * 4)
                 .is_some_and(|t| self.image.is_exec(t))
         }) {
             return None;
@@ -938,7 +952,7 @@ impl<'a> Recovery<'a> {
         if let Some(targets) = known {
             if !(0..slots).all(|i| {
                 self.image
-                    .rd32(table + i * 4)
+                    .rd32(table + u64::from(i) * 4)
                     .is_some_and(|t| targets.contains(&t))
             }) {
                 return self.switch_extent(&[], index, table, known);
@@ -976,15 +990,15 @@ impl<'a> Recovery<'a> {
         if self.switches.contains_key(&site) {
             return;
         }
-        let end = switch.table + switch.slots * 4;
+        let end = switch.table + u64::from(switch.slots) * 4;
         if !self.claim_data(switch.table, end, "switch table", rank) {
             return;
         }
         if let Some((bytes, count)) = switch.index_table {
-            self.claim_data(bytes, bytes + count, "switch index table", rank);
+            self.claim_data(bytes, bytes + u64::from(count), "switch index table", rank);
         }
         let targets: BTreeSet<Addr> = (0..switch.slots)
-            .filter_map(|i| self.image.rd32(switch.table + i * 4))
+            .filter_map(|i| self.image.rd32(switch.table + u64::from(i) * 4))
             .collect();
         self.switches
             .insert(site, (switch.table, end, targets.iter().copied().collect()));
@@ -1060,7 +1074,7 @@ impl<'a> Recovery<'a> {
             let mut at = start;
             for &length in &self.ghidra_lengths[&start] {
                 self.mapped_starts.insert(at);
-                at += length as u32;
+                at += u64::from(length);
             }
         }
         Ok(())
@@ -1089,7 +1103,7 @@ impl<'a> Recovery<'a> {
                     break;
                 }
                 self.seed(target, &format!("TLS:{at:08x}"), RANK_TRUSTED, true);
-                at = at.wrapping_add(4);
+                at += 4;
             }
         }
         self.trace();
@@ -1100,7 +1114,10 @@ impl<'a> Recovery<'a> {
             let Some(ins) = self.instructions.get(&owner) else {
                 continue;
             };
-            let direct = ins.imm4.is_some_and(|(_, value)| value == r.target);
+            let direct = ins
+                .shape
+                .immediate
+                .is_some_and(|(_, value)| value == r.target);
             if direct && !self.at_known_data(r.target) {
                 let rank = if ins.seeds_flow() {
                     RANK_RELOCATED_FLOW
@@ -1167,7 +1184,7 @@ impl<'a> Recovery<'a> {
             let mut at = start;
             for &size in &self.ghidra_lengths[&start] {
                 instructions.push((at, size));
-                at += size as u32;
+                at += u64::from(size);
             }
         }
         instructions.sort_unstable();
@@ -1186,7 +1203,7 @@ impl<'a> Recovery<'a> {
                     self.seed_from(ins.addr, target, "mapped-flow", RANK_MAPPED_FLOW, call);
                 }
             }
-            if let Some(target) = ins.pointer_immediate() {
+            if let Some(target) = ins.shape.pointer {
                 if !self.at_known_data(target) && self.clean_start(target) {
                     self.seed_from(ins.addr, target, "immediate", RANK_IMMEDIATE, true);
                 }
@@ -1229,8 +1246,8 @@ impl<'a> Recovery<'a> {
                 continue;
             }
             let executable_section = section.characteristics & 0x2000_0000 != 0;
-            let start = base + section.virtual_address;
-            let end = start + section.raw_size;
+            let start = base + u64::from(section.virtual_address);
+            let end = start + u64::from(section.raw_size);
             let lo = start.saturating_sub(base) as usize;
             let hi = (end.saturating_sub(base) as usize).min(size);
             if lo >= hi {
@@ -1242,9 +1259,11 @@ impl<'a> Recovery<'a> {
                 let stop = alignment + (data.len().saturating_sub(alignment)) / 4 * 4;
                 let mut offset = alignment;
                 while offset + 4 <= stop {
-                    let target = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                    let target = Addr::from(u32::from_le_bytes(
+                        data[offset..offset + 4].try_into().unwrap(),
+                    ));
                     let image_offset = lo + offset;
-                    let absolute = base + image_offset as u32;
+                    let absolute = base + image_offset as u64;
                     offset += 4;
                     let Some(relative) = target.checked_sub(base) else {
                         continue;
@@ -1265,7 +1284,9 @@ impl<'a> Recovery<'a> {
                         .original
                         .get(image_offset..image_offset + 4)
                         .map(|b| {
-                            u32::from_le_bytes(b.try_into().unwrap()).wrapping_add(self.delta)
+                            Addr::from(
+                                u32::from_le_bytes(b.try_into().unwrap()).wrapping_add(self.delta),
+                            )
                         });
                     if original == Some(target) {
                         candidates.insert(absolute, target);
@@ -1334,7 +1355,7 @@ impl<'a> Recovery<'a> {
         }
         let mut at = start;
         for &length in &self.ghidra_lengths[&start] {
-            let size = length as u32;
+            let size = Addr::from(length);
             if at + size > slot {
                 let Some(ins) = self.decode_at(at) else {
                     return false;
@@ -1343,8 +1364,8 @@ impl<'a> Recovery<'a> {
                     return false;
                 }
                 let field = slot - at;
-                let immediate = ins.imm4 == Some((field as u8, target));
-                let displacement = ins.disp4 == Some((field as u8, target));
+                let immediate = ins.shape.immediate == Some((field as u8, target));
+                let displacement = ins.shape.displacement == Some((field as u8, target));
                 return immediate || displacement;
             }
             at += size;
@@ -1362,7 +1383,7 @@ impl<'a> Recovery<'a> {
 
     fn first_data_start(&self, at: Addr, size: u8) -> Option<Addr> {
         (1..size as u32)
-            .map(|step| at + step)
+            .map(|step| at + u64::from(step))
             .find(|&inner| self.in_data(inner) || self.at_known_data(inner))
     }
 
@@ -1382,7 +1403,7 @@ impl<'a> Recovery<'a> {
                         .instructions
                         .get(&owner)
                         .map_or(1, |ins| ins.size as u32);
-                    at = owner + size;
+                    at = owner + u64::from(size);
                     continue;
                 }
                 if let Some((_, hi, _)) = self.mapped_span_at(at) {
@@ -1409,7 +1430,7 @@ impl<'a> Recovery<'a> {
                 let table_start = table_starts
                     .get(next_table)
                     .copied()
-                    .filter(|&table| table < at + size);
+                    .filter(|&table| table < at + u64::from(size));
                 let data_start = table_start.or_else(|| self.first_data_start(at, ins.size));
                 if let Some(data_start) = data_start {
                     self.gaps.push((at, data_start, "data-boundary"));
@@ -1417,7 +1438,7 @@ impl<'a> Recovery<'a> {
                     continue;
                 }
                 let rank = RANK_SWEEP.max(self.seed_rank.get(&at).copied().unwrap_or(0));
-                let blocked = (at + 1..at + size).any(|inner| {
+                let blocked = (at + 1..at + u64::from(size)).any(|inner| {
                     self.owner_at(inner)
                         .is_some_and(|owner| self.rank_of(owner) >= rank)
                         || self
@@ -1435,7 +1456,7 @@ impl<'a> Recovery<'a> {
                     continue;
                 }
                 self.trace();
-                at += size;
+                at += u64::from(size);
             }
         }
     }
@@ -1493,7 +1514,7 @@ impl<'a> Recovery<'a> {
         let mut previous: Option<(Addr, bool)> = None;
         for (&at, ins) in &self.instructions {
             let falls = previous.is_some_and(|(end, stops)| end == at && !stops);
-            if !falls && !self.seeds.contains_key(&at) && ins.padding {
+            if !falls && !self.seeds.contains_key(&at) && ins.shape.padding {
                 previous = None;
                 continue;
             }
@@ -1522,7 +1543,7 @@ impl<'a> Recovery<'a> {
             let mut runs: Vec<(Addr, Vec<u8>)> = Vec::new();
             for (at, size) in group {
                 let extend = runs.last().is_some_and(|(start, lengths)| {
-                    at == *start + lengths.iter().map(|&n| n as u32).sum::<u32>()
+                    at == *start + lengths.iter().map(|&n| u64::from(n)).sum::<u64>()
                 });
                 if !extend {
                     runs.push((at, Vec::new()));
@@ -1578,10 +1599,10 @@ impl<'a> Recovery<'a> {
                 let Some(ins) = self.instructions.get(&at) else {
                     return false;
                 };
-                if !ins.padding {
+                if !ins.shape.padding {
                     return false;
                 }
-                at += length as u32;
+                at += u64::from(length);
             }
         }
         any
@@ -1594,7 +1615,7 @@ impl<'a> Recovery<'a> {
         {
             return false;
         }
-        let size: Addr = spans.iter().map(|span| span.size).sum();
+        let size: u32 = spans.iter().map(|span| span.size).sum();
         if size < DATA_ENTROPY_MIN_BYTES {
             return false;
         }
@@ -1679,9 +1700,9 @@ impl<'a> Recovery<'a> {
             let mut at = span.start;
             for &length in span.lengths.as_ref()? {
                 let ins = self.instructions.get(&at)?;
-                key.push_str(&ins.signature());
+                key.push_str(&ins.signature(self.image)?);
                 key.push(';');
-                at += length as u32;
+                at += u64::from(length);
             }
         }
         Some(key)
@@ -1695,7 +1716,7 @@ impl<'a> Recovery<'a> {
         let mut signatures = BTreeMap::new();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
         for (&owner, spans) in &functions {
-            let size: Addr = spans.iter().map(|span| span.size).sum();
+            let size: u32 = spans.iter().map(|span| span.size).sum();
             if !(SHORT_FRAGMENT_MIN..=SHORT_FRAGMENT_MAX).contains(&size) {
                 continue;
             }
@@ -1747,7 +1768,7 @@ impl<'a> Recovery<'a> {
                 let mut at = span.start;
                 for &length in span.lengths.iter().flatten() {
                     discarded_sources.insert(at);
-                    at += length as u32;
+                    at += u64::from(length);
                 }
             }
         }
@@ -1835,7 +1856,7 @@ impl<'a> Recovery<'a> {
                     };
                     let mut at = span.start;
                     for &length in lengths {
-                        for byte in at..at + length as u32 {
+                        for byte in at..at + u64::from(length) {
                             if self.mapped_span_at(byte).is_some() {
                                 reason = Some(FunctionReject::OverlapsMappedCode);
                                 break 'spans;
@@ -1887,7 +1908,7 @@ impl<'a> Recovery<'a> {
                                 }
                             }
                         }
-                        at += length as u32;
+                        at += u64::from(length);
                     }
                 }
             }
@@ -1899,7 +1920,7 @@ impl<'a> Recovery<'a> {
                     let mut at = span.start;
                     for &length in span.lengths.iter().flatten() {
                         kept_instructions.insert(at);
-                        at += length as u32;
+                        at += u64::from(length);
                     }
                 }
                 kept.insert(owner, spans.clone());
@@ -2132,14 +2153,14 @@ fn span_lengths(image: &Image, check: &SleighLengths, start: Addr, end: Addr) ->
                 Hex(at)
             ))
         })?;
-        if at + ins.size as u32 > end {
+        if at + u64::from(ins.size) > end {
             return Err(Error::input(format!(
                 "{}: cannot recover mapped instruction boundaries",
                 Hex(at)
             )));
         }
         lengths.push(ins.size);
-        at += ins.size as u32;
+        at += u64::from(ins.size);
     }
     Ok(lengths)
 }
@@ -2154,117 +2175,20 @@ fn decode_at(image: &Image, check: &SleighLengths, at: Addr) -> Option<Insn> {
 }
 
 fn decode_between(image: &Image, check: &SleighLengths, at: Addr, end: Addr) -> Option<Insn> {
-    let len = 15usize.min(end.saturating_sub(at) as usize);
-    let bytes = image.bytes(at, len)?;
-    let found = if let Some(mut next) = (decode_one(bytes, at, None)?)
-        .mnemonic
-        .eq(&Mnemonic::Wait)
-        .then(|| decode_one(&bytes[1..], at + 1, Some(1)))
-        .flatten()
-        .filter(|next| mnemonic_name(next.mnemonic).starts_with("fn"))
-    {
-        next.addr = at;
-        next
-    } else {
-        decode_one(bytes, at, None)?
-    };
-    (check.length(image, at)? == found.size).then_some(found)
-}
-
-fn decode_one(bytes: &[u8], at: Addr, folded: Option<u8>) -> Option<Insn> {
-    let mut decoder = Decoder::with_ip(32, bytes, at as u64, DecoderOptions::NONE);
-    let mut insn = Instruction::default();
-    decoder.decode_out(&mut insn);
-    if insn.is_invalid() || insn.len() == 0 || insn.len() > bytes.len() {
+    let machine = rk_core::isa::machine();
+    let len = usize::from(machine.max_length()).min(end.saturating_sub(at) as usize);
+    let shape = machine.shape(at, image.bytes(at, len)?)?;
+    if check.length(image, at)? != shape.length {
         return None;
     }
-    let base = folded.unwrap_or(0);
-    let prefix = if folded.is_some() { 1u8 } else { 0u8 };
-    let size = insn.len() as u8 + prefix;
-    let mut ops = [SimpleOp::None; 4];
-    let op_count = insn.op_count().min(4) as u8;
-    for (index, op) in ops.iter_mut().enumerate().take(op_count as usize) {
-        *op = match insn.op_kind(index as u32) {
-            OpKind::Register => SimpleOp::Reg(insn.op_register(index as u32)),
-            OpKind::Memory => SimpleOp::Mem(Mem {
-                base: insn.memory_base(),
-                index: insn.memory_index(),
-                scale: insn.memory_index_scale(),
-                displacement: insn.memory_displacement64() as u32,
-                size: insn.memory_size().size() as u32,
-            }),
-            OpKind::Immediate8
-            | OpKind::Immediate8_2nd
-            | OpKind::Immediate16
-            | OpKind::Immediate32
-            | OpKind::Immediate64
-            | OpKind::Immediate8to16
-            | OpKind::Immediate8to32
-            | OpKind::Immediate8to64
-            | OpKind::Immediate32to64 => SimpleOp::Imm(insn.immediate(index as u32) as u32),
-            _ => SimpleOp::None,
-        };
-    }
-    let constant = decoder.get_constant_offsets(&insn);
-    let imm4 = (constant.immediate_size() == 4).then(|| {
-        (
-            constant.immediate_offset().wrapping_add(base as usize) as u8,
-            insn.immediate(0) as u32,
-        )
-    });
-    let disp4 = (constant.displacement_size() == 4).then(|| {
-        (
-            constant.displacement_offset().wrapping_add(base as usize) as u8,
-            insn.memory_displacement64() as u32,
-        )
-    });
-    let flow = insn.flow_control();
-    let direct = if matches!(
-        flow,
-        FlowControl::Call | FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch
-    ) && matches!(
-        insn.op0_kind(),
-        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
-    ) {
-        Some((insn.near_branch_target() as u32, flow == FlowControl::Call))
-    } else {
-        None
-    };
+    let (flow, target) = check.flow(image, at)?;
     Some(Insn {
         addr: at,
-        size,
+        size: shape.length,
         flow,
-        mnemonic: insn.mnemonic(),
-        ops,
-        op_count,
-        direct,
-        imm4,
-        disp4,
-        padding: bytes[..insn.len()].iter().all(|&b| b == 0x90 || b == 0xcc)
-            || is_alignment_padding(&insn, &ops),
+        direct: target.map(|target| (target, flow == Kind::Call)),
+        shape,
     })
-}
-
-fn is_alignment_padding(insn: &Instruction, ops: &[SimpleOp; 4]) -> bool {
-    if matches!(insn.mnemonic(), Mnemonic::Nop) {
-        return true;
-    }
-    match (ops[0], ops[1]) {
-        (SimpleOp::Reg(a), SimpleOp::Reg(b)) => {
-            a == b && matches!(insn.mnemonic(), Mnemonic::Mov | Mnemonic::Xchg)
-        }
-        (SimpleOp::Reg(a), SimpleOp::Mem(m)) => {
-            matches!(insn.mnemonic(), Mnemonic::Lea)
-                && a == m.base
-                && m.index == Register::None
-                && m.displacement == 0
-        }
-        _ => false,
-    }
-}
-
-fn mnemonic_name(mnemonic: Mnemonic) -> String {
-    format!("{mnemonic:?}").to_lowercase()
 }
 
 fn evidence_source(evidence: &str) -> Option<Addr> {

@@ -12,7 +12,7 @@ or `--engine` overrides the default. The generated-code contract is documented i
 | Settings | `rk-core` | `Settings` from `recomp-translate-input-v1` |
 | Load | `rk-image` | `Program`: image snapshot, code-map functions, spans, tables, classified entries; separate PE details for discovery |
 | Discover | `rk-discover` | Provisional functions and entries the map misses, merged into `Program` |
-| Lift | `rk-frontend` (`rk-sleigh`, `rk-decode`) | One `FunctionIr` per function: p-code, CFG, tables, SEH, noreturn |
+| Lift | `rk-frontend` (`rk-sleigh`, `rk-x86`) | One `FunctionIr` per function: p-code, CFG, tables, SEH, noreturn |
 | Facts | `recomp-translate` (`facts.rs`) | Analysis facts checked against the lifted code: call and jump bounds, site and import effects |
 | Global | `rk-global` | Call contracts, x87 control-word modes, direct-variant targets |
 | Plan | `rk-ir` → `rk-ssa` → `rk-plan` (+ `rk-x87`) | `PlannedFunction`: prepared SSA, publications, flag plan, x87 plan |
@@ -30,7 +30,11 @@ analysis cover the whole supplied snapshot; `EmitOptions.only` selects emitted b
 
 `rk-core` is the shared vocabulary. `rk-ir` is the lowering and the operation
 set that SSA, planning and emission share. `rk-analysis` is a separate offline
-binary that produces the facts the Facts stage reads (see below).
+binary that produces the facts the Facts stage reads (see below). `rk-x86` is the only
+ISA plug-in, an `rk_core::isa::Machine`: the SLEIGH spec and its lifting quirks, register
+roles and return-address convention, the Capstone decoder behind listings and typed
+operands, and the operand shapes discovery reads. The PE loader installs it from the
+image's machine field, and every other crate reaches the ISA through it.
 
 Plan and emit run in parallel per function, in two passes. The first plans every
 function and collects return-slot proofs; the second emits each ordinary body and

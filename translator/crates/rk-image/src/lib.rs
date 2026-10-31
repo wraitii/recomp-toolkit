@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use rk_core::program::{EntryKind, Function, Image, Program};
 use rk_core::settings::Settings;
-use rk_core::{Addr, Diagnostic, Error, Hex, Reason, Result};
+use rk_core::{wrap_addr, Addr, Diagnostic, Error, Hex, Reason, Result};
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug)]
@@ -55,6 +55,7 @@ pub fn load(settings: &Settings) -> Result<LoadedProgram> {
     let actual = sha256_hex(&exe);
     let invalid = |message: &str| Error::input(format!("{}: {message}", settings.exe.display()));
     let headers = pe::Headers::parse(&exe).ok_or_else(|| invalid("malformed PE image"))?;
+    rk_core::isa::install(headers.machine().map_err(|m| invalid(&m))?)?;
     let pe = details::parse_headers(&headers, settings.base);
     let image = pe::parse_headers(headers, Some(settings.base))
         .ok_or_else(|| invalid("malformed PE image"))?
@@ -170,5 +171,8 @@ pub fn entry_thunk_target(image: &Image, addr: Addr) -> Option<Addr> {
         return None;
     };
     let rel = i32::from_le_bytes(b[size - 4..size].try_into().ok()?);
-    Some(addr.wrapping_add(size as u32).wrapping_add(rel as u32))
+    Some(wrap_addr(
+        addr.wrapping_add(size as u64)
+            .wrapping_add(rel as i64 as u64),
+    ))
 }

@@ -15,7 +15,11 @@ fn json_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_default()
 }
 
-pub(super) fn call_return_bitmap(s: &mut String, call_returns: &[Addr], prefix: &str) -> (Addr, usize) {
+pub(super) fn call_return_bitmap(
+    s: &mut String,
+    call_returns: &[Addr],
+    prefix: &str,
+) -> (Addr, usize) {
     let (first, words) = match (call_returns.first(), call_returns.last()) {
         (Some(&first), Some(&last)) => {
             let mut words = vec![0u32; (((last - first) >> 5) + 1) as usize];
@@ -119,9 +123,7 @@ fn dispatch_table(
         }
         let shift = config.shift;
         let base = addrs.first().copied().unwrap_or(0) >> shift << shift;
-        let span = addrs
-            .last()
-            .map_or(0u64, |&a| ((a - base) as u64 >> shift) + 1);
+        let span = addrs.last().map_or(0u64, |&a| ((a - base) >> shift) + 1);
         let count = (span + config.max_probe as u64).max(1);
         if count > 16 * 1024 * 1024 {
             return Err(Error::input(
@@ -327,7 +329,7 @@ pub fn module_table(
         "    {}, 0x{:08x}u, 0x{:08x}u,",
         json_string(&module.name),
         module.base,
-        module.base + module.size
+        module.base + u64::from(module.size)
     );
     let _ = writeln!(s, "    {p}addrs, {n}, {p}base, {p}hooks, {p}hooked,");
     let _ = writeln!(

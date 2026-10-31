@@ -50,8 +50,8 @@ fn address(
         return None;
     }
     let (registers, size, mask) = match address_size {
-        2 => (&rk_decode::REG16[..], 2, 0xffffu64),
-        4 => (&rk_decode::REG32[..], 4, 0xffff_ffffu64),
+        2 => (&rk_x86::REG16[..], 2, 0xffffu64),
+        4 => (&rk_x86::REG32[..], 4, 0xffff_ffffu64),
         _ => return None,
     };
     if address_size == 2 && scale != 1 && index.is_some() {
@@ -337,7 +337,7 @@ fn lower_record(record: &Insn, fresh: &mut dyn FnMut(u32) -> Varnode) -> Option<
         let out = fresh(2);
         let lowering = lowering(recipes, X87Op::Status, Some(out), Vec::new());
         let mut lowering = lowering;
-        let ax = register("AX")?;
+        let ax = Registers::get().arch().eax.piece(0, 2);
         lowering.recipes.push(X87Recipe {
             op: Op::P(OpCode::Copy),
             output: Some(ax),
@@ -526,12 +526,8 @@ fn post_flags(
     out: Varnode,
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> X87Lowering {
-    let cf = Registers::get().require("CF");
-    let pf = Registers::get().require("PF");
-    let zf = Registers::get().require("ZF");
-    let of = Registers::get().require("OF");
-    let sf = Registers::get().require("SF");
-    let af = Registers::get().require("AF");
+    let arch = Registers::get().arch();
+    let (cf, pf, zf, of, sf, af) = (arch.cf, arch.pf, arch.zf, arch.of, arch.sf, arch.af);
     let one = Varnode::constant(1, 1);
     let zero = Varnode::constant(0, 1);
     let mut bit = |lowering: &mut X87Lowering, shift: u64, out: Varnode| {

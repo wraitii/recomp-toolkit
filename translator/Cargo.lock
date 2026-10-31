@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -402,6 +408,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+]
+
+[[package]]
 name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -474,13 +489,13 @@ dependencies = [
  "clap",
  "rayon",
  "rk-core",
- "rk-decode",
  "rk-discover",
  "rk-frontend",
  "rk-global",
  "rk-image",
  "rk-ir",
  "rk-ssa",
+ "rk-x86",
  "rk-x87",
  "serde",
  "serde_json",
@@ -499,19 +514,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "rk-decode"
-version = "0.1.0"
-dependencies = [
- "capstone",
- "rk-core",
- "serde",
-]
-
-[[package]]
 name = "rk-discover"
 version = "0.1.0"
 dependencies = [
- "iced-x86",
  "rayon",
  "rk-core",
  "rk-image",
@@ -536,8 +541,9 @@ version = "0.1.0"
 dependencies = [
  "rayon",
  "rk-core",
- "rk-decode",
+ "rk-ir",
  "rk-sleigh",
+ "rk-x86",
 ]
 
 [[package]]
@@ -557,6 +563,7 @@ name = "rk-image"
 version = "0.1.0"
 dependencies = [
  "rk-core",
+ "rk-x86",
  "serde",
  "serde_json",
  "sha2",
@@ -593,8 +600,11 @@ dependencies = [
  "rk-discover",
  "rk-emit",
  "rk-image",
+ "rk-ir",
  "rk-output",
  "rk-sleigh",
+ "rk-x86",
+ "rk-x87",
  "serde_json",
 ]
 
@@ -613,8 +623,8 @@ name = "rk-sleigh"
 version = "0.1.0"
 dependencies = [
  "libsla",
+ "miniz_oxide",
  "rk-core",
- "sleigh-config",
 ]
 
 [[package]]
@@ -623,6 +633,18 @@ version = "0.1.0"
 dependencies = [
  "rk-core",
  "rk-ir",
+ "rk-x86",
+]
+
+[[package]]
+name = "rk-x86"
+version = "0.1.0"
+dependencies = [
+ "capstone",
+ "iced-x86",
+ "rk-core",
+ "serde",
+ "sleigh-config",
 ]
 
 [[package]]
@@ -630,9 +652,9 @@ name = "rk-x87"
 version = "0.1.0"
 dependencies = [
  "rk-core",
- "rk-decode",
  "rk-ir",
  "rk-ssa",
+ "rk-x86",
 ]
 
 [[package]]

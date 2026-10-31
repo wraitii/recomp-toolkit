@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use recomp_translate::{facts, prepare_return_entries, EmitOptions, IrSummary, Job, Switches};
 use rk_core::program::{EntryKind, Program};
 use rk_core::settings::Settings;
+use rk_core::Addr;
 use rk_output::Translation;
 
 const INSTRUCTION_LIMIT: usize = 8192;
@@ -24,15 +25,15 @@ struct Manager {
 
 #[derive(Default)]
 struct Requests {
-    hits: BTreeMap<u32, u64>,
-    calls: BTreeMap<u32, u64>,
-    pending: BTreeSet<(u64, u32)>,
-    selected: BTreeSet<u32>,
+    hits: BTreeMap<Addr, u64>,
+    calls: BTreeMap<Addr, u64>,
+    pending: BTreeSet<(u64, Addr)>,
+    selected: BTreeSet<Addr>,
     stopped: bool,
 }
 
 impl Requests {
-    fn take_batch(queue: &(Mutex<Self>, Condvar)) -> Vec<u32> {
+    fn take_batch(queue: &(Mutex<Self>, Condvar)) -> Vec<Addr> {
         let (mutex, wake) = queue;
         let mut requests = mutex.lock().unwrap();
         while requests.pending.is_empty() && !requests.stopped {
@@ -60,7 +61,7 @@ impl Requests {
 
 static MANAGER: OnceLock<Mutex<Manager>> = OnceLock::new();
 
-fn start(base: u32, hash: String, compile: Compile) -> Mutex<Manager> {
+fn start(base: Addr, hash: String, compile: Compile) -> Mutex<Manager> {
     let requests = Arc::new((Mutex::new(Requests::default()), Condvar::new()));
     let worker_requests = Arc::clone(&requests);
     let completed = Arc::new(Mutex::new(VecDeque::new()));
@@ -98,9 +99,10 @@ pub unsafe extern "C" fn rp_jit_note(
     if hash.is_null() {
         return;
     }
+    let target = Addr::from(target);
     let manager = MANAGER.get_or_init(|| {
         start(
-            base,
+            Addr::from(base),
             CStr::from_ptr(hash).to_string_lossy().into_owned(),
             compile,
         )
@@ -246,7 +248,7 @@ pub extern "C" fn rp_jit_shutdown() {
 
 fn run(
     requests: &(Mutex<Requests>, Condvar),
-    base: u32,
+    base: Addr,
     hash: &str,
     compile: Compile,
     completed: &Mutex<VecDeque<CString>>,
@@ -304,7 +306,7 @@ fn run(
             Requests::take_batch(requests)
         };
         if let Ok(selected) = std::env::var("RECOMP_JIT_TARGET") {
-            let selected = u32::from_str_radix(selected.trim_start_matches("0x"), 16)?;
+            let selected = Addr::from(u32::from_str_radix(selected.trim_start_matches("0x"), 16)?);
             entries.retain(|entry| *entry == selected);
         }
         entries.retain(|entry| {
@@ -423,12 +425,12 @@ fn run(
 fn emit(
     settings: &Settings,
     image: &rk_core::program::Image,
-    requests: &[u32],
-    excluded: &[(u32, u32)],
+    requests: &[Addr],
+    excluded: &[(Addr, Addr)],
     out: &Path,
     batch: u32,
     instruction_limit: usize,
-) -> anyhow::Result<(BTreeSet<u32>, Vec<(u32, u32)>, bool)> {
+) -> anyhow::Result<(BTreeSet<Addr>, Vec<(Addr, Addr)>, bool)> {
     let mut program = Program::new(image.clone());
     let discovered = rk_discover::discover_jit_from_entries_excluding(
         &program,
@@ -530,10 +532,10 @@ fn emit(
     }
     let eligible = reasons.is_empty();
     if eligible {
-        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        let mut ranges: Vec<(Addr, u32)> = Vec::new();
         for (&addr, &size) in &discovered.instruction_lengths {
             if let Some((start, length)) = ranges.last_mut() {
-                if *start + *length == addr {
+                if *start + u64::from(*length) == addr {
                     *length += u32::from(size);
                     continue;
                 }
@@ -549,7 +551,7 @@ fn emit(
             program.tables.len()
         );
     }
-    let entries: BTreeSet<u32> = program.entries.keys().copied().collect();
+    let entries: BTreeSet<Addr> = program.entries.keys().copied().collect();
     let new_ranges: Vec<_> = program
         .functions
         .values()

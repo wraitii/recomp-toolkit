@@ -619,7 +619,7 @@ fn inferred_cleanup(body: &Body) -> Option<i32> {
             else {
                 return None;
             };
-            let value = (offset as i32).checked_sub(4)?;
+            let value = (offset as i32).checked_sub(rk_ir::Registers::get().arch().word as i32)?;
             if cleanup.is_some_and(|prior| prior != value) {
                 return None;
             }
@@ -692,9 +692,9 @@ fn terminal(reason: &str, search: &Search, site: Addr, detail: Value) -> Value {
     })
 }
 
-fn in_image(range: Range, image: (u32, u32)) -> bool {
+fn in_image(range: Range, image: (Addr, Addr)) -> bool {
     matches!(range.address, Address::Known { base: Base::Absolute, offset, span }
-        if offset >= image.0 && u64::from(offset) + u64::from(span) + u64::from(range.size) <= u64::from(image.1))
+        if u64::from(offset) >= image.0 && u64::from(offset) + u64::from(span) + u64::from(range.size) <= image.1)
 }
 
 fn frontier_category(terminal: &Value, range: Range) -> String {
@@ -933,7 +933,7 @@ fn investigate(
     bodies: &BTreeMap<Addr, Body>,
     start: Cursor,
     range: Range,
-    image_guard: Option<(u32, u32)>,
+    image_guard: Option<(Addr, Addr)>,
     private_evidence: bool,
     stop_after_unread_calls: usize,
 ) -> Vec<Value> {

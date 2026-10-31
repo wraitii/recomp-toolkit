@@ -21,7 +21,7 @@ pub struct Template {
     pub base: Addr,
     pub code: Vec<u8>,
     pub runs: Vec<(u32, u32)>,
-    pub imports: Vec<(u32, u32)>,
+    pub imports: Vec<(u32, Addr)>,
     pub entries: Vec<u32>,
     pub bodies: Vec<Body>,
 }
@@ -75,7 +75,7 @@ fn template_table(translation: &Translation) -> String {
             let _ = writeln!(
                 text,
                 "void fn_{:08x}(X86 *c, uint32_t base_);",
-                template.base + offset
+                template.base + u64::from(*offset)
             );
         }
     }
@@ -106,7 +106,7 @@ fn template_table(translation: &Translation) -> String {
         text.push_str("};\n");
         let _ = writeln!(text, "static const RecompRelocEntry {label}_entries[] = {{");
         for offset in &template.entries {
-            let func = template.base + offset;
+            let func = template.base + u64::from(*offset);
             let _ = writeln!(text, "{{0x{offset:x}u, fn_{func:08x}}},");
         }
         if template.entries.is_empty() {

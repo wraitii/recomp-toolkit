@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use rk_core::program::{Image, Program};
-use rk_core::{Addr, Error, Result};
+use rk_core::{wrap_addr, Addr, Error, Result};
 use serde::Deserialize;
 
 pub const FORMAT: &str = "recomp-reloc-manifest-v1";
@@ -69,15 +69,17 @@ fn hex_bytes(text: &str) -> Result<Vec<u8>> {
 }
 
 fn hex_addr(text: &str) -> Result<Addr> {
-    Addr::from_str_radix(text.trim_start_matches("0x"), 16)
+    u32::from_str_radix(text.trim_start_matches("0x"), 16)
+        .map(Addr::from)
         .map_err(|_| Error::input(format!("{text:?} is not an address")))
 }
 
 pub fn synthetic_base(index: usize) -> Addr {
-    SYNTHETIC_BASE + index as u32 * SYNTHETIC_STRIDE
+    SYNTHETIC_BASE + index as u64 * u64::from(SYNTHETIC_STRIDE)
 }
 
 pub fn program(template: &Template, index: usize) -> Result<Program> {
+    rk_x86::install()?;
     let base = synthetic_base(index);
     let mut data = code_bytes(template)?;
     if data.is_empty() || data.len() > SYNTHETIC_STRIDE as usize {
@@ -96,15 +98,20 @@ pub fn program(template: &Template, index: usize) -> Result<Program> {
             )));
         }
         let target = hex_addr(&import.target)?;
-        let relative = target.wrapping_sub(base + import.slot).wrapping_sub(4);
-        data[slot..slot + 4].copy_from_slice(&relative.to_le_bytes());
+        let relative = wrap_addr(
+            target
+                .wrapping_sub(base + Addr::from(import.slot))
+                .wrapping_sub(4),
+        );
+        data[slot..slot + 4].copy_from_slice(&(relative as u32).to_le_bytes());
     }
     let size = data.len() as u32;
     let image = Image {
+        target: rk_core::isa::target(),
         base,
         size,
         data,
-        exec_ranges: vec![(base, base + size)],
+        exec_ranges: vec![(base, base + Addr::from(size))],
         imports: BTreeMap::new(),
         relocations: Vec::new(),
     };
@@ -112,7 +119,7 @@ pub fn program(template: &Template, index: usize) -> Result<Program> {
     program.configured_entries = template
         .entries
         .iter()
-        .map(|&offset| base + offset)
+        .map(|&offset| base + Addr::from(offset))
         .collect();
     Ok(program)
 }

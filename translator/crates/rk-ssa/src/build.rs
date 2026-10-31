@@ -169,28 +169,26 @@ fn base_layout() -> &'static (Vec<StateKey>, Vec<Option<Field>>) {
         let regs = Registers::get();
         let mut keys = Vec::new();
         let mut fields = Vec::new();
-        for name in [
-            "EAX",
-            "ECX",
-            "EDX",
-            "EBX",
-            "ESP",
-            "EBP",
-            "ESI",
-            "EDI",
-            "EIP",
-            "FS_OFFSET",
-            "CF",
-            "PF",
-            "AF",
-            "ZF",
-            "SF",
-            "OF",
-            "DF",
+        let arch = regs.arch();
+        for v in [
+            arch.eax,
+            arch.ecx,
+            arch.edx,
+            arch.ebx,
+            arch.stack_pointer,
+            arch.frame_pointer,
+            arch.esi,
+            arch.edi,
+            arch.program_counter,
+            arch.thread_base,
+            arch.cf,
+            arch.pf,
+            arch.af,
+            arch.zf,
+            arch.sf,
+            arch.of,
+            arch.df,
         ] {
-            let Some(v) = regs.register(name) else {
-                continue;
-            };
             if v.space != Space::Register {
                 continue;
             }
@@ -208,11 +206,6 @@ fn base_layout() -> &'static (Vec<StateKey>, Vec<Option<Field>>) {
         }
         (keys, fields)
     })
-}
-
-fn cf_register() -> Varnode {
-    static CF: OnceLock<Varnode> = OnceLock::new();
-    *CF.get_or_init(|| Registers::get().require("CF"))
 }
 
 impl<'a> Builder<'a> {
@@ -278,10 +271,8 @@ impl<'a> Builder<'a> {
         let key_index: Lookup<StateKey, usize> =
             keys.iter().enumerate().map(|(i, key)| (*key, i)).collect();
         let mut access_indices = Vec::new();
-        for name in ["ESP", "EBP", "EIP"] {
-            let Some(register) = regs.register(name) else {
-                continue;
-            };
+        let arch = regs.arch();
+        for register in [arch.stack_pointer, arch.frame_pointer, arch.program_counter] {
             if register.space != Space::Register {
                 continue;
             }
@@ -398,7 +389,7 @@ impl<'a> Builder<'a> {
             let fallthrough = succ.len() == 1
                 && succ[0] == i as u32 + 1
                 && cg.insns.get(i + 1).is_some_and(|next| {
-                    cg.insns[i].addr + u32::from(cg.insns[i].length) == next.addr
+                    cg.insns[i].addr + u64::from(cg.insns[i].length) == next.addr
                 });
             if !fallthrough
                 || cg.exits.contains_key(&(i as u32))
@@ -512,7 +503,7 @@ impl<'a> Builder<'a> {
                     shape: insn.flag,
                     ..Pending::default()
                 };
-                let cf = cf_register();
+                let cf = Registers::get().arch().cf;
                 let touches_cf =
                     |v: Varnode| v.space == Space::Register && v.offset == cf.offset && v.size == 1;
                 let reads_cf = insn
@@ -807,7 +798,7 @@ impl<'a> Builder<'a> {
         if varnode.space != Space::Register {
             return false;
         }
-        let cf = cf_register();
+        let cf = Registers::get().arch().cf;
         varnode.offset >= cf.offset && varnode.offset < cf.offset + 6
     }
 
@@ -970,7 +961,7 @@ impl<'a> Builder<'a> {
         indices: &[usize],
     ) -> Result<(), Diagnostic> {
         let mut resolved = Vec::with_capacity(indices.len());
-        let eip = Registers::get().require("EIP").offset as u32;
+        let eip = Registers::get().arch().program_counter.offset as u32;
         let mut instruction_eip = None;
         for &index in indices {
             let key = self.keys[index];
@@ -1459,7 +1450,7 @@ impl<'a> Builder<'a> {
                     .cleanup
             })
             .flatten();
-        let esp = Registers::get().require("ESP");
+        let esp = Registers::get().arch().stack_pointer;
         let next_esp = if let Some(cleanup) = cleanup {
             let old = self.read(&esp, state, &mut Lookup::default(), block)?;
             let delta = self.value(Op::Const(4u32.wrapping_add(cleanup as u32) as u64), 4, &[]);

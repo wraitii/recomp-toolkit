@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use rk_core::isa::Machine;
 use rk_core::program::{Image, Import, Relocation};
 
 use crate::Section;
@@ -27,6 +28,7 @@ pub(crate) struct Headers<'a> {
     file: &'a [u8],
     opt: usize,
     directory_count: usize,
+    machine: u16,
     pub preferred_base: u32,
     pub size: u32,
     pub data: Vec<u8>,
@@ -40,6 +42,7 @@ impl<'a> Headers<'a> {
             return None;
         }
         let coff = pe + 4;
+        let machine = u16_at(file, coff)?;
         let section_count = u16_at(file, coff + 2)? as usize;
         let optional_size = u16_at(file, coff + 16)? as usize;
         let opt = coff + 20;
@@ -82,11 +85,19 @@ impl<'a> Headers<'a> {
             file,
             opt,
             directory_count,
+            machine,
             preferred_base,
             size,
             data,
             sections,
         })
+    }
+
+    pub(crate) fn machine(&self) -> std::result::Result<&'static dyn Machine, String> {
+        match self.machine {
+            0x14c => Ok(&rk_x86::MACHINE),
+            machine => Err(format!("unsupported PE machine {machine:#06x}")),
+        }
     }
 
     pub(crate) fn entry_rva(&self) -> Option<u32> {
@@ -112,8 +123,8 @@ impl<'a> Headers<'a> {
             .iter()
             .filter(|s| s.characteristics & SCN_MEM_EXECUTE != 0)
             .map(|s| {
-                let start = base + s.virtual_address;
-                (start, start + s.virtual_size.max(s.raw_size))
+                let start = base + Addr::from(s.virtual_address);
+                (start, start + Addr::from(s.virtual_size.max(s.raw_size)))
             })
             .collect()
     }
@@ -123,10 +134,14 @@ pub(crate) fn parse_headers(
     mut headers: Headers<'_>,
     base: Option<Addr>,
 ) -> Option<std::result::Result<Image, String>> {
-    let preferred_base = headers.preferred_base;
+    let target = match headers.machine() {
+        Ok(machine) => machine.target(),
+        Err(message) => return Some(Err(message)),
+    };
+    let preferred_base = Addr::from(headers.preferred_base);
     let size = headers.size;
     let base = base.unwrap_or(preferred_base);
-    let delta = base.wrapping_sub(preferred_base);
+    let delta = base.wrapping_sub(preferred_base) as u32;
     let mut data = std::mem::take(&mut headers.data);
     let (reloc_rva, reloc_size) = headers.directory(DIR_BASERELOC)?;
     let mut relocations = Vec::new();
@@ -156,8 +171,8 @@ pub(crate) fn parse_headers(
             let value = u32_at(&data, site)?.wrapping_add(delta);
             data[site..site + 4].copy_from_slice(&value.to_le_bytes());
             relocations.push(Relocation {
-                target: value,
-                site: base + site as u32,
+                target: Addr::from(value),
+                site: base + site as u64,
             });
         }
         off += block;
@@ -189,7 +204,7 @@ pub(crate) fn parse_headers(
                 c_string(&data, thunk as usize + 2)?
             };
             imports.insert(
-                base + first + (i as u32) * 4,
+                base + Addr::from(first) + i as u64 * 4,
                 Import {
                     dll: dll.clone(),
                     name: symbol,
@@ -201,6 +216,7 @@ pub(crate) fn parse_headers(
 
     let exec_ranges = headers.exec_ranges(base);
     Some(Ok(Image {
+        target,
         base,
         size,
         data,

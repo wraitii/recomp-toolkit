@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use rk_core::flow::Flow;
+use rk_core::ir::Insn;
 use rk_core::ir::SehEffect;
 use rk_core::program::{Image, Program};
 use rk_core::{Addr, Diagnostic, Result};
-use rk_decode::{gpr32, imm, mem, DecodedInsn, Operand, OperandKind, JCC};
+use rk_x86::{gpr32, imm, mem, Operand, OperandKind, JCC};
 
 use crate::cfg::RawFunction;
 use crate::{R_EAX, R_EBP, R_ECX, R_EDX, R_ESP};
@@ -50,7 +52,7 @@ fn seh_pattern(hex: &str, wildcards: &[usize]) -> Vec<Option<u8>> {
 }
 
 pub fn code_matches(image: &rk_core::program::Image, va: Addr, pattern: &[Option<u8>]) -> bool {
-    if !image.is_exec(va) || pattern.is_empty() || !image.is_exec(va + pattern.len() as u32 - 1) {
+    if !image.is_exec(va) || pattern.is_empty() || !image.is_exec(va + pattern.len() as u64 - 1) {
         return false;
     }
     let Some(code) = image.bytes(va, pattern.len()) else {
@@ -133,11 +135,11 @@ pub(crate) fn msvc_eh3_finally_only(
         if level == 0xffff_ffff || !seen.insert(level) {
             continue;
         }
-        if level >= 0x100 || image.rd32(scope + 12 * level + 4) != Some(0) {
+        if level >= 0x100 || image.rd32(scope + 12 * u64::from(level) + 4) != Some(0) {
             return false;
         }
-        if let Some(parent) = image.rd32(scope + 12 * level) {
-            todo.push(parent);
+        if let Some(parent) = image.rd32(scope + 12 * u64::from(level)) {
+            todo.push(parent as u32);
         }
     }
     true
@@ -149,7 +151,7 @@ pub fn seh_constructor_helper(image: &rk_core::program::Image, va: Addr) -> Opti
     let prefix = seh_pattern(prefix, &[]);
     let suffix = seh_pattern(suffix, &[]);
     let size = prefix.len() + 4 + suffix.len();
-    if !image.is_exec(va) || !image.is_exec(va + size as u32 - 1) {
+    if !image.is_exec(va) || !image.is_exec(va + size as u64 - 1) {
         return None;
     }
     let code = image.bytes(va, size)?;
@@ -164,18 +166,14 @@ pub fn seh_constructor_helper(image: &rk_core::program::Image, va: Addr) -> Opti
     {
         return None;
     }
-    let candidate = image.rd32(va + prefix.len() as u32)?;
+    let candidate = image.rd32(va + prefix.len() as u64)?;
     image.is_exec(candidate).then_some(candidate)
 }
 
 impl RawFunction {
     fn calls_seh_epilog(&self, program: &Program, i: usize) -> bool {
-        self.decoded.get(i).is_some_and(|ins| {
-            ins.mnemonic == "CALL"
-                && self
-                    .branch_target(i)
-                    .is_some_and(|target| msvc_seh_epilog(&program.image, target))
-        })
+        self.direct_call(i)
+            .is_some_and(|target| msvc_seh_epilog(&program.image, target))
     }
 
     pub(crate) fn seh_escaping_returns(
@@ -184,11 +182,9 @@ impl RawFunction {
         helpers: &BTreeSet<Addr>,
     ) -> BTreeSet<u32> {
         if self.seh_sites.is_empty()
-            && !self.decoded.iter().any(|ins| {
-                ins.mnemonic == "CALL"
-                    && self
-                        .branch_target(self.index_of(ins.addr))
-                        .is_some_and(|target| helpers.contains(&target))
+            && !(0..self.insns.len()).any(|i| {
+                self.direct_call(i)
+                    .is_some_and(|target| helpers.contains(&target))
             })
         {
             return BTreeSet::new();
@@ -202,19 +198,17 @@ impl RawFunction {
                 continue;
             }
             let index = i as usize;
-            let ins = &self.decoded[index];
             if self.seh_sites.contains_key(&i)
-                || (ins.mnemonic == "CALL"
-                    && self
-                        .branch_target(index)
-                        .is_some_and(|t| helpers.contains(&t)))
+                || self
+                    .direct_call(index)
+                    .is_some_and(|t| helpers.contains(&t))
             {
                 active = true;
             } else if self.seh_restores.contains(&i) || self.calls_seh_epilog(program, index) {
                 active = false;
             }
             if returns.contains(&i)
-                || (ins.mnemonic == "RET" && self.push_ret_target(index).is_none())
+                || (self.flows[index] == Flow::Return && self.push_ret_target(index).is_none())
             {
                 if active {
                     escapes.insert(i);
@@ -238,9 +232,9 @@ impl RawFunction {
         helpers: &BTreeSet<Addr>,
     ) -> Result<BTreeMap<u32, Vec<SehEffect>>> {
         for &i in self.seh_sites.keys() {
-            if self.decoded[i as usize].mnemonic != "MOV" {
+            if self.insns[i as usize].mnemonic != "MOV" {
                 return Err(Diagnostic::error(
-                    self.decoded[i as usize].addr,
+                    self.insns[i as usize].addr,
                     rk_core::Reason::Unsupported {
                         detail: "SEH frame site is not a MOV".into(),
                     },
@@ -249,13 +243,13 @@ impl RawFunction {
         }
         let mut effects = BTreeMap::new();
         let unlinks = !self.seh_sites.is_empty() || msvc_seh_epilog(&program.image, self.addr);
-        for (i, ins) in self.decoded.iter().enumerate() {
+        for (i, ins) in self.insns.iter().enumerate() {
             let i = i as u32;
             if seh_except_entry(ins) {
                 effects.insert(i, vec![SehEffect::Landing]);
-            } else if ins.mnemonic == "MOV" && unlinks && ins.operands.len() == 2 {
-                let dst = &ins.operands[0];
-                let src = &ins.operands[1];
+            } else if ins.mnemonic == "MOV" && unlinks && ins.typed_operands.len() == 2 {
+                let dst = &ins.typed_operands[0];
+                let src = &ins.typed_operands[1];
                 if (seh_chain_operand(dst, 0) || self.seh_sites.contains_key(&i))
                     && gpr32(src).is_some()
                 {
@@ -270,13 +264,12 @@ impl RawFunction {
                 }
             } else if ins.mnemonic == "POP" && self.seh_restores.contains(&i) {
                 effects.insert(i, vec![SehEffect::Leave]);
-            } else if ins.mnemonic == "CALL"
-                && self
-                    .branch_target(i as usize)
-                    .is_some_and(|t| helpers.contains(&t))
+            } else if self
+                .direct_call(i as usize)
+                .is_some_and(|t| helpers.contains(&t))
             {
                 effects.insert(i, vec![SehEffect::Adopt]);
-            } else if ins.mnemonic == "RET" && self.seh_escapes.contains(&i) {
+            } else if self.flows[i as usize] == Flow::Return && self.seh_escapes.contains(&i) {
                 effects.insert(i, vec![SehEffect::Orphan]);
             }
         }
@@ -306,11 +299,7 @@ pub(crate) fn seh_helpers(
                 if helpers.contains(addr) {
                     return None;
                 }
-                let calls = raw.decoded.iter().enumerate().filter_map(|(i, ins)| {
-                    (ins.mnemonic == "CALL")
-                        .then(|| raw.branch_target(i))
-                        .flatten()
-                });
+                let calls = (0..raw.insns.len()).filter_map(|i| raw.direct_call(i));
                 calls
                     .into_iter()
                     .any(|target| helpers.contains(&target))
@@ -345,8 +334,8 @@ fn seh_chain_operand(op: &Operand, zero_base: u8) -> bool {
     })
 }
 
-fn writes_reg32(ins: &DecodedInsn, reg: u8) -> bool {
-    if ins.operands.is_empty() {
+fn writes_reg32(ins: &Insn, reg: u8) -> bool {
+    if ins.typed_operands.is_empty() {
         return false;
     }
     if ins.mnemonic.starts_with("LOOP") {
@@ -357,7 +346,7 @@ fn writes_reg32(ins: &DecodedInsn, reg: u8) -> bool {
     {
         return false;
     }
-    match ins.operands[0].kind {
+    match ins.typed_operands[0].kind {
         OperandKind::Reg { gpr, .. } => gpr == reg,
         _ => true,
     }
@@ -371,19 +360,20 @@ fn seh_zero_base(raw: &RawFunction, i: usize, reg: Option<u8>) -> bool {
         return false;
     }
     let targets: BTreeSet<Addr> = raw
-        .decoded
+        .flows
         .iter()
-        .enumerate()
-        .filter(|(_, ins)| JCC.contains(&ins.mnemonic.as_str()) || ins.mnemonic == "JMP")
-        .filter_map(|(i, _)| raw.branch_target(i))
+        .filter(|flow| matches!(flow, Flow::Jump(_) | Flow::Branch(_)))
+        .filter_map(|flow| flow.target())
         .collect();
     for j in (i.saturating_sub(15)..i).rev() {
-        if !raw.contiguous[j] || targets.contains(&raw.decoded[j + 1].addr) {
+        if !raw.contiguous[j] || targets.contains(&raw.insns[j + 1].addr) {
             return false;
         }
-        let ins = &raw.decoded[j];
-        if ins.mnemonic == "XOR" && ins.operands.len() == 2 {
-            if let (Some(a), Some(b)) = (gpr32(&ins.operands[0]), gpr32(&ins.operands[1])) {
+        let ins = &raw.insns[j];
+        if ins.mnemonic == "XOR" && ins.typed_operands.len() == 2 {
+            if let (Some(a), Some(b)) =
+                (gpr32(&ins.typed_operands[0]), gpr32(&ins.typed_operands[1]))
+            {
                 if a == b && a == reg {
                     return true;
                 }
@@ -413,19 +403,19 @@ fn seh_zero_base(raw: &RawFunction, i: usize, reg: Option<u8>) -> bool {
 
 pub(crate) fn seh_restore_sites(raw: &RawFunction) -> BTreeSet<u32> {
     let mut result = BTreeSet::new();
-    for (i, ins) in raw.decoded.iter().enumerate() {
-        if !matches!(ins.mnemonic.as_str(), "POP" | "MOV") || ins.operands.is_empty() {
+    for (i, ins) in raw.insns.iter().enumerate() {
+        if !matches!(ins.mnemonic.as_str(), "POP" | "MOV") || ins.typed_operands.is_empty() {
             continue;
         }
-        let dst = &ins.operands[0];
+        let dst = &ins.typed_operands[0];
         let base = mem(dst).and_then(|(base, _, _, _, _)| base);
         if !seh_chain_operand(dst, base.unwrap_or(0)) || !seh_zero_base(raw, i, base) {
             continue;
         }
         if ins.mnemonic == "POP" {
             result.insert(i as u32);
-        } else if ins.operands.len() == 2 {
-            if let Some(src) = gpr32(&ins.operands[1]) {
+        } else if ins.typed_operands.len() == 2 {
+            if let Some(src) = gpr32(&ins.typed_operands[1]) {
                 if src != R_ESP {
                     result.insert(i as u32);
                 }
@@ -438,18 +428,18 @@ pub(crate) fn seh_restore_sites(raw: &RawFunction) -> BTreeSet<u32> {
 pub(crate) fn seh_frame_sites(raw: &RawFunction, image: &Image) -> BTreeMap<u32, Addr> {
     let mut sites = BTreeMap::new();
     if let Some(handler) = msvc_seh_prolog(image, raw.addr) {
-        let publish = raw.addr + MSVC_SEH_PROLOG_LEN - 7;
-        for (i, ins) in raw.decoded.iter().enumerate() {
+        let publish = raw.addr + u64::from(MSVC_SEH_PROLOG_LEN) - 7;
+        for (i, ins) in raw.insns.iter().enumerate() {
             if ins.addr == publish {
                 sites.insert(i as u32, handler);
             }
         }
     }
     if let Some(stub) = seh_constructor_helper(image, raw.addr) {
-        for (i, ins) in raw.decoded.iter().enumerate() {
-            if ins.mnemonic == "MOV" && ins.operands.len() == 2 {
-                let dst = &ins.operands[0];
-                let src = &ins.operands[1];
+        for (i, ins) in raw.insns.iter().enumerate() {
+            if ins.mnemonic == "MOV" && ins.typed_operands.len() == 2 {
+                let dst = &ins.typed_operands[0];
+                let src = &ins.typed_operands[1];
                 if seh_chain_operand(dst, 2)
                     && mem(dst).and_then(|(base, _, _, _, _)| base) == Some(R_EDX)
                     && gpr32(src) == Some(R_ECX)
@@ -458,19 +448,21 @@ pub(crate) fn seh_frame_sites(raw: &RawFunction, image: &Image) -> BTreeMap<u32,
                 }
             }
         }
-        for (i, ins) in raw.decoded.iter().enumerate() {
+        for (i, ins) in raw.insns.iter().enumerate() {
             if i == 0 || ins.mnemonic != "CALL" || !raw.contiguous[i - 1] {
                 continue;
             }
             let Some(target) = raw.branch_target(i) else {
                 continue;
             };
-            let reserve = &raw.decoded[i - 1];
-            if !matches!(reserve.mnemonic.as_str(), "ADD" | "SUB") || reserve.operands.len() != 2 {
+            let reserve = &raw.insns[i - 1];
+            if !matches!(reserve.mnemonic.as_str(), "ADD" | "SUB")
+                || reserve.typed_operands.len() != 2
+            {
                 continue;
             }
-            let dst = &reserve.operands[0];
-            let amount = &reserve.operands[1];
+            let dst = &reserve.typed_operands[0];
+            let amount = &reserve.typed_operands[1];
             if gpr32(dst) != Some(R_ESP)
                 || imm(amount).is_none_or(|v| {
                     v as u32
@@ -488,14 +480,14 @@ pub(crate) fn seh_frame_sites(raw: &RawFunction, image: &Image) -> BTreeMap<u32,
             }
         }
     }
-    for i in 2..raw.decoded.len() {
-        let mov = &raw.decoded[i];
-        let push = &raw.decoded[i - 1];
-        if mov.mnemonic != "MOV" || push.mnemonic != "PUSH" || mov.operands.len() != 2 {
+    for i in 2..raw.insns.len() {
+        let mov = &raw.insns[i];
+        let push = &raw.insns[i - 1];
+        if mov.mnemonic != "MOV" || push.mnemonic != "PUSH" || mov.typed_operands.len() != 2 {
             continue;
         }
-        let dst = &mov.operands[0];
-        let src = &mov.operands[1];
+        let dst = &mov.typed_operands[0];
+        let src = &mov.typed_operands[1];
         let dst_base = mem(dst).and_then(|(base, _, _, _, _)| base);
         let zero_base = if seh_zero_base(raw, i, dst_base) {
             dst_base.unwrap_or(0)
@@ -506,24 +498,24 @@ pub(crate) fn seh_frame_sites(raw: &RawFunction, image: &Image) -> BTreeMap<u32,
         {
             continue;
         }
-        let Some(pushed) = push.operands.first() else {
+        let Some(pushed) = push.typed_operands.first() else {
             continue;
         };
         let mut handler_index = i as isize - 2;
         if !seh_chain_operand(pushed, zero_base) {
-            let load = &raw.decoded[i - 2];
+            let load = &raw.insns[i - 2];
             let Some(pushed_reg) = gpr32(pushed) else {
                 continue;
             };
             if pushed_reg == R_ESP
                 || load.mnemonic != "MOV"
-                || load.operands.len() != 2
+                || load.typed_operands.len() != 2
                 || !raw.contiguous[i - 2]
             {
                 continue;
             }
-            let loaded = &load.operands[0];
-            let head = &load.operands[1];
+            let loaded = &load.typed_operands[0];
+            let head = &load.typed_operands[1];
             let Some(loaded_reg) = gpr32(loaded) else {
                 continue;
             };
@@ -543,12 +535,12 @@ pub(crate) fn seh_frame_sites(raw: &RawFunction, image: &Image) -> BTreeMap<u32,
             if j < 0 {
                 continue;
             }
-            let prev = &raw.decoded[j as usize];
+            let prev = &raw.insns[j as usize];
             if !raw.contiguous[j as usize] {
                 break;
             }
             if prev.mnemonic == "PUSH" {
-                if let Some(value) = prev.operands.first().and_then(imm) {
+                if let Some(value) = prev.typed_operands.first().and_then(imm) {
                     sites.insert(i as u32, value as Addr);
                 }
                 break;
@@ -558,11 +550,14 @@ pub(crate) fn seh_frame_sites(raw: &RawFunction, image: &Image) -> BTreeMap<u32,
     sites
 }
 
-fn seh_except_entry(ins: &DecodedInsn) -> bool {
-    if ins.mnemonic != "MOV" || ins.operands.len() != 2 || ins.operands[0].display != "ESP" {
+fn seh_except_entry(ins: &Insn) -> bool {
+    if ins.mnemonic != "MOV"
+        || ins.typed_operands.len() != 2
+        || ins.typed_operands[0].display != "ESP"
+    {
         return false;
     }
-    mem(&ins.operands[1]).is_some_and(|(base, index, _scale, disp, seg)| {
+    mem(&ins.typed_operands[1]).is_some_and(|(base, index, _scale, disp, seg)| {
         base == Some(R_EBP) && index.is_none() && seg.is_none() && disp as u32 == 0xffff_ffe8
     })
 }
@@ -575,7 +570,7 @@ fn register_constants(raw: &RawFunction, program: &Program) -> BTreeMap<u32, BTr
     before.insert(root, BTreeMap::new());
     let mut work = vec![root];
     while let Some(i) = work.pop() {
-        let ins = &raw.decoded[i as usize];
+        let ins = &raw.insns[i as usize];
         let mut state = before.get(&i).cloned().unwrap_or_default();
         let mnem = ins.mnemonic.as_str();
         if mnem == "CALL" {
@@ -586,8 +581,8 @@ fn register_constants(raw: &RawFunction, program: &Program) -> BTreeMap<u32, BTr
             || (JCC.contains(&mnem) && !mnem.starts_with("LOOP"))
             || mnem.starts_with('F')
         {
-            let first = ins.operands.first();
-            let second = ins.operands.get(1);
+            let first = ins.typed_operands.first();
+            let second = ins.typed_operands.get(1);
             if first.is_none() || matches!(first.map(|o| &o.kind), Some(OperandKind::Other(_))) {
                 state.clear();
             } else if let Some(reg) = first.and_then(gpr32) {
@@ -631,12 +626,13 @@ fn register_constants(raw: &RawFunction, program: &Program) -> BTreeMap<u32, BTr
 pub(crate) fn eh3_trylevels(raw: &RawFunction, program: &Program) -> Option<BTreeSet<u32>> {
     let mut levels = BTreeSet::new();
     let mut constants: Option<BTreeMap<u32, BTreeMap<u8, u32>>> = None;
-    for (i, ins) in raw.decoded.iter().enumerate() {
-        if ins.operands.is_empty() || matches!(ins.mnemonic.as_str(), "CMP" | "TEST" | "PUSH") {
+    for (i, ins) in raw.insns.iter().enumerate() {
+        if ins.typed_operands.is_empty() || matches!(ins.mnemonic.as_str(), "CMP" | "TEST" | "PUSH")
+        {
             continue;
         }
-        let dst = &ins.operands[0];
-        let src = ins.operands.get(1);
+        let dst = &ins.typed_operands[0];
+        let src = ins.typed_operands.get(1);
         let Some((base, index, _scale, disp, seg)) = mem(dst) else {
             continue;
         };

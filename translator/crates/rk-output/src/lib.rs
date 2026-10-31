@@ -3,8 +3,8 @@
 //! model from `rk-emit`. Callers stage into a fresh directory because stale chunks are not
 //! removed.
 
-pub mod reloc;
 pub mod jit;
+pub mod reloc;
 mod symbols;
 mod table;
 
@@ -134,8 +134,7 @@ pub fn write(out: &Path, t: &Translation) -> Result<Written> {
     if let Some(config) = &t.settings.dispatch {
         if config.shift <= 8 && !entry_names.is_empty() {
             let base = entry_names[0] >> config.shift << config.shift;
-            let span =
-                (((entry_names.last().unwrap() - base) as u64 >> config.shift) + 1) << config.shift;
+            let span = (((entry_names.last().unwrap() - base) >> config.shift) + 1) << config.shift;
             let constants = format!("#define RECOMP_DISPATCH_ENTRIES {prefix}dispatch_entries\n#define RECOMP_DISPATCH_BASE 0x{base:08x}u\n#define RECOMP_DISPATCH_SPAN {span}ull\n#define RECOMP_DISPATCH_SHIFT {}u\n#include \"x86.h\"", config.shift);
             body_header = body_header.replace("#include \"x86.h\"", &constants);
         }

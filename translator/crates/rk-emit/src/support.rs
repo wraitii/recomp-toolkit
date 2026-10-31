@@ -1,5 +1,5 @@
 use rk_core::contract::{Field, Fields};
-use rk_core::ir::OpCode;
+use rk_core::ir::{OpCode, Varnode};
 use rk_ir::{field_lane, Op, Registers, StateKey};
 use rk_ssa::ValueId;
 
@@ -113,13 +113,20 @@ pub(crate) fn location(key: StateKey) -> Option<Location> {
         StateKey::Frame { .. } => return Some(Location::Frame(key)),
         StateKey::Memory => return None,
     };
-    let (name, _) = Registers::get().covering(offset as u64)?;
-    match name {
-        "EIP" | "IP" => Some(Location::Eip),
-        "FS_OFFSET" => Some(Location::Fs),
-        "DF" => Some(Location::Df),
-        _ => None,
+    let arch = Registers::get().arch();
+    if within(arch.program_counter, offset as u64) {
+        Some(Location::Eip)
+    } else if within(arch.thread_base, offset as u64) {
+        Some(Location::Fs)
+    } else if within(arch.df, offset as u64) {
+        Some(Location::Df)
+    } else {
+        None
     }
+}
+
+pub(crate) fn within(register: Varnode, offset: u64) -> bool {
+    register.offset <= offset && offset < register.offset + register.size as u64
 }
 
 pub(crate) fn direct_loads(direct: Option<&DirectEmit>, key: StateKey) -> bool {

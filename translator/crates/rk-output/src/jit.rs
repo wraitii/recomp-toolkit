@@ -1,11 +1,11 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use rk_core::{Error, Result};
+use rk_core::{Addr, Error, Result};
 
 use crate::{body_chunk, write_file, Translation, BODY_HEADER};
 
-pub fn write(out: &Path, t: &Translation, ranges: &[(u32, u32)]) -> Result<()> {
+pub fn write(out: &Path, t: &Translation, ranges: &[(Addr, u32)]) -> Result<()> {
     std::fs::create_dir_all(out).map_err(|e| Error::io(out, e))?;
     let resume_safe = !t.bodies.iter().any(|body| body.requires.seh_call);
     let header = BODY_HEADER

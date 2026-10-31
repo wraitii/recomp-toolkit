@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
+use rk_core::flow::Flow;
 use rk_core::ir::{FunctionIr, Insn, OpCode};
 use rk_core::Addr;
 
@@ -38,18 +39,17 @@ pub(crate) fn closed(fir: &FunctionIr, tails: &BTreeSet<u32>) -> bool {
         if fir.exits.contains_key(&index) {
             return false;
         }
-        let mnemonic = mnemonic(insn);
-        let mnemonic = mnemonic.as_ref();
+        let flow = insn.flow();
         let succ = &fir.succ[index as usize];
-        if mnemonic == "RET" {
+        if flow == Flow::Return {
             if !succ.is_empty() {
                 return false;
             }
-        } else if mnemonic == "JMP" {
+        } else if flow.is_jump() {
             if succ.is_empty() {
                 return false;
             }
-        } else if mnemonic == "CALL" {
+        } else if flow.is_call() {
             if succ.is_empty() && !fir.noreturn.contains_key(&index) {
                 return false;
             }

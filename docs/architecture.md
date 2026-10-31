@@ -295,13 +295,16 @@ which still requires the interpreter when used by the guest. When a game supplie
 a reloc manifest, heap bodies matching a translated template are bound at run
 time by `runtime/reloc.cpp` before the interpreter; each entry revalidates the
 guest bytes and import slots, `RECOMP_RELOC=off` restores the interpreter path.
-`rk-pcode-ffi` lifts live bytes through the translator's pinned SLEIGH backend;
-`runtime/pcode.cpp` evaluates them and `pcode_x86.cpp` maps guest state and dispatch.
-Cached lifts are byte-validated, and nested execution retains shared ownership.
+`rk-pcode-ffi` lifts live bytes through the translator's pinned SLEIGH backend and
+shared instruction lowering before `runtime/pcode.cpp` evaluates them;
+`pcode_x86.cpp` maps guest state and dispatch. Corrected internal p-code branches
+are rejected when their relative targets cannot be preserved; unchanged sequences
+retain their original branch offsets. Cached lifts are byte-validated, and nested
+execution retains shared ownership.
 The evaluator supports scalar integer p-code; x87/MMX/SSE, other userops, SHRD,
 16-bit segmentation and guest divide-exception delivery remain explicit gaps. Memory checks cover the
 null page and arena bounds, not page permissions. Scheduler checkpoints run per
-instruction; p-code operations and host recursion are bounded, but whole guest
+instruction and periodically during repeated string operations; p-code operations and host recursion are bounded, but whole guest
 execution has no instruction cap. Unsupported sites inside translated bodies
 remain fatal; this fallback only handles dispatch gaps.
 

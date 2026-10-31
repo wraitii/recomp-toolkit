@@ -67,9 +67,10 @@ fn prepare(input: &GlobalInput<'_>, addr: Addr, facts: &dyn CallFacts) -> Option
     for block in &s.blocks {
         for &id in &block.ops {
             if s.value(id).op == Op::Return {
-                local
-                    .reads
-                    .insert(Range::new(Address::exact(Base::Frame, 0), 4));
+                local.reads.insert(Range::new(
+                    Address::exact(Base::Frame, 0),
+                    rk_ir::Registers::get().arch().word,
+                ));
             }
             let target = match s.value(id).op {
                 Op::Call { target } | Op::Tail { target } => Some(vec![target]),

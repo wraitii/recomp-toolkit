@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use rk_core::flow::Flow;
 use rk_core::ir::{FunctionIr, Insn, OpCode, PcodeOp, Space, Varnode};
 use rk_core::memory::{Address, Base};
 use rk_core::program::Program;
 use rk_core::Addr;
-use rk_decode::{branch_target, Decoder};
 use rk_ir::Registers;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,15 +14,12 @@ struct StackState {
 }
 
 pub fn analyze(program: &Program, analysis: &rk_frontend::Analysis) -> BTreeMap<Addr, i32> {
-    let Ok(decoder) = Decoder::new() else {
-        return BTreeMap::new();
-    };
     let universe: BTreeSet<Addr> = analysis.ir.keys().copied().collect();
     let mut dependencies = BTreeMap::new();
     let mut callers: BTreeMap<Addr, Vec<Addr>> = BTreeMap::new();
     for (&addr, result) in &analysis.ir {
         let deps = match result {
-            Ok(fir) => dependencies_of(program, &decoder, fir, &universe),
+            Ok(fir) => dependencies_of(program, fir, &universe),
             Err(_) => BTreeSet::new(),
         };
         for &dep in &deps {
@@ -42,7 +39,7 @@ pub fn analyze(program: &Program, analysis: &rk_frontend::Analysis) -> BTreeMap<
     let mut verified = BTreeMap::new();
     while let Some(addr) = ready.pop() {
         if let Ok(fir) = &analysis.ir[&addr] {
-            if let Ok(Some(cleanup)) = verify(program, &decoder, fir, &verified) {
+            if let Ok(Some(cleanup)) = verify(program, fir, &verified) {
                 verified.insert(addr, cleanup);
             }
         }
@@ -64,10 +61,7 @@ pub fn analyze(program: &Program, analysis: &rk_frontend::Analysis) -> BTreeMap<
     verified
 }
 
-pub fn return_immediates(
-    program: &Program,
-    analysis: &rk_frontend::Analysis,
-) -> BTreeMap<Addr, i32> {
+pub fn return_immediates(analysis: &rk_frontend::Analysis) -> BTreeMap<Addr, i32> {
     analysis
         .ir
         .iter()
@@ -87,11 +81,12 @@ pub fn return_immediates(
                 {
                     return None;
                 }
-                if insn.mnemonic.eq_ignore_ascii_case("RET") {
+                if insn.flow() == Flow::Return {
                     if !successors.is_empty() {
                         return None;
                     }
-                    returns.insert(ret_cleanup(program, insn)?);
+                    let arch = Registers::get().arch();
+                    returns.insert(arch.return_pop(insn)?);
                 } else if successors.is_empty() && !fir.noreturn.contains_key(&index) {
                     return None;
                 }
@@ -109,22 +104,21 @@ pub fn return_immediates(
 
 fn dependencies_of(
     program: &Program,
-    decoder: &Decoder,
     fir: &FunctionIr,
     universe: &BTreeSet<Addr>,
 ) -> BTreeSet<Addr> {
     let mut out = BTreeSet::new();
     for index in reachable(fir) {
         let insn = &fir.insns[index as usize];
-        let call = insn.mnemonic.eq_ignore_ascii_case("CALL");
-        let tail = insn.mnemonic.eq_ignore_ascii_case("JMP") && fir.exits.contains_key(&index);
+        let call = insn.flow().is_call();
+        let tail = insn.flow().is_jump() && fir.exits.contains_key(&index);
         if !call && !tail {
             continue;
         }
         if call && fir.noreturn.contains_key(&index) {
             continue;
         }
-        let Some(target) = direct_target(program, decoder, insn) else {
+        let Some(target) = direct_target(insn) else {
             continue;
         };
         if universe.contains(&target) && !program.is_noreturn(target) {
@@ -153,7 +147,6 @@ fn reachable(fir: &FunctionIr) -> BTreeSet<u32> {
 
 fn verify(
     program: &Program,
-    decoder: &Decoder,
     fir: &FunctionIr,
     verified: &BTreeMap<Addr, i32>,
 ) -> std::result::Result<Option<i32>, ()> {
@@ -162,8 +155,8 @@ fn verify(
     }
     let entry = fir.index_of(fir.addr).ok_or(())?;
     let registers = Registers::get();
-    let esp = registers.require("ESP");
-    let ebp = registers.require("EBP");
+    let esp = registers.arch().stack_pointer;
+    let ebp = registers.arch().frame_pointer;
     let mut before = BTreeMap::new();
     before.insert(
         entry,
@@ -177,8 +170,8 @@ fn verify(
     while let Some(index) = work.pop() {
         let state = *before.get(&index).ok_or(())?;
         let insn = fir.insns.get(index as usize).ok_or(())?;
-        let mnemonic = insn.mnemonic.to_ascii_uppercase();
-        if mnemonic == "RET" {
+        let flow = insn.flow();
+        if flow == Flow::Return {
             if fir
                 .succ
                 .get(index as usize)
@@ -191,7 +184,7 @@ fn verify(
             {
                 return Err(());
             }
-            exits.insert(ret_cleanup(program, insn).ok_or(())?);
+            exits.insert(Registers::get().arch().return_pop(insn).ok_or(())?);
             continue;
         }
 
@@ -202,29 +195,32 @@ fn verify(
             .get(index as usize)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        if mnemonic == "CALL" {
+        if flow.is_call() {
             if fir.noreturn.contains_key(&index) {
                 if !successors.is_empty() {
                     return Err(());
                 }
                 continue;
             }
-            let target = direct_target(program, decoder, insn).ok_or(())?;
+            let target = direct_target(insn).ok_or(())?;
             let Some(&cleanup) = verified.get(&target) else {
                 if successors.is_empty() && program.is_noreturn(target) {
                     continue;
                 }
                 return Err(());
             };
-            after.sp = after.sp.map(|sp| sp.wrapping_add(cleanup).wrapping_add(4));
+            let word = Registers::get().arch().word;
+            after.sp = after
+                .sp
+                .map(|sp| sp.wrapping_add(cleanup).wrapping_add(word as i32));
             after.bp = None;
         }
 
         if let Some(targets) = fir.exits.get(&index).filter(|targets| !targets.is_empty()) {
-            if mnemonic != "JMP" || !successors.is_empty() {
+            if !flow.is_jump() || !successors.is_empty() {
                 return Err(());
             }
-            let target = direct_target(program, decoder, insn).ok_or(())?;
+            let target = direct_target(insn).ok_or(())?;
             if targets.len() != 1 || targets[0] != target {
                 return Err(());
             }
@@ -239,7 +235,7 @@ fn verify(
         }
 
         if successors.is_empty() {
-            if fir.noreturn.contains_key(&index) || mnemonic == "INT3" {
+            if fir.noreturn.contains_key(&index) || flow == Flow::Trap {
                 continue;
             }
             return Err(());
@@ -383,20 +379,9 @@ fn overlaps(left: Varnode, right: Varnode) -> bool {
         && right.offset < left.offset.saturating_add(left.size as u64)
 }
 
-fn direct_target(program: &Program, decoder: &Decoder, insn: &Insn) -> Option<Addr> {
-    let raw = program.image.bytes(insn.addr, insn.length as usize)?;
-    let decoded = decoder.decode_span(insn.addr, raw)?;
-    (decoded.length == insn.length)
-        .then(|| branch_target(&decoded))
+fn direct_target(insn: &Insn) -> Option<Addr> {
+    let flow = insn.flow();
+    (flow.is_call() || flow.is_jump())
+        .then(|| flow.target())
         .flatten()
-}
-
-fn ret_cleanup(program: &Program, insn: &Insn) -> Option<i32> {
-    let raw = program.image.bytes(insn.addr, insn.length as usize)?;
-    let raw = raw.strip_prefix(&[0xf3]).unwrap_or(raw);
-    match raw {
-        [0xc3] => Some(0),
-        [0xc2, low, high] => Some(i32::from(u16::from_le_bytes([*low, *high]))),
-        _ => None,
-    }
 }

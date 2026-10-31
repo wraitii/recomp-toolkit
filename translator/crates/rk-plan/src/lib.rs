@@ -78,7 +78,7 @@ pub fn plan_function_with_view(
         }
         let addr = ssa.value_addr[index];
         if let Some(insn) = cg.index_of(addr).and_then(|n| cg.insns.get(n as usize)) {
-            return_addr.insert(index as ValueId, addr + insn.length as Addr);
+            return_addr.insert(index as ValueId, addr + Addr::from(insn.length));
         }
     }
     let block_addrs = ssa
@@ -184,7 +184,7 @@ pub fn defer_return_eip(
     if planned.ssa.return_slot.is_err() {
         return Ok(planned);
     }
-    let eip = rk_ir::Registers::get().require("EIP").offset as u32;
+    let eip = rk_ir::Registers::get().arch().program_counter.offset as u32;
     let is_eip = |key: StateKey| matches!(key, StateKey::Register(offset) if (eip..eip + 4).contains(&offset));
     let mut loads = BTreeSet::new();
     for boundary in &planned.ssa.boundaries {

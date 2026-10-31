@@ -664,8 +664,8 @@ fn prepare(
                 }
                 Op::Div { .. } | Op::Idiv { .. } => {
                     let regs = Registers::get();
-                    for name in ["EAX", "EDX"] {
-                        use_[index] |= lanes.mask(&regs.require(name)) & !local;
+                    for register in [regs.arch().eax, regs.arch().edx] {
+                        use_[index] |= lanes.mask(&register) & !local;
                     }
                 }
                 _ => {}
@@ -763,7 +763,7 @@ fn preservation_cg(mut cg: CgFunction) -> CgFunction {
                         .inputs
                         .first()
                         .copied()
-                        .unwrap_or(Varnode::constant(0, 4));
+                        .unwrap_or(Varnode::constant(0, Registers::get().arch().word));
                     op.op = Op::P(OpCode::Load);
                     op.output = None;
                     op.inputs = vec![address];
@@ -774,7 +774,7 @@ fn preservation_cg(mut cg: CgFunction) -> CgFunction {
                         .inputs
                         .first()
                         .copied()
-                        .unwrap_or(Varnode::constant(0, 4));
+                        .unwrap_or(Varnode::constant(0, Registers::get().arch().word));
                     op.op = Op::P(OpCode::Store);
                     op.output = None;
                     op.inputs = vec![address, Varnode::constant(0, x87_store_size(x87))];

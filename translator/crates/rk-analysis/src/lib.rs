@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use rk_core::contract::{Contract, Fields};
 use rk_core::facts::{AnalysisFacts, FORMAT_V2};
+use rk_core::isa::{Decoded, Machine};
 use rk_core::settings::{CallEffect, RegsEffect, Settings, X87Effect, X87Mask};
 use rk_core::{Addr, Error, Hex, Result};
-use rk_decode::{DecodedInsn, Decoder, OperandKind};
+use rk_x86::OperandKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -209,7 +210,7 @@ pub fn run(args: Args) -> Result<()> {
     }
     let settings = Settings::load(&args.input, None)?;
     let rk_image::LoadedProgram { program, pe } = rk_image::load(&settings)?;
-    let decoder = Decoder::new()?;
+    let decoder = rk_core::isa::machine();
     let com = !analysis.method_catalog.is_empty();
     let (method_bytes, effect_bytes, methods, effects, policy) = if com {
         let method_path = settings.game_dir.join(&analysis.method_catalog);
@@ -287,7 +288,7 @@ pub fn run(args: Args) -> Result<()> {
                 .spans
                 .iter()
                 .find(|span| span.start <= site && site < span.end())?;
-            let insn = decode_mapped(&program, &decoder, span, site).ok()?;
+            let insn = decode_mapped(&program, decoder, span, site).ok()?;
             (insn.mnemonic.eq_ignore_ascii_case("CALL")
                 && insn.operands.first().is_some_and(|operand| {
                     matches!(
@@ -371,7 +372,7 @@ pub fn run(args: Args) -> Result<()> {
         }
         if let Err(reason) = validate_site(
             &program,
-            &decoder,
+            decoder,
             site,
             meta,
             &mut com_analysis,
@@ -722,7 +723,7 @@ fn policy_index(
 
 fn validate_site(
     program: &rk_core::program::Program,
-    decoder: &Decoder,
+    decoder: &dyn Machine,
     site: Addr,
     meta: &MethodMeta,
     analysis: &mut Option<rk_frontend::Analysis>,
@@ -784,10 +785,10 @@ fn validate_site(
 
 fn decode_mapped(
     program: &rk_core::program::Program,
-    decoder: &Decoder,
+    decoder: &dyn Machine,
     span: &rk_core::program::Span,
     site: Addr,
-) -> std::result::Result<DecodedInsn, String> {
+) -> std::result::Result<Decoded, String> {
     if let Some(lengths) = &span.lengths {
         let mut at = span.start;
         for &length in lengths {
@@ -797,24 +798,24 @@ fn decode_mapped(
                     .bytes(site, length as usize)
                     .ok_or_else(|| "mapped instruction bytes are unavailable".to_string())?;
                 let insn = decoder
-                    .decode_span(site, raw)
+                    .decode(site, raw)
                     .ok_or_else(|| "mapped instruction does not decode exactly".to_string())?;
                 return Ok(insn);
             }
-            at += length as u32;
+            at += u64::from(length);
         }
         return Err("site is not an instruction boundary in the mapped span".to_string());
     }
     let mut at = span.start;
     while at <= site {
-        let available = (span.end() - at).min(15) as usize;
+        let available = (span.end() - at).min(u64::from(decoder.max_length())) as usize;
         let raw = program
             .image
             .bytes(at, available)
             .ok_or_else(|| "span bytes are unavailable".to_string())?;
         let mut found = None;
         for length in 1..=available {
-            if let Some(insn) = decoder.decode_span(at, &raw[..length]) {
+            if let Some(insn) = decoder.decode(at, &raw[..length]) {
                 found = Some(insn);
                 break;
             }
@@ -823,7 +824,7 @@ fn decode_mapped(
         if at == site {
             return Ok(insn);
         }
-        at += insn.length as u32;
+        at += u64::from(insn.length);
     }
     Err("site is not a decoded instruction boundary".to_string())
 }

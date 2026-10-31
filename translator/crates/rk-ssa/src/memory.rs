@@ -393,7 +393,9 @@ impl Frame {
                     span: 0,
                 } = frame
                 {
-                    if let Some(top) = (offset as i32).checked_add(4) {
+                    if let Some(top) =
+                        (offset as i32).checked_add(rk_ir::Registers::get().arch().word as i32)
+                    {
                         independent.insert(id, top);
                     }
                 }
@@ -408,7 +410,10 @@ impl Frame {
                             Range::new(addresses.relations.bounds(stored.address), stored.size);
                         borrowed.unknown_captures.iter().any(|base| match *base {
                             Base::Argument(offset) => {
-                                let read = Range::new(frame.offset(offset as u32), 4);
+                                let read = Range::new(
+                                    frame.offset(offset as u32),
+                                    rk_ir::Registers::get().arch().word,
+                                );
                                 !stored.disjoint(Range::new(
                                     addresses.relations.bounds(read.address),
                                     read.size,
@@ -529,7 +534,10 @@ impl Frame {
                             base: Base::Frame,
                             ..
                         }
-                    ) && !range.disjoint(Range::new(Address::exact(Base::Frame, 0), 4))
+                    ) && !range.disjoint(Range::new(
+                        Address::exact(Base::Frame, 0),
+                        rk_ir::Registers::get().arch().word,
+                    ))
                 })
             {
                 continue;
@@ -716,8 +724,11 @@ pub(crate) fn return_slot(s: &Ssa, facts: &dyn CallFacts) -> Result<(), &'static
     if let Some((reason, _)) = frame.rejection {
         return Err(reason);
     }
-    let eip = rk_ir::Registers::get().require("EIP").offset as u32;
-    let slot = Range::new(Address::exact(Base::Frame, 0), 4);
+    let eip = rk_ir::Registers::get().arch().program_counter.offset as u32;
+    let slot = Range::new(
+        Address::exact(Base::Frame, 0),
+        rk_ir::Registers::get().arch().word,
+    );
     let mut returns = 0;
     for &id in s.blocks.iter().flat_map(|block| &block.ops) {
         if s.value(id).op != Op::Return {
@@ -847,7 +858,9 @@ pub(crate) fn dump_stack(
                     rk_core::Hex(site), value.op, addresses.state(id, Field::Esp), summary.cleanup, summary.checkpoints,
                     summary.borrowed.is_some(), summary.readonly, summary.caller_stack_preserved, s.stack_guards.contains_key(&id))?;
             }
-            if value.op == Op::P(OpCode::IntAnd) && value.size == 4 {
+            if value.op == Op::P(OpCode::IntAnd)
+                && u32::from(value.size) == rk_ir::Registers::get().arch().word
+            {
                 let local = addresses.get(id);
                 if matches!(
                     local,
@@ -1268,9 +1281,10 @@ mod tests {
     }
 
     fn fixture(opaque_load: bool, opaque_store: bool, facts: &dyn CallFacts, call: bool) -> Ssa {
-        let esp = Registers::get().require("ESP");
-        let ecx = Registers::get().require("ECX");
-        let eax = Registers::get().require("EAX");
+        rk_x86::install().unwrap();
+        let esp = Registers::get().arch().stack_pointer;
+        let ecx = Registers::get().arch().ecx;
+        let eax = Registers::get().arch().eax;
         let address = Varnode::new(rk_core::ir::Space::Unique, 0x100, 4);
         let mut ops = vec![
             op(
@@ -1320,7 +1334,7 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 .map(|(i, op)| CgInsn {
-                    addr: 0x1000 + i as u32,
+                    addr: 0x1000 + i as u64,
                     insn: i as u32,
                     length: 1,
                     ops: vec![op],
@@ -1451,7 +1465,7 @@ mod tests {
         effects: Effects,
     }
     impl CallFacts for Facts {
-        fn call(&self, _: u32, _: Option<u32>) -> CallEffect {
+        fn call(&self, _: Addr, _: Option<Addr>) -> CallEffect {
             CallEffect {
                 reads: Fields::NONE,
                 writes: Fields::NONE,
@@ -1459,7 +1473,7 @@ mod tests {
                 preserves: Fields::ALL,
             }
         }
-        fn summary(&self, _: u32, _: Option<u32>) -> crate::CallSummary<'_> {
+        fn summary(&self, _: Addr, _: Option<Addr>) -> crate::CallSummary<'_> {
             crate::CallSummary {
                 effects: Some(std::borrow::Cow::Borrowed(&self.effects)),
                 ..Default::default()

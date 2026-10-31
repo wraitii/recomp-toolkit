@@ -13,12 +13,13 @@ pub(crate) fn parse_headers(
     headers: &Headers<'_>,
     base: Addr,
 ) -> Option<std::result::Result<PeDetails, String>> {
-    let preferred_base = headers.preferred_base;
+    let preferred_base = Addr::from(headers.preferred_base);
     let entry_rva = headers.entry_rva()?;
     let size = headers.size;
     let original = headers.data.as_slice();
 
-    let delta = base.wrapping_sub(preferred_base);
+    let delta = base.wrapping_sub(preferred_base) as u32;
+    let va = |rva: u32| base + u64::from(rva);
     let mut data_ranges = Vec::new();
     for index in 0..headers.directory_count().min(16) {
         if index == 4 {
@@ -26,7 +27,7 @@ pub(crate) fn parse_headers(
         }
         let (rva, len) = headers.directory(index)?;
         if rva != 0 && len != 0 {
-            data_ranges.push((base + rva, base + rva + len, "PE directory"));
+            data_ranges.push((va(rva), va(rva) + u64::from(len), "PE directory"));
         }
     }
     let (debug_rva, debug_size) = headers.directory(DIR_DEBUG)?;
@@ -36,7 +37,7 @@ pub(crate) fn parse_headers(
         let at = u32_at(original, off + 20)?;
         let len = u32_at(original, off + 16)?;
         if at != 0 && len != 0 {
-            data_ranges.push((base + at, base + at + len, "PE debug data"));
+            data_ranges.push((va(at), va(at) + u64::from(len), "PE debug data"));
         }
         off += 28;
     }
@@ -47,8 +48,8 @@ pub(crate) fn parse_headers(
         if rva == 0 || len == 0 {
             return;
         }
-        let low = base + rva;
-        let high = low + len;
+        let low = va(rva);
+        let high = low + u64::from(len);
         for &(start, end) in &exec_ranges {
             if low.max(start) < high.min(end) {
                 import_ranges.push((low.max(start), high.min(end), "PE import data"));
@@ -139,21 +140,21 @@ pub(crate) fn parse_headers(
         for i in 0..count {
             let rva = u32_at(original, functions as usize + i as usize * 4)?;
             if rva != 0 {
-                exports.push(base + rva);
+                exports.push(va(rva));
             }
         }
     }
 
     let (tls_rva, _) = headers.directory(DIR_TLS)?;
     let tls_callbacks = if tls_rva != 0 {
-        u32_at(original, tls_rva as usize + 12).map(|at| at.wrapping_add(delta))
+        u32_at(original, tls_rva as usize + 12).map(|at| Addr::from(at.wrapping_add(delta)))
     } else {
         None
     };
 
     Some(Ok(PeDetails {
         preferred_base,
-        entry_point: base + entry_rva,
+        entry_point: va(entry_rva),
         size,
         delta,
         original: original.to_vec(),

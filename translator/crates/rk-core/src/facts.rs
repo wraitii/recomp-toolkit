@@ -350,7 +350,7 @@ impl AnalysisFacts {
             }
         }
 
-        let check_refs = |ids: &[u32], what: &str, id: u32| -> Result<Vec<String>> {
+        let check_refs = |ids: &[u32], what: &str, id: u64| -> Result<Vec<String>> {
             let mut out = Vec::with_capacity(ids.len());
             let mut seen = BTreeSet::new();
             for &note in ids {
@@ -411,7 +411,7 @@ impl AnalysisFacts {
                 })
                 .transpose()?;
             used_evidence.extend(row.evidence.iter().copied());
-            let evidence = check_refs(&row.evidence, "method", row.id)?;
+            let evidence = check_refs(&row.evidence, "method", u64::from(row.id))?;
             if effect.is_some() && evidence.is_empty() {
                 return Err(Error::input(format!(
                     "{}: method {} has an effect without evidence",
@@ -658,7 +658,7 @@ impl AnalysisFacts {
                 )));
             };
             used_evidence.extend(row.evidence.iter().copied());
-            let evidence = check_refs(&row.evidence, "import", row.effect)?;
+            let evidence = check_refs(&row.evidence, "import", u64::from(row.effect))?;
             if evidence.is_empty() {
                 return Err(Error::input(format!(
                     "{}: import {name} has an effect without evidence",

@@ -35,6 +35,10 @@ impl Varnode {
     pub const fn register(offset: u64, size: u32) -> Self {
         Self::new(Space::Register, offset, size)
     }
+
+    pub const fn piece(self, at: u64, size: u32) -> Self {
+        Self::new(self.space, self.offset + at, size)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -193,8 +197,39 @@ pub struct Insn {
 }
 
 impl Insn {
+    pub fn new(
+        addr: Addr,
+        raw: &[u8],
+        decoded: crate::isa::Decoded,
+        ops: Vec<PcodeOp>,
+        x87: bool,
+    ) -> Self {
+        Self {
+            addr,
+            length: raw.len() as u8,
+            raw: raw.to_vec(),
+            address_size: decoded.address_size,
+            mnemonic: decoded.mnemonic,
+            operands: decoded
+                .operands
+                .iter()
+                .map(|o| o.display.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            typed_operands: decoded.operands,
+            repeat: decoded.repeat,
+            text: decoded.text,
+            ops,
+            x87,
+        }
+    }
+
     pub fn end(&self) -> Addr {
-        self.addr + self.length as Addr
+        self.addr + u64::from(self.length)
+    }
+
+    pub fn flow(&self) -> crate::flow::Flow {
+        crate::flow::Flow::of(&self.ops, self.addr, self.end())
     }
 }
 

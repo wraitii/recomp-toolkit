@@ -332,8 +332,7 @@ fn validate_call_effect(program: &Program, analysis: &Analysis, site: Addr) -> R
             Reason::Unsupported {
                 detail: "call effect site is not a call".to_string(),
             },
-        )
-        .into());
+        ));
     }
     Ok(())
 }
@@ -405,7 +404,7 @@ fn import_thunk(program: &Program, value: Addr) -> Option<String> {
     if raw[..2] != [0xff, 0x25] {
         return None;
     }
-    let slot = u32::from_le_bytes([raw[2], raw[3], raw[4], raw[5]]);
+    let slot = Addr::from(u32::from_le_bytes([raw[2], raw[3], raw[4], raw[5]]));
     program.image.imports.get(&slot).map(|import| import.key())
 }
 
@@ -464,8 +463,7 @@ fn instruction_at<'a>(
                 Reason::Unsupported {
                     detail: "site has no function IR".to_string(),
                 },
-            )
-            .into())
+            ))
         }
     };
     let index = ir.index_of(site).ok_or_else(|| {
@@ -493,8 +491,7 @@ fn call_end(program: &Program, analysis: &Analysis, site: Addr) -> Result<(Addr,
             Reason::Unsupported {
                 detail: "instruction is not a call".to_string(),
             },
-        )
-        .into());
+        ));
     }
     Ok((insn.end(), indirect))
 }

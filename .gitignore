@@ -3,6 +3,7 @@
 /analysis/
 /analysis
 /build/
+/graphics/target/
 /.venv/
 /.tools/
 /.pytest_cache/

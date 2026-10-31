@@ -345,17 +345,17 @@ fn is_media(mnemonic: &str) -> bool {
     )
 }
 
-fn call_other_family(mnemonic: &str, userop: Option<u64>) -> SlowFamily {
+fn call_other_family(mnemonic: &str, userop: Option<&str>) -> SlowFamily {
     if is_media(mnemonic) {
         return SlowFamily::Mmx;
     }
     match userop {
-        Some(1) => SlowFamily::In,
-        Some(2) => SlowFamily::Out,
-        Some(16) => SlowFamily::Int,
-        Some(44) => SlowFamily::Cpuid,
-        Some(63) => SlowFamily::Segment,
-        Some(72) => SlowFamily::Rdtsc,
+        Some("in") => SlowFamily::In,
+        Some("out") => SlowFamily::Out,
+        Some("swi") => SlowFamily::Int,
+        Some("cpuid") => SlowFamily::Cpuid,
+        Some("LocalDescriptorTableRegister") => SlowFamily::Segment,
+        Some("rdtsc") => SlowFamily::Rdtsc,
         _ => SlowFamily::CallOther,
     }
 }
@@ -382,7 +382,7 @@ fn unmodelled_family(mnemonic: &str) -> SlowFamily {
     }
 }
 
-struct Lowerer<'a> {
+pub struct InstructionLowerer<'a> {
     regs: &'static Registers,
     x87: &'a dyn X87Recipes,
     unique: u64,
@@ -399,25 +399,50 @@ pub fn lower_with(
     x87: &dyn X87Recipes,
     mark_call_returns: bool,
 ) -> rk_core::Result<CgFunction> {
-    let mut lowerer = Lowerer {
-        regs: Registers::get(),
-        x87,
-        unique: 0x8000_0000,
-        slow: Vec::new(),
-        diagnostics: Vec::new(),
-    };
+    let mut lowerer = InstructionLowerer::new(x87);
     let mut insns = Vec::with_capacity(fir.insns.len());
     for (index, insn) in fir.insns.iter().enumerate() {
-        let (mut ops, is_x87, flag_operands) = lowerer.lower_insn(fir, index as u32, insn)?;
-        if mark_call_returns && insn.mnemonic == "CALL" {
-            let return_addr = insn.addr + Addr::from(insn.length);
+        let (mut ops, is_x87, flag_operands, apply_function_policy) =
+            lowerer.lower_insn_with_import(insn, fir.import_tails.get(&(index as u32)).copied())?;
+        if apply_function_policy {
+            if let Some(kinds) = fir.seh.get(&(index as u32)) {
+                apply_seh(&mut ops, kinds);
+            }
+            if let Some(target) = fir.noreturn.get(&(index as u32)) {
+                ops.push(cg(Op::Trap(*target)));
+            }
+        }
+        for op in &mut ops {
+            match op.op {
+                Op::P(OpCode::Branch) | Op::P(OpCode::CBranch)
+                    if op.inputs.first().is_some_and(|v| v.space == Space::Const) =>
+                {
+                    let target = op.inputs.remove(0).offset;
+                    op.op = if op.op == Op::P(OpCode::Branch) {
+                        Op::Branch { target }
+                    } else {
+                        Op::CBranch { target }
+                    };
+                }
+                Op::Return => op.inputs.clear(),
+                _ => {}
+            }
+        }
+        if mark_call_returns && insn.flow().is_call() {
+            let return_addr = insn.end();
+            let arch = Registers::get().arch();
+            let (opcode, input) = match arch.link {
+                None => (OpCode::Store, 1),
+                Some(_) => (OpCode::Copy, 0),
+            };
             if let Some(position) = ops.iter().position(|op| {
-                op.op == Op::P(OpCode::Store)
-                    && op.inputs.get(1).is_some_and(|value| {
-                        value.space == Space::Const && value.offset == return_addr as u64
+                op.op == Op::P(opcode)
+                    && (arch.link.is_none() || op.output == arch.link)
+                    && op.inputs.get(input).is_some_and(|value| {
+                        value.space == Space::Const && value.offset == return_addr
                     })
             }) {
-                let value = lowerer.fresh(4);
+                let value = lowerer.fresh(arch.word);
                 ops.insert(
                     position,
                     CgOp {
@@ -426,7 +451,7 @@ pub fn lower_with(
                         inputs: Vec::new(),
                     },
                 );
-                ops[position + 1].inputs[1] = value;
+                ops[position + 1].inputs[input] = value;
             }
         }
         if let Some(&target) = fir.intra_calls.get(&(index as u32)) {
@@ -478,7 +503,25 @@ pub fn lower_with(
     })
 }
 
-impl Lowerer<'_> {
+impl<'a> InstructionLowerer<'a> {
+    pub fn new(x87: &'a dyn X87Recipes) -> Self {
+        Self {
+            regs: Registers::get(),
+            x87,
+            unique: 0x8000_0000,
+            slow: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub fn slow_insns(&self) -> &[SlowInsn] {
+        &self.slow
+    }
+
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
     fn fresh(&mut self, size: u32) -> Varnode {
         let out = Varnode::new(Space::Unique, self.unique, size);
         self.unique += 0x10;
@@ -500,18 +543,25 @@ impl Lowerer<'_> {
         self.slow(insn, family)
     }
 
-    fn lower_insn(
+    pub fn lower_insn(
         &mut self,
-        fir: &FunctionIr,
-        index: u32,
         insn: &Insn,
     ) -> rk_core::Result<(Vec<CgOp>, bool, Option<(Varnode, Varnode)>)> {
+        let (ops, x87, flags, _) = self.lower_insn_with_import(insn, None)?;
+        Ok((ops, x87, flags))
+    }
+
+    fn lower_insn_with_import(
+        &mut self,
+        insn: &Insn,
+        import_tail: Option<Addr>,
+    ) -> rk_core::Result<(Vec<CgOp>, bool, Option<(Varnode, Varnode)>, bool)> {
         let mnem = insn.mnemonic.to_ascii_uppercase();
         if mnem == "WAIT" || mnem == "NOP" || mnem == "PAUSE" {
-            return Ok((Vec::new(), false, None));
+            return Ok((Vec::new(), false, None, false));
         }
         if mnem == "INT3" {
-            return Ok((vec![cg(Op::Breakpoint)], false, None));
+            return Ok((vec![cg(Op::Breakpoint)], false, None, false));
         }
         if mnem == "MOV"
             && insn
@@ -521,11 +571,11 @@ impl Lowerer<'_> {
                 .is_some_and(|op| op.trim().eq_ignore_ascii_case("CS"))
         {
             let op = self.slow(insn, SlowFamily::Segment);
-            return Ok((vec![cg(op)], false, None));
+            return Ok((vec![cg(op)], false, None, false));
         }
         if matches!(mnem.as_str(), "FXSAVE" | "STMXCSR" | "LDMXCSR" | "SFENCE") {
             let op = self.slow(insn, SlowFamily::Sse);
-            return Ok((vec![cg(op)], false, None));
+            return Ok((vec![cg(op)], false, None, false));
         }
         if insn.x87 || mnem.starts_with('F') {
             let mut unique = self.unique;
@@ -548,29 +598,29 @@ impl Lowerer<'_> {
                         inputs: recipe.inputs,
                     })
                     .collect();
-                return Ok((ops, true, None));
+                return Ok((ops, true, None, false));
             }
             let op = self.slow(insn, SlowFamily::X87);
-            return Ok((vec![cg(op)], true, None));
+            return Ok((vec![cg(op)], true, None, false));
         }
         let raw = &insn.raw;
         if let Some(helper) = string::helper(raw) {
-            return Ok((vec![cg(Op::String(StringOp(helper)))], false, None));
+            return Ok((vec![cg(Op::String(StringOp(helper)))], false, None, false));
         }
-        if let Some(slot) = fir.import_tails.get(&index) {
-            return Ok((vec![cg(Op::ImportTail { slot: *slot })], false, None));
+        if let Some(slot) = import_tail {
+            return Ok((vec![cg(Op::ImportTail { slot })], false, None, false));
         }
         let mut stripped = Vec::new();
-        let raw_ops: &[PcodeOp] = if insn
-            .ops
-            .iter()
-            .any(|op| op.opcode == OpCode::CallOther && matches!(op.userop, Some(17 | 18)))
-        {
+        let raw_ops: &[PcodeOp] = if insn.ops.iter().any(|op| {
+            op.opcode == OpCode::CallOther
+                && matches!(self.regs.userop(op.userop), Some("LOCK" | "UNLOCK"))
+        }) {
             stripped.extend(
                 insn.ops
                     .iter()
                     .filter(|op| {
-                        !(op.opcode == OpCode::CallOther && matches!(op.userop, Some(17 | 18)))
+                        !(op.opcode == OpCode::CallOther
+                            && matches!(self.regs.userop(op.userop), Some("LOCK" | "UNLOCK")))
                     })
                     .cloned(),
             );
@@ -592,9 +642,9 @@ impl Lowerer<'_> {
                     | "MOVMSKPS"
             );
             if !handled {
-                let family = call_other_family(&mnem, call.userop);
+                let family = call_other_family(&mnem, self.regs.userop(call.userop));
                 let op = self.slow(insn, family);
-                return Ok((vec![cg(op)], false, None));
+                return Ok((vec![cg(op)], false, None, false));
             }
         }
         let divide_by_zero = matches!(mnem.as_str(), "AAM") && insn.raw.last() == Some(&0);
@@ -607,31 +657,31 @@ impl Lowerer<'_> {
                 },
                 family,
             );
-            return Ok((vec![cg(op)], false, None));
+            return Ok((vec![cg(op)], false, None, false));
         }
         let ops = match normalize_direct_ram(raw_ops, &mut |size| self.fresh(size)) {
             Ok(ops) => ops,
             Err(reason) => {
                 let op = self.reject(insn, reason, SlowFamily::Unmodelled);
-                return Ok((vec![cg(op)], false, None));
+                return Ok((vec![cg(op)], false, None, false));
             }
         };
         let ops = match correct_sse(&mnem, &ops, self.regs, insn, &mut |size| self.fresh(size)) {
             Ok(ops) => ops,
             Err(reason) => {
                 let op = self.reject(insn, reason, SlowFamily::Unmodelled);
-                return Ok((vec![cg(op)], false, None));
+                return Ok((vec![cg(op)], false, None, false));
             }
         };
         let ops = match correct_extra(&mnem, &ops, self.regs, insn, &mut |size| self.fresh(size)) {
             Ok(ops) => ops,
             Err(reason) => {
                 let op = self.reject(insn, reason, SlowFamily::Unmodelled);
-                return Ok((vec![cg(op)], false, None));
+                return Ok((vec![cg(op)], false, None, false));
             }
         };
         if mnem == "DIV" || mnem == "IDIV" {
-            let (mut converted, has_address) =
+            let (converted, has_address) =
                 match correct_div_cg(&mnem, &ops, self.regs, insn.addr, &mut |size| {
                     self.fresh(size)
                 }) {
@@ -641,16 +691,7 @@ impl Lowerer<'_> {
                         (vec![cg(op)], false)
                     }
                 };
-            if has_address {
-                if let Some(kinds) = fir.seh.get(&index) {
-                    apply_seh(&mut converted, kinds);
-                }
-                if let Some(target) = fir.noreturn.get(&index) {
-                    converted.push(cg(Op::Trap(*target)));
-                }
-                return Ok((converted, false, None));
-            }
-            return Ok((converted, false, None));
+            return Ok((converted, false, None, has_address));
         }
         let rewrites_memory = matches!(
             mnem.as_str(),
@@ -721,23 +762,17 @@ impl Lowerer<'_> {
                     _ => SlowFamily::Unmodelled,
                 };
                 let op = self.reject(insn, reason, family);
-                return Ok((vec![cg(op)], false, None));
+                return Ok((vec![cg(op)], false, None, false));
             }
         };
-        let mut converted: Vec<CgOp> = ops.into_iter().map(from_pcode).collect();
-        if let Some(kinds) = fir.seh.get(&index) {
-            apply_seh(&mut converted, kinds);
-        }
-        if let Some(target) = fir.noreturn.get(&index) {
-            converted.push(cg(Op::Trap(*target)));
-        }
-        Ok((converted, false, flag_operands))
+        let converted: Vec<CgOp> = ops.into_iter().map(from_pcode).collect();
+        Ok((converted, false, flag_operands, true))
     }
 
     fn add_tail(&self, fir: &FunctionIr, index: u32, out: &mut Vec<CgOp>) {
         if out.iter().any(|op| matches!(op.op, Op::CBranch { .. })) {
             let insn = &fir.insns[index as usize];
-            let target = insn.addr + Addr::from(insn.length);
+            let target = insn.end();
             if fir
                 .exits
                 .get(&index)
@@ -769,6 +804,13 @@ fn cg(op: Op) -> CgOp {
 fn from_pcode(op: PcodeOp) -> CgOp {
     match op.opcode {
         OpCode::Branch => {
+            if op.inputs.first().is_some_and(|v| v.space == Space::Const) {
+                return CgOp {
+                    op: Op::P(OpCode::Branch),
+                    output: op.output,
+                    inputs: op.inputs,
+                };
+            }
             let target = op.inputs.first().and_then(target_addr);
             CgOp {
                 op: target.map_or(Op::P(OpCode::Branch), |target| Op::Branch { target }),
@@ -777,6 +819,13 @@ fn from_pcode(op: PcodeOp) -> CgOp {
             }
         }
         OpCode::CBranch => {
+            if op.inputs.first().is_some_and(|v| v.space == Space::Const) {
+                return CgOp {
+                    op: Op::P(OpCode::CBranch),
+                    output: op.output,
+                    inputs: op.inputs,
+                };
+            }
             let target = op.inputs.first().and_then(target_addr);
             let inputs = if target.is_some() {
                 op.inputs.get(1..).unwrap_or(&[]).to_vec()
@@ -805,7 +854,7 @@ fn from_pcode(op: PcodeOp) -> CgOp {
         OpCode::Return => CgOp {
             op: Op::Return,
             output: op.output,
-            inputs: Vec::new(),
+            inputs: op.inputs,
         },
         OpCode::BranchInd => CgOp {
             op: Op::BranchInd,
@@ -875,7 +924,7 @@ fn correct_sse(
             || branch.output.is_some()
             || branch.inputs.len() != 2
             || branch.inputs[0].space != Space::Ram
-            || branch.inputs[0].offset != (insn.addr + insn.length as Addr) as u64
+            || branch.inputs[0].offset != (insn.end())
             || Some(branch.inputs[1]) != compare.output
             || ops[..at].iter().any(|op| {
                 matches!(
@@ -967,13 +1016,13 @@ fn correct_sse(
             .collect());
     }
     if let Some((userop, code)) = match mnem {
-        "RCPSS" => Some((0xa4, OpCode::FloatRcp)),
-        "RSQRTSS" => Some((0xa6, OpCode::FloatRsqrt)),
+        "RCPSS" => Some(("rcpss", OpCode::FloatRcp)),
+        "RSQRTSS" => Some(("rsqrtss", OpCode::FloatRsqrt)),
         _ => None,
     } {
         let mut out = Vec::with_capacity(ops.len());
         for item in ops {
-            if item.opcode == OpCode::CallOther && item.userop == Some(userop) {
+            if item.opcode == OpCode::CallOther && regs.userop(item.userop) == Some(userop) {
                 let output = item.output.ok_or_else(unsupported)?;
                 let source = *item.inputs.last().ok_or_else(unsupported)?;
                 if output.size == 16 && source.size == 16 {
@@ -1264,14 +1313,14 @@ fn add_af(
         ),
         op(
             OpCode::IntAnd,
-            flag(regs, "AF"),
+            regs.arch().af,
             vec![z, Varnode::constant(1, result.size)],
         ),
     ]
 }
 
 fn internal_target(target: Varnode, end: Addr) -> bool {
-    target.space == Space::Const || (target.space == Space::Ram && target.offset == end as u64)
+    target.space == Space::Const || (target.space == Space::Ram && target.offset == end)
 }
 
 fn correct_cmov(
@@ -1297,7 +1346,7 @@ fn correct_cmov(
         || branch.output.is_some()
         || branch.inputs.len() != 2
         || branch.inputs[0].space != Space::Ram
-        || branch.inputs[0].offset != (insn.addr + insn.length as Addr) as u64
+        || branch.inputs[0].offset != (insn.end())
         || branch.inputs[1] != negate.output.unwrap()
         || dest_copy.opcode != OpCode::Copy
         || dest.space != Space::Register
@@ -1418,7 +1467,7 @@ fn correct_cmpxchg(
     let unsupported = || Reason::Unsupported {
         detail: "unsupported CMPXCHG p-code shape".into(),
     };
-    let end = insn.addr + insn.length as Addr;
+    let end = insn.end();
     let if_index = ops
         .iter()
         .position(|op| op.opcode == OpCode::CBranch)
@@ -1550,8 +1599,8 @@ fn correct_cmpxchg8b(
     let unsupported = || Reason::Unsupported {
         detail: "unsupported CMPXCHG8B p-code shape".into(),
     };
-    let end = insn.addr + insn.length as Addr;
-    let zf = flag(regs, "ZF");
+    let end = insn.end();
+    let zf = regs.arch().zf;
     let zf_index = ops
         .iter()
         .position(|op| {
@@ -1579,10 +1628,11 @@ fn correct_cmpxchg8b(
         .iter()
         .find(|op| op.opcode == OpCode::Store)
         .ok_or_else(unsupported)?;
-    let eax = regs.require("EAX");
-    let ecx = regs.require("ECX");
-    let edx = regs.require("EDX");
-    let ebx = regs.require("EBX");
+    let arch = regs.arch();
+    let eax = arch.eax;
+    let ecx = arch.ecx;
+    let edx = arch.edx;
+    let ebx = arch.ebx;
     if !internal_target(ops[if_index].inputs[0], end)
         || !internal_target(ops[branch_index].inputs[0], end)
         || old.size != 8
@@ -2150,9 +2200,6 @@ fn normalize_direct_ram(
     Ok(out)
 }
 
-fn flag(regs: &Registers, name: &str) -> Varnode {
-    regs.require(name)
-}
 fn copy(output: Varnode, input: Varnode) -> PcodeOp {
     PcodeOp {
         opcode: OpCode::Copy,
@@ -2172,7 +2219,7 @@ fn op(opcode: OpCode, output: Varnode, inputs: Vec<Varnode>) -> PcodeOp {
 
 fn with_af_zero(ops: &[PcodeOp], regs: &Registers) -> Vec<PcodeOp> {
     let mut out = ops.to_vec();
-    out.push(copy(flag(regs, "AF"), Varnode::constant(0, 1)));
+    out.push(copy(regs.arch().af, Varnode::constant(0, 1)));
     out
 }
 
@@ -2184,7 +2231,7 @@ fn correct_bsr(
     let unsupported = || Reason::Unsupported {
         detail: "unsupported BSR p-code shape".into(),
     };
-    let zf = flag(regs, "ZF");
+    let zf = regs.arch().zf;
     let at = ops
         .iter()
         .position(|op| op.output == Some(zf))
@@ -2328,10 +2375,11 @@ fn defer_flags(
         }
         if let Some(output) = op.output {
             let is_flag = output.space == Space::Register
-                && ["CF", "PF", "AF", "ZF", "SF", "OF"].iter().any(|name| {
-                    let flag = regs.require(name);
-                    output.offset == flag.offset && output.size == flag.size
-                });
+                && regs
+                    .arch()
+                    .arithmetic_flags()
+                    .iter()
+                    .any(|flag| output.offset == flag.offset && output.size == flag.size);
             if is_flag {
                 let replacement = fresh(output.size);
                 op.output = Some(replacement);
@@ -2377,7 +2425,7 @@ fn correct_arithmetic(
         let result = ops[primary].output.unwrap();
         let first_cf = ops
             .iter()
-            .position(|op| op.output == Some(flag(regs, "CF")))
+            .position(|op| op.output == Some(regs.arch().cf))
             .ok_or_else(|| Reason::UnsupportedArithmetic {
                 mnemonic: mnem.into(),
             })?;
@@ -2420,8 +2468,7 @@ fn correct_arithmetic(
                     .is_some_and(|v| v.space == Space::Register || v.space == Space::Unique)
         }) else {
             let is_flag = |v: Varnode| {
-                ["CF", "PF", "AF", "ZF", "SF", "OF"].iter().any(|name| {
-                    let flag = regs.require(name);
+                regs.arch().arithmetic_flags().iter().any(|flag| {
                     v.space == Space::Register && v.offset == flag.offset && v.size == flag.size
                 })
             };
@@ -2437,7 +2484,7 @@ fn correct_arithmetic(
             });
             if (mnem == "SUB" || mnem == "CMP") && zero_result {
                 let mut out = ops.to_vec();
-                let af = regs.require("AF");
+                let af = regs.arch().af;
                 if !out.iter().any(|op| op.output == Some(af)) {
                     out.push(copy(af, Varnode::constant(0, 1)));
                 }
@@ -2472,7 +2519,7 @@ fn correct_arithmetic(
         ),
         op(
             OpCode::IntAnd,
-            flag(regs, "AF"),
+            regs.arch().af,
             vec![z, Varnode::constant(1, result.size)],
         ),
     ];
@@ -2511,7 +2558,7 @@ fn correct_shift(
     let original = fresh(source.size);
     let old_of = fresh(1);
     ops.insert(index, copy(original, ops[index].inputs[0]));
-    ops.insert(0, copy(old_of, flag(regs, "OF")));
+    ops.insert(0, copy(old_of, regs.arch().of));
     let nonzero = fresh(1);
     let zero = fresh(1);
     let sign = fresh(1);
@@ -2539,14 +2586,14 @@ fn correct_shift(
     ];
     if mnem == "SHL" {
         let x = fresh(1);
-        recipe.push(op(OpCode::IntXor, x, vec![sign, flag(regs, "CF")]));
+        recipe.push(op(OpCode::IntXor, x, vec![sign, regs.arch().cf]));
         recipe.push(op(OpCode::IntAnd, changed, vec![nonzero, x]));
     } else {
         recipe.push(op(OpCode::IntAnd, changed, vec![nonzero, sign]));
     }
     recipe.push(op(OpCode::IntAnd, kept, vec![zero, old_of]));
     recipe.push(op(OpCode::IntOr, updated, vec![changed, kept]));
-    recipe.push(copy(flag(regs, "OF"), updated));
+    recipe.push(copy(regs.arch().of, updated));
     ops.extend(recipe);
     Ok(ops)
 }
@@ -2574,7 +2621,7 @@ fn correct_sar(
     let nonzero = fresh(1);
     let zero = fresh(1);
     let updated = fresh(1);
-    ops.insert(0, copy(old_of, flag(regs, "OF")));
+    ops.insert(0, copy(old_of, regs.arch().of));
     ops.extend([
         op(
             OpCode::IntNotEqual,
@@ -2588,7 +2635,7 @@ fn correct_sar(
             userop: None,
         },
         op(OpCode::IntAnd, updated, vec![zero, old_of]),
-        copy(flag(regs, "OF"), updated),
+        copy(regs.arch().of, updated),
     ]);
     Ok(ops)
 }
@@ -2624,7 +2671,7 @@ fn correct_neg(
             af,
             vec![low, Varnode::constant(0, result.size)],
         ),
-        copy(flag(regs, "AF"), af),
+        copy(regs.arch().af, af),
     ]);
     Ok(ops)
 }
@@ -2670,10 +2717,17 @@ fn correct_div_cg(
     if division.inputs.iter().any(|v| v.size != quotient.size) {
         return Err(unsupported());
     }
-    let outputs: [(&str, Varnode, u64); 2] = match width {
-        1 => [("AL", quotient, 0), ("AH", remainder_value, 1)],
-        2 => [("AX", quotient, 0), ("DX", remainder_value, 4)],
-        _ => [("EAX", quotient, 0), ("EDX", remainder_value, 4)],
+    let arch = regs.arch();
+    let outputs: [(Varnode, Varnode, u64); 2] = match width {
+        1 => [
+            (arch.eax.piece(0, 1), quotient, 0),
+            (arch.eax.piece(1, 1), remainder_value, 1),
+        ],
+        2 => [
+            (arch.eax.piece(0, 2), quotient, 0),
+            (arch.edx.piece(0, 2), remainder_value, 4),
+        ],
+        _ => [(arch.eax, quotient, 0), (arch.edx, remainder_value, 4)],
     };
     let mut emitted = [false; 2];
     for op in &ops[index..] {
@@ -2683,11 +2737,10 @@ fn correct_div_cg(
         let matched = outputs
             .iter()
             .enumerate()
-            .position(|(n, (name, source, _))| {
-                let register = regs.require(name);
+            .position(|(n, (register, source, _))| {
                 !emitted[n]
                     && op.opcode == OpCode::SubPiece
-                    && op.output == Some(register)
+                    && op.output == Some(*register)
                     && op.inputs.len() == 2
                     && op.inputs[0] == *source
                     && op.inputs[1].space == Space::Const
@@ -2703,7 +2756,7 @@ fn correct_div_cg(
     }
     let result = fresh(8);
     let mut inputs = division.inputs.clone();
-    inputs.push(Varnode::constant(addr as u64, 4));
+    inputs.push(Varnode::constant(addr, 4));
     let opcode = if signed {
         Op::Idiv {
             addr,
@@ -2721,9 +2774,9 @@ fn correct_div_cg(
         output: Some(result),
         inputs,
     });
-    out.extend(outputs.into_iter().map(|(name, _, offset)| CgOp {
+    out.extend(outputs.into_iter().map(|(register, _, offset)| CgOp {
         op: Op::P(OpCode::SubPiece),
-        output: Some(regs.require(name)),
+        output: Some(register),
         inputs: vec![result, Varnode::constant(offset, 4)],
     }));
     Ok(out)

@@ -117,7 +117,7 @@ pub fn produce(
     let mut cleanups = stack::analyze(program, analysis);
     let verified_cleanups = cleanups.len();
     if options.assume_compatible_cleanup && options.assume_balanced_returns {
-        for (addr, cleanup) in stack::return_immediates(program, analysis) {
+        for (addr, cleanup) in stack::return_immediates(analysis) {
             cleanups.entry(addr).or_insert(cleanup);
         }
     }

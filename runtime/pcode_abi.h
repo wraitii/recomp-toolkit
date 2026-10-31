@@ -84,6 +84,8 @@ enum {
     RP_OP_CVTSI2SS = 67,
     RP_OP_FLOAT_RCP = 68,
     RP_OP_FLOAT_RSQRT = 69,
+    RP_OP_DIVMOD = 70,
+    RP_OP_SDIVMOD = 71,
 };
 
 typedef struct RpVarnode {

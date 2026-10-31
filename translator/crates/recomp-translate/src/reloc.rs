@@ -45,13 +45,13 @@ fn refuse(
             });
         };
         for insn in &ir.insns {
-            if insn.addr < base || insn.addr + insn.length as Addr > end {
+            if insn.addr < base || insn.end() > end {
                 return Some(Refusal {
                     reason: "instruction-outside-body".into(),
                     detail: format!("{:08x}", insn.addr),
                 });
             }
-            let start = insn.addr - base;
+            let start = (insn.addr - base) as u32;
             let imported_call = insn.mnemonic.eq_ignore_ascii_case("CALL")
                 && import_slots.contains(&(start + insn.length as u32 - 4));
             for offset in start..start + insn.length as u32 {
@@ -200,7 +200,7 @@ pub fn translate(
         let entries: Vec<Addr> = template
             .entries
             .iter()
-            .map(|&offset| program.image.base + offset)
+            .map(|&offset| program.image.base + Addr::from(offset))
             .collect();
         let discovered = rk_discover::discover_from_entries(&program, &entries)?;
         merge_trusted(&mut program, &discovered)?;
@@ -310,7 +310,10 @@ pub fn translate(
                         .map(|import| {
                             Ok((
                                 import.slot,
-                                Addr::from_str_radix(import.target.trim_start_matches("0x"), 16)?,
+                                u64::from(u32::from_str_radix(
+                                    import.target.trim_start_matches("0x"),
+                                    16,
+                                )?),
                             ))
                         })
                         .collect::<std::result::Result<_, std::num::ParseIntError>>()?,
