@@ -171,23 +171,23 @@ fn base_layout() -> &'static (Vec<StateKey>, Vec<Option<Field>>) {
         let mut fields = Vec::new();
         let arch = regs.arch();
         for v in [
-            arch.eax,
-            arch.ecx,
-            arch.edx,
-            arch.ebx,
+            arch.x86.eax,
+            arch.x86.ecx,
+            arch.x86.edx,
+            arch.x86.ebx,
             arch.stack_pointer,
             arch.frame_pointer,
-            arch.esi,
-            arch.edi,
+            arch.x86.esi,
+            arch.x86.edi,
             arch.program_counter,
             arch.thread_base,
-            arch.cf,
-            arch.pf,
-            arch.af,
-            arch.zf,
-            arch.sf,
-            arch.of,
-            arch.df,
+            arch.x86.cf,
+            arch.x86.pf,
+            arch.x86.af,
+            arch.x86.zf,
+            arch.x86.sf,
+            arch.x86.of,
+            arch.x86.df,
         ] {
             if v.space != Space::Register {
                 continue;
@@ -503,7 +503,7 @@ impl<'a> Builder<'a> {
                     shape: insn.flag,
                     ..Pending::default()
                 };
-                let cf = Registers::get().arch().cf;
+                let cf = Registers::get().arch().x86.cf;
                 let touches_cf =
                     |v: Varnode| v.space == Space::Register && v.offset == cf.offset && v.size == 1;
                 let reads_cf = insn
@@ -798,7 +798,7 @@ impl<'a> Builder<'a> {
         if varnode.space != Space::Register {
             return false;
         }
-        let cf = Registers::get().arch().cf;
+        let cf = Registers::get().arch().x86.cf;
         varnode.offset >= cf.offset && varnode.offset < cf.offset + 6
     }
 

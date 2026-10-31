@@ -2,33 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
+use crate::isa::Target;
 use crate::{Addr, Error, Hex, Result};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Isa {
-    X86,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Endian {
-    Little,
-    Big,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Target {
-    pub isa: Isa,
-    pub address_bytes: u8,
-    pub endian: Endian,
-}
-
-impl Target {
-    pub const X86_32: Self = Self {
-        isa: Isa::X86,
-        address_bytes: 4,
-        endian: Endian::Little,
-    };
-}
 
 #[derive(Clone, Debug)]
 pub struct Image {

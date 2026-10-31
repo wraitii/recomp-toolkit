@@ -337,7 +337,7 @@ fn lower_record(record: &Insn, fresh: &mut dyn FnMut(u32) -> Varnode) -> Option<
         let out = fresh(2);
         let lowering = lowering(recipes, X87Op::Status, Some(out), Vec::new());
         let mut lowering = lowering;
-        let ax = Registers::get().arch().eax.piece(0, 2);
+        let ax = Registers::get().arch().x86.eax.piece(0, 2);
         lowering.recipes.push(X87Recipe {
             op: Op::P(OpCode::Copy),
             output: Some(ax),
@@ -527,7 +527,14 @@ fn post_flags(
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> X87Lowering {
     let arch = Registers::get().arch();
-    let (cf, pf, zf, of, sf, af) = (arch.cf, arch.pf, arch.zf, arch.of, arch.sf, arch.af);
+    let (cf, pf, zf, of, sf, af) = (
+        arch.x86.cf,
+        arch.x86.pf,
+        arch.x86.zf,
+        arch.x86.of,
+        arch.x86.sf,
+        arch.x86.af,
+    );
     let one = Varnode::constant(1, 1);
     let zero = Varnode::constant(0, 1);
     let mut bit = |lowering: &mut X87Lowering, shift: u64, out: Varnode| {

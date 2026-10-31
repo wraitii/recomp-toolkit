@@ -1,4 +1,4 @@
-//! Wraps the SLEIGH specification of the installed `rk_core::isa::Machine`: instruction lengths,
+//! Wraps the `rk_core::isa::Spec` of the installed `rk_core::isa::Machine`: instruction lengths,
 //! flow ends, and p-code lifting into `rk_core::ir`. Unknown address spaces fail with a diagnostic
 //! and unmapped opcodes become `OpCode::Unknown`. Callers keep one `Lifter` per thread.
 
@@ -31,7 +31,7 @@ pub struct RawLifted {
 }
 
 pub struct Lifter {
-    machine: &'static dyn Machine,
+    machine: &'static Machine,
     sleigh: GhidraSleigh,
     code_space: AddressSpace,
     register_names: BTreeMap<(u64, u32), String>,
@@ -62,7 +62,7 @@ impl InstructionLoader for SliceLoader<'_> {
 impl Lifter {
     pub fn new() -> Result<Self> {
         let machine = rk_core::isa::machine();
-        let spec = machine.spec();
+        let spec = &machine.spec;
         let sleigh = GhidraSleigh::builder()
             .processor_spec(spec.processor)
             .and_then(|b| b.build(spec.sla))
@@ -78,7 +78,7 @@ impl Lifter {
             let v = sleigh.register_from_name(name).ok()?;
             Some((v.address.offset, v.size as u32))
         };
-        let registers = machine.registers();
+        let registers = &spec.registers;
         let diagnostic = registers
             .diagnostic
             .iter()
@@ -156,7 +156,7 @@ impl Lifter {
                 },
             ));
         }
-        let limit = self.machine.max_length();
+        let limit = self.machine.max_length;
         if length > limit {
             return Err(Diagnostic::error(
                 addr,
@@ -248,46 +248,25 @@ impl Lifter {
     }
 
     pub fn length(&self, addr: Addr, data: &[u8]) -> Result<u8> {
-        let decoded = self.translate_one(addr, data).map_err(|e| {
-            Diagnostic::error(
-                addr,
-                Reason::LiftFailed {
-                    detail: e.to_string(),
-                },
-            )
-        })?;
-        let length = decoded.origin.size;
-        let length = u8::try_from(length).map_err(|_| {
-            Diagnostic::error(
-                addr,
-                Reason::LiftFailed {
-                    detail: "instruction longer than 255 bytes".into(),
-                },
-            )
-        })?;
-        if length == 0 {
-            return Err(Diagnostic::error(
-                addr,
-                Reason::LiftFailed {
-                    detail: "no instruction mark".into(),
-                },
-            ));
-        }
-        Ok(length)
+        mark(addr, &self.decode(addr, data)?)
     }
 
     pub fn flow(&self, addr: Addr, data: &[u8]) -> Result<(u8, Flow)> {
-        let length = self.length(addr, data)?;
-        let decoded = self.translate_one(addr, data).map_err(|e| {
+        let decoded = self.decode(addr, data)?;
+        let length = mark(addr, &decoded)?;
+        let ops = self.convert_all(decoded.instructions)?;
+        Ok((length, Flow::of(&ops, addr, addr + u64::from(length))))
+    }
+
+    fn decode(&self, addr: Addr, data: &[u8]) -> Result<libsla::PcodeDisassembly> {
+        self.translate_one(addr, data).map_err(|e| {
             Diagnostic::error(
                 addr,
                 Reason::LiftFailed {
                     detail: e.to_string(),
                 },
             )
-        })?;
-        let ops = self.convert_all(decoded.instructions)?;
-        Ok((length, Flow::of(&ops, addr, addr + u64::from(length))))
+        })
     }
 
     pub fn ends_flow(&self, addr: Addr, data: &[u8]) -> Result<bool> {
@@ -312,7 +291,7 @@ impl Lifter {
     }
 
     pub fn lift(&mut self, addr: Addr, data: &[u8]) -> Result<Lifted> {
-        if self.machine.no_op(data) {
+        if (self.machine.spec.no_op)(data) {
             return Ok(Lifted {
                 length: 1,
                 ops: Vec::new(),
@@ -359,7 +338,7 @@ impl Lifter {
                     v.space == Space::Register && self.register_stack.contains(&(v.offset, v.size))
                 })
             }) {
-                if sub_flow && !self.machine.internal_flow_allowed(&data[pos..pos + size]) {
+                if sub_flow && !(self.machine.spec.internal_flow_allowed)(&data[pos..pos + size]) {
                     return Err(Diagnostic::error(
                         at,
                         Reason::Unsupported {
@@ -596,6 +575,26 @@ fn map_opcode(op: SleighOp) -> OpCode {
         S::Float(FloatOp::Round) => OpCode::FloatRound,
         _ => OpCode::Unknown,
     }
+}
+
+fn mark(addr: Addr, decoded: &libsla::PcodeDisassembly) -> Result<u8> {
+    let length = u8::try_from(decoded.origin.size).map_err(|_| {
+        Diagnostic::error(
+            addr,
+            Reason::LiftFailed {
+                detail: "instruction longer than 255 bytes".into(),
+            },
+        )
+    })?;
+    if length == 0 {
+        return Err(Diagnostic::error(
+            addr,
+            Reason::LiftFailed {
+                detail: "no instruction mark".into(),
+            },
+        ));
+    }
+    Ok(length)
 }
 
 pub fn format_varnode(v: &Varnode, lifter: &Lifter) -> String {

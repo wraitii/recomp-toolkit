@@ -21,10 +21,6 @@ pub use lookup::{Lookup, LookupSet};
 
 pub type Addr = u64;
 
-pub fn wrap_addr(value: u64) -> Addr {
-    value & mask(u32::from(isa::target().address_bytes))
-}
-
 pub const fn mask(size: u32) -> u64 {
     if size >= 8 {
         u64::MAX
@@ -33,26 +29,17 @@ pub const fn mask(size: u32) -> u64 {
     }
 }
 
-fn address_digits() -> Option<usize> {
-    isa::installed().map(|machine| 2 * usize::from(machine.target().address_bytes))
-}
-
 pub struct Hex(pub Addr);
 
 impl std::fmt::Display for Hex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{:0width$x}",
-            self.0,
-            width = address_digits().unwrap_or(8)
-        )
+        write!(f, "{:08x}", self.0)
     }
 }
 
 pub fn parse_hex(text: &str) -> Option<Addr> {
     let digits = text.strip_prefix("0x").unwrap_or(text);
-    if digits.is_empty() || digits.len() > address_digits().unwrap_or(16) {
+    if digits.is_empty() || digits.len() > 16 {
         return None;
     }
     Addr::from_str_radix(digits, 16).ok()

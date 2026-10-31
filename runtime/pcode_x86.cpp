@@ -17,8 +17,6 @@ namespace {
 const uint32_t kMaxDepth = 64;
 const uint32_t kMaxInstruction = 15;
 const uint32_t kMaxCache = 65536;
-const uint64_t kNativeRdtsc = UINT64_MAX;
-const uint64_t kNativeCpuid = UINT64_MAX - 1;
 
 thread_local unsigned g_depth;
 thread_local char g_error[512];
@@ -59,7 +57,7 @@ int flag_bit(uint64_t offset) {
     return (int)(offset - 0x200) + (offset > 0x20c);
 }
 
-enum class RegisterKind { Invalid, Gpr, Fs, Eflags, Eip, Flag };
+enum class RegisterKind { Invalid, Gpr, Fs, Eflags, Eip, Flag, X87Control };
 
 RegisterKind register_kind(const RpVarnode &v, const char *&what) {
     if (v.space != RP_SPACE_REGISTER) {
@@ -70,6 +68,8 @@ RegisterKind register_kind(const RpVarnode &v, const char *&what) {
         what = "register width is not modelled";
         return RegisterKind::Invalid;
     }
+    if (v.offset == 0x300 && v.size == 2)
+        return RegisterKind::X87Control;
     if (v.offset < 0x20 && v.offset + v.size <= 0x20 && v.size <= 4)
         return RegisterKind::Gpr;
     if (v.offset == 0x110 && v.size == 4)
@@ -175,6 +175,10 @@ class X86Host final : public PcodeHost {
             why = what;
             return false;
         }
+        if (kind == RegisterKind::X87Control) {
+            out = c_->fpu_cw;
+            return true;
+        }
         if (kind == RegisterKind::Gpr) {
             out = read_gpr(c_, v.offset, v.size);
             return true;
@@ -207,6 +211,10 @@ class X86Host final : public PcodeHost {
         if (kind == RegisterKind::Invalid) {
             why = what;
             return false;
+        }
+        if (kind == RegisterKind::X87Control) {
+            x87_set_cw(c_, (uint16_t)value);
+            return true;
         }
         if (kind == RegisterKind::Gpr) {
             write_gpr(c_, v.offset, v.size, value);
@@ -305,7 +313,9 @@ class X86Host final : public PcodeHost {
     }
 
     bool userop_supported(uint64_t id, const RpOp &op, std::string &why) override {
-        if ((id == kNativeRdtsc || id == kNativeCpuid || (id >= 0x1000 && id < 0x102d)) &&
+        if ((id == RP_USEROP_RDTSC || id == RP_USEROP_CPUID || id == RP_USEROP_X87_CLEAR ||
+             id == RP_USEROP_PUSHFD || id == RP_USEROP_POPFD ||
+             (id >= RP_USEROP_STRING_BASE && id < RP_USEROP_STRING_END)) &&
             op.input_count == 1 && !op.has_output && op.inputs[0].offset == id)
             return true;
         char message[128];
@@ -319,37 +329,58 @@ class X86Host final : public PcodeHost {
     bool execute_userop(const RpOp &op, std::string &why) override {
         if (!userop_supported(op.userop, op, why))
             return false;
-        if (op.userop == kNativeRdtsc) {
+        if (op.userop == RP_USEROP_PUSHFD || op.userop == RP_USEROP_POPFD) {
+            bool push = op.userop == RP_USEROP_PUSHFD;
+            uint32_t addr = c_->r[R_ESP] - (push ? 4u : 0u);
+            if (!memory_supported(addr, 4, push, why))
+                return false;
+            if (push)
+                recomp_pushfd(c_);
+            else
+                recomp_popfd(c_);
+            return true;
+        }
+        if (op.userop == RP_USEROP_X87_CLEAR) {
+            c_->fpu_sw &= (uint16_t)~0x80ffu;
+            return true;
+        }
+        if (op.userop == RP_USEROP_RDTSC) {
             recomp_rdtsc(c_);
             return true;
         }
-        if (op.userop == kNativeCpuid) {
+        if (op.userop == RP_USEROP_CPUID) {
             recomp_cpuid(c_);
             return true;
         }
         using StringOp = void (*)(X86 *);
-        static const StringOp functions[5][3] = {
+        static const StringOp functions[RP_STRING_FAMILIES][RP_STRING_WIDTHS] = {
             {movsb, movsw, movsd}, {stosb, stosw, stosd}, {lodsb, lodsw, lodsd},
             {cmpsb, cmpsw, cmpsd}, {scasb, scasw, scasd},
         };
-        uint32_t code = (uint32_t)(op.userop - 0x1000);
-        uint32_t family = code / 9, width = (code % 9) / 3, mode = code % 3;
+        uint32_t code = (uint32_t)(op.userop - RP_USEROP_STRING_BASE);
+        uint32_t mode = code % RP_STRING_MODES;
+        uint32_t width = code / RP_STRING_MODES % RP_STRING_WIDTHS;
+        uint32_t family = code / RP_STRING_MODES / RP_STRING_WIDTHS;
         uint32_t size = 1u << width;
+        bool reads_source =
+            family == RP_STRING_MOVS || family == RP_STRING_LODS || family == RP_STRING_CMPS;
+        bool writes_destination = family == RP_STRING_MOVS || family == RP_STRING_STOS;
+        bool compares = family == RP_STRING_CMPS || family == RP_STRING_SCAS;
         uint32_t iterations = 0;
-        while (mode == 0 || c_->r[R_ECX]) {
-            if ((family == 0 || family == 2 || family == 3) &&
-                !memory_supported(c_->r[R_ESI], size, false, why))
+        while (mode == RP_STRING_ONCE || c_->r[R_ECX]) {
+            if (reads_source && !memory_supported(c_->r[R_ESI], size, false, why))
                 return false;
-            if ((family == 0 || family == 1 || family == 3 || family == 4) &&
-                !memory_supported(c_->r[R_EDI], size, family < 2, why))
+            if (family != RP_STRING_LODS &&
+                !memory_supported(c_->r[R_EDI], size, writes_destination, why))
                 return false;
             functions[family][width](c_);
-            if (!mode)
+            if (mode == RP_STRING_ONCE)
                 break;
             --c_->r[R_ECX];
             if ((++iterations & 1023u) == 0)
                 recomp_execution_checkpoint(c_);
-            if (family >= 3 && ((mode == 1 && !c_->eflags_zf) || (mode == 2 && c_->eflags_zf)))
+            if (compares && ((mode == RP_STRING_REPE && !c_->eflags_zf) ||
+                             (mode == RP_STRING_REPNE && c_->eflags_zf)))
                 break;
         }
         return true;

@@ -2638,7 +2638,7 @@ impl<'a> Emitter<'a> {
                 );
             }
             Location::Df => {
-                let key = StateKey::Register(Registers::get().arch().df.offset as u32);
+                let key = StateKey::Register(Registers::get().arch().x86.df.offset as u32);
                 let value = self.listed_value(state, keys, key)?;
                 let expr = match value {
                     Some(value) => self.expr(value)?,
@@ -3492,7 +3492,7 @@ impl<'a> Emitter<'a> {
             "c->eip"
         } else if within(arch.thread_base, offset) {
             "c->fs_base"
-        } else if within(arch.df, offset) {
+        } else if within(arch.x86.df, offset) {
             "c->eflags_df"
         } else {
             match name {

@@ -664,7 +664,7 @@ fn prepare(
                 }
                 Op::Div { .. } | Op::Idiv { .. } => {
                     let regs = Registers::get();
-                    for register in [regs.arch().eax, regs.arch().edx] {
+                    for register in [regs.arch().x86.eax, regs.arch().x86.edx] {
                         use_[index] |= lanes.mask(&register) & !local;
                     }
                 }

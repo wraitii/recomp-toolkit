@@ -192,6 +192,7 @@ impl State {
         }
         let arch = Registers::get().arch();
         if arch
+            .x86
             .segments
             .into_iter()
             .chain([arch.thread_base])
@@ -603,7 +604,7 @@ impl Walk<'_> {
                     if mode == Mode::Cleanup && self.context.probes.contains(&target) {
                         let (esp, eax) = (
                             Registers::get().arch().stack_pointer,
-                            Registers::get().arch().eax,
+                            Registers::get().arch().x86.eax,
                         );
                         let (Some(Value::Stack(offset)), Some(Value::Constant(size))) = (
                             state.registers.get(&esp).copied(),
@@ -806,7 +807,12 @@ fn summarize(
                 return Err("return has successors");
             }
             let (preserved, effect) = state.returning()?;
-            if walk.caller_pointer(state.registers.get(&Registers::get().arch().eax).copied()) {
+            if walk.caller_pointer(
+                state
+                    .registers
+                    .get(&Registers::get().arch().x86.eax)
+                    .copied(),
+            ) {
                 walk.escapes = true;
             }
             preserves = preserves & preserved;

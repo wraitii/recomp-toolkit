@@ -493,7 +493,7 @@ pub(crate) fn build_raw(
             let raw = program.image.bytes(at, length as usize).ok_or_else(|| {
                 Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: span.start })
             })?;
-            let ins = machine.decode(at, raw).ok_or_else(|| {
+            let ins = machine.decoder.decode(at, raw).ok_or_else(|| {
                 Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: span.start })
             })?;
             decoded.push((at, raw, ins));
@@ -516,7 +516,7 @@ pub(crate) fn build_raw(
             }
             let bytes = program
                 .image
-                .bytes(at, usize::from(machine.max_length()))
+                .bytes(at, usize::from(machine.max_length))
                 .ok_or_else(|| {
                     Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
                 })?;
@@ -538,7 +538,7 @@ pub(crate) fn build_raw(
             let raw = program.image.bytes(at, length as usize).ok_or_else(|| {
                 Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
             })?;
-            let ins = machine.decode(at, raw).ok_or_else(|| {
+            let ins = machine.decoder.decode(at, raw).ok_or_else(|| {
                 Diagnostic::error(at, rk_core::Reason::DecoderCannotTile { span: entry })
             })?;
             decoded.push((at, raw, ins));

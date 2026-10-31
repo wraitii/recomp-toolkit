@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use rk_core::isa::Target;
 use rk_core::program::{InteriorKind, Span};
-use rk_core::{parse_hex, Addr, Error, Hex, Result};
+use rk_core::{Addr, Error, Hex, Result};
 
 pub const FORMAT: &str = "recomp-code-map-v3";
 const SPANS_HEADER: &str = "function\tstart\tbytes\tlengths";
@@ -32,8 +33,10 @@ fn rows<'a>(text: &'a str, name: &str, header: &str) -> Result<impl Iterator<Ite
     Ok(lines.map(|line| line.split('\t').collect()))
 }
 
-fn addr(text: &str, what: &str) -> Result<Addr> {
-    parse_hex(text).ok_or_else(|| Error::input(format!("invalid code-map {what}: {text:?}")))
+fn addr(target: Target, text: &str, what: &str) -> Result<Addr> {
+    target
+        .parse_addr(text)
+        .ok_or_else(|| Error::input(format!("invalid code-map {what}: {text:?}")))
 }
 
 fn columns<'a>(row: &[&'a str], count: usize, name: &str) -> Result<Vec<&'a str>> {
@@ -46,7 +49,7 @@ fn columns<'a>(row: &[&'a str], count: usize, name: &str) -> Result<Vec<&'a str>
     Ok(row.to_vec())
 }
 
-pub fn read_map(root: &Path) -> Result<CodeMap> {
+pub fn read_map(root: &Path, target: Target) -> Result<CodeMap> {
     let metadata: BTreeMap<String, String> = read(root, "metadata.txt")?
         .lines()
         .filter_map(|line| line.split_once('='))
@@ -63,14 +66,14 @@ pub fn read_map(root: &Path) -> Result<CodeMap> {
     let mut ends: BTreeMap<Addr, u64> = BTreeMap::new();
     for row in rows(&spans_text, "spans.tsv", SPANS_HEADER)? {
         let row = columns(&row, 4, "spans.tsv")?;
-        let start = addr(row[1], "span start")?;
+        let start = addr(target, row[1], "span start")?;
         let size: u32 = row[2]
             .parse()
             .map_err(|_| Error::input(format!("invalid code-map span size at {}", Hex(start))))?;
         let owner = if row[0].is_empty() {
             start
         } else {
-            addr(row[0], "span owner")?
+            addr(target, row[0], "span owner")?
         };
         if size == 0 || start as u64 + size as u64 > 1 << 32 {
             return Err(Error::input(format!(
@@ -119,10 +122,13 @@ pub fn read_map(root: &Path) -> Result<CodeMap> {
         let row = columns(&row, 3, "tables.tsv")?;
         let targets = row[2]
             .split(',')
-            .map(|t| addr(t, "table target"))
+            .map(|t| addr(target, t, "table target"))
             .collect::<Result<Vec<_>>>()?;
         tables.insert(
-            (addr(row[0], "table function")?, addr(row[1], "table site")?),
+            (
+                addr(target, row[0], "table function")?,
+                addr(target, row[1], "table site")?,
+            ),
             targets,
         );
     }
@@ -141,7 +147,10 @@ pub fn read_map(root: &Path) -> Result<CodeMap> {
                 )))
             }
         };
-        interior.insert(addr(row[0], "entry")?, (addr(row[1], "entry owner")?, kind));
+        interior.insert(
+            addr(target, row[0], "entry")?,
+            (addr(target, row[1], "entry owner")?, kind),
+        );
     }
 
     let mut noreturn_functions = BTreeSet::new();
@@ -149,7 +158,7 @@ pub fn read_map(root: &Path) -> Result<CodeMap> {
     let text = read(root, "noreturn.tsv")?;
     for row in rows(&text, "noreturn.tsv", NORETURN_HEADER)? {
         let row = columns(&row, 2, "noreturn.tsv")?;
-        let at = addr(row[0], "noreturn address")?;
+        let at = addr(target, row[0], "noreturn address")?;
         match row[1] {
             "function" => noreturn_functions.insert(at),
             "call" => noreturn_calls.insert(at),

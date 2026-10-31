@@ -30,7 +30,7 @@ pub fn raw_census(program: &Program, constant_stores: bool) -> BTreeMap<Addr, Ve
                 for &length in lengths {
                     let length = length as usize;
                     if let Some(raw) = program.image.bytes(at, length) {
-                        if let Some(insn) = decoder.decode(at, raw) {
+                        if let Some(insn) = decoder.decoder.decode(at, raw) {
                             scan_operands(program, &insn, constant_stores, &mut candidates);
                         }
                     }
@@ -39,13 +39,13 @@ pub fn raw_census(program: &Program, constant_stores: bool) -> BTreeMap<Addr, Ve
             } else {
                 let mut at = span.start;
                 while at < span.end() {
-                    let available = (span.end() - at).min(u64::from(decoder.max_length())) as usize;
+                    let available = (span.end() - at).min(u64::from(decoder.max_length)) as usize;
                     let Some(bytes) = program.image.bytes(at, available) else {
                         break;
                     };
                     let mut next = None;
                     for length in 1..=available {
-                        if let Some(insn) = decoder.decode(at, &bytes[..length]) {
+                        if let Some(insn) = decoder.decoder.decode(at, &bytes[..length]) {
                             next = Some(insn);
                             break;
                         }

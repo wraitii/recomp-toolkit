@@ -287,7 +287,7 @@ fn key_registers(
 }
 
 fn control_word() -> Varnode {
-    rk_ir::Registers::get().arch().fpu_control
+    rk_ir::Registers::get().arch().x86.fpu_control
 }
 
 fn traces_to(

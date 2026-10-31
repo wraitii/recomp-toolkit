@@ -10,8 +10,7 @@ pub mod report;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, PoisonError};
 
 use rayon::prelude::*;
 use rk_core::facts::{AnalysisFacts, TransferKind};
@@ -19,7 +18,7 @@ use rk_core::flow::{Flow, Target};
 use rk_core::isa::{Reg, Shape, Step};
 use rk_core::program::{Function, Image, InteriorKind, Program, Span};
 use rk_core::settings::Settings;
-use rk_core::{parse_hex, Addr, Error, Hex, Result};
+use rk_core::{parse_hex, Addr, Error, Hex, Lookup, Result};
 
 use report::{
     Conflict, DiscardedSeed, DiscoveryReport, EntryReject, EntryRejection, FunctionReject,
@@ -65,14 +64,21 @@ const NORETURN_IMPORTS: &[&str] = &[
 type Functions = BTreeMap<Addr, Vec<Span>>;
 type Entries = BTreeMap<Addr, (Addr, InteriorKind)>;
 
-const TARGET_SHARDS: usize = 64;
+const SHARDS: usize = 64;
 
-type Targets = Mutex<BTreeMap<Addr, Addr>>;
+#[derive(Clone, Copy)]
+struct Lifted {
+    length: u8,
+    kind: Kind,
+    target: Option<Addr>,
+}
 
-#[derive(Default)]
-struct SleighLengths {
-    cache: OnceLock<Box<[AtomicU8]>>,
-    targets: OnceLock<Box<[Targets]>>,
+struct FlowCache(Box<[Mutex<Lookup<Addr, Option<Lifted>>>]>);
+
+impl Default for FlowCache {
+    fn default() -> Self {
+        Self((0..SHARDS).map(|_| Mutex::default()).collect())
+    }
 }
 
 thread_local! {
@@ -91,17 +97,6 @@ enum Kind {
     Trap,
 }
 
-const KINDS: [Kind; 8] = [
-    Kind::Fall,
-    Kind::Jump,
-    Kind::IndirectJump,
-    Kind::Branch,
-    Kind::Call,
-    Kind::IndirectCall,
-    Kind::Return,
-    Kind::Trap,
-];
-
 impl Kind {
     fn of(flow: Flow) -> Self {
         match flow {
@@ -115,70 +110,35 @@ impl Kind {
             Flow::Trap => Kind::Trap,
         }
     }
-
-    fn direct(self) -> bool {
-        matches!(self, Kind::Jump | Kind::Branch | Kind::Call)
-    }
 }
 
-fn sleigh_flow(image: &Image, at: Addr) -> Option<(u8, Flow)> {
-    let limit = u64::from(rk_core::isa::machine().max_length());
+fn lift(image: &Image, at: Addr) -> Option<Lifted> {
+    let limit = u64::from(rk_core::isa::machine().max_length);
     let available = image.end().saturating_sub(at).min(limit) as usize;
     let bytes = image.bytes(at, available)?;
-    LIFTER.with(|lifter| {
+    let (length, flow) = LIFTER.with(|lifter| {
         let mut lifter = lifter.borrow_mut();
         let lifter =
             lifter.get_or_insert_with(|| rk_sleigh::Lifter::new().expect("SLEIGH initialization"));
         lifter.flow(at, bytes).ok()
+    })?;
+    Some(Lifted {
+        length,
+        kind: Kind::of(flow),
+        target: flow.target(),
     })
 }
 
-impl SleighLengths {
-    fn entry(&self, image: &Image, at: Addr) -> Option<u8> {
-        let cache = self
-            .cache
-            .get_or_init(|| (0..image.size).map(|_| AtomicU8::new(0)).collect());
-        let slot = cache.get(at.saturating_sub(image.base) as usize)?;
-        let cached = slot.load(Ordering::Relaxed);
-        if cached != 0 {
-            return (cached != u8::MAX).then_some(cached);
+impl FlowCache {
+    fn get(&self, image: &Image, at: Addr) -> Option<Lifted> {
+        let shard = &self.0[at as usize % SHARDS];
+        let lock = || shard.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(&cached) = lock().get(&at) {
+            return cached;
         }
-        let found = sleigh_flow(image, at).filter(|&(length, _)| length < 16);
-        if let Some(target) = found.and_then(|(_, flow)| flow.target()) {
-            self.targets(at).insert(at, target);
-        }
-        let out = found.map(|(length, flow)| length | (Kind::of(flow) as u8) << 4);
-        slot.store(out.unwrap_or(u8::MAX), Ordering::Relaxed);
-        out
-    }
-
-    fn targets(&self, at: Addr) -> std::sync::MutexGuard<'_, BTreeMap<Addr, Addr>> {
-        let shards = self.targets.get_or_init(|| {
-            (0..TARGET_SHARDS)
-                .map(|_| Mutex::new(BTreeMap::new()))
-                .collect()
-        });
-        shards[at as usize % TARGET_SHARDS]
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn length(&self, image: &Image, at: Addr) -> Option<u8> {
-        Some(self.entry(image, at)? & 0xf)
-    }
-
-    fn flow(&self, image: &Image, at: Addr) -> Option<(Kind, Option<Addr>)> {
-        let kind = KINDS[usize::from(self.entry(image, at)? >> 4)];
-        let target = if kind.direct() {
-            let cached = self.targets(at).get(&at).copied();
-            Some(match cached {
-                Some(target) => target,
-                None => sleigh_flow(image, at)?.1.target()?,
-            })
-        } else {
-            None
-        };
-        Some((kind, target))
+        let lifted = lift(image, at);
+        lock().insert(at, lifted);
+        lifted
     }
 }
 
@@ -206,6 +166,7 @@ impl Insn {
 
     fn signature(&self, image: &Image) -> Option<String> {
         let shape = rk_core::isa::machine()
+            .decoder
             .signature(self.addr, image.bytes(self.addr, usize::from(self.size))?)?;
         Some(format!(
             "{}:{:?}:{:?}:{shape}",
@@ -266,7 +227,7 @@ pub fn discover(
             report: DiscoveryReport::empty(),
         });
     }
-    let check = SleighLengths::default();
+    let check = FlowCache::default();
     let mut suppressions = Vec::new();
     let mut rejections = Vec::new();
     let mut functions = BTreeMap::new();
@@ -362,7 +323,7 @@ fn discover_entries(
     excluded: &[(Addr, Addr)],
     jit: bool,
 ) -> Result<Discovered> {
-    let check = SleighLengths::default();
+    let check = FlowCache::default();
     let mut recovery = Recovery::new(program, None, &check, excluded.to_vec());
     recovery.jit = jit;
     recovery.instruction_limit = limit;
@@ -413,7 +374,7 @@ struct Recovery<'a> {
     jit: bool,
     instruction_limit: usize,
     image: &'a Image,
-    check: &'a SleighLengths,
+    check: &'a FlowCache,
     delta: u32,
     instructions: BTreeMap<Addr, Insn>,
     covered: Vec<Addr>,
@@ -456,7 +417,7 @@ impl<'a> Recovery<'a> {
     fn new(
         program: &'a Program,
         details: Option<&rk_image::PeDetails>,
-        check: &'a SleighLengths,
+        check: &'a FlowCache,
         mut suppressed: Vec<(Addr, Addr)>,
     ) -> Self {
         let image = &program.image;
@@ -2143,7 +2104,7 @@ fn address(path: &Path, text: &str) -> Result<Addr> {
         .ok_or_else(|| Error::input(format!("{}: invalid address {text:?}", path.display())))
 }
 
-fn span_lengths(image: &Image, check: &SleighLengths, start: Addr, end: Addr) -> Result<Vec<u8>> {
+fn span_lengths(image: &Image, check: &FlowCache, start: Addr, end: Addr) -> Result<Vec<u8>> {
     let mut lengths = Vec::new();
     let mut at = start;
     while at < end {
@@ -2165,7 +2126,7 @@ fn span_lengths(image: &Image, check: &SleighLengths, start: Addr, end: Addr) ->
     Ok(lengths)
 }
 
-fn decode_at(image: &Image, check: &SleighLengths, at: Addr) -> Option<Insn> {
+fn decode_at(image: &Image, check: &FlowCache, at: Addr) -> Option<Insn> {
     let end = image
         .exec_ranges
         .iter()
@@ -2174,19 +2135,20 @@ fn decode_at(image: &Image, check: &SleighLengths, at: Addr) -> Option<Insn> {
     decode_between(image, check, at, end)
 }
 
-fn decode_between(image: &Image, check: &SleighLengths, at: Addr, end: Addr) -> Option<Insn> {
+fn decode_between(image: &Image, check: &FlowCache, at: Addr, end: Addr) -> Option<Insn> {
     let machine = rk_core::isa::machine();
-    let len = usize::from(machine.max_length()).min(end.saturating_sub(at) as usize);
-    let shape = machine.shape(at, image.bytes(at, len)?)?;
-    if check.length(image, at)? != shape.length {
-        return None;
-    }
-    let (flow, target) = check.flow(image, at)?;
+    let len = usize::from(machine.max_length).min(end.saturating_sub(at) as usize);
+    let shape = machine.decoder.shape(at, image.bytes(at, len)?)?;
+    let lifted = check
+        .get(image, at)
+        .filter(|lifted| lifted.length == shape.length)?;
     Some(Insn {
         addr: at,
         size: shape.length,
-        flow,
-        direct: target.map(|target| (target, flow == Kind::Call)),
+        flow: lifted.kind,
+        direct: lifted
+            .target
+            .map(|target| (target, lifted.kind == Kind::Call)),
         shape,
     })
 }

@@ -388,6 +388,7 @@ pub struct InstructionLowerer<'a> {
     unique: u64,
     slow: Vec<SlowInsn>,
     diagnostics: Vec<Diagnostic>,
+    pcode_control: bool,
 }
 
 pub fn lower(fir: &FunctionIr, x87: &dyn X87Recipes) -> rk_core::Result<CgFunction> {
@@ -410,22 +411,6 @@ pub fn lower_with(
             }
             if let Some(target) = fir.noreturn.get(&(index as u32)) {
                 ops.push(cg(Op::Trap(*target)));
-            }
-        }
-        for op in &mut ops {
-            match op.op {
-                Op::P(OpCode::Branch) | Op::P(OpCode::CBranch)
-                    if op.inputs.first().is_some_and(|v| v.space == Space::Const) =>
-                {
-                    let target = op.inputs.remove(0).offset;
-                    op.op = if op.op == Op::P(OpCode::Branch) {
-                        Op::Branch { target }
-                    } else {
-                        Op::CBranch { target }
-                    };
-                }
-                Op::Return => op.inputs.clear(),
-                _ => {}
             }
         }
         if mark_call_returns && insn.flow().is_call() {
@@ -511,7 +496,13 @@ impl<'a> InstructionLowerer<'a> {
             unique: 0x8000_0000,
             slow: Vec::new(),
             diagnostics: Vec::new(),
+            pcode_control: false,
         }
+    }
+
+    pub fn with_pcode_control(mut self) -> Self {
+        self.pcode_control = true;
+        self
     }
 
     pub fn slow_insns(&self) -> &[SlowInsn] {
@@ -765,8 +756,25 @@ impl<'a> InstructionLowerer<'a> {
                 return Ok((vec![cg(op)], false, None, false));
             }
         };
-        let converted: Vec<CgOp> = ops.into_iter().map(from_pcode).collect();
+        let converted: Vec<CgOp> = ops.into_iter().map(|op| self.convert(op)).collect();
         Ok((converted, false, flag_operands, true))
+    }
+
+    fn convert(&self, op: PcodeOp) -> CgOp {
+        let internal = matches!(op.opcode, OpCode::Branch | OpCode::CBranch)
+            && op.inputs.first().is_some_and(|v| v.space == Space::Const);
+        if !self.pcode_control || !(internal || op.opcode == OpCode::Return) {
+            return from_pcode(op);
+        }
+        CgOp {
+            op: if internal {
+                Op::P(op.opcode)
+            } else {
+                Op::Return
+            },
+            output: op.output,
+            inputs: op.inputs,
+        }
     }
 
     fn add_tail(&self, fir: &FunctionIr, index: u32, out: &mut Vec<CgOp>) {
@@ -804,13 +812,6 @@ fn cg(op: Op) -> CgOp {
 fn from_pcode(op: PcodeOp) -> CgOp {
     match op.opcode {
         OpCode::Branch => {
-            if op.inputs.first().is_some_and(|v| v.space == Space::Const) {
-                return CgOp {
-                    op: Op::P(OpCode::Branch),
-                    output: op.output,
-                    inputs: op.inputs,
-                };
-            }
             let target = op.inputs.first().and_then(target_addr);
             CgOp {
                 op: target.map_or(Op::P(OpCode::Branch), |target| Op::Branch { target }),
@@ -819,13 +820,6 @@ fn from_pcode(op: PcodeOp) -> CgOp {
             }
         }
         OpCode::CBranch => {
-            if op.inputs.first().is_some_and(|v| v.space == Space::Const) {
-                return CgOp {
-                    op: Op::P(OpCode::CBranch),
-                    output: op.output,
-                    inputs: op.inputs,
-                };
-            }
             let target = op.inputs.first().and_then(target_addr);
             let inputs = if target.is_some() {
                 op.inputs.get(1..).unwrap_or(&[]).to_vec()
@@ -854,7 +848,7 @@ fn from_pcode(op: PcodeOp) -> CgOp {
         OpCode::Return => CgOp {
             op: Op::Return,
             output: op.output,
-            inputs: op.inputs,
+            inputs: Vec::new(),
         },
         OpCode::BranchInd => CgOp {
             op: Op::BranchInd,
@@ -1313,7 +1307,7 @@ fn add_af(
         ),
         op(
             OpCode::IntAnd,
-            regs.arch().af,
+            regs.arch().x86.af,
             vec![z, Varnode::constant(1, result.size)],
         ),
     ]
@@ -1600,7 +1594,7 @@ fn correct_cmpxchg8b(
         detail: "unsupported CMPXCHG8B p-code shape".into(),
     };
     let end = insn.end();
-    let zf = regs.arch().zf;
+    let zf = regs.arch().x86.zf;
     let zf_index = ops
         .iter()
         .position(|op| {
@@ -1629,10 +1623,10 @@ fn correct_cmpxchg8b(
         .find(|op| op.opcode == OpCode::Store)
         .ok_or_else(unsupported)?;
     let arch = regs.arch();
-    let eax = arch.eax;
-    let ecx = arch.ecx;
-    let edx = arch.edx;
-    let ebx = arch.ebx;
+    let eax = arch.x86.eax;
+    let ecx = arch.x86.ecx;
+    let edx = arch.x86.edx;
+    let ebx = arch.x86.ebx;
     if !internal_target(ops[if_index].inputs[0], end)
         || !internal_target(ops[branch_index].inputs[0], end)
         || old.size != 8
@@ -2219,7 +2213,7 @@ fn op(opcode: OpCode, output: Varnode, inputs: Vec<Varnode>) -> PcodeOp {
 
 fn with_af_zero(ops: &[PcodeOp], regs: &Registers) -> Vec<PcodeOp> {
     let mut out = ops.to_vec();
-    out.push(copy(regs.arch().af, Varnode::constant(0, 1)));
+    out.push(copy(regs.arch().x86.af, Varnode::constant(0, 1)));
     out
 }
 
@@ -2231,7 +2225,7 @@ fn correct_bsr(
     let unsupported = || Reason::Unsupported {
         detail: "unsupported BSR p-code shape".into(),
     };
-    let zf = regs.arch().zf;
+    let zf = regs.arch().x86.zf;
     let at = ops
         .iter()
         .position(|op| op.output == Some(zf))
@@ -2377,6 +2371,7 @@ fn defer_flags(
             let is_flag = output.space == Space::Register
                 && regs
                     .arch()
+                    .x86
                     .arithmetic_flags()
                     .iter()
                     .any(|flag| output.offset == flag.offset && output.size == flag.size);
@@ -2425,7 +2420,7 @@ fn correct_arithmetic(
         let result = ops[primary].output.unwrap();
         let first_cf = ops
             .iter()
-            .position(|op| op.output == Some(regs.arch().cf))
+            .position(|op| op.output == Some(regs.arch().x86.cf))
             .ok_or_else(|| Reason::UnsupportedArithmetic {
                 mnemonic: mnem.into(),
             })?;
@@ -2468,7 +2463,7 @@ fn correct_arithmetic(
                     .is_some_and(|v| v.space == Space::Register || v.space == Space::Unique)
         }) else {
             let is_flag = |v: Varnode| {
-                regs.arch().arithmetic_flags().iter().any(|flag| {
+                regs.arch().x86.arithmetic_flags().iter().any(|flag| {
                     v.space == Space::Register && v.offset == flag.offset && v.size == flag.size
                 })
             };
@@ -2484,7 +2479,7 @@ fn correct_arithmetic(
             });
             if (mnem == "SUB" || mnem == "CMP") && zero_result {
                 let mut out = ops.to_vec();
-                let af = regs.arch().af;
+                let af = regs.arch().x86.af;
                 if !out.iter().any(|op| op.output == Some(af)) {
                     out.push(copy(af, Varnode::constant(0, 1)));
                 }
@@ -2519,7 +2514,7 @@ fn correct_arithmetic(
         ),
         op(
             OpCode::IntAnd,
-            regs.arch().af,
+            regs.arch().x86.af,
             vec![z, Varnode::constant(1, result.size)],
         ),
     ];
@@ -2558,7 +2553,7 @@ fn correct_shift(
     let original = fresh(source.size);
     let old_of = fresh(1);
     ops.insert(index, copy(original, ops[index].inputs[0]));
-    ops.insert(0, copy(old_of, regs.arch().of));
+    ops.insert(0, copy(old_of, regs.arch().x86.of));
     let nonzero = fresh(1);
     let zero = fresh(1);
     let sign = fresh(1);
@@ -2586,14 +2581,14 @@ fn correct_shift(
     ];
     if mnem == "SHL" {
         let x = fresh(1);
-        recipe.push(op(OpCode::IntXor, x, vec![sign, regs.arch().cf]));
+        recipe.push(op(OpCode::IntXor, x, vec![sign, regs.arch().x86.cf]));
         recipe.push(op(OpCode::IntAnd, changed, vec![nonzero, x]));
     } else {
         recipe.push(op(OpCode::IntAnd, changed, vec![nonzero, sign]));
     }
     recipe.push(op(OpCode::IntAnd, kept, vec![zero, old_of]));
     recipe.push(op(OpCode::IntOr, updated, vec![changed, kept]));
-    recipe.push(copy(regs.arch().of, updated));
+    recipe.push(copy(regs.arch().x86.of, updated));
     ops.extend(recipe);
     Ok(ops)
 }
@@ -2621,7 +2616,7 @@ fn correct_sar(
     let nonzero = fresh(1);
     let zero = fresh(1);
     let updated = fresh(1);
-    ops.insert(0, copy(old_of, regs.arch().of));
+    ops.insert(0, copy(old_of, regs.arch().x86.of));
     ops.extend([
         op(
             OpCode::IntNotEqual,
@@ -2635,7 +2630,7 @@ fn correct_sar(
             userop: None,
         },
         op(OpCode::IntAnd, updated, vec![zero, old_of]),
-        copy(regs.arch().of, updated),
+        copy(regs.arch().x86.of, updated),
     ]);
     Ok(ops)
 }
@@ -2671,7 +2666,7 @@ fn correct_neg(
             af,
             vec![low, Varnode::constant(0, result.size)],
         ),
-        copy(regs.arch().af, af),
+        copy(regs.arch().x86.af, af),
     ]);
     Ok(ops)
 }
@@ -2720,14 +2715,17 @@ fn correct_div_cg(
     let arch = regs.arch();
     let outputs: [(Varnode, Varnode, u64); 2] = match width {
         1 => [
-            (arch.eax.piece(0, 1), quotient, 0),
-            (arch.eax.piece(1, 1), remainder_value, 1),
+            (arch.x86.eax.piece(0, 1), quotient, 0),
+            (arch.x86.eax.piece(1, 1), remainder_value, 1),
         ],
         2 => [
-            (arch.eax.piece(0, 2), quotient, 0),
-            (arch.edx.piece(0, 2), remainder_value, 4),
+            (arch.x86.eax.piece(0, 2), quotient, 0),
+            (arch.x86.edx.piece(0, 2), remainder_value, 4),
         ],
-        _ => [(arch.eax, quotient, 0), (arch.edx, remainder_value, 4)],
+        _ => [
+            (arch.x86.eax, quotient, 0),
+            (arch.x86.edx, remainder_value, 4),
+        ],
     };
     let mut emitted = [false; 2];
     for op in &ops[index..] {

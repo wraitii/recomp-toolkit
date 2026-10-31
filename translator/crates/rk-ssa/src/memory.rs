@@ -1283,8 +1283,8 @@ mod tests {
     fn fixture(opaque_load: bool, opaque_store: bool, facts: &dyn CallFacts, call: bool) -> Ssa {
         rk_x86::install().unwrap();
         let esp = Registers::get().arch().stack_pointer;
-        let ecx = Registers::get().arch().ecx;
-        let eax = Registers::get().arch().eax;
+        let ecx = Registers::get().arch().x86.ecx;
+        let eax = Registers::get().arch().x86.eax;
         let address = Varnode::new(rk_core::ir::Space::Unique, 0x100, 4);
         let mut ops = vec![
             op(

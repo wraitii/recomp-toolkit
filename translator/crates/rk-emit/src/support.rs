@@ -118,7 +118,7 @@ pub(crate) fn location(key: StateKey) -> Option<Location> {
         Some(Location::Eip)
     } else if within(arch.thread_base, offset as u64) {
         Some(Location::Fs)
-    } else if within(arch.df, offset as u64) {
+    } else if within(arch.x86.df, offset as u64) {
         Some(Location::Df)
     } else {
         None

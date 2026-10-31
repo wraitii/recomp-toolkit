@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use rk_core::program::{EntryKind, Function, Image, Program};
 use rk_core::settings::Settings;
-use rk_core::{wrap_addr, Addr, Diagnostic, Error, Hex, Reason, Result};
+use rk_core::{Addr, Diagnostic, Error, Reason, Result};
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug)]
@@ -60,14 +60,14 @@ pub fn load(settings: &Settings) -> Result<LoadedProgram> {
     let image = pe::parse_headers(headers, Some(settings.base))
         .ok_or_else(|| invalid("malformed PE image"))?
         .map_err(|message| invalid(&message))?;
-    let map = code_map::read_map(&settings.code_map)?;
+    let map = code_map::read_map(&settings.code_map, image.target)?;
     if actual != settings.sha256 || map.metadata.get("executable_sha256") != Some(&actual) {
         return Err(Error::input(
             "code-map, game.toml and executable SHA-256 do not match",
         ));
     }
     if image.base != settings.base
-        || map.metadata.get("image_base") != Some(&Hex(image.base).to_string())
+        || map.metadata.get("image_base") != Some(&image.target.hex(image.base))
     {
         return Err(Error::input(
             "code-map, game.toml and executable image bases do not match",
@@ -171,8 +171,10 @@ pub fn entry_thunk_target(image: &Image, addr: Addr) -> Option<Addr> {
         return None;
     };
     let rel = i32::from_le_bytes(b[size - 4..size].try_into().ok()?);
-    Some(wrap_addr(
-        addr.wrapping_add(size as u64)
-            .wrapping_add(rel as i64 as u64),
-    ))
+    Some(
+        image.target.wrap(
+            addr.wrapping_add(size as u64)
+                .wrapping_add(rel as i64 as u64),
+        ),
+    )
 }

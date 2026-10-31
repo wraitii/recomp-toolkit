@@ -7,7 +7,7 @@ use rk_core::contract::{DirectArguments, Field, Fields};
 use rk_core::ir::{FunctionIr, OpCode, Space};
 use rk_core::program::Program;
 use rk_core::settings::Settings;
-use rk_core::{wrap_addr, Addr, Diagnostic, Hex};
+use rk_core::{Addr, Diagnostic, Hex};
 use rk_emit::{Body, Requires};
 
 pub mod facts;
@@ -416,6 +416,7 @@ pub fn prepare_return_entries(
     analysis: &mut rk_frontend::Analysis,
     stack: &rk_global::stack::Analysis,
 ) -> BTreeMap<Addr, Addr> {
+    let guest = rk_core::isa::machine().target;
     let mut entries = BTreeMap::new();
     for (&caller, result) in &mut analysis.ir {
         let Ok(fir) = result else { continue };
@@ -439,7 +440,7 @@ pub fn prepare_return_entries(
                 continue;
             };
             let continuation = insn.end();
-            let adjusted = wrap_addr(continuation.wrapping_add(delta as i64 as u64));
+            let adjusted = guest.wrap(continuation.wrapping_add(delta as i64 as u64));
             if fir.index_of(adjusted).is_none() {
                 invalid = Some(Diagnostic::new(
                     insn.addr,

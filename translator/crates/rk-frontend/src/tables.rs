@@ -22,7 +22,7 @@ pub(crate) fn recover_tables(
         if program.tables.contains_key(&(raw.addr, ins.addr)) {
             continue;
         }
-        let Some(table) = indexed_load(&ins.ops, target) else {
+        let Some(table) = indexed_load(program, &ins.ops, target) else {
             continue;
         };
         if table == 0 || program.image.bytes(table, 4).is_none() {
@@ -66,9 +66,9 @@ pub(crate) fn table_jumps(raw: &RawFunction) -> BTreeSet<u32> {
         .collect()
 }
 
-fn indexed_load(ops: &[PcodeOp], target: Varnode) -> Option<Addr> {
+fn indexed_load(program: &Program, ops: &[PcodeOp], target: Varnode) -> Option<Addr> {
     let defining = |v: Varnode| ops.iter().rev().find(|op| op.output == Some(v));
-    let pointer = u32::from(rk_core::isa::target().address_bytes);
+    let pointer = u32::from(program.image.target.address_bytes);
     let load = defining(target).filter(|op| op.opcode == OpCode::Load && target.size == pointer)?;
     let sum = defining(*load.inputs.first()?).filter(|op| op.opcode == OpCode::IntAdd)?;
     let [a, b] = sum.inputs.as_slice() else {

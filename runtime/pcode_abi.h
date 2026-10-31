@@ -88,6 +88,35 @@ enum {
     RP_OP_SDIVMOD = 71,
 };
 
+enum {
+    RP_STRING_MOVS = 0,
+    RP_STRING_STOS = 1,
+    RP_STRING_LODS = 2,
+    RP_STRING_CMPS = 3,
+    RP_STRING_SCAS = 4,
+    RP_STRING_FAMILIES = 5,
+};
+
+enum {
+    RP_STRING_ONCE = 0,
+    RP_STRING_REPE = 1,
+    RP_STRING_REPNE = 2,
+    RP_STRING_MODES = 3,
+};
+
+enum {
+    RP_STRING_WIDTHS = 3,
+    RP_USEROP_STRING_BASE = 0x1000,
+    RP_USEROP_STRING_END =
+        RP_USEROP_STRING_BASE + RP_STRING_FAMILIES * RP_STRING_WIDTHS * RP_STRING_MODES,
+};
+
+#define RP_USEROP_RDTSC UINT64_MAX
+#define RP_USEROP_CPUID (UINT64_MAX - 1)
+#define RP_USEROP_X87_CLEAR (UINT64_MAX - 2)
+#define RP_USEROP_PUSHFD (UINT64_MAX - 3)
+#define RP_USEROP_POPFD (UINT64_MAX - 4)
+
 typedef struct RpVarnode {
     uint32_t space;
     uint32_t size;

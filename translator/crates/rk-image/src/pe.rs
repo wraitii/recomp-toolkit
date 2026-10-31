@@ -93,7 +93,7 @@ impl<'a> Headers<'a> {
         })
     }
 
-    pub(crate) fn machine(&self) -> std::result::Result<&'static dyn Machine, String> {
+    pub(crate) fn machine(&self) -> std::result::Result<&'static Machine, String> {
         match self.machine {
             0x14c => Ok(&rk_x86::MACHINE),
             machine => Err(format!("unsupported PE machine {machine:#06x}")),
@@ -135,7 +135,7 @@ pub(crate) fn parse_headers(
     base: Option<Addr>,
 ) -> Option<std::result::Result<Image, String>> {
     let target = match headers.machine() {
-        Ok(machine) => machine.target(),
+        Ok(machine) => machine.target,
         Err(message) => return Some(Err(message)),
     };
     let preferred_base = Addr::from(headers.preferred_base);

@@ -723,7 +723,7 @@ fn policy_index(
 
 fn validate_site(
     program: &rk_core::program::Program,
-    decoder: &dyn Machine,
+    decoder: &Machine,
     site: Addr,
     meta: &MethodMeta,
     analysis: &mut Option<rk_frontend::Analysis>,
@@ -785,7 +785,7 @@ fn validate_site(
 
 fn decode_mapped(
     program: &rk_core::program::Program,
-    decoder: &dyn Machine,
+    decoder: &Machine,
     span: &rk_core::program::Span,
     site: Addr,
 ) -> std::result::Result<Decoded, String> {
@@ -798,6 +798,7 @@ fn decode_mapped(
                     .bytes(site, length as usize)
                     .ok_or_else(|| "mapped instruction bytes are unavailable".to_string())?;
                 let insn = decoder
+                    .decoder
                     .decode(site, raw)
                     .ok_or_else(|| "mapped instruction does not decode exactly".to_string())?;
                 return Ok(insn);
@@ -808,14 +809,14 @@ fn decode_mapped(
     }
     let mut at = span.start;
     while at <= site {
-        let available = (span.end() - at).min(u64::from(decoder.max_length())) as usize;
+        let available = (span.end() - at).min(u64::from(decoder.max_length)) as usize;
         let raw = program
             .image
             .bytes(at, available)
             .ok_or_else(|| "span bytes are unavailable".to_string())?;
         let mut found = None;
         for length in 1..=available {
-            if let Some(insn) = decoder.decode(at, &raw[..length]) {
+            if let Some(insn) = decoder.decoder.decode(at, &raw[..length]) {
                 found = Some(insn);
                 break;
             }

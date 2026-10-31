@@ -31,10 +31,12 @@ analysis cover the whole supplied snapshot; `EmitOptions.only` selects emitted b
 `rk-core` is the shared vocabulary. `rk-ir` is the lowering and the operation
 set that SSA, planning and emission share. `rk-analysis` is a separate offline
 binary that produces the facts the Facts stage reads (see below). `rk-x86` is the only
-ISA plug-in, an `rk_core::isa::Machine`: the SLEIGH spec and its lifting quirks, register
-roles and return-address convention, the Capstone decoder behind listings and typed
-operands, and the operand shapes discovery reads. The PE loader installs it from the
-image's machine field, and every other crate reaches the ISA through it.
+ISA plug-in, a static `rk_core::isa::Machine` of plain data: the `Target` (address width,
+endianness), the SLEIGH `Spec` with register roles, return-address convention and lifting
+quirks, and a `Decoder` for Capstone listings, typed operands and the iced operand shapes
+discovery reads. The PE loader installs it from the image's machine field for the lifter
+and register table; address formatting, parsing and wrapping take the `Target` from
+`Image.target`. `rk_ir::Arch` holds the role registers and an `x86` section of x86 names.
 
 Plan and emit run in parallel per function, in two passes. The first plans every
 function and collects return-slot proofs; the second emits each ordinary body and

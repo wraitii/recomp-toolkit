@@ -15,6 +15,11 @@ pub struct Arch {
     pub frame_pointer: Varnode,
     pub program_counter: Varnode,
     pub thread_base: Varnode,
+    pub x86: X86Registers,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct X86Registers {
     pub fpu_control: Varnode,
     pub eax: Varnode,
     pub ecx: Varnode,
@@ -32,27 +37,9 @@ pub struct Arch {
     pub segments: [Varnode; 6],
 }
 
-impl Arch {
-    fn resolve(map: &BTreeMap<String, Varnode>, address_bytes: u8) -> Result<Self, String> {
-        let machine = rk_core::isa::machine();
-        let roles = machine.registers();
-        let get = |name: &str| {
-            map.get(name)
-                .copied()
-                .ok_or_else(|| format!("SLEIGH register {name}"))
-        };
-        let stack_pointer = get(roles.stack_pointer)?;
+impl X86Registers {
+    fn resolve(get: impl Fn(&str) -> Result<Varnode, String>) -> Result<Self, String> {
         Ok(Self {
-            address_bytes,
-            word: stack_pointer.size,
-            link: match machine.return_address() {
-                ReturnAddress::Stack => None,
-                ReturnAddress::Register(name) => Some(get(name)?),
-            },
-            stack_pointer,
-            frame_pointer: get(roles.frame_pointer)?,
-            program_counter: get(roles.program_counter)?,
-            thread_base: get(roles.thread_base)?,
             fpu_control: get("FPUControlWord")?,
             eax: get("EAX")?,
             ecx: get("ECX")?,
@@ -78,16 +65,45 @@ impl Arch {
         })
     }
 
+    pub fn arithmetic_flags(&self) -> [Varnode; 6] {
+        [self.cf, self.pf, self.af, self.zf, self.sf, self.of]
+    }
+}
+
+impl Arch {
+    fn resolve(map: &BTreeMap<String, Varnode>, address_bytes: u8) -> Result<Self, String> {
+        let roles = &rk_core::isa::machine().spec.registers;
+        let get = |name: &str| {
+            map.get(name)
+                .copied()
+                .ok_or_else(|| format!("SLEIGH register {name}"))
+        };
+        let stack_pointer = get(roles.stack_pointer)?;
+        Ok(Self {
+            address_bytes,
+            word: stack_pointer.size,
+            link: match roles.return_address {
+                ReturnAddress::Stack => None,
+                ReturnAddress::Register(name) => Some(get(name)?),
+            },
+            stack_pointer,
+            frame_pointer: get(roles.frame_pointer)?,
+            program_counter: get(roles.program_counter)?,
+            thread_base: get(roles.thread_base)?,
+            x86: X86Registers::resolve(get)?,
+        })
+    }
+
     pub fn general(&self) -> [Varnode; 8] {
         [
-            self.eax,
-            self.ecx,
-            self.edx,
-            self.ebx,
+            self.x86.eax,
+            self.x86.ecx,
+            self.x86.edx,
+            self.x86.ebx,
             self.stack_pointer,
             self.frame_pointer,
-            self.esi,
-            self.edi,
+            self.x86.esi,
+            self.x86.edi,
         ]
     }
 
@@ -106,10 +122,6 @@ impl Arch {
             Value::Stack(top) => i32::try_from(top - i64::from(self.word)).ok(),
             _ => None,
         }
-    }
-
-    pub fn arithmetic_flags(&self) -> [Varnode; 6] {
-        [self.cf, self.pf, self.af, self.zf, self.sf, self.of]
     }
 }
 
@@ -159,7 +171,7 @@ impl Registers {
             })
             .collect();
         let arch = Arch::resolve(&map, lifter.address_bytes())?;
-        let target = rk_core::isa::target().address_bytes;
+        let target = rk_core::isa::machine().target.address_bytes;
         if arch.address_bytes != target {
             return Err(format!(
                 "SLEIGH addresses are {} bytes but the target's are {target}",

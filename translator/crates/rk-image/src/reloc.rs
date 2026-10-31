@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use rk_core::program::{Image, Program};
-use rk_core::{wrap_addr, Addr, Error, Result};
+use rk_core::{Addr, Error, Result};
 use serde::Deserialize;
 
 pub const FORMAT: &str = "recomp-reloc-manifest-v1";
@@ -79,6 +79,7 @@ pub fn synthetic_base(index: usize) -> Addr {
 }
 
 pub fn program(template: &Template, index: usize) -> Result<Program> {
+    let guest = rk_x86::MACHINE.target;
     rk_x86::install()?;
     let base = synthetic_base(index);
     let mut data = code_bytes(template)?;
@@ -98,7 +99,7 @@ pub fn program(template: &Template, index: usize) -> Result<Program> {
             )));
         }
         let target = hex_addr(&import.target)?;
-        let relative = wrap_addr(
+        let relative = guest.wrap(
             target
                 .wrapping_sub(base + Addr::from(import.slot))
                 .wrapping_sub(4),
@@ -107,7 +108,7 @@ pub fn program(template: &Template, index: usize) -> Result<Program> {
     }
     let size = data.len() as u32;
     let image = Image {
-        target: rk_core::isa::target(),
+        target: guest,
         base,
         size,
         data,

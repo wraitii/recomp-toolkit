@@ -15,7 +15,36 @@ uint64_t width_mask(uint32_t size) {
 }
 
 bool is_float(uint32_t op) {
-    return op >= RP_OP_FLOAT_EQUAL && op <= RP_OP_FLOAT_ROUND;
+    switch (op) {
+    case RP_OP_FLOAT_EQUAL:
+    case RP_OP_FLOAT_NOTEQUAL:
+    case RP_OP_FLOAT_LESS:
+    case RP_OP_FLOAT_LESSEQUAL:
+    case RP_OP_FLOAT_NAN:
+    case RP_OP_FLOAT_ADD:
+    case RP_OP_FLOAT_DIV:
+    case RP_OP_FLOAT_MULT:
+    case RP_OP_FLOAT_SUB:
+    case RP_OP_FLOAT_NEG:
+    case RP_OP_FLOAT_ABS:
+    case RP_OP_FLOAT_SQRT:
+    case RP_OP_FLOAT_INT2FLOAT:
+    case RP_OP_FLOAT_FLOAT2FLOAT:
+    case RP_OP_FLOAT_TRUNC:
+    case RP_OP_FLOAT_CEIL:
+    case RP_OP_FLOAT_FLOOR:
+    case RP_OP_FLOAT_ROUND:
+    case RP_OP_FLOAT_MIN:
+    case RP_OP_FLOAT_MAX:
+    case RP_OP_CVTSS2SI:
+    case RP_OP_CVTTSS2SI:
+    case RP_OP_CVTSI2SS:
+    case RP_OP_FLOAT_RCP:
+    case RP_OP_FLOAT_RSQRT:
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool is_compare(uint32_t op) {
@@ -265,7 +294,7 @@ void PcodeMachine::preflight(const std::vector<RpOp> &ops) {
     for (const RpOp &op : ops) {
         if (op.opcode == 0)
             fail("unsupported p-code opcode");
-        if (is_float(op.opcode) || (op.opcode >= RP_OP_FLOAT_MIN && op.opcode <= RP_OP_FLOAT_RSQRT))
+        if (is_float(op.opcode))
             fail("floating-point p-code is not modelled");
         if (op.input_count > 4)
             fail("too many p-code inputs");
@@ -364,7 +393,9 @@ void PcodeMachine::preflight(const std::vector<RpOp> &ops) {
                      op.output.size != op.inputs[0].size))
                     fail("malformed unary p-code operation");
             } else if (is_binary(op.opcode)) {
-                if (op.input_count != 2 || !op.has_output || op.output.size > op.inputs[0].size)
+                bool narrowed = op.opcode == RP_OP_INT_AND && op.output.size < op.inputs[0].size;
+                if (op.input_count != 2 || !op.has_output ||
+                    (op.output.size != op.inputs[0].size && !narrowed))
                     fail("malformed binary p-code operation");
                 if (op.opcode != RP_OP_INT_LEFT && op.opcode != RP_OP_INT_RIGHT &&
                     op.opcode != RP_OP_INT_SRIGHT)

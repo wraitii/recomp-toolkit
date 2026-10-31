@@ -7,8 +7,7 @@ mod shape;
 
 use std::cell::RefCell;
 
-use rk_core::isa::{Decoded, Machine, Registers, ReturnAddress, Shape, Spec};
-use rk_core::program::Target;
+use rk_core::isa::{Decoded, Decoder, Machine, Registers, ReturnAddress, Shape, Spec, Target};
 use rk_core::Addr;
 
 pub use decode::{
@@ -18,61 +17,40 @@ pub use rk_core::ir::{Operand, OperandKind, Part, Repeat};
 
 const WAIT: u8 = 0x9b;
 
-const REGISTERS: Registers = Registers {
-    stack_pointer: "ESP",
-    frame_pointer: "EBP",
-    program_counter: "EIP",
-    thread_base: "FS_OFFSET",
-    diagnostic: &[
-        "FPUInstructionPointer",
-        "FPUDataPointer",
-        "FPULastInstructionOpcode",
-        "FPUPointerSelector",
-        "FPUDataSelector",
-    ],
-    register_stack: &["ST0", "ST1", "ST2", "ST3", "ST4", "ST5", "ST6", "ST7"],
+pub static MACHINE: Machine = Machine {
+    target: Target::X86_32,
+    max_length: 15,
+    spec: Spec {
+        processor: sleigh_config::processor_x86::PSPEC_X86,
+        sla: sleigh_config::processor_x86::SLA_X86,
+        registers: Registers {
+            stack_pointer: "ESP",
+            frame_pointer: "EBP",
+            program_counter: "EIP",
+            thread_base: "FS_OFFSET",
+            return_address: ReturnAddress::Stack,
+            diagnostic: &[
+                "FPUInstructionPointer",
+                "FPUDataPointer",
+                "FPULastInstructionOpcode",
+                "FPUPointerSelector",
+                "FPUDataSelector",
+            ],
+            register_stack: &["ST0", "ST1", "ST2", "ST3", "ST4", "ST5", "ST6", "ST7"],
+        },
+        no_op: |bytes| bytes == [WAIT],
+        internal_flow_allowed: |bytes| matches!(bytes, [0xda | 0xdb, 0xc0..=0xdf]),
+    },
+    decoder: &X86,
 };
 
-pub struct X86;
-
-pub static MACHINE: X86 = X86;
+struct X86;
 
 thread_local! {
     static DECODER: RefCell<Option<decode::Decoder>> = const { RefCell::new(None) };
 }
 
-impl Machine for X86 {
-    fn target(&self) -> Target {
-        Target::X86_32
-    }
-
-    fn spec(&self) -> Spec {
-        Spec {
-            processor: sleigh_config::processor_x86::PSPEC_X86,
-            sla: sleigh_config::processor_x86::SLA_X86,
-        }
-    }
-
-    fn registers(&self) -> &Registers {
-        &REGISTERS
-    }
-
-    fn return_address(&self) -> ReturnAddress {
-        ReturnAddress::Stack
-    }
-
-    fn max_length(&self) -> u8 {
-        15
-    }
-
-    fn no_op(&self, bytes: &[u8]) -> bool {
-        bytes == [WAIT]
-    }
-
-    fn internal_flow_allowed(&self, bytes: &[u8]) -> bool {
-        matches!(bytes, [0xda | 0xdb, 0xc0..=0xdf])
-    }
-
+impl Decoder for X86 {
     fn decode(&self, addr: Addr, bytes: &[u8]) -> Option<Decoded> {
         DECODER.with(|slot| {
             let mut slot = slot.borrow_mut();
