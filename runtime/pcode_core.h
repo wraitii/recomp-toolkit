@@ -32,7 +32,7 @@ struct PcodeHost {
         why = "floating-point p-code is not modelled";
         return false;
     }
-    virtual bool execute_userop(const RpOp &, std::string &why) {
+    virtual bool execute_userop(const RpOp &, const uint64_t *, uint64_t &, std::string &why) {
         why = "unsupported userop execution";
         return false;
     }

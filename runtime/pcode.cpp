@@ -301,6 +301,8 @@ void PcodeMachine::preflight(const std::vector<RpOp> &ops) {
                 fail("malformed userop");
             if (!host_.userop_supported(op.userop, op, why))
                 fail(why);
+            for (uint32_t i = 1; i < op.input_count; ++i)
+                value(op.inputs[i]);
             if (op.has_output)
                 value(op.output, true);
             continue;
@@ -522,10 +524,16 @@ bool PcodeMachine::step(uint64_t &pc) {
             if (!host_.return_to(a, pc, why))
                 fail(why);
             return false;
-        case RP_OP_CALLOTHER:
-            if (!host_.execute_userop(op, why))
+        case RP_OP_CALLOTHER: {
+            uint64_t args[3] = {}, result = 0;
+            for (uint32_t i = 1; i < op.input_count; ++i)
+                load(op.inputs[i], args[i - 1]);
+            if (!host_.execute_userop(op, args, result, why))
                 fail(why);
+            if (op.has_output)
+                store(op.output, result);
             break;
+        }
         case RP_OP_INT_ZEXT:
             load(op.inputs[0], a);
             store(op.output, a & width_mask(op.inputs[0].size));

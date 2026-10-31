@@ -10,6 +10,7 @@ use rk_ir::{CgOp, InstructionLowerer, Op, SlowInsn, X87Op};
 use rk_sleigh::Lifter;
 
 mod jit;
+mod x87;
 
 const RP_OP_DIVMOD: u32 = 70;
 const RP_OP_SDIVMOD: u32 = 71;
@@ -296,7 +297,8 @@ fn interpreter_op(op: CgOp, insn: &Insn, slow: &[SlowInsn]) -> Result<RpOp, Stri
             inputs.push(X87_CONTROL);
             memory(OpCode::Store, None, &inputs)
         }
-        Op::X87(_) => Err(format!("{}: x87 operation is not modelled", insn.mnemonic)),
+        Op::X87(effect) => x87::encode(effect, op.output, &op.inputs)
+            .ok_or_else(|| format!("{}: x87 operation is not modelled", insn.mnemonic))?,
         Op::Slow(_) if insn.mnemonic == "RDTSC" => native_userop(RP_USEROP_RDTSC),
         Op::Slow(_) if insn.mnemonic == "CPUID" => native_userop(RP_USEROP_CPUID),
         Op::Slow(i) => Err(format!(

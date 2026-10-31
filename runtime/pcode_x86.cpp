@@ -2,6 +2,7 @@
 #include "discovery.h"
 #include "jit.h"
 #include "pcode_core.h"
+#include "pcode_x87.h"
 
 #include <climits>
 #include <cstdio>
@@ -457,6 +458,8 @@ class X86Host final : public PcodeHost {
     }
 
     bool userop_supported(uint64_t id, const RpOp &op, std::string &why) override {
+        if (pcode_x87_supported(id, op))
+            return true;
         if ((id == RP_USEROP_RDTSC || id == RP_USEROP_CPUID || id == RP_USEROP_X87_CLEAR ||
              id == RP_USEROP_X87_EMPTY || id == RP_USEROP_X87_EMPTY_RESET ||
              (id >= RP_USEROP_STRING_BASE && id < RP_USEROP_STRING_END)) &&
@@ -470,9 +473,12 @@ class X86Host final : public PcodeHost {
         return false;
     }
 
-    bool execute_userop(const RpOp &op, std::string &why) override {
+    bool execute_userop(const RpOp &op, const uint64_t *args, uint64_t &result,
+                        std::string &why) override {
         if (!userop_supported(op.userop, op, why))
             return false;
+        if (pcode_x87_supported(op.userop, op))
+            return pcode_x87_execute(*this, c_, op, args, result, why);
         if (op.userop == RP_USEROP_X87_EMPTY || op.userop == RP_USEROP_X87_EMPTY_RESET) {
             c_->fpu_tag = 0xffff;
             if (op.userop == RP_USEROP_X87_EMPTY_RESET)
