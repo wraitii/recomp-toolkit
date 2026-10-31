@@ -294,8 +294,6 @@ void PcodeMachine::preflight(const std::vector<RpOp> &ops) {
     for (const RpOp &op : ops) {
         if (op.opcode == 0)
             fail("unsupported p-code opcode");
-        if (is_float(op.opcode))
-            fail("floating-point p-code is not modelled");
         if (op.input_count > 4)
             fail("too many p-code inputs");
         if (op.opcode == RP_OP_CALLOTHER) {
@@ -317,6 +315,11 @@ void PcodeMachine::preflight(const std::vector<RpOp> &ops) {
         }
         if (op.has_output)
             value(op.output, true);
+        if (is_float(op.opcode)) {
+            if (!host_.float_supported(op, why))
+                fail(why);
+            continue;
+        }
 
         switch (op.opcode) {
         case RP_OP_COPY:
@@ -434,6 +437,16 @@ bool PcodeMachine::step(uint64_t &pc) {
             fail("p-code operation budget exhausted");
         const RpOp &op = ops[ip];
         uint64_t a = 0, b = 0, out = 0;
+        if (is_float(op.opcode)) {
+            load(op.inputs[0], a);
+            if (op.input_count > 1)
+                load(op.inputs[1], b);
+            if (!host_.execute_float(op, a, b, out, why))
+                fail(why);
+            store(op.output, out);
+            ++ip;
+            continue;
+        }
         switch (op.opcode) {
         case RP_OP_COPY:
             load(op.inputs[0], a);

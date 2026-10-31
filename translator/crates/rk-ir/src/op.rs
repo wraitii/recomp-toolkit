@@ -53,7 +53,6 @@ pub enum SlowFamily {
     Bcd,
     Mmx,
     Sse,
-    Flags,
     Segment,
     X87,
     CallOther,
@@ -62,6 +61,15 @@ pub enum SlowFamily {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StringOp(pub &'static str);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimdOp {
+    Float { opcode: OpCode, lane_bytes: u8 },
+    SignMask { lane_bytes: u8 },
+    ShiftBytesRight { bytes: u8 },
+    Shuffle { lane_bytes: u8, lanes: [u8; 4] },
+    ShuffleScalars { lane_bytes: u8 },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
@@ -82,6 +90,7 @@ pub enum Op {
     String(StringOp),
     Slow(u32),
     CallOther(u64),
+    Simd(SimdOp),
     X87(X87Op),
     Input(StateKey),
     Const(u64),
@@ -250,6 +259,7 @@ pub fn properties(op: Op) -> Properties {
             ..Properties::new()
         },
         Op::String(_) => Properties::effect(),
+        Op::Simd(_) => Properties::pure(),
         Op::Slow(_) | Op::CallOther(_) => Properties::effect(),
         Op::Tail { .. } | Op::ImportTail { .. } | Op::BranchInd | Op::Return => Properties {
             observes: true,

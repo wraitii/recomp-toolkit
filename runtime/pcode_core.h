@@ -24,6 +24,14 @@ struct PcodeHost {
     virtual bool read_memory(uint64_t addr, uint32_t size, uint64_t &out, std::string &why) = 0;
     virtual bool write_memory(uint64_t addr, uint32_t size, uint64_t value, std::string &why) = 0;
     virtual bool userop_supported(uint64_t id, const RpOp &op, std::string &why) = 0;
+    virtual bool float_supported(const RpOp &, std::string &why) {
+        why = "floating-point p-code is not modelled";
+        return false;
+    }
+    virtual bool execute_float(const RpOp &, uint64_t, uint64_t, uint64_t &, std::string &why) {
+        why = "floating-point p-code is not modelled";
+        return false;
+    }
     virtual bool execute_userop(const RpOp &, std::string &why) {
         why = "unsupported userop execution";
         return false;

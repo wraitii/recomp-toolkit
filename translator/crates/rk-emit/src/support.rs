@@ -66,6 +66,7 @@ pub(crate) enum Location {
     Eip,
     Fs,
     Df,
+    FlagsMisc,
 }
 
 pub(crate) fn x87_reads_flags(line: &str) -> bool {
@@ -114,7 +115,9 @@ pub(crate) fn location(key: StateKey) -> Option<Location> {
         StateKey::Memory => return None,
     };
     let arch = Registers::get().arch();
-    if within(arch.program_counter, offset as u64) {
+    if within(rk_ir::EFLAGS_MISC, offset as u64) {
+        Some(Location::FlagsMisc)
+    } else if within(arch.program_counter, offset as u64) {
         Some(Location::Eip)
     } else if within(arch.thread_base, offset as u64) {
         Some(Location::Fs)

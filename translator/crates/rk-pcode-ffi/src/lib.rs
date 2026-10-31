@@ -27,8 +27,8 @@ const RP_USEROP_STRING_BASE: u64 = 0x1000;
 const RP_USEROP_RDTSC: u64 = u64::MAX;
 const RP_USEROP_CPUID: u64 = u64::MAX - 1;
 const RP_USEROP_X87_CLEAR: u64 = u64::MAX - 2;
-const RP_USEROP_PUSHFD: u64 = u64::MAX - 3;
-const RP_USEROP_POPFD: u64 = u64::MAX - 4;
+const RP_USEROP_X87_EMPTY: u64 = u64::MAX - 3;
+const RP_USEROP_X87_EMPTY_RESET: u64 = u64::MAX - 4;
 const X87_CONTROL: Varnode = Varnode::new(Space::Register, 0x300, 2);
 
 #[repr(C)]
@@ -286,6 +286,11 @@ fn interpreter_op(op: CgOp, insn: &Insn, slow: &[SlowInsn]) -> Result<RpOp, Stri
             rp_op(opcode, op.output, &inputs, None)
         }
         Op::X87(X87Op::Clear) => native_userop(RP_USEROP_X87_CLEAR),
+        Op::X87(X87Op::EmptyTags(reset_top)) => native_userop(if reset_top {
+            RP_USEROP_X87_EMPTY_RESET
+        } else {
+            RP_USEROP_X87_EMPTY
+        }),
         Op::X87(X87Op::Environment(X87Environment::LoadCw)) => {
             memory(OpCode::Load, Some(X87_CONTROL), &op.inputs[..1])
         }
@@ -297,8 +302,6 @@ fn interpreter_op(op: CgOp, insn: &Insn, slow: &[SlowInsn]) -> Result<RpOp, Stri
         Op::X87(_) => Err(format!("{}: x87 operation is not modelled", insn.mnemonic)),
         Op::Slow(_) if insn.mnemonic == "RDTSC" => native_userop(RP_USEROP_RDTSC),
         Op::Slow(_) if insn.mnemonic == "CPUID" => native_userop(RP_USEROP_CPUID),
-        Op::Slow(_) if insn.mnemonic == "PUSHFD" => native_userop(RP_USEROP_PUSHFD),
-        Op::Slow(_) if insn.mnemonic == "POPFD" => native_userop(RP_USEROP_POPFD),
         Op::Slow(i) => Err(format!(
             "{}: unsupported {:?}",
             insn.mnemonic, slow[i as usize].family
@@ -346,6 +349,11 @@ fn lift_one(addr: u32, bytes: &[u8]) -> Result<(u8, String, Vec<RpOp>), String> 
     }
     let mut lowerer = InstructionLowerer::new(&rk_x87::Recipes).with_pcode_control();
     let (ops, _, _) = lowerer.lower_insn(&insn).map_err(|e| e.to_string())?;
+    let ops = if rk_ir::wide::required(&ops) {
+        rk_ir::wide::legalize(&ops, insn.addr).map_err(|e| e.to_string())?
+    } else {
+        ops
+    };
     let lowered_internal = ops.iter().any(|op| match op.op {
         Op::P(opcode) => is_internal(opcode, &op.inputs),
         _ => false,

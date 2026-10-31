@@ -33,20 +33,20 @@ bool in_arena(uint32_t addr, uint32_t size) {
     return addr >= GUEST_NULL_LIMIT && size != 0 && addr < GUEST_SIZE && size <= GUEST_SIZE - addr;
 }
 
-uint64_t read_gpr(const X86 *c, uint64_t offset, uint32_t size) {
+uint64_t read_words(const uint32_t *words, uint64_t offset, uint32_t size) {
     uint64_t value = 0;
     for (uint32_t i = 0; i < size; ++i) {
         uint64_t byte = offset + i;
-        value |= (uint64_t)((c->r[byte / 4] >> ((byte % 4) * 8)) & 0xff) << (8 * i);
+        value |= (uint64_t)((words[byte / 4] >> ((byte % 4) * 8)) & 0xff) << (8 * i);
     }
     return value;
 }
 
-void write_gpr(X86 *c, uint64_t offset, uint32_t size, uint64_t value) {
+void write_words(uint32_t *words, uint64_t offset, uint32_t size, uint64_t value) {
     for (uint32_t i = 0; i < size; ++i) {
         uint64_t byte = offset + i;
         uint32_t shift = (byte % 4) * 8;
-        uint32_t &word = c->r[byte / 4];
+        uint32_t &word = words[byte / 4];
         word = (word & ~(0xffu << shift)) | ((uint32_t)(value >> (8 * i)) & 0xffu) << shift;
     }
 }
@@ -57,7 +57,7 @@ int flag_bit(uint64_t offset) {
     return (int)(offset - 0x200) + (offset > 0x20c);
 }
 
-enum class RegisterKind { Invalid, Gpr, Fs, Eflags, Eip, Flag, X87Control };
+enum class RegisterKind { Invalid, Gpr, Fs, Eflags, EflagsMisc, Eip, Flag, X87Control, Mm, Xmm };
 
 RegisterKind register_kind(const RpVarnode &v, const char *&what) {
     if (v.space != RP_SPACE_REGISTER) {
@@ -68,8 +68,15 @@ RegisterKind register_kind(const RpVarnode &v, const char *&what) {
         what = "register width is not modelled";
         return RegisterKind::Invalid;
     }
+    if (v.offset >= 0xffff0000 && v.offset < 0xffff0004 && v.size <= 0xffff0004 - v.offset)
+        return RegisterKind::EflagsMisc;
     if (v.offset == 0x300 && v.size == 2)
         return RegisterKind::X87Control;
+    if (v.offset >= 0x1100 && v.offset < 0x1180 && v.offset % 16 < 8 && v.size <= 8 - v.offset % 16)
+        return RegisterKind::Mm;
+    if (v.offset >= 0x1200 && v.offset < 0x1400 && v.offset % 64 < 16 &&
+        v.size <= 16 - v.offset % 64)
+        return RegisterKind::Xmm;
     if (v.offset < 0x20 && v.offset + v.size <= 0x20 && v.size <= 4)
         return RegisterKind::Gpr;
     if (v.offset == 0x110 && v.size == 4)
@@ -149,12 +156,13 @@ class X86Host final : public PcodeHost {
     }
 
     bool register_supported(const RpVarnode &v, std::string &why) override {
-        if (v.space == RP_SPACE_REGISTER && v.offset >= 0x1000) {
+        const char *what = nullptr;
+        RegisterKind kind = register_kind(v, what);
+        if (kind == RegisterKind::Invalid && v.space == RP_SPACE_REGISTER && v.offset >= 0x1000 &&
+            v.offset < 0xffff0000) {
             why = "x87/MMX/SSE register p-code is not modelled";
             return false;
         }
-        const char *what = nullptr;
-        RegisterKind kind = register_kind(v, what);
         if (kind == RegisterKind::Invalid ||
             (kind == RegisterKind::Flag && flag_bit(v.offset) < 0)) {
             if (kind == RegisterKind::Flag)
@@ -180,7 +188,16 @@ class X86Host final : public PcodeHost {
             return true;
         }
         if (kind == RegisterKind::Gpr) {
-            out = read_gpr(c_, v.offset, v.size);
+            out = read_words(c_->r, v.offset, v.size);
+            return true;
+        }
+        if (kind == RegisterKind::Mm) {
+            out = c_->mm[(v.offset - 0x1100) / 16] >> ((v.offset % 16) * 8);
+            out &= UINT64_MAX >> ((8 - v.size) * 8);
+            return true;
+        }
+        if (kind == RegisterKind::Xmm) {
+            out = read_words(c_->xmm[(v.offset - 0x1200) / 64], v.offset % 64, v.size);
             return true;
         }
         if (kind == RegisterKind::Fs) {
@@ -189,6 +206,11 @@ class X86Host final : public PcodeHost {
         }
         if (kind == RegisterKind::Eip) {
             out = v.size == 2 ? (c_->eip & 0xffffu) : c_->eip;
+            return true;
+        }
+        if (kind == RegisterKind::EflagsMisc) {
+            out = (c_->eflags_misc >> ((v.offset - 0xffff0000) * 8)) &
+                  (UINT32_MAX >> ((4 - v.size) * 8));
             return true;
         }
         uint32_t flags = x86_get_eflags(c_);
@@ -217,7 +239,18 @@ class X86Host final : public PcodeHost {
             return true;
         }
         if (kind == RegisterKind::Gpr) {
-            write_gpr(c_, v.offset, v.size, value);
+            write_words(c_->r, v.offset, v.size, value);
+            return true;
+        }
+        if (kind == RegisterKind::Mm) {
+            uint64_t &word = c_->mm[(v.offset - 0x1100) / 16];
+            uint32_t shift = (uint32_t)(v.offset % 16) * 8;
+            uint64_t mask = UINT64_MAX >> ((8 - v.size) * 8);
+            word = (word & ~(mask << shift)) | ((value & mask) << shift);
+            return true;
+        }
+        if (kind == RegisterKind::Xmm) {
+            write_words(c_->xmm[(v.offset - 0x1200) / 64], v.offset % 64, v.size, value);
             return true;
         }
         if (kind == RegisterKind::Fs) {
@@ -227,6 +260,13 @@ class X86Host final : public PcodeHost {
         if (kind == RegisterKind::Eip) {
             c_->eip = v.size == 2 ? (c_->eip & 0xffff0000u) | ((uint32_t)value & 0xffffu)
                                   : (uint32_t)value;
+            return true;
+        }
+        if (kind == RegisterKind::EflagsMisc) {
+            uint32_t shift = (uint32_t)(v.offset - 0xffff0000) * 8;
+            uint32_t mask = UINT32_MAX >> ((4 - v.size) * 8);
+            c_->eflags_misc =
+                (c_->eflags_misc & ~(mask << shift)) | (((uint32_t)value & mask) << shift);
             return true;
         }
         uint32_t flags = x86_get_eflags(c_);
@@ -312,9 +352,113 @@ class X86Host final : public PcodeHost {
         return true;
     }
 
+    bool float_supported(const RpOp &op, std::string &why) override {
+        uint32_t count = 2;
+        uint32_t size = 4;
+        switch (op.opcode) {
+        case RP_OP_FLOAT_NAN:
+            count = 1;
+            size = 1;
+            break;
+        case RP_OP_FLOAT_EQUAL:
+        case RP_OP_FLOAT_NOTEQUAL:
+        case RP_OP_FLOAT_LESS:
+        case RP_OP_FLOAT_LESSEQUAL:
+            size = 1;
+            break;
+        case RP_OP_FLOAT_NEG:
+        case RP_OP_FLOAT_ABS:
+        case RP_OP_FLOAT_SQRT:
+        case RP_OP_FLOAT_RCP:
+        case RP_OP_FLOAT_RSQRT:
+            count = 1;
+            break;
+        case RP_OP_FLOAT_ADD:
+        case RP_OP_FLOAT_SUB:
+        case RP_OP_FLOAT_MULT:
+        case RP_OP_FLOAT_DIV:
+        case RP_OP_FLOAT_MIN:
+        case RP_OP_FLOAT_MAX:
+            break;
+        default:
+            why = "floating-point p-code operation is not modelled";
+            return false;
+        }
+        if (!op.has_output || op.output.size != size || op.input_count != count) {
+            why = "malformed floating-point p-code operation";
+            return false;
+        }
+        for (uint32_t i = 0; i < count; ++i) {
+            if (op.inputs[i].size != 4) {
+                why = "floating-point p-code input width is not modelled";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool execute_float(const RpOp &op, uint64_t left, uint64_t right, uint64_t &out,
+                       std::string &why) override {
+        uint32_t a = (uint32_t)left, b = (uint32_t)right;
+        switch (op.opcode) {
+        case RP_OP_FLOAT_NAN:
+            out = recomp_sse_nan_bits(a);
+            break;
+        case RP_OP_FLOAT_EQUAL:
+            out = recomp_sse_f32(a) == recomp_sse_f32(b);
+            break;
+        case RP_OP_FLOAT_NOTEQUAL:
+            out = recomp_sse_f32(a) != recomp_sse_f32(b);
+            break;
+        case RP_OP_FLOAT_LESS:
+            out = recomp_sse_f32(a) < recomp_sse_f32(b);
+            break;
+        case RP_OP_FLOAT_LESSEQUAL:
+            out = recomp_sse_f32(a) <= recomp_sse_f32(b);
+            break;
+        case RP_OP_FLOAT_NEG:
+            out = a ^ 0x80000000u;
+            break;
+        case RP_OP_FLOAT_ABS:
+            out = a & 0x7fffffffu;
+            break;
+        case RP_OP_FLOAT_ADD:
+            out = recomp_sse_addps(c_, a, b);
+            break;
+        case RP_OP_FLOAT_SUB:
+            out = recomp_sse_subps(c_, a, b);
+            break;
+        case RP_OP_FLOAT_MULT:
+            out = recomp_sse_mulps(c_, a, b);
+            break;
+        case RP_OP_FLOAT_DIV:
+            out = recomp_sse_divps(c_, a, b);
+            break;
+        case RP_OP_FLOAT_MIN:
+            out = recomp_sse_minps(a, b);
+            break;
+        case RP_OP_FLOAT_MAX:
+            out = recomp_sse_maxps(a, b);
+            break;
+        case RP_OP_FLOAT_SQRT:
+            out = recomp_sse_sqrtps(a);
+            break;
+        case RP_OP_FLOAT_RCP:
+            out = recomp_sse_rcpps(a);
+            break;
+        case RP_OP_FLOAT_RSQRT:
+            out = recomp_sse_rsqrtps(a);
+            break;
+        default:
+            why = "floating-point p-code operation is not modelled";
+            return false;
+        }
+        return true;
+    }
+
     bool userop_supported(uint64_t id, const RpOp &op, std::string &why) override {
         if ((id == RP_USEROP_RDTSC || id == RP_USEROP_CPUID || id == RP_USEROP_X87_CLEAR ||
-             id == RP_USEROP_PUSHFD || id == RP_USEROP_POPFD ||
+             id == RP_USEROP_X87_EMPTY || id == RP_USEROP_X87_EMPTY_RESET ||
              (id >= RP_USEROP_STRING_BASE && id < RP_USEROP_STRING_END)) &&
             op.input_count == 1 && !op.has_output && op.inputs[0].offset == id)
             return true;
@@ -329,15 +473,10 @@ class X86Host final : public PcodeHost {
     bool execute_userop(const RpOp &op, std::string &why) override {
         if (!userop_supported(op.userop, op, why))
             return false;
-        if (op.userop == RP_USEROP_PUSHFD || op.userop == RP_USEROP_POPFD) {
-            bool push = op.userop == RP_USEROP_PUSHFD;
-            uint32_t addr = c_->r[R_ESP] - (push ? 4u : 0u);
-            if (!memory_supported(addr, 4, push, why))
-                return false;
-            if (push)
-                recomp_pushfd(c_);
-            else
-                recomp_popfd(c_);
+        if (op.userop == RP_USEROP_X87_EMPTY || op.userop == RP_USEROP_X87_EMPTY_RESET) {
+            c_->fpu_tag = 0xffff;
+            if (op.userop == RP_USEROP_X87_EMPTY_RESET)
+                c_->fpu_top = 0;
             return true;
         }
         if (op.userop == RP_USEROP_X87_CLEAR) {

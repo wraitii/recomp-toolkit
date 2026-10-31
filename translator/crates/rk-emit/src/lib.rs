@@ -1177,25 +1177,6 @@ impl<'a> Emitter<'a> {
                 self.out.push_str("recomp_cpuid(c);\n");
                 Ok(true)
             }
-            SlowFamily::Flags => match mnemonic.as_str() {
-                "PUSHFD" => {
-                    self.out.push_str("recomp_pushfd(c);\n");
-                    Ok(true)
-                }
-                "POPFD" => {
-                    self.out.push_str("recomp_popfd(c);\n");
-                    Ok(true)
-                }
-                "PUSHF" => {
-                    self.out.push_str("recomp_pushf(c);\n");
-                    Ok(true)
-                }
-                "POPF" => {
-                    self.out.push_str("recomp_popf(c);\n");
-                    Ok(true)
-                }
-                _ => self.unsupported(addr, &mnemonic),
-            },
             SlowFamily::Int => {
                 let vector = match mnemonic.as_str() {
                     "INT1" => Some(1),
@@ -2637,6 +2618,9 @@ impl<'a> Emitter<'a> {
                     ctype(size)
                 );
             }
+            Location::FlagsMisc => {
+                self.publish_register("eflags_misc", rk_ir::EFLAGS_MISC, state, keys)?
+            }
             Location::Df => {
                 let key = StateKey::Register(Registers::get().arch().x86.df.offset as u32);
                 let value = self.listed_value(state, keys, key)?;
@@ -3484,6 +3468,13 @@ impl<'a> Emitter<'a> {
         let StateKey::Register(offset) = key else {
             return None;
         };
+        if within(rk_ir::EFLAGS_MISC, offset as u64) {
+            return Some((
+                "c->eflags_misc".to_string(),
+                offset - rk_ir::EFLAGS_MISC.offset as u32,
+                4,
+            ));
+        }
         let (name, register) = Registers::get().covering(offset as u64)?;
         let lane = (offset as u64 - register.offset) as u32;
         let arch = Registers::get().arch();

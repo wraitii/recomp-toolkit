@@ -9,11 +9,15 @@ pub mod lower;
 pub mod op;
 pub mod regs;
 pub mod string;
+pub mod wide;
 pub mod x87;
 
 pub use lower::{lower, lower_with, CgFunction, CgInsn, CgOp, FlagShape, InstructionLowerer};
 pub use op::{
-    properties, CcKind, NoX87, Op, Properties, SlowFamily, SlowInsn, StateKey, StringOp, X87Recipes,
+    properties, CcKind, NoX87, Op, Properties, SimdOp, SlowFamily, SlowInsn, StateKey, StringOp,
+    X87Recipes,
 };
 pub use regs::{field_lane, lanes, xmm_offset, Arch, Registers, X86Registers};
 pub use x87::{Arithmetic, ArithmeticOp, X87Lowering, X87Op, X87Recipe};
+
+pub use regs::EFLAGS_MISC;

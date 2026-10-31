@@ -4,8 +4,9 @@ use rk_core::ir::{FunctionIr, Insn, OpCode, PcodeOp, SehEffect, Space, Varnode};
 use rk_core::{Addr, Diagnostic, Reason};
 
 use crate::op::{Op, SlowFamily, SlowInsn, StringOp, X87Recipes};
-use crate::regs::Registers;
+use crate::regs::{Registers, EFLAGS_MISC};
 use crate::string;
+use crate::wide::{wide_lanes, wide_output};
 
 #[derive(Clone, Debug)]
 pub struct CgOp {
@@ -365,7 +366,6 @@ fn unmodelled_family(mnemonic: &str) -> SlowFamily {
         return SlowFamily::Mmx;
     }
     match mnemonic {
-        "PUSHFD" | "POPFD" => SlowFamily::Flags,
         "LDS" | "LES" | "SLDT" => SlowFamily::Segment,
         "HLT" => SlowFamily::Hlt,
         "CLI" => SlowFamily::Cli,
@@ -551,6 +551,131 @@ impl<'a> InstructionLowerer<'a> {
         if mnem == "WAIT" || mnem == "NOP" || mnem == "PAUSE" {
             return Ok((Vec::new(), false, None, false));
         }
+        if matches!(mnem.as_str(), "PUSHFD" | "POPFD" | "PUSHF" | "POPF") {
+            let push = mnem.starts_with("PUSH");
+            let size = if mnem.ends_with('D') { 4 } else { 2 };
+            let stack = self.regs.arch().stack_pointer;
+            let r = self.regs.arch().x86;
+            let flags = [
+                (r.cf, 0),
+                (r.pf, 2),
+                (r.af, 4),
+                (r.zf, 6),
+                (r.sf, 7),
+                (r.df, 10),
+                (r.of, 11),
+            ];
+            let mut ops = Vec::new();
+            if push {
+                let mut value = self.fresh(4);
+                ops.push(op(
+                    OpCode::IntAnd,
+                    value,
+                    vec![EFLAGS_MISC, Varnode::constant(!0xcd5u32 as u64, 4)],
+                ));
+                let fixed = self.fresh(4);
+                ops.push(op(
+                    OpCode::IntOr,
+                    fixed,
+                    vec![value, Varnode::constant(2, 4)],
+                ));
+                value = fixed;
+                for (flag, bit) in flags {
+                    let wide = self.fresh(4);
+                    let shifted = self.fresh(4);
+                    let combined = self.fresh(4);
+                    ops.push(op(OpCode::IntZExt, wide, vec![flag]));
+                    ops.push(op(
+                        OpCode::IntLeft,
+                        shifted,
+                        vec![wide, Varnode::constant(bit, 4)],
+                    ));
+                    ops.push(op(OpCode::IntOr, combined, vec![value, shifted]));
+                    value = combined;
+                }
+                let new_stack = self.fresh(4);
+                ops.push(op(
+                    OpCode::IntSub,
+                    new_stack,
+                    vec![stack, Varnode::constant(size, 4)],
+                ));
+                ops.push(copy(stack, new_stack));
+                if size == 2 {
+                    let short = self.fresh(2);
+                    ops.push(op(
+                        OpCode::SubPiece,
+                        short,
+                        vec![value, Varnode::constant(0, 4)],
+                    ));
+                    value = short;
+                }
+                ops.push(PcodeOp {
+                    opcode: OpCode::Store,
+                    output: None,
+                    inputs: vec![new_stack, value],
+                    userop: None,
+                });
+            } else {
+                let value = self.fresh(size as u32);
+                ops.push(op(OpCode::Load, value, vec![stack]));
+                let wide = if size == 2 {
+                    let extended = self.fresh(4);
+                    let high = self.fresh(4);
+                    let combined = self.fresh(4);
+                    ops.push(op(OpCode::IntZExt, extended, vec![value]));
+                    ops.push(op(
+                        OpCode::IntAnd,
+                        high,
+                        vec![EFLAGS_MISC, Varnode::constant(0xffff0000, 4)],
+                    ));
+                    ops.push(op(OpCode::IntOr, combined, vec![extended, high]));
+                    combined
+                } else {
+                    value
+                };
+                let misc = self.fresh(4);
+                ops.push(op(
+                    OpCode::IntAnd,
+                    misc,
+                    vec![wide, Varnode::constant(!0xcd5u32 as u64, 4)],
+                ));
+                ops.push(op(
+                    OpCode::IntOr,
+                    EFLAGS_MISC,
+                    vec![misc, Varnode::constant(2, 4)],
+                ));
+                for (flag, bit) in flags {
+                    let shifted = self.fresh(4);
+                    let byte = self.fresh(1);
+                    ops.push(op(
+                        OpCode::IntRight,
+                        shifted,
+                        vec![wide, Varnode::constant(bit, 4)],
+                    ));
+                    ops.push(op(
+                        OpCode::SubPiece,
+                        byte,
+                        vec![shifted, Varnode::constant(0, 4)],
+                    ));
+                    ops.push(op(
+                        OpCode::IntAnd,
+                        flag,
+                        vec![byte, Varnode::constant(1, 1)],
+                    ));
+                }
+                ops.push(op(
+                    OpCode::IntAdd,
+                    stack,
+                    vec![stack, Varnode::constant(size, 4)],
+                ));
+            }
+            return Ok((
+                ops.into_iter().map(from_pcode).collect(),
+                false,
+                None,
+                false,
+            ));
+        }
         if mnem == "INT3" {
             return Ok((vec![cg(Op::Breakpoint)], false, None, false));
         }
@@ -568,7 +693,7 @@ impl<'a> InstructionLowerer<'a> {
             let op = self.slow(insn, SlowFamily::Sse);
             return Ok((vec![cg(op)], false, None, false));
         }
-        if insn.x87 || mnem.starts_with('F') {
+        if insn.x87 || mnem.starts_with('F') || mnem == "EMMS" {
             let mut unique = self.unique;
             let lowering = {
                 let mut fresh = |size| {
@@ -657,6 +782,131 @@ impl<'a> InstructionLowerer<'a> {
                 return Ok((vec![cg(op)], false, None, false));
             }
         };
+        if matches!(mnem.as_str(), "SHUFPS" | "PSHUFD") {
+            if let Some(shuffled) = lower_shuffle(&mnem, &ops, insn, &mut |size| self.fresh(size)) {
+                let cut = shuffled.len() - 4;
+                let lanes = &shuffled[cut..];
+                if let Some(first) = lanes[0].output {
+                    if lanes.iter().enumerate().all(|(index, lane)| {
+                        lane.opcode == OpCode::Copy
+                            && lane.output
+                                == Some(Varnode::new(
+                                    Space::Register,
+                                    first.offset + index as u64 * 4,
+                                    4,
+                                ))
+                            && lane.inputs.len() == 1
+                    }) {
+                        let snapshots: Vec<&PcodeOp> = shuffled[..cut]
+                            .iter()
+                            .filter(|item| {
+                                item.opcode == OpCode::Copy
+                                    && item
+                                        .output
+                                        .is_some_and(|v| v.size == 4 && v.space == Space::Unique)
+                                    && item.inputs.len() == 1
+                                    && item.inputs[0].size == 4
+                            })
+                            .take(if mnem == "SHUFPS" { 8 } else { 4 })
+                            .collect();
+                        let wide_sources: Option<Vec<Varnode>> = snapshots
+                            .chunks(4)
+                            .map(|group| {
+                                let first = group.first()?.inputs[0];
+                                if group.len() != 4
+                                    || !matches!(first.space, Space::Register | Space::Unique)
+                                    || !group.iter().enumerate().all(|(i, item)| {
+                                        item.inputs[0]
+                                            == Varnode::new(
+                                                first.space,
+                                                first.offset + 4 * i as u64,
+                                                4,
+                                            )
+                                    })
+                                {
+                                    return None;
+                                }
+                                Some(Varnode::new(first.space, first.offset, 16))
+                            })
+                            .collect();
+                        let selectors: Option<Vec<u8>> = lanes
+                            .iter()
+                            .map(|lane| {
+                                snapshots
+                                    .iter()
+                                    .position(|item| item.output == Some(lane.inputs[0]))
+                                    .map(|i| i as u8)
+                            })
+                            .collect();
+                        let (mut result, op, inputs): (Vec<CgOp>, _, _) =
+                            if let (Some(inputs), Some(selectors)) = (wide_sources, selectors) {
+                                let result = shuffled[..cut]
+                                    .iter()
+                                    .filter(|item| {
+                                        !snapshots
+                                            .iter()
+                                            .any(|snapshot| std::ptr::eq(*snapshot, *item))
+                                    })
+                                    .cloned()
+                                    .map(|op| self.convert(op))
+                                    .collect();
+                                (
+                                    result,
+                                    crate::SimdOp::Shuffle {
+                                        lane_bytes: 4,
+                                        lanes: selectors.try_into().unwrap(),
+                                    },
+                                    inputs,
+                                )
+                            } else {
+                                (
+                                    shuffled[..cut]
+                                        .iter()
+                                        .cloned()
+                                        .map(|op| self.convert(op))
+                                        .collect(),
+                                    crate::SimdOp::ShuffleScalars { lane_bytes: 4 },
+                                    lanes.iter().map(|lane| lane.inputs[0]).collect(),
+                                )
+                            };
+                        result.push(CgOp {
+                            op: Op::Simd(op),
+                            output: Some(Varnode::new(Space::Register, first.offset, 16)),
+                            inputs,
+                        });
+                        return Ok((result, false, None, true));
+                    }
+                }
+            }
+        }
+        if mnem == "PSRLDQ" {
+            let shift = sse_immediate(insn).and_then(|value| u8::try_from(value).ok());
+            let item = ops.iter().find(|op| {
+                op.opcode == OpCode::IntRight && op.output.is_some_and(|v| v.size == 16)
+            });
+            if let (Some(shift), Some(item)) = (shift, item) {
+                if let (Some(output), Some(source)) = (item.output, item.inputs.first()) {
+                    return Ok((
+                        vec![CgOp {
+                            op: Op::Simd(crate::SimdOp::ShiftBytesRight { bytes: shift }),
+                            output: Some(output),
+                            inputs: vec![*source],
+                        }],
+                        false,
+                        None,
+                        true,
+                    ));
+                }
+            }
+            let op = self.reject(
+                insn,
+                Reason::Unsupported {
+                    detail: "unsupported PSRLDQ p-code shape".into(),
+                },
+                SlowFamily::Unmodelled,
+            );
+            return Ok((vec![cg(op)], false, None, false));
+        }
         let ops = match correct_sse(&mnem, &ops, self.regs, insn, &mut |size| self.fresh(size)) {
             Ok(ops) => ops,
             Err(reason) => {
@@ -756,7 +1006,18 @@ impl<'a> InstructionLowerer<'a> {
                 return Ok((vec![cg(op)], false, None, false));
             }
         };
-        let converted: Vec<CgOp> = ops.into_iter().map(|op| self.convert(op)).collect();
+        let converted: Vec<CgOp> = ops
+            .into_iter()
+            .map(|op| {
+                let mut converted = self.convert(op);
+                if matches!(converted.op, Op::CallOther(_)) {
+                    if let Some(simd) = crate::wide::semantic(&mnem) {
+                        converted.op = Op::Simd(simd);
+                    }
+                }
+                converted
+            })
+            .collect();
         Ok((converted, false, flag_operands, true))
     }
 
@@ -894,6 +1155,13 @@ fn correct_sse(
     insn: &Insn,
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
+    if crate::wide::deferred(mnem) {
+        return Ok(if mnem.starts_with("CMP") && mnem.ends_with("PS") {
+            rewrite_temps(ops, regs, fresh)
+        } else {
+            ops.to_vec()
+        });
+    }
     let unsupported = || Reason::Unsupported {
         detail: format!("unsupported {mnem} p-code shape"),
     };
@@ -1034,60 +1302,6 @@ fn correct_sse(
         }
         return Ok(out);
     }
-    if mnem == "PSRLDQ" {
-        return split_psrldq(ops, insn, regs, fresh);
-    }
-    if matches!(mnem, "SHUFPS" | "PSHUFD") {
-        return match lower_shuffle(mnem, ops, insn, fresh) {
-            Some(out) => Ok(out),
-            None => split_wide(ops, mnem, regs, fresh),
-        };
-    }
-    if mnem.starts_with("CMP") && mnem.ends_with("PS") {
-        let rewritten = rewrite_temps(ops, regs, fresh);
-        return split_wide(&rewritten, mnem, regs, fresh);
-    }
-    if matches!(
-        mnem,
-        "MOVAPS"
-            | "XORPS"
-            | "ANDPS"
-            | "ORPS"
-            | "ANDNPS"
-            | "ADDPS"
-            | "SUBPS"
-            | "MULPS"
-            | "DIVPS"
-            | "MINPS"
-            | "MAXPS"
-            | "SQRTPS"
-            | "RCPPS"
-            | "RSQRTPS"
-            | "CMPEQPS"
-            | "CMPLTPS"
-            | "CMPLEPS"
-            | "CMPUNORDPS"
-            | "CMPNEQPS"
-            | "CMPNLTPS"
-            | "CMPNLEPS"
-            | "CMPORDPS"
-            | "UNPCKLPS"
-            | "UNPCKHPS"
-            | "MOVLHPS"
-            | "MOVHLPS"
-            | "MOVLPS"
-            | "MOVHPS"
-            | "MOVMSKPS"
-            | "MOVUPS"
-            | "MOVNTPS"
-            | "MOVDQA"
-            | "MOVDQU"
-            | "MOVAPD"
-            | "PUNPCKLQDQ"
-            | "PUNPCKHQDQ"
-    ) {
-        return split_wide(ops, mnem, regs, fresh);
-    }
     Ok(ops.to_vec())
 }
 
@@ -1179,70 +1393,6 @@ fn lower_shuffle(
         out.push(copy(target, source));
     }
     Some(out)
-}
-
-fn split_psrldq(
-    ops: &[PcodeOp],
-    insn: &Insn,
-    regs: &Registers,
-    fresh: &mut dyn FnMut(u32) -> Varnode,
-) -> Result<Vec<PcodeOp>, Reason> {
-    let unsupported = || Reason::Unsupported {
-        detail: "unsupported PSRLDQ p-code shape".into(),
-    };
-    let shift = sse_immediate(insn).ok_or_else(unsupported)? as usize & 0xff;
-    let item = ops
-        .iter()
-        .find(|op| op.opcode == OpCode::IntRight && op.output.is_some_and(|v| v.size == 16))
-        .ok_or_else(unsupported)?;
-    let source = wide_lanes(
-        *item.inputs.first().ok_or_else(unsupported)?,
-        &BTreeMap::new(),
-        regs,
-        fresh,
-    )?;
-    let output = wide_output(item.output.ok_or_else(unsupported)?, regs, fresh)?;
-    let mut out = Vec::new();
-    let mut snapshot = [Varnode::constant(0, 4); 4];
-    for lane in 0..4 {
-        snapshot[lane] = fresh(4);
-        out.push(copy(snapshot[lane], source[lane]));
-    }
-    for lane in 0..4 {
-        let byte = lane * 4 + shift;
-        if byte >= 16 {
-            out.push(copy(output[lane], Varnode::constant(0, 4)));
-            continue;
-        }
-        let index = byte / 4;
-        let bits = (byte % 4) as u64 * 8;
-        let value = if bits == 0 {
-            snapshot[index]
-        } else {
-            let down = fresh(4);
-            let up = fresh(4);
-            let merged = fresh(4);
-            out.push(op(
-                OpCode::IntRight,
-                down,
-                vec![snapshot[index], Varnode::constant(bits, 4)],
-            ));
-            let high = if index < 3 {
-                snapshot[index + 1]
-            } else {
-                Varnode::constant(0, 4)
-            };
-            out.push(op(
-                OpCode::IntLeft,
-                up,
-                vec![high, Varnode::constant(32 - bits, 4)],
-            ));
-            out.push(op(OpCode::IntOr, merged, vec![down, up]));
-            merged
-        };
-        out.push(copy(output[lane], value));
-    }
-    Ok(out)
 }
 
 fn correct_extra(
@@ -1701,351 +1851,6 @@ fn correct_cmpxchg8b(
     Ok(out)
 }
 
-fn wide_lanes(
-    value: Varnode,
-    lanes: &BTreeMap<Varnode, [Varnode; 4]>,
-    regs: &Registers,
-    _fresh: &mut dyn FnMut(u32) -> Varnode,
-) -> Result<[Varnode; 4], Reason> {
-    if let Some(lanes) = lanes.get(&value) {
-        return Ok(*lanes);
-    }
-    if value.space == Space::Register {
-        if !regs
-            .covering(value.offset)
-            .is_some_and(|(name, _)| name.starts_with("XMM"))
-        {
-            return Err(Reason::Unsupported {
-                detail: "wide non-XMM register".into(),
-            });
-        }
-        return Ok(std::array::from_fn(|lane| {
-            Varnode::new(Space::Register, value.offset + lane as u64 * 4, 4)
-        }));
-    }
-    if value.space == Space::Const {
-        return Ok(std::array::from_fn(|lane| {
-            Varnode::constant(
-                value.offset.checked_shr(lane as u32 * 32).unwrap_or(0) & 0xffff_ffff,
-                4,
-            )
-        }));
-    }
-    Err(Reason::Unsupported {
-        detail: "wide value without dword lanes".into(),
-    })
-}
-
-fn wide_output(
-    value: Varnode,
-    regs: &Registers,
-    fresh: &mut dyn FnMut(u32) -> Varnode,
-) -> Result<[Varnode; 4], Reason> {
-    if value.space == Space::Register {
-        wide_lanes(value, &BTreeMap::new(), regs, fresh)
-    } else if value.space == Space::Unique {
-        Ok(std::array::from_fn(|_| fresh(4)))
-    } else {
-        Err(Reason::Unsupported {
-            detail: "wide output space".into(),
-        })
-    }
-}
-
-fn lane_address(
-    address: Varnode,
-    lane: usize,
-    fresh: &mut dyn FnMut(u32) -> Varnode,
-    out: &mut Vec<PcodeOp>,
-) -> Result<Varnode, Reason> {
-    if address.size != 4 {
-        return Err(Reason::Unsupported {
-            detail: "wide memory address width".into(),
-        });
-    }
-    if address.space == Space::Const {
-        return Ok(Varnode::constant(address.offset + lane as u64 * 4, 4));
-    }
-    let offset = Varnode::constant(lane as u64 * 4, address.size);
-    let result = fresh(address.size);
-    out.push(op(OpCode::IntAdd, result, vec![address, offset]));
-    Ok(result)
-}
-
-fn half_lanes(
-    value: Varnode,
-    lanes: &BTreeMap<Varnode, [Varnode; 2]>,
-    regs: &Registers,
-) -> Result<[Varnode; 2], Reason> {
-    if let Some(lanes) = lanes.get(&value) {
-        return Ok(*lanes);
-    }
-    if value.space == Space::Register {
-        if !regs
-            .covering(value.offset)
-            .is_some_and(|(name, _)| name.starts_with("XMM"))
-        {
-            return Err(Reason::Unsupported {
-                detail: "wide non-XMM register".into(),
-            });
-        }
-        return Ok(std::array::from_fn(|lane| {
-            Varnode::new(Space::Register, value.offset + lane as u64 * 4, 4)
-        }));
-    }
-    if value.space == Space::Const {
-        return Ok(std::array::from_fn(|lane| {
-            Varnode::constant((value.offset >> (lane * 32)) & 0xffff_ffff, 4)
-        }));
-    }
-    Err(Reason::Unsupported {
-        detail: "wide value without dword lanes".into(),
-    })
-}
-
-fn half_output(
-    value: Varnode,
-    regs: &Registers,
-    fresh: &mut dyn FnMut(u32) -> Varnode,
-) -> Result<[Varnode; 2], Reason> {
-    if value.space == Space::Register {
-        half_lanes(value, &BTreeMap::new(), regs)
-    } else if value.space == Space::Unique {
-        Ok(std::array::from_fn(|_| fresh(4)))
-    } else {
-        Err(Reason::Unsupported {
-            detail: "wide output space".into(),
-        })
-    }
-}
-
-fn split_wide(
-    ops: &[PcodeOp],
-    mnem: &str,
-    regs: &Registers,
-    fresh: &mut dyn FnMut(u32) -> Varnode,
-) -> Result<Vec<PcodeOp>, Reason> {
-    let unsupported = || Reason::Unsupported {
-        detail: "unsupported wide SSE shape".into(),
-    };
-    let mut out = Vec::with_capacity(ops.len() * 4);
-    let mut lanes: BTreeMap<Varnode, [Varnode; 4]> = BTreeMap::new();
-    let mut halves: BTreeMap<Varnode, [Varnode; 2]> = BTreeMap::new();
-    for item in ops {
-        if item.opcode == OpCode::CallOther {
-            if mnem == "MOVMSKPS" {
-                let output = item.output.ok_or_else(unsupported)?;
-                let source = wide_lanes(
-                    *item.inputs.last().ok_or_else(unsupported)?,
-                    &lanes,
-                    regs,
-                    fresh,
-                )?;
-                let mut acc = Varnode::constant(0, 4);
-                for lane in 0..4 {
-                    let shifted = fresh(4);
-                    let bit = fresh(4);
-                    let placed = fresh(4);
-                    let merged = fresh(4);
-                    out.push(op(
-                        OpCode::IntRight,
-                        shifted,
-                        vec![source[lane], Varnode::constant(31, 4)],
-                    ));
-                    out.push(op(
-                        OpCode::IntAnd,
-                        bit,
-                        vec![shifted, Varnode::constant(1, 4)],
-                    ));
-                    out.push(op(
-                        OpCode::IntLeft,
-                        placed,
-                        vec![bit, Varnode::constant(lane as u64, 4)],
-                    ));
-                    out.push(op(OpCode::IntOr, merged, vec![acc, placed]));
-                    acc = merged;
-                }
-                out.push(copy(output, acc));
-                continue;
-            }
-            if matches!(
-                mnem,
-                "MINPS" | "MAXPS" | "DIVPS" | "SQRTPS" | "RCPPS" | "RSQRTPS" | "RSQRTSS"
-            ) {
-                let output = item.output.ok_or_else(unsupported)?;
-                let source = *item.inputs.last().ok_or_else(unsupported)?;
-                if output.size == 16 {
-                    let output_lanes = wide_output(output, regs, fresh)?;
-                    if matches!(mnem, "MINPS" | "MAXPS" | "DIVPS") {
-                        let vectors: Vec<Varnode> = item
-                            .inputs
-                            .iter()
-                            .copied()
-                            .filter(|value| value.size == 16)
-                            .collect();
-                        if vectors.len() < 2 {
-                            return Err(unsupported());
-                        }
-                        let left = wide_lanes(vectors[0], &lanes, regs, fresh)?;
-                        let right = wide_lanes(vectors[1], &lanes, regs, fresh)?;
-                        let code = match mnem {
-                            "MINPS" => OpCode::FloatMin,
-                            "MAXPS" => OpCode::FloatMax,
-                            _ => OpCode::FloatDiv,
-                        };
-                        for lane in 0..4 {
-                            out.push(op(code, output_lanes[lane], vec![left[lane], right[lane]]));
-                        }
-                    } else {
-                        let source_lanes = wide_lanes(source, &lanes, regs, fresh)?;
-                        let code = match mnem {
-                            "SQRTPS" => OpCode::FloatSqrt,
-                            "RCPPS" => OpCode::FloatRcp,
-                            _ => OpCode::FloatRsqrt,
-                        };
-                        for lane in 0..4 {
-                            out.push(op(code, output_lanes[lane], vec![source_lanes[lane]]));
-                        }
-                    }
-                    lanes.insert(output, output_lanes);
-                } else if output.size == 4 && source.size == 4 {
-                    out.push(op(OpCode::FloatRsqrt, output, vec![source]));
-                } else {
-                    return Err(unsupported());
-                }
-                continue;
-            }
-        }
-        if item.opcode == OpCode::SubPiece
-            && item.output.is_some_and(|v| v.size == 4)
-            && item.inputs.len() == 2
-            && item.inputs[0].size == 16
-            && item.inputs[1].space == Space::Const
-        {
-            let offset = item.inputs[1].offset;
-            if offset % 4 != 0 || offset >= 16 {
-                return Err(unsupported());
-            }
-            let source = wide_lanes(item.inputs[0], &lanes, regs, fresh)?;
-            out.push(copy(item.output.unwrap(), source[offset as usize / 4]));
-            continue;
-        }
-        let half_output_value = item.output.filter(|v| v.size == 8);
-        let half_inputs = item
-            .inputs
-            .iter()
-            .filter(|v| v.size == 8)
-            .copied()
-            .collect::<Vec<_>>();
-        if half_output_value.is_some() || !half_inputs.is_empty() {
-            match item.opcode {
-                OpCode::Load if half_output_value.is_some() && item.inputs.len() == 1 => {
-                    let output = half_output(half_output_value.unwrap(), regs, fresh)?;
-                    for lane in 0..2 {
-                        let address = lane_address(item.inputs[0], lane, fresh, &mut out)?;
-                        out.push(PcodeOp {
-                            opcode: OpCode::Load,
-                            output: Some(output[lane]),
-                            inputs: vec![address],
-                            userop: None,
-                        });
-                    }
-                    halves.insert(half_output_value.unwrap(), output);
-                }
-                OpCode::Copy if half_output_value.is_some() && half_inputs.len() == 1 => {
-                    let source = half_lanes(half_inputs[0], &halves, regs)?;
-                    let output = half_output(half_output_value.unwrap(), regs, fresh)?;
-                    for lane in 0..2 {
-                        out.push(copy(output[lane], source[lane]));
-                    }
-                    halves.insert(half_output_value.unwrap(), output);
-                }
-                OpCode::Store if half_output_value.is_none() && item.inputs.len() == 2 => {
-                    let source = half_lanes(item.inputs[1], &halves, regs)?;
-                    for lane in 0..2 {
-                        let address = lane_address(item.inputs[0], lane, fresh, &mut out)?;
-                        out.push(PcodeOp {
-                            opcode: OpCode::Store,
-                            output: None,
-                            inputs: vec![address, source[lane]],
-                            userop: None,
-                        });
-                    }
-                }
-                _ => return Err(unsupported()),
-            }
-            continue;
-        }
-        let wide_output_value = item.output.filter(|v| v.size == 16);
-        let wide_inputs = item
-            .inputs
-            .iter()
-            .filter(|v| v.size == 16)
-            .copied()
-            .collect::<Vec<_>>();
-        if wide_output_value.is_none() && wide_inputs.is_empty() {
-            out.push(item.clone());
-            continue;
-        }
-        match item.opcode {
-            OpCode::Load if wide_output_value.is_some() && item.inputs.len() == 1 => {
-                let output = wide_output(wide_output_value.unwrap(), regs, fresh)?;
-                for lane in 0..4 {
-                    let address = lane_address(item.inputs[0], lane, fresh, &mut out)?;
-                    out.push(PcodeOp {
-                        opcode: OpCode::Load,
-                        output: Some(output[lane]),
-                        inputs: vec![address],
-                        userop: None,
-                    });
-                }
-                lanes.insert(wide_output_value.unwrap(), output);
-            }
-            OpCode::Copy if wide_output_value.is_some() && wide_inputs.len() == 1 => {
-                let source = wide_lanes(wide_inputs[0], &lanes, regs, fresh)?;
-                let output = wide_output(wide_output_value.unwrap(), regs, fresh)?;
-                for lane in 0..4 {
-                    out.push(copy(output[lane], source[lane]));
-                }
-                lanes.insert(wide_output_value.unwrap(), output);
-            }
-            OpCode::Store if wide_output_value.is_none() && item.inputs.len() == 2 => {
-                let source = wide_lanes(item.inputs[1], &lanes, regs, fresh)?;
-                for lane in 0..4 {
-                    let address = lane_address(item.inputs[0], lane, fresh, &mut out)?;
-                    out.push(PcodeOp {
-                        opcode: OpCode::Store,
-                        output: None,
-                        inputs: vec![address, source[lane]],
-                        userop: None,
-                    });
-                }
-            }
-            OpCode::IntAnd | OpCode::IntOr | OpCode::IntXor
-                if wide_output_value.is_some() && wide_inputs.len() == 2 =>
-            {
-                let left = wide_lanes(wide_inputs[0], &lanes, regs, fresh)?;
-                let right = wide_lanes(wide_inputs[1], &lanes, regs, fresh)?;
-                let output = wide_output(wide_output_value.unwrap(), regs, fresh)?;
-                for lane in 0..4 {
-                    out.push(op(item.opcode, output[lane], vec![left[lane], right[lane]]));
-                }
-                lanes.insert(wide_output_value.unwrap(), output);
-            }
-            OpCode::IntNegate if wide_output_value.is_some() && wide_inputs.len() == 1 => {
-                let source = wide_lanes(wide_inputs[0], &lanes, regs, fresh)?;
-                let output = wide_output(wide_output_value.unwrap(), regs, fresh)?;
-                for lane in 0..4 {
-                    out.push(op(item.opcode, output[lane], vec![source[lane]]));
-                }
-                lanes.insert(wide_output_value.unwrap(), output);
-            }
-            _ => return Err(unsupported()),
-        }
-    }
-    Ok(out)
-}
-
 fn normalize_direct_ram(
     ops: &[PcodeOp],
     fresh: &mut dyn FnMut(u32) -> Varnode,
@@ -2194,7 +1999,7 @@ fn normalize_direct_ram(
     Ok(out)
 }
 
-fn copy(output: Varnode, input: Varnode) -> PcodeOp {
+pub(crate) fn copy(output: Varnode, input: Varnode) -> PcodeOp {
     PcodeOp {
         opcode: OpCode::Copy,
         output: Some(output),
@@ -2202,7 +2007,7 @@ fn copy(output: Varnode, input: Varnode) -> PcodeOp {
         userop: None,
     }
 }
-fn op(opcode: OpCode, output: Varnode, inputs: Vec<Varnode>) -> PcodeOp {
+pub(crate) fn op(opcode: OpCode, output: Varnode, inputs: Vec<Varnode>) -> PcodeOp {
     PcodeOp {
         opcode,
         output: Some(output),

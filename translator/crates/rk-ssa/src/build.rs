@@ -104,9 +104,17 @@ pub(crate) fn build_with_faults(
     lazy_stack_writes: bool,
     frame: Option<&FramePlan>,
 ) -> Result<Ssa, Diagnostic> {
-    let mut builder = Builder::new(cg, opts, fault_state, frame)?;
+    let mut lowered = std::borrow::Cow::Borrowed(cg);
+    if cg.insns.iter().any(|insn| rk_ir::wide::required(&insn.ops)) {
+        for insn in &mut lowered.to_mut().insns {
+            if rk_ir::wide::required(&insn.ops) {
+                insn.ops = rk_ir::wide::legalize(&insn.ops, insn.addr)?;
+            }
+        }
+    }
+    let mut builder = Builder::new(&lowered, opts, fault_state, frame)?;
     builder.lazy_stack_writes = lazy_stack_writes;
-    builder.run(cg)
+    builder.run(&lowered)
 }
 
 struct Builder<'a> {
@@ -1289,7 +1297,8 @@ impl<'a> Builder<'a> {
                 }
                 ops.push(value);
             }
-            Op::Input(_)
+            Op::Simd(_)
+            | Op::Input(_)
             | Op::Const(_)
             | Op::Phi
             | Op::Byte(_)

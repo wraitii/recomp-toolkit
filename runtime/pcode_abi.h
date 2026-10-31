@@ -114,8 +114,8 @@ enum {
 #define RP_USEROP_RDTSC UINT64_MAX
 #define RP_USEROP_CPUID (UINT64_MAX - 1)
 #define RP_USEROP_X87_CLEAR (UINT64_MAX - 2)
-#define RP_USEROP_PUSHFD (UINT64_MAX - 3)
-#define RP_USEROP_POPFD (UINT64_MAX - 4)
+#define RP_USEROP_X87_EMPTY (UINT64_MAX - 3)
+#define RP_USEROP_X87_EMPTY_RESET (UINT64_MAX - 4)
 
 typedef struct RpVarnode {
     uint32_t space;

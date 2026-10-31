@@ -18,6 +18,8 @@ pub struct Arch {
     pub x86: X86Registers,
 }
 
+pub const EFLAGS_MISC: Varnode = Varnode::new(Space::Register, 0xffff0000, 4);
+
 #[derive(Clone, Copy, Debug)]
 pub struct X86Registers {
     pub fpu_control: Varnode,
