@@ -22,7 +22,10 @@ per-draw constants and group 1 for material textures, samplers and interpreter
 programs. Sealed batches move to the submit worker for upload preparation and
 recording. The worker retains the encoder across ordered batches, clears and raw
 texture copies, with up to 32 queued jobs. Synchronous recording paths reclaim it;
-frame submissions and event-query markers remain ordered on the worker.
+frame submissions and event-query markers remain ordered on the worker. Streamed
+geometry retains immutable source ranges for direct worker-side staging copies,
+with an 8 MiB source-allocation budget per batch (counting each retained reference);
+excess ranges use eager copies. Snapshots are released after staging.
 DIVERGENCE(original): backend validation/OOM failures during deferred recording fail with a named
 worker diagnostic rather than returning a synchronous operation HRESULT;
 CPU-side draw validation remains synchronous.
@@ -280,6 +283,10 @@ plus executing jobs), `submit_sync_wait_ns`, `batch_record_jobs`,
 `batch_cache_wait_ns` (texture invalidation blocking), `batch_queue_wait_ns`
 (enqueue to recording start), and `batch_record_ns` (worker preparation/recording).
 Completed recording times are collected at subsequent job enqueues and can lag a frame.
+`deferred_geometry_bytes` counts deferred upload ranges, while
+`deferred_geometry_source_bytes` sums source lengths per retained reference;
+`buffer_snapshot_copy_bytes` counts full-buffer copies caused by shared snapshots
+on later updates.
 Statistics enable per-draw and handoff clock reads; leave them and pipeline tracing
 off for final performance comparisons.
 `RECOMP_D3D9_TRACE_MEMOS=1` independently reports `[d3d9-memos]` reuse buckets

@@ -1786,10 +1786,113 @@ fn same_bindings(a: &PendingDraw, b: &PendingDraw) -> bool {
     a.layout.material == b.layout.material && a.programs == b.programs && a.textures == b.textures
 }
 
+struct StreamUpload {
+    bytes: Arc<Vec<u8>>,
+    source: usize,
+    destination: usize,
+    size: usize,
+    resident: usize,
+}
+
+#[derive(Default)]
+struct BatchUpload {
+    bytes: Vec<u8>,
+    streams: Vec<StreamUpload>,
+    size: usize,
+    retained: usize,
+}
+
+impl BatchUpload {
+    fn len(&self) -> usize {
+        self.size
+    }
+
+    fn clear(&mut self) {
+        self.bytes.clear();
+        self.streams.clear();
+        self.size = 0;
+        self.retained = 0;
+    }
+
+    fn resize(&mut self, size: usize, value: u8) {
+        self.bytes
+            .resize(self.bytes.len() + size - self.size, value);
+        self.size = size;
+    }
+
+    fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+        self.size += bytes.len();
+    }
+
+    fn get(&self, range: std::ops::Range<usize>) -> Option<&[u8]> {
+        let count = self
+            .streams
+            .partition_point(|stream| stream.destination < range.end);
+        let skipped = match count.checked_sub(1).map(|index| &self.streams[index]) {
+            Some(stream) if stream.destination + stream.size > range.start => return None,
+            Some(stream) => stream.destination + stream.size - stream.resident,
+            None => 0,
+        };
+        self.bytes.get(range.start - skipped..range.end - skipped)
+    }
+
+    fn tail_mut(&mut self, start: usize) -> &mut [u8] {
+        let skipped = self.size - self.bytes.len();
+        &mut self.bytes[start - skipped..]
+    }
+
+    fn stream(&mut self, bytes: &Arc<Vec<u8>>, source: usize, size: usize) {
+        let source = source.min(bytes.len());
+        if self.retained.saturating_add(bytes.capacity()) > 8 << 20 {
+            let end = self.size + size;
+            self.extend_from_slice(&bytes[source..(source + size).min(bytes.len())]);
+            self.resize(end, 0);
+            return;
+        }
+        self.retained += bytes.capacity();
+        self.streams.push(StreamUpload {
+            bytes: Arc::clone(bytes),
+            source,
+            destination: self.size,
+            size,
+            resident: self.bytes.len(),
+        });
+        self.size += size;
+        stats::record(|s| {
+            s.deferred_geometry_bytes += size as u64;
+            s.deferred_geometry_source_bytes += bytes.len() as u64;
+        });
+    }
+
+    fn write_to(&mut self, destination: &mut wgpu::BufferViewMut) {
+        let mut resident = 0;
+        let mut written = 0;
+        for stream in self.streams.drain(..) {
+            destination
+                .slice(written..stream.destination)
+                .copy_from_slice(&self.bytes[resident..stream.resident]);
+            let source_end = (stream.source + stream.size).min(stream.bytes.len());
+            let copied_end = stream.destination + source_end - stream.source;
+            destination
+                .slice(stream.destination..copied_end)
+                .copy_from_slice(&stream.bytes[stream.source..source_end]);
+            written = stream.destination + stream.size;
+            destination.slice(copied_end..written).fill(0);
+            resident = stream.resident;
+        }
+        destination
+            .slice(written..self.size)
+            .copy_from_slice(&self.bytes[resident..]);
+        destination.slice(self.size..).fill(0);
+        self.clear();
+    }
+}
+
 #[derive(Default)]
 struct DrawBatch {
     draws: Vec<PendingDraw>,
-    data: Vec<u8>,
+    data: BatchUpload,
     color_view: Option<wgpu::TextureView>,
     color_key_view: Option<wgpu::TextureView>,
     padded_color: Option<PaddedColor>,
@@ -3623,10 +3726,7 @@ pub(crate) fn execute(
             if let GeometryData::Stream(bytes) = source {
                 let start = data.len().next_multiple_of(4);
                 data.resize(start, 0);
-                let from = (*offset as usize).min(bytes.len());
-                let to = (from + size as usize).min(bytes.len());
-                data.extend_from_slice(&bytes[from..to]);
-                data.resize(start + size as usize, 0);
+                data.stream(bytes, *offset as usize, size as usize);
                 *offset = start as u64;
                 *source = GeometryData::Upload;
             }
@@ -3652,12 +3752,20 @@ pub(crate) fn execute(
         let start = draw.batch.data.len();
         let format = if compact_indices {
             draw.batch.data.resize(start + index_size, 0);
-            for (destination, &index) in draw.batch.data[start..].chunks_exact_mut(2).zip(indices) {
+            for (destination, &index) in draw
+                .batch
+                .data
+                .tail_mut(start)
+                .chunks_exact_mut(2)
+                .zip(indices)
+            {
                 destination.copy_from_slice(&(index as u16).to_le_bytes());
             }
             wgpu::IndexFormat::Uint16
         } else {
-            append_u32_le(&mut draw.batch.data, indices);
+            for index in indices {
+                draw.batch.data.extend_from_slice(&index.to_le_bytes());
+            }
             wgpu::IndexFormat::Uint32
         };
         let size = draw.batch.data.len() - start;
@@ -3932,7 +4040,11 @@ fn flush_inner(
         ));
     }
     let recorder = Arc::clone(&draw.recorder);
-    let mut spare = recorder.try_lock().ok().and_then(|mut r| r.spare.take()).unwrap_or_default();
+    let mut spare = recorder
+        .try_lock()
+        .ok()
+        .and_then(|mut r| r.spare.take())
+        .unwrap_or_default();
     for pending in &mut spare.draws {
         if let Some(geometry) = pending.native_geometry.take() {
             draw.native_geometry_pool.push(geometry);
@@ -4157,14 +4269,12 @@ fn record_sealed_batch(
                 }),
             },
         );
-    staging
-        .write_buffer(
-            encoder,
-            &upload,
-            0,
-            wgpu::BufferSize::new(needed).expect("draw upload is nonempty"),
-        )
-        .copy_from_slice(&batch.data);
+    batch.data.write_to(&mut staging.write_buffer(
+        encoder,
+        &upload,
+        0,
+        wgpu::BufferSize::new(needed).expect("draw upload is nonempty"),
+    ));
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("d3d9-draw-batch"),
         color_attachments: &colors,

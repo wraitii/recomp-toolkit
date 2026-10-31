@@ -1572,6 +1572,9 @@ pub fn upload_dirty_buffer(b: &mut BufferState) -> Result<(), RenderError> {
             let strong = Arc::strong_count(&uploaded);
             let weak_detach = strong == 1 && Arc::weak_count(&uploaded) != 0;
             s.buffer_snapshot_copies += u64::from(strong > 1);
+            if strong > 1 {
+                s.buffer_snapshot_copy_bytes += uploaded.len() as u64;
+            }
             s.buffer_weak_detaches += u64::from(weak_detach);
             if matches!(b.format, 101 | 102) {
                 s.index_buffer_uploads += 1;
