@@ -11,8 +11,8 @@ pub fn source() -> String {
          @group(0) @binding(1) var<uniform> vsp: VSP;\n\
          @group(0) @binding(2) var<uniform> pcb: array<vec4<f32>, {PIXEL_CONSTANTS}>;\n\
          @group(0) @binding(3) var<uniform> psp: PSP;\n\
-         @group(0) @binding({}) var<uniform> vp: Program;\n\
-         @group(0) @binding({}) var<uniform> pp: Program;\n\
+         @group(1) @binding({}) var<uniform> vp: Program;\n\
+         @group(1) @binding({}) var<uniform> pp: Program;\n\
          struct Registers {{ temp: array<vec4<f32>, {TEMP_REGISTERS}>, input: array<vec4<f32>, {VERTEX_INPUTS}>, pos: vec4<f32>, color: array<vec4<f32>, 2>, address: vec4<f32>, tex: array<vec4<f32>, {TEXTURE_COORDINATES}> }}\n",
         PROGRAM_BINDINGS[0], PROGRAM_BINDINGS[1]
     );
@@ -22,7 +22,7 @@ pub fn source() -> String {
     for slot in 0..TEXTURE_SLOTS {
         let kind = if slot < TEXTURES_2D { "2d" } else { "cube" };
         source += &format!(
-            "@group(0) @binding({}) var tx{slot}: texture_{kind}<f32>;\n@group(0) @binding({}) var sm{slot}: sampler;\n",
+            "@group(1) @binding({}) var tx{slot}: texture_{kind}<f32>;\n@group(1) @binding({}) var sm{slot}: sampler;\n",
             TEXTURE_BINDING + slot,
             SAMPLER_BINDING + slot
         );

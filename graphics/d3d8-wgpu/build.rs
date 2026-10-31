@@ -77,7 +77,10 @@ fn interpreter_source() {
         let mut resources = naga::back::msl::EntryPointResources::default();
         for (binding, slot) in [(0, 0), (1, 1), (2, 2), (3, 3), (36, 4), (37, 5)] {
             resources.resources.insert(
-                naga::ResourceBinding { group: 0, binding },
+                naga::ResourceBinding {
+                    group: u32::from(binding >= 4),
+                    binding,
+                },
                 naga::back::msl::BindTarget {
                     buffer: Some(slot),
                     ..Default::default()
@@ -87,7 +90,7 @@ fn interpreter_source() {
         for slot in 0..uber_abi::TEXTURE_SLOTS {
             resources.resources.insert(
                 naga::ResourceBinding {
-                    group: 0,
+                    group: 1,
                     binding: shader_interface::TEXTURE_BINDING + slot,
                 },
                 naga::back::msl::BindTarget {
@@ -97,7 +100,7 @@ fn interpreter_source() {
             );
             resources.resources.insert(
                 naga::ResourceBinding {
-                    group: 0,
+                    group: 1,
                     binding: shader_interface::SAMPLER_BINDING + slot,
                 },
                 naga::back::msl::BindTarget {

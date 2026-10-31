@@ -1,7 +1,7 @@
 use super::format;
 use crate::RenderError;
 use crate::backend::GpuContext;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 pub const COPY_ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -125,29 +125,66 @@ impl PendingClear {
     }
 }
 
+type Recording = (wgpu::CommandEncoder, wgpu::util::StagingBelt);
+type Recorded = Recording;
+type RecordTask = Box<dyn FnOnce(&mut wgpu::CommandEncoder, &mut wgpu::util::StagingBelt) + Send>;
+
 enum SubmitJob {
-    Frame(wgpu::CommandEncoder, wgpu::util::StagingBelt),
+    Record(Option<Recording>, RecordTask, Option<std::time::Instant>),
+    Reclaim(mpsc::Sender<Recorded>),
+    Frame(Option<Recording>),
     After(Box<dyn FnOnce(&wgpu::Queue) + Send>),
     Sync(mpsc::Sender<()>),
 }
 
 struct Submitter {
-    jobs: Option<mpsc::Sender<SubmitJob>>,
+    jobs: Option<mpsc::SyncSender<SubmitJob>>,
     belts: mpsc::Receiver<wgpu::util::StagingBelt>,
     thread: Option<std::thread::JoinHandle<()>>,
+    depth: Option<Arc<AtomicUsize>>,
+    timings: Arc<(AtomicU64, AtomicU64)>,
 }
 
 impl Submitter {
     fn new(queue: wgpu::Queue, physical: PhysicalLoss) -> Self {
-        let (jobs, received) = mpsc::channel::<SubmitJob>();
+        let (jobs, received) = mpsc::sync_channel::<SubmitJob>(32);
         let (returned, belts) = mpsc::channel();
+        let depth = super::stats::enabled().then(|| Arc::new(AtomicUsize::new(0)));
+        let worker_depth = depth.clone();
+        let timings = Arc::new((AtomicU64::new(0), AtomicU64::new(0)));
+        let worker_timings = Arc::clone(&timings);
         let thread = std::thread::Builder::new()
             .name("d3d9-submit".into())
             .spawn(move || {
+                let mut recording: Option<Recording> = None;
                 for job in received {
                     match job {
-                        SubmitJob::Frame(encoder, mut staging) => {
+                        SubmitJob::Record(initial, record, queued) => {
+                            if initial.is_some() {
+                                assert!(recording.is_none());
+                                recording = initial;
+                            }
+                            let (encoder, staging) = recording.as_mut().expect("D3D9 recording is owned");
+                            let start = queued.map(|_| std::time::Instant::now());
+                            let queued_ns = queued.zip(start).map_or(0, |(queued, start)| {
+                                start.duration_since(queued).as_nanos() as u64
+                            });
+                            record(encoder, staging);
+                            let record_ns = start.map_or(0, |start| start.elapsed().as_nanos() as u64);
+                            worker_timings.0.fetch_add(queued_ns, Ordering::Relaxed);
+                            worker_timings.1.fetch_add(record_ns, Ordering::Relaxed);
+                        }
+                        SubmitJob::Reclaim(returned) => {
+                            let _ = returned.send(recording.take().expect("D3D9 recording is owned"));
+                        }
+                        SubmitJob::Frame(initial) => {
+                            if initial.is_some() {
+                                assert!(recording.is_none());
+                                recording = initial;
+                            }
+                            let (encoder, mut staging) = recording.take().expect("D3D9 recording is owned");
                             if !physical.is_lost() {
+                                staging.finish();
                                 queue.submit([encoder.finish()]);
                                 staging.recall();
                             }
@@ -155,8 +192,15 @@ impl Submitter {
                         }
                         SubmitJob::After(work) => work(&queue),
                         SubmitJob::Sync(done) => {
+                            if let Some(depth) = &worker_depth {
+                                depth.fetch_sub(1, Ordering::AcqRel);
+                            }
                             let _ = done.send(());
+                            continue;
                         }
+                    }
+                    if let Some(depth) = &worker_depth {
+                        depth.fetch_sub(1, Ordering::AcqRel);
                     }
                 }
             })
@@ -165,10 +209,24 @@ impl Submitter {
             jobs: Some(jobs),
             belts,
             thread: Some(thread),
+            depth,
+            timings,
         }
     }
 
     fn send(&self, job: SubmitJob) {
+        let queued = self.timings.0.swap(0, Ordering::Relaxed);
+        let recorded = self.timings.1.swap(0, Ordering::Relaxed);
+        super::stats::record(|s| {
+            s.batch_queue_wait_ns += queued;
+            s.batch_record_ns += recorded;
+        });
+        if let Some(depth) = &self.depth {
+            let depth = depth.fetch_add(1, Ordering::AcqRel) + 1;
+            super::stats::record(|s| {
+                s.submit_queue_depth_max = s.submit_queue_depth_max.max(depth as u64)
+            });
+        }
         self.jobs
             .as_ref()
             .expect("D3D9 submit queue is open")
@@ -179,7 +237,11 @@ impl Submitter {
     fn sync(&self) {
         let (done, wait) = mpsc::channel();
         self.send(SubmitJob::Sync(done));
+        let start = super::stats::enabled().then(std::time::Instant::now);
         wait.recv().expect("D3D9 submit thread exited");
+        if let Some(start) = start {
+            super::stats::record(|s| s.submit_sync_wait_ns += start.elapsed().as_nanos() as u64);
+        }
     }
 }
 
@@ -194,9 +256,9 @@ impl Drop for Submitter {
 
 pub(crate) struct PendingWork {
     device: wgpu::Device,
-    physical: PhysicalLoss,
     encoder: Option<wgpu::CommandEncoder>,
-    staging: wgpu::util::StagingBelt,
+    staging: Option<wgpu::util::StagingBelt>,
+    recording: bool,
     clear: Option<PendingClear>,
     submitter: Submitter,
     flush_pending: Arc<AtomicBool>,
@@ -214,6 +276,39 @@ fn frame_encoder<'a>(
 }
 
 impl PendingWork {
+    fn restore_recording(&mut self) {
+        if self.recording {
+            let (returned, recording) = mpsc::channel();
+            self.submitter.send(SubmitJob::Reclaim(returned));
+            let start = super::stats::enabled().then(std::time::Instant::now);
+            let (encoder, staging) = recording.recv().expect("D3D9 batch recording worker exited");
+            if let Some(start) = start {
+                super::stats::record(|s| {
+                    s.batch_record_waits += 1;
+                    s.batch_record_wait_ns += start.elapsed().as_nanos() as u64;
+                });
+            }
+            self.encoder = Some(encoder);
+            self.staging = Some(staging);
+            self.recording = false;
+        }
+    }
+
+    fn enqueue(&mut self, task: RecordTask, timed: bool) {
+        let initial = if self.recording {
+            None
+        } else {
+            frame_encoder(&self.device, &mut self.encoder);
+            self.recording = true;
+            Some((self.encoder.take().unwrap(), self.staging.take().unwrap()))
+        };
+        self.submitter.send(SubmitJob::Record(
+            initial,
+            task,
+            (timed && super::stats::enabled()).then(std::time::Instant::now),
+        ));
+    }
+
     pub(crate) fn synchronize(&mut self) {
         self.submit();
         self.submitter.sync();
@@ -225,28 +320,26 @@ impl PendingWork {
 
     fn apply_clear(&mut self) {
         if let Some(clear) = self.clear.take() {
-            clear.record(frame_encoder(&self.device, &mut self.encoder));
+            self.enqueue(Box::new(move |encoder, _| clear.record(encoder)), false);
         }
     }
 
     fn submit(&mut self) {
-        if self.physical.is_lost() {
-            self.clear = None;
-            self.encoder = None;
-            return;
-        }
         self.apply_clear();
-        let Some(encoder) = self.encoder.take() else {
+        let initial = if self.recording {
+            self.recording = false;
+            None
+        } else if let Some(encoder) = self.encoder.take() {
+            Some((encoder, self.staging.take().expect("D3D9 staging is owned")))
+        } else {
             return;
         };
-        self.staging.finish();
-        let next =
-            self.submitter.belts.try_recv().unwrap_or_else(|_| {
-                wgpu::util::StagingBelt::new(self.device.clone(), STAGING_CHUNK)
-            });
-        let staging = std::mem::replace(&mut self.staging, next);
-        self.submitter.send(SubmitJob::Frame(encoder, staging));
+        self.staging = Some(self.submitter.belts.try_recv().unwrap_or_else(|_| {
+            wgpu::util::StagingBelt::new(self.device.clone(), STAGING_CHUNK)
+        }));
+        self.submitter.send(SubmitJob::Frame(initial));
     }
+
 }
 
 impl Drop for PendingWork {
@@ -294,9 +387,12 @@ pub(crate) fn pending_work(gpu: &GpuContext) -> Arc<Mutex<PendingWork>> {
     Arc::clone(gpu.d3d9_pending.get_or_init(|| {
         Arc::new(Mutex::new(PendingWork {
             device: gpu.device.clone(),
-            physical: gpu.physical_loss(),
             encoder: None,
-            staging: wgpu::util::StagingBelt::new(gpu.device.clone(), STAGING_CHUNK),
+            staging: Some(wgpu::util::StagingBelt::new(
+                gpu.device.clone(),
+                STAGING_CHUNK,
+            )),
+            recording: false,
             clear: None,
             submitter: Submitter::new(gpu.queue.clone(), gpu.physical_loss()),
             flush_pending: Arc::new(AtomicBool::new(false)),
@@ -402,13 +498,57 @@ impl D3d9Gpu {
         let mut pending = self.pending.lock().unwrap();
         let fold = pending.clear.take_if(|clear| folds(clear));
         pending.apply_clear();
+        pending.restore_recording();
         let PendingWork {
             device,
             encoder,
             staging,
             ..
         } = &mut *pending;
-        f(frame_encoder(device, encoder), staging, fold)
+        f(
+            frame_encoder(device, encoder),
+            staging.as_mut().expect("D3D9 staging is owned"),
+            fold,
+        )
+    }
+
+    pub(crate) fn record_async(
+        &self,
+        f: impl FnOnce(&mut wgpu::CommandEncoder, &mut wgpu::util::StagingBelt) + Send + 'static,
+    ) {
+        let mut pending = self.pending.lock().unwrap();
+        pending.apply_clear();
+        let device = self.device.clone();
+        pending.enqueue(
+            Box::new(move |encoder, staging| {
+                let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+                f(encoder, staging);
+                let oom = pollster::block_on(oom.pop());
+                let validation = pollster::block_on(validation.pop());
+                if let Some(error) = oom.or(validation) {
+                    panic!("D3D9 recording worker: {error}");
+                }
+            }),
+            false,
+        );
+    }
+
+    pub(crate) fn record_batch(
+        &self,
+        folds: impl FnOnce(&PendingClear) -> bool,
+        record: impl FnOnce(
+            &mut wgpu::CommandEncoder,
+            &mut wgpu::util::StagingBelt,
+            Option<PendingClear>,
+        ) + Send
+        + 'static,
+    ) {
+        let mut pending = self.pending.lock().unwrap();
+        let fold = pending.clear.take_if(|clear| folds(clear));
+        pending.apply_clear();
+        pending.enqueue(Box::new(move |encoder, staging| record(encoder, staging, fold)), true);
+        super::stats::record(|s| s.batch_record_jobs += 1);
     }
 
     pub(crate) fn set_clear(&self, clear: PendingClear) {

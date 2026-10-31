@@ -808,11 +808,11 @@ impl<'a> Gen<'a> {
                 "sampler"
             };
             s += &format!(
-                "@group(0) @binding({}) var tx{stage}: {ty};\n",
+                "@group(1) @binding({}) var tx{stage}: {ty};\n",
                 TEXTURE_BINDING + stage
             );
             s += &format!(
-                "@group(0) @binding({}) var sm{stage}: {sampler};\n",
+                "@group(1) @binding({}) var sm{stage}: {sampler};\n",
                 SAMPLER_BINDING + stage
             );
         }

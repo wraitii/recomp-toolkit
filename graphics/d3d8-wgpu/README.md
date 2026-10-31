@@ -17,7 +17,15 @@ Owned stage recipes retain decoded programs and explicit variant/output settings
 or captured fixed-function source. Complete pipeline recipes add resource/vertex
 interfaces, entry points and raster/output descriptors; prepared GPU handles stay
 separate. Draw parameters take explicit values and constant-bank slices, copied
-into existing batch storage before later state changes.
+into existing batch storage before later state changes. D3D9 uses group 0 for
+per-draw constants and group 1 for material textures, samplers and interpreter
+programs. Sealed batches move to the submit worker for upload preparation and
+recording. The worker retains the encoder across ordered batches, clears and raw
+texture copies, with up to 32 queued jobs. Synchronous recording paths reclaim it;
+frame submissions and event-query markers remain ordered on the worker.
+DIVERGENCE(original): backend validation/OOM failures during deferred recording fail with a named
+worker diagnostic rather than returning a synchronous operation HRESULT;
+CPU-side draw validation remains synchronous.
 
 - Lives in the kit graphics Cargo workspace and is built by `dx/CMakeLists.txt` for native hosts.
   `RECOMP_D3D8_WGPU` enables rendering; CPU resource support still links the archive when it is off.
@@ -266,8 +274,14 @@ retains the full state/texture checks; capacity eviction removes the least recen
 used memo. Memos retain their GPU resource references until eviction or reset. Constant
 fill counters exclude preshader writes; saved CTAB parses count actual cache fills.
 Index cleanup counts FIFO entries visited, with dead removals and live evictions
-reported separately. This mode adds no per-draw clock reads
-or logs; use sampling separately for CPU costs and leave pipeline tracing off.
+reported separately. Submit statistics include `submit_queue_depth_max` (queued
+plus executing jobs), `submit_sync_wait_ns`, `batch_record_jobs`,
+`batch_record_waits`/`batch_record_wait_ns` (encoder handoff blocking),
+`batch_cache_wait_ns` (texture invalidation blocking), `batch_queue_wait_ns`
+(enqueue to recording start), and `batch_record_ns` (worker preparation/recording).
+Completed recording times are collected at subsequent job enqueues and can lag a frame.
+Statistics enable per-draw and handoff clock reads; leave them and pipeline tracing
+off for final performance comparisons.
 `RECOMP_D3D9_TRACE_MEMOS=1` independently reports `[d3d9-memos]` reuse buckets
 every 120 frames and a partial bucket at device destruction. Hash-only shadow
 LRUs predict hits at capacities 16/32/64/128/256/512/1024; `actual_miss_hits`

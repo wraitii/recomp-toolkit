@@ -227,11 +227,13 @@ fn raw_copy(
     let (dst_face, dst_level, dst_slice) = dst.subresource;
     let src_z = if src.volume { src_slice } else { src_face };
     let dst_z = if dst.volume { dst_slice } else { dst_face };
+    let src_texture = src.texture.clone();
+    let dst_texture = dst.texture.clone();
     gpu.validate(op, || {
-        gpu.record(|encoder, _| {
+        gpu.record_async(move |encoder, _| {
             encoder.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &src.texture,
+                    texture: &src_texture,
                     mip_level: src_level,
                     origin: wgpu::Origin3d {
                         x: src_rect.left,
@@ -241,7 +243,7 @@ fn raw_copy(
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyTextureInfo {
-                    texture: &dst.texture,
+                    texture: &dst_texture,
                     mip_level: dst_level,
                     origin: wgpu::Origin3d {
                         x: dst_rect.left,

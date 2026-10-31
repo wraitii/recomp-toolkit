@@ -6,10 +6,46 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct BindingLayouts {
+    pub(crate) uniforms: wgpu::BindGroupLayout,
+    pub(crate) material: Option<wgpu::BindGroupLayout>,
+}
+
+impl BindingLayouts {
+    pub(crate) fn create(
+        device: &wgpu::Device,
+        entries: &[wgpu::BindGroupLayoutEntry],
+        material: bool,
+        label: &str,
+    ) -> Self {
+        let uniforms: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.binding < 4)
+            .cloned()
+            .collect();
+        let material_entries: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.binding >= 4)
+            .cloned()
+            .collect();
+        let create = |entries: &[wgpu::BindGroupLayoutEntry]| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some(label),
+                entries,
+            })
+        };
+        Self {
+            uniforms: create(&uniforms),
+            material: material.then(|| create(&material_entries)),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct PreparedPipeline {
     pub(crate) entry_points: [&'static str; 2],
     pub(crate) modules: [wgpu::ShaderModule; 2],
-    pub(crate) layout: wgpu::BindGroupLayout,
+    pub(crate) layout: BindingLayouts,
     pub(crate) buffers: VertexLayouts,
     pub(crate) target: Option<wgpu::ColorTargetState>,
     pub(crate) primitive: wgpu::PrimitiveState,
@@ -19,9 +55,10 @@ pub(crate) struct PreparedPipeline {
 
 impl PreparedPipeline {
     pub(crate) fn create(&self, device: &wgpu::Device, label: &str) -> wgpu::RenderPipeline {
+        let layouts = [Some(&self.layout.uniforms), self.layout.material.as_ref()];
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(label),
-            bind_group_layouts: &[Some(&self.layout)],
+            bind_group_layouts: &layouts[..if self.layout.material.is_some() { 2 } else { 1 }],
             immediate_size: 0,
         });
         let attributes: Vec<Vec<_>> = self
@@ -117,7 +154,7 @@ impl PreparedPipeline {
 #[derive(Default)]
 pub(crate) struct CompilationCache {
     modules: LruCache<ShaderRecipeKey, wgpu::ShaderModule, 512, { 32 << 20 }>,
-    layouts: LruCache<Arc<[wgpu::BindGroupLayoutEntry]>, wgpu::BindGroupLayout, 128>,
+    layouts: LruCache<(Arc<[wgpu::BindGroupLayoutEntry]>, bool), BindingLayouts, 128>,
 }
 
 impl CompilationCache {
@@ -134,7 +171,10 @@ impl CompilationCache {
             }
         }
         self.layouts.insert(
-            Arc::clone(&recipe.interface.bindings),
+            (
+                Arc::clone(&recipe.interface.bindings),
+                recipe.interface.material,
+            ),
             compiled.layout.clone(),
             std::mem::size_of_val(recipe.interface.bindings.as_ref()),
         );
@@ -191,13 +231,18 @@ impl PipelineRecipe {
             let modules: [wgpu::ShaderModule; 2] = modules.try_into().unwrap();
             let layout = cache
                 .layouts
-                .get(&self.interface.bindings)
+                .get(&(
+                    Arc::clone(&self.interface.bindings),
+                    self.interface.material,
+                ))
                 .cloned()
                 .unwrap_or_else(|| {
-                    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("specialization-worker"),
-                        entries: &self.interface.bindings,
-                    })
+                    BindingLayouts::create(
+                        device,
+                        &self.interface.bindings,
+                        self.interface.material,
+                        "specialization-worker",
+                    )
                 });
             let pipeline = self
                 .prepare(modules.clone(), layout.clone())
@@ -242,7 +287,7 @@ impl PipelineRecipe {
     pub(crate) fn prepare(
         &self,
         modules: [wgpu::ShaderModule; 2],
-        layout: wgpu::BindGroupLayout,
+        layout: BindingLayouts,
     ) -> PreparedPipeline {
         PreparedPipeline {
             entry_points: self.descriptor.entry_points,
@@ -261,5 +306,5 @@ impl PipelineRecipe {
 pub(crate) struct CompiledPipeline {
     pub(crate) pipeline: wgpu::RenderPipeline,
     pub(crate) modules: [wgpu::ShaderModule; 2],
-    pub(crate) layout: wgpu::BindGroupLayout,
+    pub(crate) layout: BindingLayouts,
 }

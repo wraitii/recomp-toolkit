@@ -1370,22 +1370,26 @@ impl D3d9State {
                 "shader float constant range is out of bounds",
             ));
         }
-        for (vector, chunk) in values.chunks_exact(4).enumerate() {
-            let index = start + vector as u32;
-            let value = [chunk[0], chunk[1], chunk[2], chunk[3]];
-            if self.recording.is_some() {
-                let block = self.recording.as_mut().unwrap();
-                let list = if pixel {
-                    &mut block.ps_const_f
-                } else {
-                    &mut block.vs_const_f
-                };
-                put(list, index, value, |entry| entry.0);
-            } else if pixel {
-                self.ps_const_f[index as usize] = value;
+        let Some(block) = self.recording.as_mut() else {
+            let constants: &mut [[f32; 4]] = if pixel {
+                &mut self.ps_const_f
             } else {
-                self.vs_const_f[index as usize] = value;
-            }
+                &mut self.vs_const_f
+            };
+            let start = start as usize;
+            constants[start..start + values.len() / 4]
+                .as_flattened_mut()
+                .copy_from_slice(values);
+            return Ok(());
+        };
+        let list = if pixel {
+            &mut block.ps_const_f
+        } else {
+            &mut block.vs_const_f
+        };
+        for (vector, chunk) in values.chunks_exact(4).enumerate() {
+            let value = [chunk[0], chunk[1], chunk[2], chunk[3]];
+            put(list, start + vector as u32, value, |entry| entry.0);
         }
         Ok(())
     }

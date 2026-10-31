@@ -515,6 +515,7 @@ fn prepare_recipe(
             }
         }),
         interface: InterfaceKey {
+            material: true,
             bindings: inputs.layout.entries().into(),
             vertex_buffers: inputs.vertex_buffers.clone(),
         },
@@ -722,6 +723,7 @@ pub(super) fn resolve(
         let recipe = PipelineRecipe {
             shaders: recipes.clone(),
             interface: InterfaceKey {
+                material: true,
                 bindings: Arc::clone(&binding_entries),
                 vertex_buffers: shape.0.clone(),
             },

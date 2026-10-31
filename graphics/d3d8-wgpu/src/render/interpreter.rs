@@ -1,6 +1,6 @@
 use super::bindings::uniform_entry;
 use super::interface::{InterfaceKey, LayoutAttribute};
-use super::pipeline::{PipelineDescriptor, PreparedPipeline};
+use super::pipeline::{BindingLayouts, PipelineDescriptor, PreparedPipeline};
 use crate::RenderError;
 use crate::fast_map::FastMap;
 use crate::shader::interface::*;
@@ -32,7 +32,7 @@ pub(crate) struct PreparedInterpreter {
     pub(crate) families: Vec<PreparedFamily>,
     index: FastMap<PipelineDescriptor, usize>,
     pub(crate) module: wgpu::ShaderModule,
-    pub(crate) layout: wgpu::BindGroupLayout,
+    pub(crate) layout: BindingLayouts,
     pub(crate) unused_texture: wgpu::TextureView,
     pub(crate) unused_cube: wgpu::TextureView,
     pub(crate) unused_sampler: wgpu::Sampler,
@@ -90,6 +90,7 @@ impl FamilyKey {
             temporaries: TEMP_REGISTERS,
             constants: [VERTEX_CONSTANTS, PIXEL_CONSTANTS],
             interface: InterfaceKey {
+                material: true,
                 bindings: bindings.into(),
                 vertex_buffers: smallvec::smallvec![(
                     VERTEX_STRIDE,
@@ -252,7 +253,7 @@ impl FamilyKey {
                 u64::from(limits.max_bindings_per_bind_group),
                 38,
             ),
-            ("bind-groups", u64::from(limits.max_bind_groups), 1),
+            ("bind-groups", u64::from(limits.max_bind_groups), 2),
             (
                 "vertex-attributes",
                 u64::from(limits.max_vertex_attributes),
@@ -312,10 +313,8 @@ impl PreparedInterpreter {
         let keys = FamilyKey::manifest(manifest);
         let key = &keys[0];
         key.check_limits(&device.limits())?;
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("d3d9-interpreter"),
-            entries: &key.interface.bindings,
-        });
+        let layout =
+            BindingLayouts::create(device, &key.interface.bindings, true, "d3d9-interpreter");
         let module_started = std::time::Instant::now();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("d3d9-interpreter"),

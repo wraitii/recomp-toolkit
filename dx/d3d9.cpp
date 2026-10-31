@@ -4704,7 +4704,7 @@ void Dev_SetVertexDeclaration(X86 *c) {
     recomp::d3d::Status status =
         dev->d3d9_device->set_vertex_declaration(d ? d->d3d9_state_handle : 0);
     if (d3d_bridge_ok(status))
-        d3d9_refresh_bindings(dev);
+        d3d9_bind_slot(dev, 35, d ? d->id : 0);
     com_ret(c, bridge_result(c, status));
 }
 
@@ -6341,7 +6341,7 @@ void Dev_SetFVF(X86 *c) {
     }
     recomp::d3d::Status status = dev->d3d9_device->set_fvf_binding(result.value, fvf);
     if (d3d_bridge_ok(status))
-        d3d9_refresh_bindings(dev);
+        d3d9_bind_slot(dev, 35, dev->d3d9_device->decl_views.at(result.value));
     com_ret(c, bridge_result(c, status));
 }
 void Dev_GetVertexDeclaration(X86 *c) {
@@ -6401,7 +6401,7 @@ void Dev_SetVertexShader(X86 *c) {
     }
     recomp::d3d::Status status = dev->d3d9_device->set_shader(false, s ? s->d3d9_state_handle : 0);
     if (d3d_bridge_ok(status))
-        d3d9_refresh_bindings(dev);
+        d3d9_bind_slot(dev, 33, s ? s->id : 0);
     com_ret(c, bridge_result(c, status));
 }
 void Dev_GetVertexShader(X86 *c) {
@@ -6452,7 +6452,7 @@ void Dev_SetPixelShader(X86 *c) {
     }
     recomp::d3d::Status status = dev->d3d9_device->set_shader(true, s ? s->d3d9_state_handle : 0);
     if (d3d_bridge_ok(status))
-        d3d9_refresh_bindings(dev);
+        d3d9_bind_slot(dev, 34, s ? s->id : 0);
     com_ret(c, bridge_result(c, status));
 }
 void Dev_GetPixelShader(X86 *c) {

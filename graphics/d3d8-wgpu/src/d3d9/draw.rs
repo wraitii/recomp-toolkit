@@ -10,7 +10,7 @@ use crate::render::bindings::{DrawParameters, uniform_entry};
 use crate::render::cache::LruCache;
 use crate::render::interface::{InterfaceKey, LayoutAttribute, VertexAttributes, VertexLayouts};
 use crate::render::pipeline::{
-    CompiledPipeline, PipelineDescriptor, PipelineRecipe, PipelineRecipeKey,
+    BindingLayouts, CompiledPipeline, PipelineDescriptor, PipelineRecipe, PipelineRecipeKey,
     PreparedPipeline as PipelineKey,
 };
 use crate::shader::identity::ProgramKey;
@@ -1195,7 +1195,7 @@ fn ff_fragment_source(state: &D3d9State, textures: &[BoundTexture]) -> Result<St
                 "2d"
             };
             source += &format!(
-                "@group(0) @binding({}) var tx{stage}:texture_{dimension}<f32>;\n@group(0) @binding({}) var sm{stage}:sampler;\n",
+                "@group(1) @binding({}) var tx{stage}:texture_{dimension}<f32>;\n@group(1) @binding({}) var sm{stage}:sampler;\n",
                 TEXTURE_BINDING + stage,
                 SAMPLER_BINDING + stage
             );
@@ -1731,14 +1731,13 @@ struct PendingTexture {
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct BindGroupKey {
     layout: wgpu::BindGroupLayout,
-    uniform_sizes: [u64; 4],
     programs: Option<[wgpu::Buffer; 2]>,
     textures: Arc<[PendingTexture]>,
 }
 
 struct PendingDraw {
     pipeline: wgpu::RenderPipeline,
-    layout: wgpu::BindGroupLayout,
+    layout: BindingLayouts,
     uniform_offsets: [u32; 4],
     uniform_sizes: [u64; 4],
     programs: Option<[wgpu::Buffer; 2]>,
@@ -1784,10 +1783,7 @@ fn store_bind_group(
 }
 
 fn same_bindings(a: &PendingDraw, b: &PendingDraw) -> bool {
-    a.layout == b.layout
-        && a.uniform_sizes == b.uniform_sizes
-        && a.programs == b.programs
-        && a.textures == b.textures
+    a.layout.material == b.layout.material && a.programs == b.programs && a.textures == b.textures
 }
 
 #[derive(Default)]
@@ -1825,7 +1821,7 @@ struct DrawMemo {
     modules: [wgpu::ShaderModule; 2],
     recipes: [ShaderRecipe; 2],
     binding_entries: Arc<[wgpu::BindGroupLayoutEntry]>,
-    layout: wgpu::BindGroupLayout,
+    layout: BindingLayouts,
     trace_interface: Option<trace::Interface>,
     trace_pipeline: Option<(u64, u64)>,
     pipeline: Option<(
@@ -1839,11 +1835,24 @@ struct DrawMemo {
 }
 
 #[derive(Default)]
+struct BatchRecorder {
+    upload: Option<wgpu::Buffer>,
+    bind_groups: FastMap<BindGroupKey, wgpu::BindGroup>,
+    bind_groups_previous: FastMap<BindGroupKey, wgpu::BindGroup>,
+    bind_group_scratch: Vec<wgpu::BindGroup>,
+    uniform_groups: FastMap<(wgpu::BindGroupLayout, [u64; 4]), wgpu::BindGroup>,
+    uniform_scratch: Vec<wgpu::BindGroup>,
+    spare: Option<DrawBatch>,
+}
+
+#[derive(Default)]
 pub(crate) struct D3d9DrawState {
     shaders: LruCache<String, wgpu::ShaderModule, 512, { 32 << 20 }>,
     shader_variants: LruCache<ShaderVariantKey, Arc<CachedShaderSource>, 512, { 32 << 20 }>,
     samplers: LruCache<SamplerKey, wgpu::Sampler, 128>,
-    layouts: LruCache<LayoutKey, wgpu::BindGroupLayout, 128>,
+    layouts: LruCache<LayoutKey, BindingLayouts, 128>,
+    uniform_layouts: LruCache<Arc<[wgpu::BindGroupLayoutEntry]>, wgpu::BindGroupLayout, 128>,
+    material_layouts: LruCache<Arc<[wgpu::BindGroupLayoutEntry]>, wgpu::BindGroupLayout, 128>,
     pipelines:
         LruCache<PipelineRecipeKey, (CompiledPipeline, Arc<PipelineRecipe>), 512, { 32 << 20 }>,
     batch: DrawBatch,
@@ -1876,10 +1885,7 @@ pub(crate) struct D3d9DrawState {
     batch_upload_bytes: u64,
     module_ms: f64,
     pipeline_ms: f64,
-    upload: Option<wgpu::Buffer>,
-    bind_groups: FastMap<BindGroupKey, wgpu::BindGroup>,
-    bind_groups_previous: FastMap<BindGroupKey, wgpu::BindGroup>,
-    bind_group_scratch: Vec<wgpu::BindGroup>,
+    recorder: Arc<std::sync::Mutex<BatchRecorder>>,
     linked: Vec<LinkedInput>,
     link_plans: FastMap<LinkKey, LinkPlan>,
     ff_uniforms: Vec<f32>,
@@ -1912,11 +1918,12 @@ impl D3d9DrawState {
         self.pipeline_memo = None;
         self.pipelines.clear();
         self.layouts.clear();
+        self.uniform_layouts.clear();
+        self.material_layouts.clear();
         self.shaders.clear();
         self.shader_variants.clear();
         self.samplers.clear();
-        self.bind_groups.clear();
-        self.bind_groups_previous.clear();
+        self.recorder = Arc::default();
         self.geometry.clear();
         self.geometry_bytes = 0;
         self.geometry_seen.clear();
@@ -2010,16 +2017,27 @@ impl D3d9DrawState {
         self.native_geometry_pool.clear();
         self.native_layouts.clear();
         self.interpreter_programs.clear();
-        self.upload = None;
     }
 
     pub fn drop_texture(&mut self, texture: &wgpu::Texture) {
-        self.bind_groups.retain(|key, _| {
+        let mut recorder = match self.recorder.try_lock() {
+            Ok(recorder) => recorder,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let start = stats::enabled().then(Instant::now);
+                let recorder = self.recorder.lock().unwrap();
+                if let Some(start) = start {
+                    stats::record(|s| s.batch_cache_wait_ns += start.elapsed().as_nanos() as u64);
+                }
+                recorder
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => panic!("D3D9 batch cache: {error}"),
+        };
+        recorder.bind_groups.retain(|key, _| {
             !key.textures
                 .iter()
                 .any(|entry| entry.texture.as_ref() == Some(texture))
         });
-        self.bind_groups_previous.retain(|key, _| {
+        recorder.bind_groups_previous.retain(|key, _| {
             !key.textures
                 .iter()
                 .any(|entry| entry.texture.as_ref() == Some(texture))
@@ -2120,23 +2138,59 @@ impl D3d9DrawState {
         Ok(shader)
     }
 
-    fn layout(
-        &mut self,
-        gpu: &D3d9Gpu,
-        key: LayoutKey,
-    ) -> Result<wgpu::BindGroupLayout, RenderError> {
+    fn layout(&mut self, gpu: &D3d9Gpu, key: LayoutKey) -> Result<BindingLayouts, RenderError> {
         if let Some(layout) = self.layouts.get(&key) {
             return Ok(layout.clone());
         }
         let entries = key.entries();
-        let layout = gpu.validate("Draw", || {
-            Ok(gpu
-                .device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("d3d9-cached"),
-                    entries: &entries,
-                }))
-        })?;
+        let uniforms: Arc<[wgpu::BindGroupLayoutEntry]> = entries
+            .iter()
+            .filter(|entry| entry.binding < 4)
+            .cloned()
+            .collect();
+        let material: Arc<[wgpu::BindGroupLayoutEntry]> = entries
+            .iter()
+            .filter(|entry| entry.binding >= 4)
+            .cloned()
+            .collect();
+        let uniform_layout = match self.uniform_layouts.get(&uniforms) {
+            Some(layout) => layout.clone(),
+            None => {
+                let layout = gpu.validate("Draw", || {
+                    Ok(gpu
+                        .device
+                        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                            label: Some("d3d9-uniforms"),
+                            entries: &uniforms,
+                        }))
+                })?;
+                self.uniform_layouts.insert(uniforms, layout.clone(), 0);
+                layout
+            }
+        };
+        let material_layout = if matches!(key, LayoutKey::Clear) {
+            None
+        } else {
+            Some(match self.material_layouts.get(&material) {
+                Some(layout) => layout.clone(),
+                None => {
+                    let layout = gpu.validate("Draw", || {
+                        Ok(gpu
+                            .device
+                            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                                label: Some("d3d9-material"),
+                                entries: &material,
+                            }))
+                    })?;
+                    self.material_layouts.insert(material, layout.clone(), 0);
+                    layout
+                }
+            })
+        };
+        let layout = BindingLayouts {
+            uniforms: uniform_layout,
+            material: material_layout,
+        };
         self.layouts.insert(key, layout.clone(), 0);
         Ok(layout)
     }
@@ -3316,6 +3370,7 @@ pub(crate) fn execute(
             let recipe = PipelineRecipe {
                 shaders: memo.recipes.clone(),
                 interface: InterfaceKey {
+                    material: true,
                     bindings: Arc::clone(&memo.binding_entries),
                     vertex_buffers: key.buffers.clone(),
                 },
@@ -3506,7 +3561,11 @@ pub(crate) fn execute(
                 Ok((texture, view))
             })?;
             let source = snapshot.target.clone();
-            gpu.record(|encoder, _| {
+            let copy_source = source.clone();
+            let copy_texture = texture.clone();
+            gpu.record_async(move |encoder, _| {
+                let source = copy_source;
+                let texture = copy_texture;
                 encoder.copy_texture_to_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: &source.texture,
@@ -3783,7 +3842,11 @@ fn feedback_bindings(
             entry
         }
     };
-    gpu.record(|encoder, _| {
+    let copy_source = source.clone();
+    let copy_target = copy.clone();
+    gpu.record_async(move |encoder, _| {
+        let source = &copy_source;
+        let copy = &copy_target;
         for level in 0..levels {
             let mut extent = size.mip_level_size(level, dimension);
             let layers = if dimension == wgpu::TextureDimension::D2 {
@@ -3868,19 +3931,86 @@ fn flush_inner(
             "draw upload exceeds the device buffer limit",
         ));
     }
-    if draw
+    let recorder = Arc::clone(&draw.recorder);
+    let mut spare = recorder.try_lock().ok().and_then(|mut r| r.spare.take()).unwrap_or_default();
+    for pending in &mut spare.draws {
+        if let Some(geometry) = pending.native_geometry.take() {
+            draw.native_geometry_pool.push(geometry);
+        }
+    }
+    spare.draws.clear();
+    spare.data.clear();
+    spare.color_view = None;
+    spare.color_key_view = None;
+    spare.padded_color = None;
+    spare.depth = None;
+    spare.last_uniform = None;
+    let mut batch = std::mem::replace(&mut draw.batch, spare);
+    let color_key = batch.color_key_view.clone().expect("draw color key");
+    let depth = batch.depth.clone();
+    let query_set = queries.occlusion_set().cloned();
+    let device = gpu.device.clone();
+    let max_buffer_size = gpu.limits().max_buffer_size;
+    if trace_compilation() {
+        draw.batch_upload_bytes += needed;
+    }
+    stats::record(|s| {
+        s.flushes += 1;
+        s.flushed_draws += batch.draws.len() as u64;
+        s.flushed_bytes += needed;
+    });
+    gpu.record_batch(
+        |clear| clear.folds_into(&color_key, depth.as_ref()),
+        move |encoder, staging, fold| {
+            let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            let mut recorder = recorder.lock().unwrap();
+            record_sealed_batch(
+                &device,
+                max_buffer_size,
+                &mut recorder,
+                &mut batch,
+                segment,
+                query_set.as_ref(),
+                encoder,
+                staging,
+                fold,
+            );
+            let oom = pollster::block_on(oom.pop());
+            let validation = pollster::block_on(validation.pop());
+            if let Some(error) = oom.or(validation) {
+                panic!("D3D9 DrawFlush worker: {error}");
+            }
+            recorder.spare = Some(batch);
+        },
+    );
+    Ok(())
+}
+
+fn record_sealed_batch(
+    device: &wgpu::Device,
+    max_buffer_size: u64,
+    recorder: &mut BatchRecorder,
+    batch: &mut DrawBatch,
+    segment: Option<u32>,
+    query_set: Option<&wgpu::QuerySet>,
+    encoder: &mut wgpu::CommandEncoder,
+    staging: &mut wgpu::util::StagingBelt,
+    fold: Option<PendingClear>,
+) {
+    let needed = batch.data.len().max(4) as u64;
+    if recorder
         .upload
         .as_ref()
         .is_none_or(|buffer| buffer.size() < needed)
     {
-        draw.bind_groups.clear();
-        draw.bind_groups_previous.clear();
         let size = needed
             .next_power_of_two()
             .max(4096)
-            .min(gpu.limits().max_buffer_size)
+            .min(max_buffer_size)
             .max(needed);
-        draw.upload = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        recorder.uniform_groups.clear();
+        recorder.upload = Some(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("d3d9-draw-upload"),
             size,
             usage: wgpu::BufferUsages::UNIFORM
@@ -3890,22 +4020,56 @@ fn flush_inner(
             mapped_at_creation: false,
         }));
     }
-    let upload = draw
+    let upload = recorder
         .upload
         .as_ref()
         .expect("draw upload buffer was created")
         .clone();
-    let mut bind_groups = std::mem::take(&mut draw.bind_group_scratch);
+    let mut bind_groups = std::mem::take(&mut recorder.bind_group_scratch);
     bind_groups.clear();
-    let mut bind_group_cache = std::mem::take(&mut draw.bind_groups);
-    let mut bind_group_previous = std::mem::take(&mut draw.bind_groups_previous);
-    for (index, pending) in draw.batch.draws.iter().enumerate() {
-        let bind_group = if index > 0 && same_bindings(&draw.batch.draws[index - 1], pending) {
+    let mut bind_group_cache = std::mem::take(&mut recorder.bind_groups);
+    let mut bind_group_previous = std::mem::take(&mut recorder.bind_groups_previous);
+    let mut uniforms = std::mem::take(&mut recorder.uniform_scratch);
+    uniforms.clear();
+    for (index, pending) in batch.draws.iter().enumerate() {
+        let uniform_key = (pending.layout.uniforms.clone(), pending.uniform_sizes);
+        if recorder.uniform_groups.len() >= BIND_GROUP_CACHE_LIMIT
+            && !recorder.uniform_groups.contains_key(&uniform_key)
+        {
+            recorder.uniform_groups.clear();
+        }
+        let uniform_group = recorder
+            .uniform_groups
+            .entry(uniform_key)
+            .or_insert_with(|| {
+                let entries: Vec<_> = (0..4)
+                    .map(|binding| wgpu::BindGroupEntry {
+                        binding,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &upload,
+                            offset: 0,
+                            size: wgpu::BufferSize::new(pending.uniform_sizes[binding as usize]),
+                        }),
+                    })
+                    .collect();
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("d3d9-draw-uniforms"),
+                    layout: &pending.layout.uniforms,
+                    entries: &entries,
+                })
+            })
+            .clone();
+        uniforms.push(uniform_group);
+        let bind_group = if index > 0 && same_bindings(&batch.draws[index - 1], pending) {
             bind_groups[index - 1].clone()
         } else {
             let key = BindGroupKey {
-                layout: pending.layout.clone(),
-                uniform_sizes: pending.uniform_sizes,
+                layout: pending
+                    .layout
+                    .material
+                    .as_ref()
+                    .expect("draw material layout")
+                    .clone(),
                 programs: pending.programs.clone(),
                 textures: Arc::clone(&pending.textures),
             };
@@ -3914,17 +4078,7 @@ fn flush_inner(
             {
                 bind_group
             } else {
-                let mut entries = Vec::with_capacity(4 + pending.textures.len() * 2);
-                for binding in 0..4 {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &upload,
-                            offset: 0,
-                            size: wgpu::BufferSize::new(pending.uniform_sizes[binding as usize]),
-                        }),
-                    });
-                }
+                let mut entries = Vec::with_capacity(2 + pending.textures.len() * 2);
                 if let Some(programs) = &pending.programs {
                     for (binding, buffer) in crate::shader::uber::PROGRAM_BINDINGS
                         .into_iter()
@@ -3946,9 +4100,13 @@ fn flush_inner(
                         resource: wgpu::BindingResource::Sampler(&texture.sampler),
                     });
                 }
-                let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("d3d9-draw-bindings"),
-                    layout: &pending.layout,
+                    layout: pending
+                        .layout
+                        .material
+                        .as_ref()
+                        .expect("draw material layout"),
                     entries: &entries,
                 });
                 store_bind_group(
@@ -3962,231 +4120,203 @@ fn flush_inner(
         };
         bind_groups.push(bind_group);
     }
-    draw.bind_groups = bind_group_cache;
-    draw.bind_groups_previous = bind_group_previous;
-    let color_view = draw
-        .batch
+    recorder.bind_groups = bind_group_cache;
+    recorder.bind_groups_previous = bind_group_previous;
+    let color_view = batch
         .color_view
         .as_ref()
         .expect("draw batch has a color target");
-    let color_key_view = draw
-        .batch
-        .color_key_view
+
+    let folded_color = fold
         .as_ref()
-        .expect("draw batch has a color target key");
-    let depth_target = draw.batch.depth.as_ref();
-    gpu.record_folding_clear(
-        |clear| clear.folds_into(color_key_view, depth_target),
-        |encoder, staging, fold| {
-            let folded_color = fold
-                .as_ref()
-                .and_then(|clear| clear.color.as_ref())
-                .map_or(wgpu::LoadOp::Load, |(_, value)| wgpu::LoadOp::Clear(*value));
-            let folded_depth = fold.as_ref().and_then(|clear| clear.depth.as_ref());
-            let colors = [Some(wgpu::RenderPassColorAttachment {
-                view: color_view,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: folded_color,
-                    store: wgpu::StoreOp::Store,
-                },
-            })];
-            let depth = draw.batch.depth.as_ref().map(|(view, has_stencil)| {
-                wgpu::RenderPassDepthStencilAttachment {
-                    view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: folded_depth.map_or(wgpu::LoadOp::Load, |(_, depth, _)| depth.load),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: has_stencil.then_some(wgpu::Operations {
-                        load: folded_depth
-                            .and_then(|(_, _, stencil)| stencil.as_ref())
-                            .map_or(wgpu::LoadOp::Load, |stencil| stencil.load),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                }
-            });
-            staging
-                .write_buffer(
-                    encoder,
-                    &upload,
-                    0,
-                    wgpu::BufferSize::new(needed).expect("draw upload is nonempty"),
-                )
-                .copy_from_slice(&draw.batch.data);
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("d3d9-draw-batch"),
-                color_attachments: &colors,
-                depth_stencil_attachment: depth,
-                timestamp_writes: None,
-                occlusion_query_set: segment.and(queries.occlusion_set()),
-                multiview_mask: None,
-            });
-            if let Some(index) = segment {
-                pass.begin_occlusion_query(index);
-            }
-            let mut cached_viewport = None;
-            let mut cached_stencil = None;
-            let mut cached_blend = None;
-            let mut cached_scissor = None;
-            let mut cached_pipeline: Option<&wgpu::RenderPipeline> = None;
-            let mut cached_bind: Option<(&wgpu::BindGroup, [u32; 4])> = None;
-            let mut cached_vertices: [Option<(&wgpu::Buffer, u64, u64)>; 8] = [None; 8];
-            let mut cached_index: Option<(&wgpu::Buffer, u64, u64, wgpu::IndexFormat)> = None;
-            for (pending, bind_group) in draw.batch.draws.iter().zip(&bind_groups) {
-                if cached_pipeline != Some(&pending.pipeline) {
-                    pass.set_pipeline(&pending.pipeline);
-                    cached_pipeline = Some(&pending.pipeline);
-                }
-                if cached_bind != Some((bind_group, pending.uniform_offsets)) {
-                    pass.set_bind_group(0, bind_group, &pending.uniform_offsets);
-                    cached_bind = Some((bind_group, pending.uniform_offsets));
-                }
-                let mut vertex_bindings: SmallVec<[(&wgpu::Buffer, u64, u64); 2]> = SmallVec::new();
-                if let Some(geometry) = &pending.native_geometry {
-                    for vertex in &geometry.vertices {
-                        vertex_bindings.push((
-                            vertex.data.buffer(&upload),
-                            vertex.offset,
-                            vertex.size,
-                        ));
-                    }
-                } else if pending.has_attributes {
-                    vertex_bindings.push((&upload, pending.vertex_offset, pending.vertex_size));
-                }
-                for (slot, binding) in vertex_bindings.into_iter().enumerate() {
-                    if cached_vertices[slot] != Some(binding) {
-                        let (buffer, offset, size) = binding;
-                        pass.set_vertex_buffer(slot as u32, buffer.slice(offset..offset + size));
-                        cached_vertices[slot] = Some(binding);
-                    }
-                }
-                let viewport_key = (
-                    pending.viewport.x,
-                    pending.viewport.y,
-                    pending.viewport.width,
-                    pending.viewport.height,
-                    pending.viewport.min_z.to_bits(),
-                    pending.viewport.max_z.to_bits(),
-                );
-                if cached_viewport != Some(viewport_key) {
-                    pass.set_viewport(
-                        pending.viewport.x as f32,
-                        pending.viewport.y as f32,
-                        pending.viewport.width as f32,
-                        pending.viewport.height as f32,
-                        pending.viewport.min_z,
-                        pending.viewport.max_z,
-                    );
-                    cached_viewport = Some(viewport_key);
-                }
-                if cached_stencil != Some(pending.stencil_reference) {
-                    pass.set_stencil_reference(pending.stencil_reference);
-                    cached_stencil = Some(pending.stencil_reference);
-                }
-                let blend = pending.blend_constant;
-                let blend_bits = blend.map(f32::to_bits);
-                if cached_blend != Some(blend_bits) {
-                    pass.set_blend_constant(wgpu::Color {
-                        r: blend[0] as f64,
-                        g: blend[1] as f64,
-                        b: blend[2] as f64,
-                        a: blend[3] as f64,
-                    });
-                    cached_blend = Some(blend_bits);
-                }
-                let [left, top, width, height] =
-                    pending
-                        .scissor
-                        .unwrap_or([0, 0, draw.batch.width, draw.batch.height]);
-                if cached_scissor != Some([left, top, width, height]) {
-                    pass.set_scissor_rect(left, top, width, height);
-                    cached_scissor = Some([left, top, width, height]);
-                }
-                let index_binding = match (&pending.native_geometry, pending.index_range) {
-                    (Some(geometry), _) => Some((
-                        geometry.index.buffer(&upload),
-                        geometry.index_offset,
-                        geometry.index_size,
-                        geometry.index_format,
-                    )),
-                    (None, Some((offset, size, format))) => Some((&upload, offset, size, format)),
-                    (None, None) => None,
-                };
-                if let Some(binding) = index_binding {
-                    if cached_index != Some(binding) {
-                        let (buffer, offset, size, format) = binding;
-                        pass.set_index_buffer(buffer.slice(offset..offset + size), format);
-                        cached_index = Some(binding);
-                    }
-                }
-                if let Some(geometry) = &pending.native_geometry {
-                    pass.draw_indexed(
-                        geometry.first_index..geometry.first_index + geometry.count,
-                        geometry.base_vertex,
-                        0..1,
-                    );
-                } else if pending.index_range.is_some() {
-                    pass.draw_indexed(0..pending.vertex_count, 0, 0..1);
-                } else {
-                    pass.draw(0..pending.vertex_count, 0..1);
-                }
-            }
-            if segment.is_some() {
-                pass.end_occlusion_query();
-            }
-            drop(pass);
-            if let Some(padded) = &draw.batch.padded_color {
-                encoder.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &padded.texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &padded.source.texture,
-                        mip_level: padded.source.subresource.1,
-                        origin: wgpu::Origin3d {
-                            x: 0,
-                            y: 0,
-                            z: padded.source.subresource.0,
-                        },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::Extent3d {
-                        width: padded.source.width,
-                        height: padded.source.height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-            }
+        .and_then(|clear| clear.color.as_ref())
+        .map_or(wgpu::LoadOp::Load, |(_, value)| wgpu::LoadOp::Clear(*value));
+    let folded_depth = fold.as_ref().and_then(|clear| clear.depth.as_ref());
+    let colors = [Some(wgpu::RenderPassColorAttachment {
+        view: color_view,
+        resolve_target: None,
+        depth_slice: None,
+        ops: wgpu::Operations {
+            load: folded_color,
+            store: wgpu::StoreOp::Store,
         },
-    );
-    if trace_compilation() {
-        draw.batch_upload_bytes += needed;
-    }
-    stats::record(|s| {
-        s.flushes += 1;
-        s.flushed_draws += draw.batch.draws.len() as u64;
-        s.flushed_bytes += needed;
+    })];
+    let depth =
+        batch.depth.as_ref().map(
+            |(view, has_stencil)| wgpu::RenderPassDepthStencilAttachment {
+                view,
+                depth_ops: Some(wgpu::Operations {
+                    load: folded_depth.map_or(wgpu::LoadOp::Load, |(_, depth, _)| depth.load),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: has_stencil.then_some(wgpu::Operations {
+                    load: folded_depth
+                        .and_then(|(_, _, stencil)| stencil.as_ref())
+                        .map_or(wgpu::LoadOp::Load, |stencil| stencil.load),
+                    store: wgpu::StoreOp::Store,
+                }),
+            },
+        );
+    staging
+        .write_buffer(
+            encoder,
+            &upload,
+            0,
+            wgpu::BufferSize::new(needed).expect("draw upload is nonempty"),
+        )
+        .copy_from_slice(&batch.data);
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("d3d9-draw-batch"),
+        color_attachments: &colors,
+        depth_stencil_attachment: depth,
+        timestamp_writes: None,
+        occlusion_query_set: segment.and(query_set),
+        multiview_mask: None,
     });
-    bind_groups.clear();
-    draw.bind_group_scratch = bind_groups;
-    for pending in &mut draw.batch.draws {
-        if let Some(geometry) = pending.native_geometry.take() {
-            draw.native_geometry_pool.push(geometry);
+    if let Some(index) = segment {
+        pass.begin_occlusion_query(index);
+    }
+    let mut cached_viewport = None;
+    let mut cached_stencil = None;
+    let mut cached_blend = None;
+    let mut cached_scissor = None;
+    let mut cached_pipeline: Option<&wgpu::RenderPipeline> = None;
+    let mut cached_bind: Option<(&wgpu::BindGroup, [u32; 4])> = None;
+    let mut cached_material: Option<&wgpu::BindGroup> = None;
+    let mut cached_vertices: [Option<(&wgpu::Buffer, u64, u64)>; 8] = [None; 8];
+    let mut cached_index: Option<(&wgpu::Buffer, u64, u64, wgpu::IndexFormat)> = None;
+    for ((pending, bind_group), uniform_group) in
+        batch.draws.iter().zip(&bind_groups).zip(&uniforms)
+    {
+        if cached_pipeline != Some(&pending.pipeline) {
+            pass.set_pipeline(&pending.pipeline);
+            cached_pipeline = Some(&pending.pipeline);
+        }
+        if cached_bind != Some((uniform_group, pending.uniform_offsets)) {
+            pass.set_bind_group(0, uniform_group, &pending.uniform_offsets);
+            cached_bind = Some((uniform_group, pending.uniform_offsets));
+        }
+        if cached_material != Some(bind_group) {
+            pass.set_bind_group(1, bind_group, &[]);
+            cached_material = Some(bind_group);
+        }
+        let mut vertex_bindings: SmallVec<[(&wgpu::Buffer, u64, u64); 2]> = SmallVec::new();
+        if let Some(geometry) = &pending.native_geometry {
+            for vertex in &geometry.vertices {
+                vertex_bindings.push((vertex.data.buffer(&upload), vertex.offset, vertex.size));
+            }
+        } else if pending.has_attributes {
+            vertex_bindings.push((&upload, pending.vertex_offset, pending.vertex_size));
+        }
+        for (slot, binding) in vertex_bindings.into_iter().enumerate() {
+            if cached_vertices[slot] != Some(binding) {
+                let (buffer, offset, size) = binding;
+                pass.set_vertex_buffer(slot as u32, buffer.slice(offset..offset + size));
+                cached_vertices[slot] = Some(binding);
+            }
+        }
+        let viewport_key = (
+            pending.viewport.x,
+            pending.viewport.y,
+            pending.viewport.width,
+            pending.viewport.height,
+            pending.viewport.min_z.to_bits(),
+            pending.viewport.max_z.to_bits(),
+        );
+        if cached_viewport != Some(viewport_key) {
+            pass.set_viewport(
+                pending.viewport.x as f32,
+                pending.viewport.y as f32,
+                pending.viewport.width as f32,
+                pending.viewport.height as f32,
+                pending.viewport.min_z,
+                pending.viewport.max_z,
+            );
+            cached_viewport = Some(viewport_key);
+        }
+        if cached_stencil != Some(pending.stencil_reference) {
+            pass.set_stencil_reference(pending.stencil_reference);
+            cached_stencil = Some(pending.stencil_reference);
+        }
+        let blend = pending.blend_constant;
+        let blend_bits = blend.map(f32::to_bits);
+        if cached_blend != Some(blend_bits) {
+            pass.set_blend_constant(wgpu::Color {
+                r: blend[0] as f64,
+                g: blend[1] as f64,
+                b: blend[2] as f64,
+                a: blend[3] as f64,
+            });
+            cached_blend = Some(blend_bits);
+        }
+        let [left, top, width, height] =
+            pending.scissor.unwrap_or([0, 0, batch.width, batch.height]);
+        if cached_scissor != Some([left, top, width, height]) {
+            pass.set_scissor_rect(left, top, width, height);
+            cached_scissor = Some([left, top, width, height]);
+        }
+        let index_binding = match (&pending.native_geometry, pending.index_range) {
+            (Some(geometry), _) => Some((
+                geometry.index.buffer(&upload),
+                geometry.index_offset,
+                geometry.index_size,
+                geometry.index_format,
+            )),
+            (None, Some((offset, size, format))) => Some((&upload, offset, size, format)),
+            (None, None) => None,
+        };
+        if let Some(binding) = index_binding {
+            if cached_index != Some(binding) {
+                let (buffer, offset, size, format) = binding;
+                pass.set_index_buffer(buffer.slice(offset..offset + size), format);
+                cached_index = Some(binding);
+            }
+        }
+        if let Some(geometry) = &pending.native_geometry {
+            pass.draw_indexed(
+                geometry.first_index..geometry.first_index + geometry.count,
+                geometry.base_vertex,
+                0..1,
+            );
+        } else if pending.index_range.is_some() {
+            pass.draw_indexed(0..pending.vertex_count, 0, 0..1);
+        } else {
+            pass.draw(0..pending.vertex_count, 0..1);
         }
     }
-    draw.batch.draws.clear();
-    draw.batch.data.clear();
-    draw.batch.color_view = None;
-    draw.batch.color_key_view = None;
-    draw.batch.padded_color = None;
-    draw.batch.depth = None;
-    draw.batch.last_uniform = None;
-    Ok(())
+    if segment.is_some() {
+        pass.end_occlusion_query();
+    }
+    drop(pass);
+    if let Some(padded) = &batch.padded_color {
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &padded.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &padded.source.texture,
+                mip_level: padded.source.subresource.1,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: padded.source.subresource.0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: padded.source.width,
+                height: padded.source.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    bind_groups.clear();
+    recorder.bind_group_scratch = bind_groups;
+    uniforms.clear();
+    recorder.uniform_scratch = uniforms;
 }
 
 pub(crate) fn clear(
@@ -4306,7 +4436,7 @@ pub(crate) fn clear(
     );
     let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("d3d9-clear"),
-        layout: &layout,
+        layout: &layout.uniforms,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
             resource: buffer.as_entire_binding(),
@@ -4338,6 +4468,7 @@ pub(crate) fn clear(
         let recipe = PipelineRecipe {
             shaders: [source.clone(), source],
             interface: InterfaceKey {
+                material: false,
                 bindings: Arc::clone(&clear_bindings),
                 vertex_buffers: key.buffers.clone(),
             },

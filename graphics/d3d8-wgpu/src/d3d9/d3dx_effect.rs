@@ -2979,17 +2979,29 @@ pub fn d3dx_effect_prepare_shaders(
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum RegisterShape {
+    Copy,
+    Transpose4x4,
+    General,
+}
+
 #[derive(Clone)]
 struct RegisterLayout {
     rows: usize,
     cols: usize,
-    count: usize,
     stride: usize,
     columns: bool,
     lanes: usize,
     valid: usize,
     float: bool,
     convert: fn(u32) -> f32,
+    needed: usize,
+    shape: RegisterShape,
+}
+
+fn f32_at(data: &[u8], offset: usize) -> f32 {
+    f32::from_le_bytes(data[offset..offset + 4].try_into().expect("four bytes"))
 }
 
 impl RegisterLayout {
@@ -3020,20 +3032,30 @@ impl RegisterLayout {
     }
 
     fn write(&self, data: &[u8], out: &mut [f32]) -> Result<(), RenderError> {
-        out.fill(0.0);
-        if let Some(last) = (0..self.count)
-            .rev()
-            .find(|register| register % self.stride < self.valid)
-            .filter(|_| self.lanes > 0)
-        {
-            let max_index = self.index(last / self.stride, last % self.stride, self.lanes - 1);
-            if (max_index + 1) * 4 > data.len() {
-                return Err(invalid_data("shader constant data is too short"));
+        if self.needed > data.len() {
+            return Err(invalid_data("shader constant data is too short"));
+        }
+        match self.shape {
+            RegisterShape::Copy => {
+                for (value, word) in out.iter_mut().zip(data.chunks_exact(4)) {
+                    *value = f32::from_le_bytes(word.try_into().expect("four bytes"));
+                }
             }
-            if self.float {
-                self.fill(data, out, f32::from_bits);
-            } else {
-                self.fill(data, out, self.convert);
+            RegisterShape::Transpose4x4 => {
+                for (register, slot) in out.chunks_exact_mut(4).enumerate() {
+                    let base = (register / 4 * 16 + register % 4) * 4;
+                    for (lane, value) in slot.iter_mut().enumerate() {
+                        *value = f32_at(data, base + lane * 16);
+                    }
+                }
+            }
+            RegisterShape::General => {
+                out.fill(0.0);
+                if self.needed > 0 && self.float {
+                    self.fill(data, out, f32::from_bits);
+                } else if self.needed > 0 {
+                    self.fill(data, out, self.convert);
+                }
             }
         }
         Ok(())
@@ -3076,17 +3098,36 @@ fn register_layout(param: &EfxParam, constant: &CtabConst) -> Result<RegisterLay
             ));
         }
     };
-    Ok(RegisterLayout {
+    let float = param.type_.type_ == FXT_FLOAT;
+    let shape = if !float || lanes != 4 || stride != valid {
+        RegisterShape::General
+    } else if !columns && cols == 4 {
+        RegisterShape::Copy
+    } else if columns && rows == 4 && cols == 4 {
+        RegisterShape::Transpose4x4
+    } else {
+        RegisterShape::General
+    };
+    let mut layout = RegisterLayout {
         rows,
         cols,
-        count,
         stride,
         columns,
         lanes,
         valid,
-        float: param.type_.type_ == FXT_FLOAT,
+        float,
         convert,
-    })
+        needed: 0,
+        shape,
+    };
+    if let Some(last) = (0..count)
+        .rev()
+        .find(|register| register % stride < valid)
+        .filter(|_| lanes > 0)
+    {
+        layout.needed = (layout.index(last / stride, last % stride, lanes - 1) + 1) * 4;
+    }
+    Ok(layout)
 }
 
 fn ctab_layouts(
@@ -3424,18 +3465,18 @@ impl StateSink<'_> {
         fill: impl FnOnce(&mut [f32]) -> Result<(), RenderError>,
     ) -> Result<(), RenderError> {
         let len = count as usize * 4;
-        stats::record(|s| {
-            s.constant_updates += 1;
-            s.constant_registers += u64::from(count);
-        });
         match self {
             StateSink::Device(device, values) => {
                 stats::record(|s| {
+                    s.constant_updates += 1;
+                    s.constant_registers += u64::from(count);
                     s.constant_temp_bytes += (len * size_of::<f32>()) as u64;
-                    s.constant_scratch_grows += u64::from(len > values.capacity());
+                    s.constant_scratch_grows += u64::from(len > values.len());
                 });
-                values.clear();
-                values.resize(len, 0.0);
+                if values.len() < len {
+                    values.resize(len, 0.0);
+                }
+                let values = &mut values[..len];
                 fill(values)?;
                 device
                     .state
@@ -3443,6 +3484,10 @@ impl StateSink<'_> {
                     .map_err(|_| invalid_data("shader constant range is out of bounds"))
             }
             StateSink::Commands(commands, values_out) => {
+                stats::record(|s| {
+                    s.constant_updates += 1;
+                    s.constant_registers += u64::from(count);
+                });
                 let offset = values_out.len();
                 values_out.resize(offset + len, 0.0);
                 if let Err(error) = fill(&mut values_out[offset..]) {
@@ -4239,13 +4284,13 @@ fn prepare_pass(
     let mut commands = std::mem::take(&mut effect.spare_commands);
     let mut values = std::mem::take(&mut effect.spare_values);
     commands.clear();
-    values.clear();
     let ctx = Apply {
         since: commit.then_some(effect.pass_version),
         now: next_version(),
         commit,
     };
     if manager {
+        values.clear();
         let mut sink = StateSink::Commands(&mut commands, &mut values);
         for state in states {
             if let Err(error) = apply_state(effect, &mut sink, state, ctx) {
@@ -4270,12 +4315,10 @@ fn prepare_pass(
         let mut sink = StateSink::Device(device, &mut values);
         for state in states {
             if let Err(error) = apply_state(effect, &mut sink, state, ctx) {
-                values.clear();
                 effect.spare_values = values;
                 return run_result(failed(label, error));
             }
         }
-        values.clear();
         effect.spare_values = values;
         effect.pass_version = ctx.now;
         effect.pass = index as i32;
