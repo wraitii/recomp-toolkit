@@ -1718,7 +1718,7 @@ struct SamplerKey {
     depth: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct PendingTexture {
     stage: u32,
     texture: Option<wgpu::Texture>,
@@ -1731,7 +1731,7 @@ struct BindGroupKey {
     layout: wgpu::BindGroupLayout,
     uniform_sizes: [u64; 4],
     programs: Option<[wgpu::Buffer; 2]>,
-    textures: SmallVec<[(u32, Option<wgpu::Texture>, wgpu::TextureView, wgpu::Sampler); 4]>,
+    textures: Arc<[PendingTexture]>,
 }
 
 struct PendingDraw {
@@ -1785,11 +1785,7 @@ fn same_bindings(a: &PendingDraw, b: &PendingDraw) -> bool {
     a.layout == b.layout
         && a.uniform_sizes == b.uniform_sizes
         && a.programs == b.programs
-        && a.textures.len() == b.textures.len()
-        && a.textures
-            .iter()
-            .zip(b.textures.iter())
-            .all(|(x, y)| x.stage == y.stage && x.view == y.view && x.sampler == y.sampler)
+        && a.textures == b.textures
 }
 
 #[derive(Default)]
@@ -2016,12 +2012,12 @@ impl D3d9DrawState {
         self.bind_groups.retain(|key, _| {
             !key.textures
                 .iter()
-                .any(|entry| entry.1.as_ref() == Some(texture))
+                .any(|entry| entry.texture.as_ref() == Some(texture))
         });
         self.bind_groups_previous.retain(|key, _| {
             !key.textures
                 .iter()
-                .any(|entry| entry.1.as_ref() == Some(texture))
+                .any(|entry| entry.texture.as_ref() == Some(texture))
         });
     }
 
@@ -3889,18 +3885,7 @@ fn flush_inner(
                 layout: pending.layout.clone(),
                 uniform_sizes: pending.uniform_sizes,
                 programs: pending.programs.clone(),
-                textures: pending
-                    .textures
-                    .iter()
-                    .map(|texture| {
-                        (
-                            texture.stage,
-                            texture.texture.clone(),
-                            texture.view.clone(),
-                            texture.sampler.clone(),
-                        )
-                    })
-                    .collect(),
+                textures: Arc::clone(&pending.textures),
             };
             if let Some(bind_group) =
                 cached_bind_group(&mut bind_group_cache, &mut bind_group_previous, &key)
