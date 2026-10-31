@@ -32,7 +32,12 @@ static const uint32_t LOADER_EXPECTED_ENTRY = RECOMP_ENTRY_POINT;
 // does not match LOADER_EXPECTED_SHA256. There is no hash bypass.
 // Returns false and leaves loader_error() set on failure.
 bool loader_load(const char *exe_path = nullptr);
-bool loader_load_interpreted(const char *exe_path);
+// Maps an arbitrary PE32 program with no hash or base gate for the interpreter.
+// Requires an empty translated dispatch that registered itself through
+// loader_register_interpreted_dispatch. register_shims runs on the fresh arena
+// before the IAT is bound, so binding sees every implemented import.
+void loader_register_interpreted_dispatch();
+bool loader_load_interpreted(const char *exe_path, void (*register_shims)());
 
 const char *loader_error();
 uint32_t loader_image_base();

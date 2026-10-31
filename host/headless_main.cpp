@@ -626,47 +626,10 @@ void print_report(FILE *out, bool abnormal) {
     // never took.
 }
 
-} // namespace
-
-// Configure and run the frame-writing host with bounded execution and offline audio.
-// Exit status distinguishes missing frames or content from a completed capture.
-int main(int argc, char **argv) {
-#ifdef RECOMP_MANUAL_RUNNER
-    if (argc < 2) {
-        fprintf(stderr, "usage: recomp-run /path/to/program.exe [arguments...]\n");
-        return 2;
-    }
-    std::string args;
-    for (int i = 2; i < argc; ++i) {
-        if (!args.empty())
-            args += ' ';
-        args += '"';
-        unsigned backslashes = 0;
-        for (const char *p = argv[i]; *p; ++p) {
-            if (*p == '\\') {
-                ++backslashes;
-                continue;
-            }
-            args.append(backslashes * (*p == '"' ? 2 : 1), '\\');
-            backslashes = 0;
-            if (*p == '"')
-                args += '\\';
-            args += *p;
-        }
-        args.append(backslashes * 2, '\\');
-        args += '"';
-    }
-    os_setenv("RECOMP_GUEST_ARGS", args.c_str());
-    os_unsetenv("RECOMP_JIT_INPUT");
-    os_setenv("RECOMP_JIT_EXEC", "off");
-    g_max_frames = 0;
-    g_max_seconds = 0;
-    g_frame_every = 0;
-#else
-    (void)argc;
-    (void)argv;
-#endif
-
+// Boot and run the frame-writing host with bounded execution and offline
+// audio. The caller's caps are defaults the environment may override. False
+// means the run never started.
+bool headless_run(BootOptions opts) {
     if (const char *v = recomp_env("MAX_FRAMES"))
         g_max_frames = (uint32_t)strtoul(v, nullptr, 0);
     if (const char *v = recomp_env("MAX_SECONDS"))
@@ -680,15 +643,6 @@ int main(int argc, char **argv) {
 
     mkdir_p(g_frames_dir);
 
-    BootOptions opts;
-#ifdef RECOMP_MANUAL_RUNNER
-    opts.name = "recomp-run";
-    opts.exe = argv[1];
-    opts.interpreted = true;
-    opts.load_mods = false;
-#else
-    opts.name = "headless";
-#endif
     opts.activate = g_activate;
     opts.tick = headless_tick;
     opts.report = print_report;
@@ -701,16 +655,16 @@ int main(int argc, char **argv) {
     opts.close_unwind_grace = 15.0;
 
     if (!host_input_script_load())
-        return 2;
+        return false;
     host_input_set_notify(dinput_host_input_changed);
     if (!boot_load(opts)) {
-        fprintf(stderr, "headless: loader_load: %s\n", loader_error());
-        return 2;
+        fprintf(stderr, "%s: loader_load: %s\n", opts.name, loader_error());
+        return false;
     }
 
-    printf("headless: %s, entry %08x, image %08x..%08x\n", loader_exe_path().c_str(),
+    printf("%s: %s, entry %08x, image %08x..%08x\n", opts.name, loader_exe_path().c_str(),
            loader_entry_point(), loader_image_base(), loader_image_limit());
-    printf("headless: caps %u frames / %.0fs, frames -> %s\n", g_max_frames, g_max_seconds,
+    printf("%s: caps %u frames / %.0fs, frames -> %s\n", opts.name, g_max_frames, g_max_seconds,
            g_frames_dir.c_str());
     fflush(stdout);
 
@@ -721,12 +675,21 @@ int main(int argc, char **argv) {
     boot_run();
 
     audio_offline_end();
+    return true;
+}
 
-#ifndef RECOMP_MANUAL_RUNNER
+} // namespace
+
+// Exit status distinguishes missing frames or content from a completed capture.
+int main() {
+    BootOptions opts;
+    opts.name = "headless";
+    if (!headless_run(opts))
+        return 2;
+
     boot_report_lock();
     print_report(stdout, false);
     boot_report_unlock();
-#endif
 
     // The exit status says how the run ended, so a script never reads a
     // rescued run as a good one.
@@ -736,17 +699,10 @@ int main(int argc, char **argv) {
     //      out of guest code, or the guest exited with a non-zero code
     //   4  frames were presented but every one of them was uniform
     // The watchdog and the fault handler exit on their own, with 4, 5 and 6.
-#ifdef RECOMP_MANUAL_RUNNER
-    if (process_exited() && !boot_forced_stop())
-        return (int)process_exit_code();
-#endif
     if (boot_abnormal_exit()) {
         fprintf(stderr, "headless: the run did not end normally (%s)\n", boot_stop_reason());
         return 3;
     }
-#ifdef RECOMP_MANUAL_RUNNER
-    return process_exited() ? (int)process_exit_code() : 0;
-#endif
     if (!g_present_count)
         return 1;
     if (!g_seen_max_nonbg)

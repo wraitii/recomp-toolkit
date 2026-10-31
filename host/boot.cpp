@@ -515,14 +515,14 @@ bool boot_load(const BootOptions &opts) {
     if (!exe)
         exe = recomp_env("EXE");
     if (g_opt.interpreted) {
-        imports_init();
+        if (!loader_load_interpreted(exe, dx_register_shims))
+            return false;
+    } else {
+        if (!loader_load(exe))
+            return false;
+        load_extra_code();
         dx_register_shims();
     }
-    if (!(g_opt.interpreted ? loader_load_interpreted(exe) : loader_load(exe)))
-        return false;
-    if (!g_opt.interpreted)
-        load_extra_code();
-    dx_register_shims();
 
     // GetTickCount and timeGetTime keep telling the truth; installing the
     // source only adds the host's heartbeat to a call the guest already makes

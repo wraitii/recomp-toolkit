@@ -1,14 +1,16 @@
 #include "imports.h"
 #include "interp.h"
+#include "loader.h"
 #include "seh.h"
 #include "thunks.h"
 #include <cstdio>
 #include <cstdlib>
 
-extern "C" {
-int recomp_interpreter_dispatch_ready() {
-    return 1;
+namespace {
+[[maybe_unused]] const bool g_registered = (loader_register_interpreted_dispatch(), true);
 }
+
+extern "C" {
 const RecompHostMethod recomp_host_methods[1] = {};
 const uint32_t recomp_host_method_count = 0;
 RecompHostSlot recomp_host_slots[1] = {};
