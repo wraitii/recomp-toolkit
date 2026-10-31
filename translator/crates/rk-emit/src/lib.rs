@@ -2573,6 +2573,26 @@ impl<'a> Emitter<'a> {
                 };
                 let _ = writeln!(self.out, "c->xmm[{reg}][{lane}] = (uint32_t)({expr});");
             }
+            Location::Mm(reg, lane) => {
+                let register = Registers::get().require(&format!("MM{reg}"));
+                let shift = lane * 32;
+                let mut parts = Vec::with_capacity(4);
+                for byte in 0..4 {
+                    let key = StateKey::Register(
+                        (register.offset + lane as u64 * 4 + byte as u64) as u32,
+                    );
+                    let expr = match self.listed_value(state, keys, key)? {
+                        Some(value) => self.expr(value)?,
+                        None => format!("(c->mm[{reg}] >> {})", shift + byte * 8),
+                    };
+                    parts.push(format!("((uint64_t)(({expr}) & 0xffu) << {})", shift + byte * 8));
+                }
+                let _ = writeln!(
+                    self.out,
+                    "c->mm[{reg}] = (c->mm[{reg}] & ~(0xffffffffull << {shift})) | {};",
+                    parts.join(" | ")
+                );
+            }
             Location::Eip => {
                 let register = Registers::get().arch().program_counter;
                 self.publish_register("eip", register, state, keys)?
@@ -3439,6 +3459,13 @@ impl<'a> Emitter<'a> {
             return Some((
                 format!("c->xmm[{reg}][{}]", offset / 4),
                 (offset % 4) as u32,
+                4,
+            ));
+        }
+        if let Some((reg, offset)) = mm_offset(key) {
+            return Some((
+                format!("((uint32_t)(c->mm[{reg}] >> {}))", offset / 4 * 32),
+                offset % 4,
                 4,
             ));
         }

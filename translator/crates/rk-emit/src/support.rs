@@ -63,6 +63,7 @@ pub(crate) enum Location {
     Gpr(usize),
     Flag(Field),
     Xmm(usize, usize),
+    Mm(usize, usize),
     Eip,
     Fs,
     Df,
@@ -109,6 +110,9 @@ pub(crate) fn location(key: StateKey) -> Option<Location> {
     if let Some((reg, offset)) = rk_ir::xmm_offset(key) {
         return Some(Location::Xmm(reg, (offset / 4) as usize));
     }
+    if let Some((reg, offset)) = mm_offset(key) {
+        return Some(Location::Mm(reg, offset as usize / 4));
+    }
     let offset = match key {
         StateKey::Register(offset) => offset,
         StateKey::Frame { .. } => return Some(Location::Frame(key)),
@@ -126,6 +130,16 @@ pub(crate) fn location(key: StateKey) -> Option<Location> {
     } else {
         None
     }
+}
+
+pub(crate) fn mm_offset(key: StateKey) -> Option<(usize, u32)> {
+    let StateKey::Register(offset) = key else {
+        return None;
+    };
+    (0..8).find_map(|reg| {
+        let register = Registers::get().require(&format!("MM{reg}"));
+        within(register, offset as u64).then(|| (reg, offset - register.offset as u32))
+    })
 }
 
 pub(crate) fn within(register: Varnode, offset: u64) -> bool {
