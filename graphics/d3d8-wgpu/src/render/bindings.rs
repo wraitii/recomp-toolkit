@@ -7,16 +7,10 @@ pub(crate) struct DrawParameters {
 }
 
 impl DrawParameters {
-    pub(crate) fn new(
-        half_pixel: [f32; 4],
-        attribute_scales: [[f32; 4]; 16],
-        pixel_words: [u32; 12],
-    ) -> Self {
-        let mut vertex = [0.0; VERTEX_PARAMETER_BYTES / 4];
+    #[inline]
+    pub(crate) fn new(half_pixel: [f32; 4], pixel_words: [u32; 12]) -> Self {
+        let mut vertex = [1.0; VERTEX_PARAMETER_BYTES / 4];
         vertex[..4].copy_from_slice(&half_pixel);
-        for (slot, scale) in vertex[4..].chunks_exact_mut(4).zip(attribute_scales) {
-            slot.copy_from_slice(&scale);
-        }
         let mut pixel = [0; INTERPRETER_PARAMETER_BYTES];
         for (bytes, word) in pixel.chunks_exact_mut(4).zip(pixel_words) {
             bytes.copy_from_slice(&word.to_le_bytes());
@@ -28,12 +22,11 @@ impl DrawParameters {
         }
     }
 
-    pub(crate) fn interpreter_flags(mut self, opaque: u32, unbound: u32, tint: bool) -> Self {
+    pub(crate) fn interpreter_flags(&mut self, opaque: u32, unbound: u32, tint: bool) {
         self.pixel[48..52].copy_from_slice(&opaque.to_le_bytes());
         self.pixel[52..56].copy_from_slice(&u32::from(tint).to_le_bytes());
         self.pixel[56..60].copy_from_slice(&unbound.to_le_bytes());
         self.pixel_size = INTERPRETER_PARAMETER_BYTES;
-        self
     }
 
     pub(crate) fn values<'a>(

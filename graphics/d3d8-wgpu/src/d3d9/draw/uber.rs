@@ -120,7 +120,7 @@ pub(super) struct Selection {
 
 #[derive(PartialEq, Eq)]
 struct SelectionKey {
-    revision: u64,
+    fingerprint: u64,
     primitive: u32,
     target: (wgpu::TextureFormat, u32, u32),
     depth: Option<(wgpu::TextureFormat, u32, u32)>,
@@ -150,7 +150,7 @@ impl SelectionKey {
             );
         }
         Self {
-            revision: state.selection_revision(),
+            fingerprint: state.selection_fingerprint(),
             primitive: snapshot.command.primitive,
             target: surface(&snapshot.target),
             depth: snapshot.depth.as_ref().map(surface),
@@ -199,6 +199,7 @@ pub(super) fn select(
         return Ok(selection);
     }
     draw.specialization.selection = None;
+    stats::record(|s| s.selection_misses += 1);
     let coverage = coverage(gpu, state, snapshot, vs, ps);
     let eligible = matches!(coverage, Ok(true));
     let family = if eligible {

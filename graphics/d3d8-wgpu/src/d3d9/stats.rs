@@ -5,6 +5,18 @@ use std::time::Instant;
 #[derive(Debug, Default)]
 pub(super) struct Counters {
     pub draws: u64,
+    pub execute_ns: u64,
+    pub draws_native: u64,
+    pub draws_packed: u64,
+    pub draws_interpreted: u64,
+    pub packed_vertex_bytes: u64,
+    pub streamed_geometry_bytes: u64,
+    pub geometry_buffer_creates: u64,
+    pub geometry_buffer_bytes: u64,
+    pub selection_misses: u64,
+    pub flushes: u64,
+    pub flushed_draws: u64,
+    pub flushed_bytes: u64,
     pub binding_refreshes: u64,
     pub binding_refreshes_unchanged: u64,
     pub effect_pass_binding_refreshes: u64,

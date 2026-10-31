@@ -130,15 +130,10 @@ pub(super) enum GeometryData {
 }
 
 impl GeometryData {
-    pub(super) fn slice<'a>(
-        &'a self,
-        upload: &'a wgpu::Buffer,
-        offset: u64,
-        size: u64,
-    ) -> wgpu::BufferSlice<'a> {
+    pub(super) fn buffer<'a>(&'a self, upload: &'a wgpu::Buffer) -> &'a wgpu::Buffer {
         match self {
-            GeometryData::Buffer(buffer) => buffer.slice(offset..offset + size),
-            _ => upload.slice(offset..offset + size),
+            GeometryData::Buffer(buffer) => buffer,
+            _ => upload,
         }
     }
 }
@@ -178,6 +173,7 @@ pub(super) struct NativeGeometry {
     pub(super) index_offset: u64,
     pub(super) index_size: u64,
     pub(super) index_format: wgpu::IndexFormat,
+    pub(super) first_index: u32,
     pub(super) base_vertex: i32,
     pub(super) count: u32,
 }
@@ -326,24 +322,27 @@ pub(super) fn pack_shader_vertices(
     })
 }
 
-pub(super) fn plan_native_geometry(
-    gpu: &D3d9Gpu,
-    draw: &mut D3d9DrawState,
-    command: &DrawCommand,
-    linked: &[LinkedInput],
-    allow_raw_inputs: bool,
-) -> Result<Option<NativeGeometryPlan>, RenderError> {
-    let topology = match command.primitive {
+pub(super) fn native_topology(command: &DrawCommand) -> Option<wgpu::PrimitiveTopology> {
+    if !command.indexed {
+        return None;
+    }
+    Some(match command.primitive {
         D3DPT_POINTLIST => wgpu::PrimitiveTopology::PointList,
         D3DPT_LINELIST => wgpu::PrimitiveTopology::LineList,
         D3DPT_LINESTRIP => wgpu::PrimitiveTopology::LineStrip,
         D3DPT_TRIANGLELIST => wgpu::PrimitiveTopology::TriangleList,
         D3DPT_TRIANGLESTRIP => wgpu::PrimitiveTopology::TriangleStrip,
-        _ => return Ok(None),
-    };
-    if !command.indexed || linked.is_empty() {
-        return Ok(None);
-    }
+        _ => return None,
+    })
+}
+
+pub(super) fn native_layout(
+    gpu: &D3d9Gpu,
+    draw: &mut D3d9DrawState,
+    command: &DrawCommand,
+    linked: &[LinkedInput],
+    allow_raw_inputs: bool,
+) -> Result<Option<Arc<NativeLayout>>, RenderError> {
     let mut key = NativeLayoutKey::new();
     for input in linked {
         let format = if allow_raw_inputs && input.element_type == D3DDECLTYPE_UBYTE4 {
@@ -379,7 +378,7 @@ pub(super) fn plan_native_geometry(
             },
         ));
     }
-    let layout = match draw.native_layouts.get(&key) {
+    Ok(Some(match draw.native_layouts.get(&key) {
         Some(layout) => {
             stats::record(|s| s.native_layout_hits += 1);
             Arc::clone(layout)
@@ -407,7 +406,119 @@ pub(super) fn plan_native_geometry(
             stats::record(|s| s.native_layout_evictions += evicted as u64);
             layout
         }
+    }))
+}
+
+pub(super) fn raw_input_mask(linked: &[LinkedInput]) -> Option<u16> {
+    linked
+        .iter()
+        .filter(|input| input.element_type == D3DDECLTYPE_UBYTE4)
+        .try_fold(0u16, |mask, input| {
+            Some(mask | 1u16.checked_shl(input.location)?)
+        })
+}
+
+type NativeShape = SmallVec<[(u32, u32); 2]>;
+
+pub(super) struct LinkPlan {
+    linked: Arc<[LinkedInput]>,
+    raw_inputs: Option<u16>,
+    streams: SmallVec<[u32; 2]>,
+    native: Option<(NativeShape, Option<Arc<NativeLayout>>)>,
+}
+
+impl D3d9DrawState {
+    pub(super) fn link_plan(
+        &mut self,
+        key: LinkKey,
+        declaration: &[VertexElement],
+        program: &wgsl::Program,
+    ) -> Result<(Arc<[LinkedInput]>, Option<u16>), RenderError> {
+        if let Some(plan) = self.link_plans.get(&key) {
+            return Ok((Arc::clone(&plan.linked), plan.raw_inputs));
+        }
+        let mut linked = Vec::new();
+        link_inputs(declaration, program, &mut linked)?;
+        if key.2 {
+            linked.sort_by_key(|input| input.location);
+        }
+        let mut streams = SmallVec::new();
+        for input in &linked {
+            if !streams.contains(&u32::from(input.stream)) {
+                streams.push(u32::from(input.stream));
+            }
+        }
+        let plan = LinkPlan {
+            raw_inputs: raw_input_mask(&linked),
+            linked: linked.into(),
+            streams,
+            native: None,
+        };
+        let result = (Arc::clone(&plan.linked), plan.raw_inputs);
+        if self.link_plans.len() >= 1024 {
+            self.link_plans.clear();
+        }
+        self.link_plans.insert(key, plan);
+        Ok(result)
+    }
+
+    pub(super) fn linked_native_layout(
+        &mut self,
+        gpu: &D3d9Gpu,
+        key: LinkKey,
+        command: &DrawCommand,
+    ) -> Result<Option<Arc<NativeLayout>>, RenderError> {
+        let plan = &self.link_plans[&key];
+        let shape = plan
+            .streams
+            .iter()
+            .map(|&stream| {
+                command
+                    .streams
+                    .iter()
+                    .find(|s| s.stream == stream)
+                    .map(|s| (s.stride, s.offset % 4))
+            })
+            .collect::<Option<NativeShape>>();
+        if let (Some(shape), Some((cached, layout))) = (&shape, &plan.native) {
+            if shape == cached {
+                return Ok(layout.clone());
+            }
+        }
+        let linked = Arc::clone(&plan.linked);
+        let layout = native_layout(gpu, self, command, &linked, true)?;
+        if let Some(shape) = shape {
+            self.link_plans.get_mut(&key).unwrap().native = Some((shape, layout.clone()));
+        }
+        Ok(layout)
+    }
+}
+
+fn fetch_fits(command: &DrawCommand, input: &LinkedInput, max_index: u32) -> bool {
+    let Some(data) = command
+        .streams
+        .iter()
+        .find(|s| s.stream == u32::from(input.stream))
+    else {
+        return false;
     };
+    let Some(size) = element_size(input.element_type) else {
+        return false;
+    };
+    u64::from(max_index) * u64::from(data.stride)
+        + u64::from(data.offset)
+        + u64::from(input.offset)
+        + u64::from(size)
+        <= data.bytes.len() as u64
+}
+
+pub(super) fn plan_native_geometry(
+    draw: &mut D3d9DrawState,
+    command: &DrawCommand,
+    linked: &[LinkedInput],
+    topology: wgpu::PrimitiveTopology,
+    layout: Arc<NativeLayout>,
+) -> Result<Option<NativeGeometryPlan>, RenderError> {
     if !matches!(command.index_format, 101 | 102) {
         return Err(invalid("Draw", "invalid index format"));
     }
@@ -431,14 +542,19 @@ pub(super) fn plan_native_geometry(
         ));
     }
     let max_index = max_index as u32;
-    for input in linked {
-        VertexFetch::prepare(
-            command,
-            input.stream,
-            input.offset,
-            input.element_type,
-            max_index,
-        )?;
+    if !linked
+        .iter()
+        .all(|input| fetch_fits(command, input, max_index))
+    {
+        for input in linked {
+            VertexFetch::prepare(
+                command,
+                input.stream,
+                input.offset,
+                input.element_type,
+                max_index,
+            )?;
+        }
     }
     let strip = matches!(
         topology,
@@ -475,7 +591,7 @@ pub(super) fn upload_native_geometry(
     plan: NativeGeometryPlan,
 ) -> Result<Box<NativeGeometry>, RenderError> {
     let index = draw.geometry_source(gpu, &command.index_bytes)?;
-    let mut vertices = SmallVec::new();
+    let mut vertices: SmallVec<[NativeStream; 2]> = SmallVec::new();
     for &stream_id in &plan.layout.streams {
         let stream = stream_for(command, stream_id)?;
         let stride = u64::from(stream.stride);
@@ -488,16 +604,42 @@ pub(super) fn upload_native_geometry(
         };
         vertices.push(NativeStream { data, offset, size });
     }
+    let mut base_vertex = plan.base_vertex;
+    let whole_vertex = i64::from(base_vertex) + plan.first as i64;
+    if (0..=i64::from(i32::MAX)).contains(&whole_vertex)
+        && vertices
+            .iter()
+            .all(|vertex| matches!(vertex.data, GeometryData::Buffer(_)))
+    {
+        for (vertex, &stream_id) in vertices.iter_mut().zip(&plan.layout.streams) {
+            let stream = stream_for(command, stream_id)?;
+            vertex.offset = u64::from(stream.offset);
+            vertex.size = stream.bytes.len() as u64 - vertex.offset;
+        }
+        base_vertex = whole_vertex as i32;
+    }
+    let (index_offset, index_size, first_index) = match &index {
+        GeometryData::Buffer(buffer) => {
+            let stride = if plan.index_format == wgpu::IndexFormat::Uint16 {
+                2
+            } else {
+                4
+            };
+            (0, buffer.size(), (plan.index_offset / stride) as u32)
+        }
+        _ => (plan.index_offset, plan.index_size, 0),
+    };
     let geometry = NativeGeometry {
         vertices,
         layout: plan.layout,
         topology: plan.topology,
         strip_format: plan.strip_format,
         index,
-        index_offset: plan.index_offset,
-        index_size: plan.index_size,
+        index_offset,
+        index_size,
         index_format: plan.index_format,
-        base_vertex: plan.base_vertex,
+        first_index,
+        base_vertex,
         count: plan.count,
     };
     Ok(match draw.native_geometry_pool.pop() {
@@ -614,15 +756,18 @@ impl D3d9DrawState {
                 "geometry exceeds the device buffer limit",
             ));
         }
-        self.geometry
-            .retain(|_, cached| cached.bytes.strong_count() != 0);
-        let total: u64 = self
-            .geometry
-            .values()
-            .map(|cached| cached.buffer.size())
-            .sum();
-        if total.saturating_add(bytes.len() as u64) > 128 << 20 {
-            self.geometry.clear();
+        if self.geometry_bytes.saturating_add(bytes.len() as u64) > 128 << 20 {
+            self.geometry
+                .retain(|_, cached| cached.bytes.strong_count() != 0);
+            self.geometry_bytes = self
+                .geometry
+                .values()
+                .map(|cached| cached.buffer.size())
+                .sum();
+            if self.geometry_bytes.saturating_add(bytes.len() as u64) > 128 << 20 {
+                self.geometry.clear();
+                self.geometry_bytes = 0;
+            }
         }
         let buffer = gpu.validate("Draw", || {
             Ok(make_buffer(
@@ -635,6 +780,11 @@ impl D3d9DrawState {
         if trace_compilation() {
             self.geometry_upload_bytes += bytes.len() as u64;
         }
+        self.geometry_bytes += buffer.size();
+        stats::record(|s| {
+            s.geometry_buffer_creates += 1;
+            s.geometry_buffer_bytes += buffer.size();
+        });
         self.geometry.insert(
             key,
             CachedGeometry {

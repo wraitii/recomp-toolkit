@@ -308,6 +308,8 @@ pub(crate) struct DrawSnapshot {
     pub textures: BoundTextures,
 }
 
+type LinkKey = (u32, u32, bool);
+
 struct LinkedInput {
     location: u32,
     stream: u16,
@@ -1847,6 +1849,7 @@ pub(crate) struct D3d9DrawState {
     batch: DrawBatch,
     index_remap: Vec<u32>,
     geometry: FastMap<usize, CachedGeometry>,
+    geometry_bytes: u64,
     geometry_seen: FastMap<usize, (Weak<Vec<u8>>, u64)>,
     index_bounds: FastMap<usize, CachedIndexBounds>,
     index_bounds_order: std::collections::VecDeque<usize>,
@@ -1878,6 +1881,7 @@ pub(crate) struct D3d9DrawState {
     bind_groups_previous: FastMap<BindGroupKey, wgpu::BindGroup>,
     bind_group_scratch: Vec<wgpu::BindGroup>,
     linked: Vec<LinkedInput>,
+    link_plans: FastMap<LinkKey, LinkPlan>,
     ff_uniforms: Vec<f32>,
     index_slots: FastMap<u32, u32>,
     native_layouts: LruCache<NativeLayoutKey, Arc<NativeLayout>, 256>,
@@ -1914,6 +1918,7 @@ impl D3d9DrawState {
         self.bind_groups.clear();
         self.bind_groups_previous.clear();
         self.geometry.clear();
+        self.geometry_bytes = 0;
         self.geometry_seen.clear();
         self.index_bounds.clear();
         self.index_bounds_order.clear();
@@ -2638,7 +2643,7 @@ pub(crate) fn execute(
     objects: &super::shader::D3d9Objects,
     snapshot: &DrawSnapshot,
 ) -> Result<(), RenderError> {
-    let draw_started = trace_compilation().then(Instant::now);
+    let draw_started = (trace_compilation() || stats::enabled()).then(Instant::now);
     if let Some(compiler) = &mut draw.compiler {
         let ready = compiler.publish(draw.frame)?;
         if !ready.is_empty() {
@@ -2770,32 +2775,43 @@ pub(crate) fn execute(
     } else {
         None
     };
-    let linked = match vs {
+    let link_key = (state.declaration(), state.shader(false), covered);
+    let (shader_linked, raw_mask) = match vs {
         Some(v) => {
-            link_inputs(declaration, &v.program, &mut linked_inputs)?;
-            if covered {
-                linked_inputs.sort_by_key(|input| input.location);
-            }
-            Some(linked_inputs.as_slice())
+            let (linked, raw) = draw.link_plan(link_key, declaration, &v.program)?;
+            (Some(linked), raw)
         }
+        None => (None, raw_input_mask(&linked_inputs)),
+    };
+    let linked = match &shader_linked {
+        Some(linked) => Some(&linked[..]),
         None => ff_key.is_some().then_some(linked_inputs.as_slice()),
     };
     let hybrid = covered && uber::hybrid(gpu);
-    let native_plan = linked
-        .filter(|_| !covered || hybrid)
-        .map(|linked| plan_native_geometry(gpu, draw, &snapshot.command, linked, vs.is_some()))
-        .transpose()?
-        .flatten();
-    let mut raw_inputs = 0u16;
-    if native_plan.is_some() {
-        for input in linked.into_iter().flatten() {
-            if input.element_type == D3DDECLTYPE_UBYTE4 {
-                raw_inputs |= 1u16
-                    .checked_shl(input.location)
-                    .ok_or_else(|| invalid("Draw", "raw byte vertex input location exceeds 15"))?;
+    let native_plan = match (
+        linked.filter(|_| !covered || hybrid),
+        native_topology(&snapshot.command),
+    ) {
+        (Some(linked), Some(topology)) if !linked.is_empty() => {
+            let layout = if vs.is_some() {
+                draw.linked_native_layout(gpu, link_key, &snapshot.command)?
+            } else {
+                native_layout(gpu, draw, &snapshot.command, linked, false)?
+            };
+            match layout {
+                Some(layout) => {
+                    plan_native_geometry(draw, &snapshot.command, linked, topology, layout)?
+                }
+                None => None,
             }
         }
-    }
+        _ => None,
+    };
+    let mut raw_inputs = if native_plan.is_some() {
+        raw_mask.ok_or_else(|| invalid("Draw", "raw byte vertex input location exceeds 15"))?
+    } else {
+        0
+    };
     let specialization_started = trace_compilation().then(Instant::now);
     let ready = if hybrid {
         let (buffers, topology, strip_format) = if let Some(plan) = &native_plan {
@@ -3224,12 +3240,11 @@ pub(crate) fn execute(
         rs(state, 38),
         (if rs(state, 194) != 0 { 1.0f32 } else { 0.0f32 }).to_bits(),
     ];
-    let parameters = DrawParameters::new(
+    let mut parameters = DrawParameters::new(
         [1.0 / vp.width as f32, -1.0 / vp.height as f32, 0.0, 0.0],
-        [[1.0; 4]; 16],
         psp_words,
     );
-    let parameters = if interpreted {
+    if interpreted {
         let (opaque, unbound) = ps
             .unwrap()
             .interpreter
@@ -3252,10 +3267,8 @@ pub(crate) fn execute(
                     None => (opaque, unbound | (1 << physical)),
                 },
             );
-        parameters.interpreter_flags(opaque, unbound, uber::tint_enabled(gpu))
-    } else {
-        parameters
-    };
+        parameters.interpreter_flags(opaque, unbound, uber::tint_enabled(gpu));
+    }
     let has_attributes = !vertices.attributes.is_empty();
     let buffers = match native_geometry.as_ref() {
         Some(geometry) => Cow::Borrowed(&geometry.layout.layouts),
@@ -3569,6 +3582,7 @@ pub(crate) fn execute(
         );
     }
     let vertex_size = vertices.bytes.len();
+    let native_geometry_drawn = native_geometry.is_some();
     let vertex_offset = aligned(draw.batch.data.len(), 4)
         .ok_or_else(|| invalid("Draw", "vertex upload offset overflow"))?;
     draw.batch.data.resize(vertex_offset, 0);
@@ -3649,6 +3663,14 @@ pub(crate) fn execute(
     if draw.batch.data.len() >= 32 << 20 {
         flush(gpu, draw, queries)?;
     }
+    stats::record(|s| {
+        s.execute_ns += draw_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
+        s.draws_native += u64::from(native_geometry_drawn);
+        s.draws_packed += u64::from(!native_geometry_drawn && !interpreted);
+        s.draws_interpreted += u64::from(interpreted);
+        s.packed_vertex_bytes += vertex_size as u64;
+        s.streamed_geometry_bytes += streamed as u64;
+    });
     if let Some(started) = draw_started {
         let ms = started.elapsed().as_secs_f64() * 1000.0;
         draw.draw_cpu_ms += ms;
@@ -4010,6 +4032,8 @@ fn flush_inner(
             let mut cached_scissor = None;
             let mut cached_pipeline: Option<&wgpu::RenderPipeline> = None;
             let mut cached_bind: Option<(&wgpu::BindGroup, [u32; 4])> = None;
+            let mut cached_vertices: [Option<(&wgpu::Buffer, u64, u64)>; 8] = [None; 8];
+            let mut cached_index: Option<(&wgpu::Buffer, u64, u64, wgpu::IndexFormat)> = None;
             for (pending, bind_group) in draw.batch.draws.iter().zip(&bind_groups) {
                 if cached_pipeline != Some(&pending.pipeline) {
                     pass.set_pipeline(&pending.pipeline);
@@ -4019,20 +4043,24 @@ fn flush_inner(
                     pass.set_bind_group(0, bind_group, &pending.uniform_offsets);
                     cached_bind = Some((bind_group, pending.uniform_offsets));
                 }
+                let mut vertex_bindings: SmallVec<[(&wgpu::Buffer, u64, u64); 2]> = SmallVec::new();
                 if let Some(geometry) = &pending.native_geometry {
-                    for (slot, vertex) in geometry.vertices.iter().enumerate() {
-                        pass.set_vertex_buffer(
-                            slot as u32,
-                            vertex.data.slice(&upload, vertex.offset, vertex.size),
-                        );
+                    for vertex in &geometry.vertices {
+                        vertex_bindings.push((
+                            vertex.data.buffer(&upload),
+                            vertex.offset,
+                            vertex.size,
+                        ));
                     }
                 } else if pending.has_attributes {
-                    pass.set_vertex_buffer(
-                        0,
-                        upload.slice(
-                            pending.vertex_offset..pending.vertex_offset + pending.vertex_size,
-                        ),
-                    );
+                    vertex_bindings.push((&upload, pending.vertex_offset, pending.vertex_size));
+                }
+                for (slot, binding) in vertex_bindings.into_iter().enumerate() {
+                    if cached_vertices[slot] != Some(binding) {
+                        let (buffer, offset, size) = binding;
+                        pass.set_vertex_buffer(slot as u32, buffer.slice(offset..offset + size));
+                        cached_vertices[slot] = Some(binding);
+                    }
                 }
                 let viewport_key = (
                     pending.viewport.x,
@@ -4076,16 +4104,30 @@ fn flush_inner(
                     pass.set_scissor_rect(left, top, width, height);
                     cached_scissor = Some([left, top, width, height]);
                 }
-                if let Some(geometry) = &pending.native_geometry {
-                    pass.set_index_buffer(
-                        geometry
-                            .index
-                            .slice(&upload, geometry.index_offset, geometry.index_size),
+                let index_binding = match (&pending.native_geometry, pending.index_range) {
+                    (Some(geometry), _) => Some((
+                        geometry.index.buffer(&upload),
+                        geometry.index_offset,
+                        geometry.index_size,
                         geometry.index_format,
+                    )),
+                    (None, Some((offset, size, format))) => Some((&upload, offset, size, format)),
+                    (None, None) => None,
+                };
+                if let Some(binding) = index_binding {
+                    if cached_index != Some(binding) {
+                        let (buffer, offset, size, format) = binding;
+                        pass.set_index_buffer(buffer.slice(offset..offset + size), format);
+                        cached_index = Some(binding);
+                    }
+                }
+                if let Some(geometry) = &pending.native_geometry {
+                    pass.draw_indexed(
+                        geometry.first_index..geometry.first_index + geometry.count,
+                        geometry.base_vertex,
+                        0..1,
                     );
-                    pass.draw_indexed(0..geometry.count, geometry.base_vertex, 0..1);
-                } else if let Some((offset, size, format)) = pending.index_range {
-                    pass.set_index_buffer(upload.slice(offset..offset + size), format);
+                } else if pending.index_range.is_some() {
                     pass.draw_indexed(0..pending.vertex_count, 0, 0..1);
                 } else {
                     pass.draw(0..pending.vertex_count, 0..1);
@@ -4125,6 +4167,11 @@ fn flush_inner(
     if trace_compilation() {
         draw.batch_upload_bytes += needed;
     }
+    stats::record(|s| {
+        s.flushes += 1;
+        s.flushed_draws += draw.batch.draws.len() as u64;
+        s.flushed_bytes += needed;
+    });
     bind_groups.clear();
     draw.bind_group_scratch = bind_groups;
     for pending in &mut draw.batch.draws {
