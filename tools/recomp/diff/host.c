@@ -40,11 +40,14 @@ int interp_call(X86 *c, uint32_t target) {
     harness_escape("interp", target);
     return 0;
 }
+
+#ifndef RECOMP_TEST_RELOC
 int recomp_reloc_call(X86 *c, uint32_t target) {
     (void)c;
     (void)target;
     return 0;
 }
+#endif
 int recomp_run_thunk(X86 *c, uint32_t target) {
     (void)c;
     harness_escape("thunk", target);

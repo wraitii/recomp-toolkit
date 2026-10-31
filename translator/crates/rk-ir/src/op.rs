@@ -1,5 +1,4 @@
 use rk_core::ir::{Insn, OpCode, SehEffect, Varnode};
-use rk_core::program::Image;
 use rk_core::Addr;
 
 use crate::x87::{X87Lowering, X87Op};
@@ -305,23 +304,13 @@ pub fn properties(op: Op) -> Properties {
 }
 
 pub trait X87Recipes: Sync {
-    fn lower(
-        &self,
-        insn: &Insn,
-        image: &Image,
-        fresh: &mut dyn FnMut(u32) -> Varnode,
-    ) -> Option<X87Lowering>;
+    fn lower(&self, insn: &Insn, fresh: &mut dyn FnMut(u32) -> Varnode) -> Option<X87Lowering>;
 }
 
 pub struct NoX87;
 
 impl X87Recipes for NoX87 {
-    fn lower(
-        &self,
-        _insn: &Insn,
-        _image: &Image,
-        _fresh: &mut dyn FnMut(u32) -> Varnode,
-    ) -> Option<X87Lowering> {
+    fn lower(&self, _insn: &Insn, _fresh: &mut dyn FnMut(u32) -> Varnode) -> Option<X87Lowering> {
         None
     }
 }

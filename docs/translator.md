@@ -10,7 +10,7 @@ or `--engine` overrides the default. The generated-code contract is documented i
 | Stage | Crate | Produces |
 | --- | --- | --- |
 | Settings | `rk-core` | `Settings` from `recomp-translate-input-v1` |
-| Load | `rk-image` | `Program`: relocated PE, code-map functions, spans, tables, classified entries |
+| Load | `rk-image` | `Program`: image snapshot, code-map functions, spans, tables, classified entries; separate PE details for discovery |
 | Discover | `rk-discover` | Provisional functions and entries the map misses, merged into `Program` |
 | Lift | `rk-frontend` (`rk-sleigh`, `rk-decode`) | One `FunctionIr` per function: p-code, CFG, tables, SEH, noreturn |
 | Facts | `recomp-translate` (`facts.rs`) | Analysis facts checked against the lifted code: call and jump bounds, site and import effects |
@@ -18,6 +18,15 @@ or `--engine` overrides the default. The generated-code contract is documented i
 | Plan | `rk-ir` → `rk-ssa` → `rk-plan` (+ `rk-x87`) | `PlannedFunction`: prepared SSA, publications, flag plan, x87 plan |
 | Emit | `rk-emit` | C bodies and wrappers, or a trap body with a reason |
 | Write | `rk-output` | The generated tree |
+
+Relocatable templates use the same `Program` and frontend pipeline, with explicit entry
+discovery in place of PE discovery. `FunctionIr` carries decoded operands and instruction
+bytes for lowering without the image. The `recomp-translate` library exposes `Job` for a
+bounded program snapshot: lift, supply validated facts and native replacements, then run
+global analysis and emission, or use `translate` with supplied facts. Callers own discovery,
+fact validation, output writing and any stack-policy fingerprint checks. Lifting and global
+analysis cover the whole supplied snapshot; `EmitOptions.only` selects emitted bodies. Apply
+`JobOutput.extra_entries` to the program before writing normal output.
 
 `rk-core` is the shared vocabulary. `rk-ir` is the lowering and the operation
 set that SSA, planning and emission share. `rk-analysis` is a separate offline

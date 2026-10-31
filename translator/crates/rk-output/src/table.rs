@@ -15,7 +15,7 @@ fn json_string(text: &str) -> String {
     serde_json::to_string(text).unwrap_or_default()
 }
 
-fn call_return_bitmap(s: &mut String, call_returns: &[Addr], prefix: &str) -> (Addr, usize) {
+pub(super) fn call_return_bitmap(s: &mut String, call_returns: &[Addr], prefix: &str) -> (Addr, usize) {
     let (first, words) = match (call_returns.first(), call_returns.last()) {
         (Some(&first), Some(&last)) => {
             let mut words = vec![0u32; (((last - first) >> 5) + 1) as usize];

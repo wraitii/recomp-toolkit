@@ -4,6 +4,7 @@
 //! removed.
 
 pub mod reloc;
+pub mod jit;
 mod symbols;
 mod table;
 

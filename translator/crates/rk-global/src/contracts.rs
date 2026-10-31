@@ -617,7 +617,7 @@ fn prepare(
             detail: "control flow is not closed".into(),
         });
     }
-    let cg = rk_ir::lower(fir, &program.image, &Recipes).map_err(|error| Reason::Conservative {
+    let cg = rk_ir::lower(fir, &Recipes).map_err(|error| Reason::Conservative {
         detail: format!("lowering failed: {error}"),
     })?;
     let n = fir.insns.len();

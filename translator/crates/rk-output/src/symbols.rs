@@ -138,7 +138,7 @@ pub fn symbols_json(settings: &Settings, program: &Program, rows: &[SymbolRow]) 
         events.insert(name.as_str(), Hex(addr).to_string());
     }
     let symbols = Symbols {
-        exe_sha256: program.sha256.clone(),
+        exe_sha256: settings.sha256.clone(),
         image_base: Hex(program.image.base).to_string(),
         functions: rows,
         globals: settings

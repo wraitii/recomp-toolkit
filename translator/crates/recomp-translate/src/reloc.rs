@@ -8,8 +8,7 @@ use rk_core::settings::{Curated, Settings};
 use rk_core::Addr;
 use rk_emit::RelocEmit;
 
-use crate::facts::Facts;
-use crate::{build_bodies, Switches, X87Mode};
+use recomp_translate::{facts::Facts, EmitOptions, Job, Switches, X87Mode};
 
 #[derive(Default)]
 struct Refusal {
@@ -120,18 +119,7 @@ fn merge_trusted(program: &mut Program, discovered: &rk_discover::Discovered) ->
             },
         );
     }
-    program.spans = program
-        .functions
-        .values()
-        .flat_map(|function| {
-            function
-                .spans
-                .iter()
-                .map(move |span| (span.start, span.end(), function.addr))
-        })
-        .collect();
-    program.spans.sort_unstable();
-    Ok(rk_image::index_entries(program)?)
+    Ok(rk_image::rebuild_index(program)?)
 }
 
 /// Byte runs the translation depends on: decoded instruction bytes, less masked slots. Other
@@ -216,35 +204,38 @@ pub fn translate(
             .collect();
         let discovered = rk_discover::discover_from_entries(&program, &entries)?;
         merge_trusted(&mut program, &discovered)?;
-        let analysis = rk_frontend::analyze(&program);
-        let facts = Facts::default();
-        let global = rk_global::GlobalFacts::analyze(&rk_global::GlobalInput {
-            settings: &reloc_settings,
+        let native = BTreeSet::new();
+        let job = Job {
             program: &program,
-            analysis: &analysis,
-            indirect: &facts.call_targets,
-            indirect_jumps: &facts.jump_targets,
-            site_effects: &facts.site_effects,
-            fact_summary: &facts.summary,
-        })?;
+            settings: &reloc_settings,
+            native: &native,
+        };
+        let analysis = job.lift();
+        let facts = Facts::default();
+        let global = job.global(&analysis, &facts)?;
         let mut reloc_switches = switches;
         reloc_switches.direct = false;
-        let built = build_bodies(
-            &program,
+        let stack_inputs = recomp_translate::offline_stack_inputs(
+            &reloc_settings,
+            reloc_switches,
+            X87Mode::Auto,
+            false,
+        )?;
+        let built = job.emit(
             &analysis,
             None,
             &global,
-            &facts.guest_calls,
-            &facts.host_calls,
-            &reloc_settings,
-            X87Mode::Auto,
-            reloc_switches,
-            &[],
-            Some(RelocEmit {
-                image_base: program.image.base,
-                local_size: program.image.size,
-            }),
-            None,
+            &facts,
+            EmitOptions {
+                x87_mode: X87Mode::Auto,
+                switches: reloc_switches,
+                only: &[],
+                reloc: Some(RelocEmit {
+                    image_base: program.image.base,
+                    local_size: program.image.size,
+                }),
+                return_stack_inputs: Some(&stack_inputs),
+            },
         )?;
         let (bodies, stats, _) = built;
 

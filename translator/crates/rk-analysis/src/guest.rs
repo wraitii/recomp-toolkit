@@ -87,8 +87,12 @@ impl Options {
     }
 }
 
-pub fn discover_program(settings: &Settings, program: &Program) -> Result<(Program, bool)> {
-    let discovered = rk_discover::discover(settings, program)?;
+pub fn discover_program(
+    settings: &Settings,
+    program: &Program,
+    pe: &rk_image::PeDetails,
+) -> Result<(Program, bool)> {
+    let discovered = rk_discover::discover(settings, program, pe)?;
     let converged = discovered.report.converged;
     let mut program = program.clone();
     rk_discover::merge(&mut program, &discovered)?;
@@ -355,8 +359,7 @@ pub(crate) fn prepare_ssa<'a>(
             fir.tables.remove(&(last as u32));
         }
     }
-    let cg =
-        rk_ir::lower(&fir, &program.image, &rk_x87::Recipes).map_err(|error| error.to_string())?;
+    let cg = rk_ir::lower(&fir, &rk_x87::Recipes).map_err(|error| error.to_string())?;
     let options = PrepareOptions::new(contracts);
     let ssa = prepare(&cg, &options).map_err(|error| error.to_string())?;
     Ok((fir, ssa))

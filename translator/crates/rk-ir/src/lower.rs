@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use rk_core::ir::{FunctionIr, Insn, OpCode, PcodeOp, SehEffect, Space, Varnode};
-use rk_core::program::Image;
 use rk_core::{Addr, Diagnostic, Reason};
 
 use crate::op::{Op, SlowFamily, SlowInsn, StringOp, X87Recipes};
@@ -385,26 +384,23 @@ fn unmodelled_family(mnemonic: &str) -> SlowFamily {
 
 struct Lowerer<'a> {
     regs: &'static Registers,
-    image: &'a Image,
     x87: &'a dyn X87Recipes,
     unique: u64,
     slow: Vec<SlowInsn>,
     diagnostics: Vec<Diagnostic>,
 }
 
-pub fn lower(fir: &FunctionIr, image: &Image, x87: &dyn X87Recipes) -> rk_core::Result<CgFunction> {
-    lower_with(fir, image, x87, false)
+pub fn lower(fir: &FunctionIr, x87: &dyn X87Recipes) -> rk_core::Result<CgFunction> {
+    lower_with(fir, x87, false)
 }
 
 pub fn lower_with(
     fir: &FunctionIr,
-    image: &Image,
     x87: &dyn X87Recipes,
     mark_call_returns: bool,
 ) -> rk_core::Result<CgFunction> {
     let mut lowerer = Lowerer {
         regs: Registers::get(),
-        image,
         x87,
         unique: 0x8000_0000,
         slow: Vec::new(),
@@ -539,7 +535,7 @@ impl Lowerer<'_> {
                     unique += 0x10;
                     out
                 };
-                self.x87.lower(insn, self.image, &mut fresh)
+                self.x87.lower(insn, &mut fresh)
             };
             self.unique = unique;
             if let Some(lowering) = lowering {
@@ -557,10 +553,7 @@ impl Lowerer<'_> {
             let op = self.slow(insn, SlowFamily::X87);
             return Ok((vec![cg(op)], true, None));
         }
-        let raw = self
-            .image
-            .bytes(insn.addr, insn.length as usize)
-            .unwrap_or(&[]);
+        let raw = &insn.raw;
         if let Some(helper) = string::helper(raw) {
             return Ok((vec![cg(Op::String(StringOp(helper)))], false, None));
         }
@@ -604,12 +597,7 @@ impl Lowerer<'_> {
                 return Ok((vec![cg(op)], false, None));
             }
         }
-        let divide_by_zero = matches!(mnem.as_str(), "AAM")
-            && self
-                .image
-                .bytes(insn.addr, insn.length as usize)
-                .and_then(|b| b.last())
-                == Some(&0);
+        let divide_by_zero = matches!(mnem.as_str(), "AAM") && insn.raw.last() == Some(&0);
         if divide_by_zero || !SUPPORTED.contains(&mnem.as_str()) {
             let family = unmodelled_family(&mnem);
             let op = self.reject(

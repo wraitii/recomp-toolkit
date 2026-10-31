@@ -10,6 +10,13 @@ crate-type = ["cdylib"]
 [dependencies]
 rk-core.workspace = true
 rk-sleigh.workspace = true
+rk-discover.workspace = true
+rk-image.workspace = true
+rk-output.workspace = true
+recomp-translate = { path = "../recomp-translate" }
+serde_json.workspace = true
+rk-emit.workspace = true
+anyhow.workspace = true
 
 [lints]
 workspace = true

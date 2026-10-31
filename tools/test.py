@@ -82,12 +82,14 @@ def main():
     build_py.game_config.add_game_args(parser)
     raw = parser.parse_args()
     if raw.translator:
-        build_py.test_translator_analysis(ROOT / "build")
+        build_py.test_translator_libraries(ROOT / "build")
         command = [sys.executable, str(ROOT / "tests/translator/run.py"),
                    "--iterations", str(raw.iterations), "--jobs", str(raw.jobs)]
         for case in raw.case:
             command += ["--case", case]
         run(command, without_switches(os.environ))
+        if not raw.case:
+            run([sys.executable, str(ROOT / "tests/translator/reloc.py")], without_switches(os.environ))
         return
     if raw.case:
         parser.error("--case requires --translator")

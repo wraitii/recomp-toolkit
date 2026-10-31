@@ -163,8 +163,12 @@ pub struct GlobalFacts {
 
 impl GlobalFacts {
     pub fn analyze(input: &GlobalInput<'_>) -> Result<Self> {
-        let opaque_helpers: BTreeSet<Addr> = input.analysis.seh_helpers.clone();
         let native = input.settings.native_replaced()?;
+        Self::analyze_with_native(input, &native)
+    }
+
+    pub fn analyze_with_native(input: &GlobalInput<'_>, native: &BTreeSet<Addr>) -> Result<Self> {
+        let opaque_helpers: BTreeSet<Addr> = input.analysis.seh_helpers.clone();
         let mut mode_opaque = opaque_helpers.clone();
         mode_opaque.extend(native.iter().copied());
         let stack = if input.settings.stack_memory {
@@ -206,7 +210,7 @@ impl GlobalFacts {
             input.indirect,
             input.indirect_jumps,
             input.site_effects,
-            &native,
+            native,
         )?;
         let calls = stack::CallFacts {
             registers: ContractCallFacts {

@@ -13,6 +13,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import shlex
 import subprocess
 import hashlib
 import sys
@@ -370,6 +371,14 @@ def translation_input(cfg):
             "import_pops": import_abi.import_pops(), "import_memory": import_abi.import_memory()}
 
 
+def translator_cargo(build_root, command, *args):
+    target = Path(build_root) / "recomp/cargo"
+    subprocess.run(["cargo", command, "--quiet", "--locked",
+                    "--manifest-path", str(ROOT / "translator/Cargo.toml"),
+                    "--target-dir", str(target), *args], check=True)
+    return target
+
+
 def rust_pcode_library(build_root):
     """Return the bundled p-code evaluator library or build it for this desktop host."""
     names = {"Darwin": "librk_pcode_ffi.dylib", "Windows": "rk_pcode_ffi.dll"}
@@ -379,10 +388,7 @@ def rust_pcode_library(build_root):
         if not bundled.is_file():
             raise ValueError("Bundled p-code library is missing; reinstall Recomp Toolkit")
         return bundled
-    target = Path(build_root) / "recomp/cargo"
-    subprocess.run(["cargo", "build", "--release", "--quiet", "--locked", "-p", "rk-pcode-ffi",
-                    "--manifest-path", str(ROOT / "translator/Cargo.toml"), "--target-dir", str(target)],
-                   check=True)
+    target = translator_cargo(build_root, "build", "--release", "-p", "rk-pcode-ffi")
     source = target / "release" / name
     if platform.system() == "Darwin":
         staged = Path(build_root) / "recomp/pcode" / name
@@ -395,10 +401,7 @@ def rust_pcode_library(build_root):
 
 def rust_analysis(build_root):
     """Build the offline analysis producer and return its executable."""
-    target = Path(build_root) / "recomp/cargo"
-    subprocess.run(["cargo", "build", "--release", "--quiet", "-p", "rk-analysis",
-                    "--manifest-path", str(ROOT / "translator/Cargo.toml"), "--target-dir", str(target)],
-                   check=True)
+    target = translator_cargo(build_root, "build", "--release", "-p", "rk-analysis")
     return target / "release" / ("rk-analysis.exe" if os.name == "nt" else "rk-analysis")
 
 
@@ -434,22 +437,19 @@ def run_analysis(args, cfg, build_root):
 
 def rust_translator(build_root):
     """Return the bundled translator or build it into the build root."""
-    bundled = ROOT.parent / "dependencies/bin/recomp-translate"
+    name = "recomp-translate.exe" if os.name == "nt" else "recomp-translate"
+    bundled = ROOT.parent / "dependencies/bin" / name
     if (ROOT.parent / "dependencies/manifest.json").is_file():
         if not bundled.is_file():
             raise ValueError("Bundled Rust translator is missing; reinstall Recomp Toolkit")
         return bundled
-    target = Path(build_root) / "recomp/cargo"
-    subprocess.run(["cargo", "build", "--release", "--quiet", "--locked", "-p", "recomp-translate",
-                    "--manifest-path", str(ROOT / "translator/Cargo.toml"), "--target-dir", str(target)],
-                   check=True)
-    return target / "release" / ("recomp-translate.exe" if os.name == "nt" else "recomp-translate")
+    target = translator_cargo(build_root, "build", "--release", "-p", "recomp-translate")
+    return target / "release" / name
 
 
-def test_translator_analysis(build_root):
-    subprocess.run(["cargo", "test", "--quiet", "--locked", "--lib", "-p", "rk-core", "-p", "rk-ssa", "-p", "rk-global",
-                    "--manifest-path", str(ROOT / "translator/Cargo.toml"),
-                    "--target-dir", str(Path(build_root) / "recomp/cargo")], check=True)
+def test_translator_libraries(build_root):
+    translator_cargo(build_root, "test", "--lib", "-p", "rk-core", "-p", "rk-ssa",
+                     "-p", "rk-global", "-p", "recomp-translate")
 
 
 def run_reloc_extractor(cfg):
@@ -687,19 +687,54 @@ def host_entry_stubs(gen, out):
     return out
 
 
+def build_jit_module(directory, input_path):
+    directory = Path(directory).resolve()
+    build_root = Path(input_path).resolve().parent.parent
+    database = build_root / "cmake" / default_preset(platform.system()) / "compile_commands.json"
+    commands = json.loads(database.read_text())
+    sample = next(row for row in commands
+                  if Path(row["file"]).name.startswith("chunk_") and row["file"].endswith(".c"))
+    command = sample.get("arguments") or shlex.split(sample["command"])
+    flags = []
+    skip = False
+    for arg in command[1:]:
+        if skip:
+            skip = False
+        elif arg in ("-o", "-c"):
+            skip = True
+        elif arg.startswith("-DRECOMP_OVERRIDE_HEADER"):
+            continue
+        else:
+            flags.append(arg)
+    extension = ".dylib" if platform.system() == "Darwin" else ".so"
+    link = (["-dynamiclib", "-Wl,-undefined,dynamic_lookup"]
+            if platform.system() == "Darwin" else ["-shared"])
+    subprocess.run([command[0], "-I", str(directory), *flags, "-fPIC", "-fvisibility=hidden",
+                    str(directory / "batch.c"), str(directory / "module.c"),
+                    *link, "-o", str(directory / ("module" + extension))],
+                   cwd=sample["directory"], check=True)
+
+
 def build_translator_harness(gen, out):
     """Compile a synthetic translation and the diff host without a game build."""
     gen = Path(gen).resolve()
     generated = sorted(gen.glob("chunk_*.c")) + [gen / "table.c", gen / "call_facts.c"]
     if not (gen / "table.c").is_file():
         sys.exit("%s/table.c is missing: translate the fixture first" % gen)
+    reloc = (gen / "reloc/table.c").is_file()
+    if reloc:
+        generated += sorted((gen / "reloc").glob("chunk_*.c")) + [gen / "reloc/table.c"]
     host = [ROOT / "tools/recomp/tests/harness.c", ROOT / "tools/recomp/diff/host.c",
             ROOT / "platform/os_posix.cpp", ROOT / "platform/env.cpp",
             ROOT / "tools/recomp/diff/host.cpp", ROOT / "runtime/guest_strings.cpp",
             ROOT / "runtime/dispatch.cpp"]
+    if reloc:
+        host += [ROOT / "runtime/reloc.cpp", ROOT / "tests/translator/reloc_host.cpp"]
     out = Path(out).resolve()
     objects = out.parent / (out.stem + "-objects")
     objects.mkdir(parents=True, exist_ok=True)
+    if reloc:
+        (objects / "game_config.h").write_text("#define RECOMP_ENTRY_POINT 0x00401000u\n")
     darwin = platform.system() == "Darwin"
     cc = ["xcrun", "clang"] if darwin else ["clang"]
     built = []
@@ -712,13 +747,14 @@ def build_translator_harness(gen, out):
     for source in host[2:]:
         obj = objects / (source.stem + ".o")
         subprocess.check_call(cc + ["-x", "c++", "-std=c++17", "-O1", "-fno-exceptions", "-fPIC",
-                                    "-I", str(ROOT), "-c", str(source), "-o", str(obj)])
+                                    "-I", str(objects), "-I", str(ROOT), "-c", str(source), "-o", str(obj)])
         built.append(str(obj))
     whole = (["-dynamiclib", "-lc++", "-framework", "CoreFoundation", "-framework", "CoreServices"]
              if darwin else ["-shared", "-lm"])
     stubs = host_entry_stubs(gen, objects / "host_entries.c")
     subprocess.check_call(cc + ["-O1", "-ffp-contract=off", "-std=c11", "-w", "-fPIC",
                                 "-I", str(gen), "-I", str(ROOT), "-I", str(ROOT / "runtime"),
+                                *(["-DRECOMP_TEST_RELOC"] if reloc else []),
                                 str(host[0]), str(host[1]), str(stubs)] + built + whole +
                           ["-o", str(out)])
     print("built translator harness: %s" % out)
@@ -863,6 +899,8 @@ def parse_args(argv, system=None):
     game_config.add_game_args(parser)
     parser.add_argument("--stub", action="store_true",
                         help="Link the hosts against a stub translation (no game code; CI's build)")
+    parser.add_argument("--jit-module", type=Path)
+    parser.add_argument("--jit-input", type=Path)
     parser.add_argument("--no-pcode", action="store_true",
                         help="Omit the runtime SLEIGH lifter and p-code interpreter; missing code remains fatal")
     parser.add_argument("--no-observe", action="store_true",
@@ -893,6 +931,10 @@ def parse_args(argv, system=None):
                         help="Android: push the configured game install minus [bundle].exclude before launch")
     parser.add_argument("--console", action="store_true", help="After launching on the device, stream its console")
     args = parser.parse_args(argv)
+    if args.jit_module:
+        if not args.jit_input:
+            parser.error("--jit-module requires --jit-input")
+        return args, parser
     if args.stack_return_report and any((args.regenerate, args.regen_function, args.diff_harness,
                                          args.translator_harness, args.function_corpus, args.stub,
                                          args.produce_analysis_facts, args.target != "app")):
@@ -973,6 +1015,9 @@ def regenerate_selection(value, cfg, parser):
 def main():
     """Check inputs, translate under the build lock when needed, then configure and build."""
     args, parser = parse_args(sys.argv[1:])
+    if args.jit_module:
+        build_jit_module(args.jit_module, args.jit_input)
+        return
     if args.renderer_consumer or args.compositor_consumer:
         from cargo_build import native_target_args
         try:

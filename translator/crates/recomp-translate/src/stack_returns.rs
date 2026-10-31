@@ -1487,12 +1487,7 @@ pub(super) fn write(
                 return (addr, prior, false);
             };
             let attempt = (|| -> rk_core::Result<Option<anyhow::Result<Body>>> {
-                let cg = rk_ir::lower_with(
-                    ir,
-                    &ctx.program.image,
-                    &rk_x87::Recipes,
-                    ctx.reloc.is_some(),
-                )?;
+                let cg = rk_ir::lower_with(ir, &rk_x87::Recipes, ctx.reloc.is_some())?;
                 let mut view = None;
                 let mut options = ctx.plan_options(addr);
                 options.call_facts = &facts;
@@ -2094,7 +2089,7 @@ pub(super) fn write(
     let mut report = json!({"format": "recomp-stack-return-report-v1", "read_only": true,
         "inputs": ctx.return_stack_inputs, "function_plans": function_plans,
         "proof_coverage": "Complete overwrite is a proof only for the listed call/return/slot queries under the recorded stack assumptions. No percentage or minimum sample size applies. Unresolved or unqueried queries block extending that proof. Function-wide consumption generalizes to unqueried callers under an explicitly accepted normal-C lifetime assumption; this report does not close the caller set. Support counts nominate, never prove; any definite read rejects nomination. No threshold is selected.",
-        "executable_sha256": ctx.program.sha256, "image_base": format!("{:08x}", ctx.program.image.base), "image_size": ctx.program.image.size,
+        "executable_sha256": ctx.executable_sha256, "image_base": format!("{:08x}", ctx.program.image.base), "image_size": ctx.program.image.size,
         "scope": "Normal continuations of ordinary planned return publications; pre-promotion SSA uses per-function production assumptions and retains every original store. Production forwarding removes reads proven to consume prior writes. Stack evidence uses private-frame exposure and general address relations. Candidates require runtime observer guards and return/entry contracts before optimization. Indirect and external callers prevent global elimination from these counts alone.",
         "limits": {"steps_per_query": STEP_LIMIT, "nested_calls": CALL_LIMIT, "caller_unwinds": 0, "bytes_per_query": BYTE_LIMIT},
         "assumptions": {"private_stack": ctx.assume_private_stack, "stack_pointer_bases": ctx.assume_stack_pointer_bases,

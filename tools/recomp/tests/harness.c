@@ -49,7 +49,14 @@ void recomp_shim_call(X86 *c, uint32_t target) {
     harness_escape("import", target);
     last_shim = target;
 }
+#ifdef RECOMP_TEST_RELOC
+int recomp_reloc_call(X86 *c, uint32_t target);
+#endif
 void recomp_unknown_call(X86 *c, uint32_t target) {
+#ifdef RECOMP_TEST_RELOC
+    if (recomp_reloc_call(c, target))
+        return;
+#endif
     (void)c;
     harness_escape("unknown-call", target);
     last_unknown = target;

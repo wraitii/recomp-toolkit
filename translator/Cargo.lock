@@ -587,8 +587,15 @@ dependencies = [
 name = "rk-pcode-ffi"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "recomp-translate",
  "rk-core",
+ "rk-discover",
+ "rk-emit",
+ "rk-image",
+ "rk-output",
  "rk-sleigh",
+ "serde_json",
 ]
 
 [[package]]

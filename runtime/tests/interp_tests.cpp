@@ -76,6 +76,21 @@ extern "C" void recomp_call(X86 *c, uint32_t target) {
 
 // NATIVE is the one "translated" entry the table knows, so a JMP to it is a
 // tail call the interpreter hands back rather than decoding into.
+extern "C" int recomp_is_call_return(uint32_t target) {
+    return target == RETURN;
+}
+extern "C" int recomp_module_is_call_return(uint32_t) {
+    return 0;
+}
+extern "C" void recomp_rdtsc(X86 *) {
+    fprintf(stderr, "interp fixture: RDTSC helper unavailable\n");
+    abort();
+}
+extern "C" void recomp_cpuid(X86 *) {
+    fprintf(stderr, "interp fixture: CPUID helper unavailable\n");
+    abort();
+}
+
 extern "C" int recomp_thunk_target_kind(uint32_t target) {
     return target == NATIVE ? 1 : 0;
 }
@@ -86,6 +101,9 @@ extern "C" void recomp_jump(X86 *c, uint32_t target) {
 
 extern "C" void recomp_execution_checkpoint_due(X86 *) {}
 extern "C" void discovery_note(const char *, uint32_t, uint32_t) {}
+extern "C" int recomp_jit_resume(X86 *, uint32_t, uint32_t, uint32_t *) {
+    return 0;
+}
 
 static void put(uint32_t at, const std::vector<uint8_t> &b) {
     memcpy(g_mem + at, b.data(), b.size());

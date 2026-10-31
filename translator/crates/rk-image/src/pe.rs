@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use rk_core::program::{Image, Import, Relocation, Section};
+use rk_core::program::{Image, Import, Relocation};
+
+use crate::Section;
 use rk_core::Addr;
 
 const SCN_MEM_EXECUTE: u32 = 0x2000_0000;

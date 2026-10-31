@@ -1,5 +1,6 @@
 #include "pcode.h"
 #include "discovery.h"
+#include "jit.h"
 #include "pcode_core.h"
 
 #include <climits>
@@ -85,7 +86,16 @@ RegisterKind register_kind(const RpVarnode &v, const char *&what) {
 
 class X86Host final : public PcodeHost {
   public:
-    explicit X86Host(X86 *c) : c_(c) {}
+    explicit X86Host(X86 *c) : c_(c) {
+        if (c->dynamic_return_count)
+            continuation_ = c->dynamic_returns[c->dynamic_return_count - 1];
+        if (in_arena(c->r[R_ESP], 4)) {
+            const uint32_t target = rd32(c->r[R_ESP]);
+            if (target == GUEST_RETURN_SENTINEL || recomp_is_call_return(target) ||
+                recomp_module_is_call_return(target))
+                continuation_ = target;
+        }
+    }
 
     std::shared_ptr<PcodeInstruction> lift(uint64_t pc64, std::string &why) override {
         uint32_t pc;
@@ -402,6 +412,16 @@ class X86Host final : public PcodeHost {
         }
         discovery_note("jump", target, pc);
         next_pc = target;
+        if (target <= pc && continuation_) {
+            uint32_t next = target;
+            const int result = recomp_jit_resume(c_, target, continuation_, &next);
+            if (result) {
+                x86_cc_settle(c_);
+                next_pc = next;
+                handled = result == 1;
+                return true;
+            }
+        }
         handled = false;
         return true;
     }
@@ -419,15 +439,11 @@ class X86Host final : public PcodeHost {
         if (!read_memory(c_->r[R_ESP], 4, expected, why))
             return false;
         c_->eip = pc;
-        const bool dynamic_return = !recomp_is_call_return((uint32_t)expected) &&
-                                    !recomp_module_is_call_return((uint32_t)expected);
-        const unsigned dynamic_depth =
-            dynamic_return ? recomp_dynamic_return_push(c_, (uint32_t)expected) : 0;
+        const unsigned dynamic_depth = recomp_dynamic_return_push(c_, (uint32_t)expected);
         ++g_depth;
         recomp_call(c_, target);
         --g_depth;
-        if (dynamic_return)
-            recomp_dynamic_return_pop(c_, dynamic_depth);
+        recomp_dynamic_return_pop(c_, dynamic_depth);
         x86_cc_settle(c_);
         next_pc = c_->eip;
         handled = next_pc != expected;
@@ -457,6 +473,7 @@ class X86Host final : public PcodeHost {
     }
 
     X86 *c_;
+    uint32_t continuation_ = 0;
 };
 
 void report_fault(const PcodeFault &fault) {

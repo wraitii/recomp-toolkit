@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use rk_core::program::{Image, PeDetails, Program, Section};
+use rk_core::program::{Image, Program};
 use rk_core::{Addr, Error, Result};
 use serde::Deserialize;
 
@@ -103,48 +103,16 @@ pub fn program(template: &Template, index: usize) -> Result<Program> {
     let image = Image {
         base,
         size,
-        data: data.clone(),
+        data,
         exec_ranges: vec![(base, base + size)],
         imports: BTreeMap::new(),
         relocations: Vec::new(),
     };
-    let pe = PeDetails {
-        preferred_base: base,
-        entry_point: base,
-        size,
-        delta: 0,
-        original: data,
-        sections: vec![Section {
-            virtual_address: 0,
-            virtual_size: size,
-            raw_size: size,
-            raw_pointer: 0,
-            characteristics: 0x6000_0020,
-        }],
-        data_ranges: Vec::new(),
-        exports: Vec::new(),
-        tls_callbacks: None,
-    };
-    let configured_entries = template
+    let mut program = Program::new(image);
+    program.configured_entries = template
         .entries
         .iter()
         .map(|&offset| base + offset)
         .collect();
-    let mut metadata = BTreeMap::new();
-    metadata.insert("reloc_template".to_string(), template.id.clone());
-    Ok(Program {
-        image,
-        sha256: template.id.clone(),
-        pe,
-        metadata,
-        functions: BTreeMap::new(),
-        tables: BTreeMap::new(),
-        interior: BTreeMap::new(),
-        noreturn_calls: Default::default(),
-        configured_entries,
-        entries: BTreeMap::new(),
-        interior_by_function: BTreeMap::new(),
-        region_entries: BTreeMap::new(),
-        spans: Vec::new(),
-    })
+    Ok(program)
 }

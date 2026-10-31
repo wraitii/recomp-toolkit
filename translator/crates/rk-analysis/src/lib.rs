@@ -208,7 +208,7 @@ pub fn run(args: Args) -> Result<()> {
         }
     }
     let settings = Settings::load(&args.input, None)?;
-    let program = rk_image::load(&settings)?;
+    let rk_image::LoadedProgram { program, pe } = rk_image::load(&settings)?;
     let decoder = Decoder::new()?;
     let com = !analysis.method_catalog.is_empty();
     let (method_bytes, effect_bytes, methods, effects, policy) = if com {
@@ -439,7 +439,7 @@ pub fn run(args: Args) -> Result<()> {
         discovery["seeds"] = seeds;
         eprintln!("analysis guest: discovery");
         let (program, discovery_converged) =
-            guest::discover_program(&discovery_settings, &program)?;
+            guest::discover_program(&discovery_settings, &program, &pe)?;
         discovery["converged"] = serde_json::json!(discovery_converged);
         if !discovery_converged {
             return Err(Error::input(

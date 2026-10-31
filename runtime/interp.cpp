@@ -2,6 +2,7 @@
 
 #if RECOMP_PCODE_FALLBACK
 #include "pcode.h"
+#include "pcode_abi.h"
 #endif
 
 #include <cstdio>
@@ -31,6 +32,7 @@ extern "C" int interp_call(X86 *c, uint32_t target) {
     snprintf(g_error, sizeof g_error, "%s", pcode_interp_last_error());
     fprintf(stderr, "[recomp] pcode interp: routine %08x stopped: %s\n", target, g_error);
     fflush(stderr);
+    rp_jit_shutdown();
     abort();
 #else
     snprintf(g_error, sizeof g_error,

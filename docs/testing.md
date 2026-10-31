@@ -9,7 +9,7 @@ resvg-py for app icons. An executable link alone does not establish a finished b
 | --- | --- | --- |
 | `tools/test.py --native` | Native CTest suites (runtime, DirectX, Metal, controls) | `game`-labelled suites only |
 | `tools/test.py --compile-only` | Native test binaries build | No |
-| `tools/test.py --translator` | Synthetic assembly cases translated and compared with Unicorn | No |
+| `tools/test.py --translator` | Synthetic assembly cases compared with Unicorn and relocation binding integration | No |
 | `tools/test.py --mods` | Mod loader, hooks and replay against the translated archive | Yes |
 | `tools/test.py --d3d8-wgpu test\|probe` | Rust D3D8 renderer tests or offscreen probe | Yes, plus a GPU |
 | `tools/build.py --renderer-consumer build\|run` | Build, or build and run, the independent D3D9 CPU buffer consumer | No |
@@ -19,6 +19,11 @@ resvg-py for app icons. An executable link alone does not establish a finished b
 | `tools/build.py --stub --no-pcode --target compositor-tests` | Build existing compositor, host, GPU, DirectX, layout and guest graphics checks | No game; GPU for pixel checks |
 | `tools/build.py --compositor-consumer build\|run --compositor-frames 8` | Independent Rust compositor/surface host; run exits after the requested frames | No game; window and GPU to run |
 | `tools/format.py` | Native code formatting | No |
+
+For empty-map bring-up, use a separate game configuration and build root, retaining the
+executable hash and memory layout. Use a header-only code map with zero functions, disable
+offline discovery, and omit mapped-site facts and configured entries. Check that the translation
+report has zero functions and entries before exercising the runtime fallback.
 
 CTest labels: `nogame`, `game`, `gpu`, `device`, `mods`. Run a subset with
 `ctest --test-dir <build root>/cmake/macos -L nogame` or `-R dx_tests`.

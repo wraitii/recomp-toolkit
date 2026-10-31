@@ -1,16 +1,8 @@
-use std::cell::RefCell;
-
-use rk_core::ir::{Insn, OpCode, Space, Varnode};
-use rk_core::program::Image;
-use rk_decode::{DecodedInsn, Decoder, OperandKind};
+use rk_core::ir::{Insn, OpCode, OperandKind, Space, Varnode};
 use rk_ir::x87::{
     Arithmetic, ArithmeticOp, X87Condition, X87Eager, X87Environment, X87Legacy, X87Op, X87Recipe,
 };
 use rk_ir::{Op, Registers, X87Lowering, X87Recipes};
-
-thread_local! {
-    static DECODER: RefCell<Option<Decoder>> = const { RefCell::new(None) };
-}
 
 #[derive(Clone, Copy)]
 enum Operand {
@@ -29,28 +21,8 @@ enum Operand {
 pub struct Recipes;
 
 impl X87Recipes for Recipes {
-    fn lower(
-        &self,
-        insn: &Insn,
-        image: &Image,
-        fresh: &mut dyn FnMut(u32) -> Varnode,
-    ) -> Option<X87Lowering> {
-        let bytes = image.bytes(insn.addr, insn.length as usize)?;
-        DECODER.with(|cell| {
-            let mut decoder = cell.borrow_mut();
-            let decoder = match decoder.as_mut() {
-                Some(decoder) => decoder,
-                None => {
-                    *decoder = Some(Decoder::new().ok()?);
-                    decoder.as_mut()?
-                }
-            };
-            let record = decoder.decode_span(insn.addr, bytes)?;
-            if record.addr != insn.addr || record.length != insn.length {
-                return None;
-            }
-            lower_record(&record, fresh)
-        })
+    fn lower(&self, insn: &Insn, fresh: &mut dyn FnMut(u32) -> Varnode) -> Option<X87Lowering> {
+        lower_record(insn, fresh)
     }
 }
 
@@ -124,13 +96,10 @@ fn lowering(
     X87Lowering { recipes }
 }
 
-fn lower_record(
-    record: &DecodedInsn,
-    fresh: &mut dyn FnMut(u32) -> Varnode,
-) -> Option<X87Lowering> {
+fn lower_record(record: &Insn, fresh: &mut dyn FnMut(u32) -> Varnode) -> Option<X87Lowering> {
     let mnem = record.mnemonic.to_ascii_uppercase();
     let mut operands = Vec::new();
-    for operand in &record.operands {
+    for operand in &record.typed_operands {
         match &operand.kind {
             OperandKind::St(index) => operands.push(Operand::St(*index)),
             OperandKind::Reg { .. } if operand.display == "AX" => operands.push(Operand::Ax),

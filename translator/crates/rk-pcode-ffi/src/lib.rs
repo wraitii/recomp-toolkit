@@ -6,6 +6,8 @@ use std::slice;
 use rk_core::ir::{OpCode, Space, Varnode};
 use rk_sleigh::{Lifter, RawLifted};
 
+mod jit;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RpVarnode {

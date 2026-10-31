@@ -1,7 +1,7 @@
 # The guest runtime. Object libraries, so every source is linked into every
 # consumer exactly as the shell scripts linked every object.
 set(RECOMP_RUNTIME_SOURCES
-  memory.cpp guest_strings.cpp loader.cpp imports.cpp cpu.cpp dispatch.cpp thunks.cpp seh.cpp profile.cpp reloc.cpp kernel32.cpp kernel32_wide.cpp
+  memory.cpp guest_strings.cpp loader.cpp imports.cpp cpu.cpp jit.cpp dispatch.cpp thunks.cpp seh.cpp profile.cpp reloc.cpp kernel32.cpp kernel32_wide.cpp
   msvcr90.cpp steam_api.cpp
   resources.cpp oleaut32.cpp mods_seam.cpp user32.cpp user32_wide.cpp user32_vcl.cpp user32_static.cpp user32_cursor.cpp user32_dialog.cpp user32_messagebox.cpp
   misc.cpp misc_dlls.cpp comctl32.cpp gdi32.cpp gdi32_draw.cpp gdi32_text.cpp gdi32_truetype.cpp msimg32.cpp
@@ -24,6 +24,8 @@ add_custom_command(
   VERBATIM)
 list(APPEND RECOMP_RUNTIME_SOURCES ${RECOMP_BUNDLED_FONTS_CPP})
 
+add_compile_definitions(RECOMP_JIT_PYTHON="${Python3_EXECUTABLE}" RECOMP_JIT_BUILD_SCRIPT="${RECOMP_ROOT}/tools/build.py")
+
 set(RECOMP_PCODE_LIB "" CACHE FILEPATH "Rust p-code shared library; empty disables p-code fallback")
 if(RECOMP_PCODE_LIB)
   add_library(recomp_pcode SHARED IMPORTED GLOBAL)
@@ -39,6 +41,7 @@ target_link_libraries(recomp_runtime PUBLIC recomp_platform)
 if(RECOMP_PCODE_LIB)
   target_compile_definitions(recomp_runtime PRIVATE RECOMP_PCODE_FALLBACK=1)
   target_link_libraries(recomp_runtime PUBLIC recomp_pcode)
+  target_link_options(recomp_runtime PUBLIC "$<$<PLATFORM_ID:Darwin>:-Wl,-export_dynamic>")
 else()
   target_compile_definitions(recomp_runtime PRIVATE RECOMP_PCODE_FALLBACK=0)
 endif()

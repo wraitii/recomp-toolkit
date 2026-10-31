@@ -92,7 +92,14 @@ pub struct RejectionCounts {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
+pub struct ExternalCall {
+    pub site: String,
+    pub target: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct DiscoveryReport {
+    pub external_calls: Vec<ExternalCall>,
     pub instructions: usize,
     pub passes: usize,
     pub converged: bool,

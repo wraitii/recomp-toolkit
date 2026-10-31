@@ -1,4 +1,4 @@
-use rk_core::program::PeDetails;
+use crate::PeDetails;
 use rk_core::Addr;
 
 use crate::pe::{c_string, u32_at, Headers};

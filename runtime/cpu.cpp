@@ -8,6 +8,7 @@
 #include "game_config.h"
 #include "discovery.h"
 #include "interp.h"
+#include "jit.h"
 #include "loader.h"
 #include "win32.h"
 #include "thunks.h"
@@ -337,6 +338,10 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
     // call through a null pointer faults at the call, and there are no
     // instructions at it to interpret. Reading them would be the very
     // dereference this page exists to refuse.
+    if (recomp_jit_call(c, target)) {
+        observe_indirect(site, target, "jit");
+        return;
+    }
     discovery_note("call", target, site);
     if (target >= GUEST_NULL_LIMIT && interp_call(c, target)) {
         observe_indirect(site, target, "interp");

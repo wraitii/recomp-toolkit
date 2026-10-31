@@ -181,6 +181,7 @@ pub enum Repeat {
 pub struct Insn {
     pub addr: Addr,
     pub length: u8,
+    pub raw: Vec<u8>,
     pub address_size: u8,
     pub mnemonic: String,
     pub operands: String,

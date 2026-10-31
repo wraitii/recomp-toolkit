@@ -1,6 +1,6 @@
 //! Loads and cross-checks the translation inputs: the PE32 image (`pe`, rebased through its HIGHLOW
 //! relocations when needed) and the Ghidra `recomp-code-map-v3` directory (`code_map`), whose
-//! executable hash and image base must match the settings. `index_entries` classifies every entry
+//! executable hash and image base must match the settings. `rebuild_index` classifies every entry
 //! as function, table target, interior, thunk target, relocated pointer or configured entry;
 //! `details` derives unrelocated PE metadata from the same parse.
 
@@ -16,6 +16,33 @@ use rk_core::settings::Settings;
 use rk_core::{Addr, Diagnostic, Error, Hex, Reason, Result};
 use sha2::{Digest, Sha256};
 
+#[derive(Clone, Debug)]
+pub struct Section {
+    pub virtual_address: u32,
+    pub virtual_size: u32,
+    pub raw_size: u32,
+    pub raw_pointer: u32,
+    pub characteristics: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct PeDetails {
+    pub preferred_base: Addr,
+    pub entry_point: Addr,
+    pub size: u32,
+    pub delta: u32,
+    pub original: Vec<u8>,
+    pub sections: Vec<Section>,
+    pub data_ranges: Vec<(Addr, Addr, &'static str)>,
+    pub exports: Vec<Addr>,
+    pub tls_callbacks: Option<Addr>,
+}
+
+pub struct LoadedProgram {
+    pub program: Program,
+    pub pe: PeDetails,
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -23,7 +50,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-pub fn load(settings: &Settings) -> Result<Program> {
+pub fn load(settings: &Settings) -> Result<LoadedProgram> {
     let exe = std::fs::read(&settings.exe).map_err(|e| Error::io(&settings.exe, e))?;
     let actual = sha256_hex(&exe);
     let invalid = |message: &str| Error::input(format!("{}: {message}", settings.exe.display()));
@@ -63,31 +90,27 @@ pub fn load(settings: &Settings) -> Result<Program> {
             (addr, function)
         })
         .collect();
-    let mut spans: Vec<(Addr, Addr, Addr)> = functions
+    let mut program = Program::new(image);
+    program.functions = functions;
+    program.tables = map.tables;
+    program.interior = map.interior;
+    program.noreturn_calls = map.noreturn_calls;
+    program.configured_entries = settings.configured_entries.clone();
+    rebuild_index(&mut program)?;
+    Ok(LoadedProgram { program, pe })
+}
+
+pub fn rebuild_index(program: &mut Program) -> Result<()> {
+    program.spans = program
+        .functions
         .values()
         .flat_map(|f| f.spans.iter().map(move |s| (s.start, s.end(), f.addr)))
         .collect();
-    spans.sort_unstable();
-    let mut program = Program {
-        image,
-        sha256: actual,
-        pe,
-        metadata: map.metadata,
-        functions,
-        tables: map.tables,
-        interior: map.interior,
-        noreturn_calls: map.noreturn_calls,
-        configured_entries: settings.configured_entries.clone(),
-        entries: BTreeMap::new(),
-        interior_by_function: BTreeMap::new(),
-        region_entries: BTreeMap::new(),
-        spans,
-    };
-    index_entries(&mut program)?;
-    Ok(program)
+    program.spans.sort_unstable();
+    index_entries(program)
 }
 
-pub fn index_entries(program: &mut Program) -> Result<()> {
+fn index_entries(program: &mut Program) -> Result<()> {
     let mut found: BTreeMap<Addr, EntryKind> = program
         .functions
         .keys()

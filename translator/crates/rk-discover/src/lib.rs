@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register};
 use rayon::prelude::*;
 use rk_core::facts::{AnalysisFacts, TransferKind};
-use rk_core::program::{Function, Image, InteriorKind, PeDetails, Program, Span};
+use rk_core::program::{Function, Image, InteriorKind, Program, Span};
 use rk_core::settings::Settings;
 use rk_core::{parse_hex, Addr, Error, Hex, Result};
 
@@ -240,7 +240,11 @@ pub struct Discovered {
     pub report: DiscoveryReport,
 }
 
-pub fn discover(settings: &Settings, program: &Program) -> Result<Discovered> {
+pub fn discover(
+    settings: &Settings,
+    program: &Program,
+    pe: &rk_image::PeDetails,
+) -> Result<Discovered> {
     if !settings.discover {
         return Ok(Discovered {
             functions: BTreeMap::new(),
@@ -257,10 +261,10 @@ pub fn discover(settings: &Settings, program: &Program) -> Result<Discovered> {
     let mut recovery = None;
     let mut converged = false;
     for pass in 1..=MAX_DISCOVERY_PASSES {
-        let mut current = Recovery::new(program, program.pe.clone(), &check, suppressions.clone());
+        let mut current = Recovery::new(program, Some(pe), &check, suppressions.clone());
         current.pass = pass;
         current.function_rejections = rejections;
-        run_discovery(&mut current, settings)?;
+        run_discovery(&mut current, settings, pe)?;
         let (next_functions, next_entries) = current.code_map_rows()?;
         let (next_functions, next_entries, next_suppressions) =
             current.discard_fragments(next_functions, next_entries);
@@ -293,22 +297,64 @@ pub fn discover(settings: &Settings, program: &Program) -> Result<Discovered> {
     })
 }
 
-fn run_discovery(recovery: &mut Recovery<'_>, settings: &Settings) -> Result<()> {
+fn run_discovery(
+    recovery: &mut Recovery<'_>,
+    settings: &Settings,
+    pe: &rk_image::PeDetails,
+) -> Result<()> {
     recovery.map_lengths()?;
-    recovery.initial_seeds();
+    recovery.initial_seeds(pe);
     recovery.observed_seeds(settings)?;
     recovery.mapped_flow_seeds();
-    recovery.pointer_tables();
+    recovery.pointer_tables(pe);
     recovery.sweep();
     recovery.finish();
     Ok(())
 }
 
 pub fn discover_from_entries(program: &Program, entries: &[Addr]) -> Result<Discovered> {
+    discover_from_entries_limited(program, entries, usize::MAX)
+}
+
+pub fn discover_from_entries_limited(
+    program: &Program,
+    entries: &[Addr],
+    limit: usize,
+) -> Result<Discovered> {
+    discover_from_entries_excluding(program, entries, limit, &[])
+}
+
+pub fn discover_from_entries_excluding(
+    program: &Program,
+    entries: &[Addr],
+    limit: usize,
+    excluded: &[(Addr, Addr)],
+) -> Result<Discovered> {
+    discover_entries(program, entries, limit, excluded, false)
+}
+
+pub fn discover_jit_from_entries_excluding(
+    program: &Program,
+    entries: &[Addr],
+    limit: usize,
+    excluded: &[(Addr, Addr)],
+) -> Result<Discovered> {
+    discover_entries(program, entries, limit, excluded, true)
+}
+
+fn discover_entries(
+    program: &Program,
+    entries: &[Addr],
+    limit: usize,
+    excluded: &[(Addr, Addr)],
+    jit: bool,
+) -> Result<Discovered> {
     let check = SleighLengths::default();
-    let mut recovery = Recovery::new(program, program.pe.clone(), &check, Vec::new());
+    let mut recovery = Recovery::new(program, None, &check, excluded.to_vec());
+    recovery.jit = jit;
+    recovery.instruction_limit = limit;
     for &entry in entries {
-        recovery.seed(entry, "reloc entry", RANK_TRUSTED, true);
+        recovery.seed(entry, "explicit entry", RANK_TRUSTED, true);
     }
     recovery.map_lengths()?;
     recovery.trace();
@@ -347,18 +393,13 @@ pub fn merge(program: &mut Program, discovered: &Discovered) -> Result<()> {
         }
         program.interior.entry(addr).or_insert((owner, kind));
     }
-    program.spans = program
-        .functions
-        .values()
-        .flat_map(|f| f.spans.iter().map(move |s| (s.start, s.end(), f.addr)))
-        .collect();
-    program.spans.sort_unstable();
-    rk_image::index_entries(program)
+    rk_image::rebuild_index(program)
 }
 
 struct Recovery<'a> {
+    jit: bool,
+    instruction_limit: usize,
     image: &'a Image,
-    details: PeDetails,
     check: &'a SleighLengths,
     delta: u32,
     instructions: BTreeMap<Addr, Insn>,
@@ -401,7 +442,7 @@ struct Recovery<'a> {
 impl<'a> Recovery<'a> {
     fn new(
         program: &'a Program,
-        details: PeDetails,
+        details: Option<&rk_image::PeDetails>,
         check: &'a SleighLengths,
         mut suppressed: Vec<(Addr, Addr)>,
     ) -> Self {
@@ -446,10 +487,11 @@ impl<'a> Recovery<'a> {
             mapped_tables.entry(site).or_default().extend(targets);
         }
         let mut recovery = Self {
+            jit: false,
+            instruction_limit: usize::MAX,
             image,
-            delta: details.delta,
+            delta: details.map_or(0, |details| details.delta),
             data_ranges: Vec::new(),
-            details,
             check,
             instructions: BTreeMap::new(),
             covered: vec![0; image.size as usize],
@@ -491,8 +533,10 @@ impl<'a> Recovery<'a> {
             function_rejections: Vec::new(),
             entry_rejections: Vec::new(),
         };
-        for (lo, hi, kind) in recovery.details.data_ranges.clone() {
-            recovery.add_data(lo, hi, kind);
+        if let Some(details) = details {
+            for &(lo, hi, kind) in &details.data_ranges {
+                recovery.add_data(lo, hi, kind);
+            }
         }
         recovery
     }
@@ -765,15 +809,20 @@ impl<'a> Recovery<'a> {
             self.speculative.insert(ins.addr);
         }
         if let Some((target, call)) = ins.flow_target() {
-            self.seed_from(
-                ins.addr,
-                target,
-                "direct",
-                rank,
-                call && rank >= RANK_MAPPED_FLOW,
-            );
+            if !self.jit || !call {
+                self.seed_from(
+                    ins.addr,
+                    target,
+                    "direct",
+                    rank,
+                    call && rank >= RANK_MAPPED_FLOW,
+                );
+            }
         }
-        if let Some(target) = ins.pointer_immediate().filter(|&t| self.clean_start(t)) {
+        if let Some(target) = ins
+            .pointer_immediate()
+            .filter(|&t| !self.jit && self.clean_start(t))
+        {
             let (immediate_rank, root) = if self.clean_pointer_start(target) {
                 (rank.min(RANK_IMMEDIATE), true)
             } else {
@@ -953,6 +1002,9 @@ impl<'a> Recovery<'a> {
             let speculative = rank < RANK_TRUSTED;
             let mut at = at;
             while self.image.is_exec(at) {
+                if self.instructions.len() >= self.instruction_limit {
+                    return;
+                }
                 if self.suppressed_at(at).is_some() {
                     break;
                 }
@@ -1014,9 +1066,9 @@ impl<'a> Recovery<'a> {
         Ok(())
     }
 
-    fn initial_seeds(&mut self) {
-        self.seed(self.details.entry_point, "PE entry", RANK_TRUSTED, true);
-        let exports = self.details.exports.clone();
+    fn initial_seeds(&mut self, details: &rk_image::PeDetails) {
+        self.seed(details.entry_point, "PE entry", RANK_TRUSTED, true);
+        let exports = details.exports.clone();
         for addr in exports {
             self.seed(addr, "export", RANK_TRUSTED, true);
         }
@@ -1031,7 +1083,7 @@ impl<'a> Recovery<'a> {
                 );
             }
         }
-        if let Some(mut at) = self.details.tls_callbacks {
+        if let Some(mut at) = details.tls_callbacks {
             while let Some(target) = self.image.rd32(at) {
                 if target == 0 {
                     break;
@@ -1160,7 +1212,7 @@ impl<'a> Recovery<'a> {
         self.trace();
     }
 
-    fn pointer_tables(&mut self) {
+    fn pointer_tables(&mut self, details: &rk_image::PeDetails) {
         let base = self.image.base;
         let size = self.image.size as usize;
         let mut executable = vec![0u8; size];
@@ -1171,7 +1223,7 @@ impl<'a> Recovery<'a> {
                 executable[lo..hi.min(size)].fill(1);
             }
         }
-        let sections = self.details.sections.clone();
+        let sections = details.sections.clone();
         for section in &sections {
             if section.characteristics & 0x4000_0000 == 0 {
                 continue;
@@ -1209,8 +1261,7 @@ impl<'a> Recovery<'a> {
                     {
                         continue;
                     }
-                    let original = self
-                        .details
+                    let original = details
                         .original
                         .get(image_offset..image_offset + 4)
                         .map(|b| {
@@ -1392,7 +1443,10 @@ impl<'a> Recovery<'a> {
     fn finish(&mut self) {
         for (&at, ins) in &self.instructions {
             if !self.speculative.contains(&at) {
-                if let Some((target, _)) = ins.flow_target() {
+                if let Some((target, call)) = ins.flow_target() {
+                    if self.jit && call {
+                        continue;
+                    }
                     if !self.instructions.contains_key(&target) {
                         self.traps.insert(
                             at,
@@ -2009,6 +2063,22 @@ impl<'a> Recovery<'a> {
             })
             .collect();
         DiscoveryReport {
+            external_calls: if self.jit {
+                self.instructions
+                    .values()
+                    .filter_map(|ins| {
+                        let (target, call) = ins.flow_target()?;
+                        (call && !self.instructions.contains_key(&target)).then(|| {
+                            report::ExternalCall {
+                                site: Hex(ins.addr).to_string(),
+                                target: Hex(target).to_string(),
+                            }
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             instructions: self.instructions.len(),
             passes: self.pass,
             converged: false,

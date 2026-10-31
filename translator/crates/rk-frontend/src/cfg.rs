@@ -635,6 +635,7 @@ pub(crate) fn build_raw(
         insns.push(Insn {
             addr: ins.addr,
             length: lifted.length,
+            raw: ins.raw[..ins.length as usize].to_vec(),
             address_size: ins.address_size,
             mnemonic: ins.mnemonic.clone(),
             operands: ins
