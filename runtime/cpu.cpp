@@ -23,6 +23,20 @@
 #include <map>
 #include <vector>
 
+std::vector<uint32_t> x86_return_chain(uint32_t ebp, size_t max) {
+    std::vector<uint32_t> out;
+    while (ebp && gm_valid(ebp, 8) && out.size() < max) {
+        uint32_t ret = rd32(ebp + 4), next = rd32(ebp);
+        if (!loader_in_image(ret))
+            break;
+        out.push_back(ret);
+        if (next <= ebp)
+            break; // frames grow upwards; anything else is not a chain
+        ebp = next;
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // State for the _setjmp/_longjmp intrinsics, outside extern "C" because these
 // helpers have C++ types.
@@ -337,12 +351,6 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
     // call through a null pointer faults at the call, and there are no
     // instructions at it to interpret. Reading them would be the very
     // dereference this page exists to refuse.
-    discovery_note("call", target, site);
-    if (target >= GUEST_NULL_LIMIT && interp_call(c, target)) {
-        observe_indirect(site, target, "interp");
-        return;
-    }
-    observe_indirect(site, target, "unknown");
     if (target == GUEST_RETURN_SENTINEL) {
         recomp_callback_return(c);
         // With no matching live callback this is an ordinary undeliverable
@@ -350,6 +358,12 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
         return_as_if_ret(c);
         return;
     }
+    discovery_note("call", target, site);
+    if (target >= GUEST_NULL_LIMIT && interp_call(c, target)) {
+        observe_indirect(site, target, "interp");
+        return;
+    }
+    observe_indirect(site, target, "unknown");
     uint32_t ret = rd32(c->r[R_ESP]);
     // Windows maps nothing in the first 64 KB, so a call there - through a nil
     // interface, whose vtable reads back as zero - faults, and the program's
@@ -367,7 +381,7 @@ void recomp_unknown_call(X86 *c, uint32_t target) {
             wr32(info, 8);
             wr32(info + 4, target);
             std::string chain;
-            for (uint32_t frame : win32_return_chain(c->r[R_EBP], 8)) {
+            for (uint32_t frame : x86_return_chain(c->r[R_EBP], 8)) {
                 char word[16];
                 snprintf(word, sizeof word, " %08x", frame);
                 chain += word;

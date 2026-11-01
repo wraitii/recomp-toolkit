@@ -39,6 +39,7 @@
 #include "d3d_render.h"
 #include "gpu/gpu_factory.h"
 #include "../runtime/display_seam.h"
+#include "../runtime/native_seam.h"
 #include "../runtime/guest.h"
 #include "../runtime/loader.h"
 #include "../runtime/win32.h"
@@ -578,10 +579,11 @@ HostFrameCapture fire_dumpat(HostScreenClass cls, bool at_seal);
 // is where the overlay's read precedence lives, and then with an ordinary
 // fopen on whatever host path that resolved to.
 void read_guest_file(const char *guest_path, const char *want) {
-    std::string host = win32_host_path_op(guest_path, WIN32_FILE_READ);
+    char host[4096] = {};
+    recomp_readable_path(guest_path, host, sizeof host);
     std::string text;
-    if (!host.empty()) {
-        if (FILE *f = fopen(host.c_str(), "rb")) {
+    if (host[0]) {
+        if (FILE *f = fopen(host, "rb")) {
             char buf[4096];
             size_t n;
             while ((n = fread(buf, 1, sizeof buf, f)) > 0)
@@ -593,7 +595,7 @@ void read_guest_file(const char *guest_path, const char *want) {
         printf("readfile %s: ok\n", guest_path);
     } else {
         printf("readfile %s: MISSING (wanted \"%s\" in %s)\n", guest_path, want,
-               host.empty() ? "(unresolved)" : host.c_str());
+               host[0] ? host : "(unresolved)");
         ++g_readfile_misses;
     }
     fflush(stdout);

@@ -16,16 +16,16 @@
 #include <stddef.h>
 #include <string.h>
 #include <string>
+#include <vector>
 
 // ---------------------------------------------------------------------------
-// Guest address space. The GUEST_* macros come from x86.h (the translator owns
-// them); the constants below are the runtime's names for the same layout plus
-// the few regions x86.h does not spell out.
+// Guest address space constants.
 // ---------------------------------------------------------------------------
+std::vector<uint32_t> x86_return_chain(uint32_t ebp, size_t max);
+
 static const uint32_t IMAGE_BASE = GUEST_IMAGE_BASE; // PE preferred base, no relocation
 // The image end is IMAGE_BASE + SizeOfImage, read from the PE headers at load
-// time: see loader_image_limit(). x86.h's GUEST_IMAGE_END is a size, not an
-// end address, so it must not be used as a bound.
+// time: see loader_image_limit().
 static const uint32_t HEAP_BASE = GUEST_HEAP_BASE; // heap arena start
 static const uint32_t HEAP_LIMIT = GUEST_HEAP_END; // heap arena end (exclusive)
 static const uint32_t STACK_TOP = GUEST_STACK_TOP; // initial ESP region top, grows down

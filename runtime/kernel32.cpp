@@ -4636,20 +4636,6 @@ std::vector<uint32_t> win32_stack_return_candidates(uint32_t esp, uint32_t bytes
     return out;
 }
 
-std::vector<uint32_t> win32_return_chain(uint32_t ebp, size_t max) {
-    std::vector<uint32_t> out;
-    while (ebp && gm_valid(ebp, 8) && out.size() < max) {
-        uint32_t ret = rd32(ebp + 4), next = rd32(ebp);
-        if (!loader_in_image(ret))
-            break;
-        out.push_back(ret);
-        if (next <= ebp)
-            break; // frames grow upwards; anything else is not a chain
-        ebp = next;
-    }
-    return out;
-}
-
 namespace {
 
 void k_RaiseException(X86 *c) {
@@ -4658,7 +4644,7 @@ void k_RaiseException(X86 *c) {
     // hides: the log shows the dialog that reported it and nothing that led
     // there. Verbose only - a Delphi program raises to signal, not to fail.
     if (log_level() >= 2) {
-        std::vector<uint32_t> chain = win32_return_chain(c->r[R_EBP], 12);
+        std::vector<uint32_t> chain = x86_return_chain(c->r[R_EBP], 12);
         std::string frames;
         for (uint32_t r : chain) {
             char b[16];
@@ -4684,7 +4670,7 @@ void k_RaiseException(X86 *c) {
     std::string what = win32_describe_cxx_throw(arg(c, 0), arg(c, 2), arg(c, 3));
     if (!what.empty())
         LOGW("  a C++ throw: %s", what.c_str());
-    std::vector<uint32_t> chain = win32_return_chain(c->r[R_EBP], 12);
+    std::vector<uint32_t> chain = x86_return_chain(c->r[R_EBP], 12);
     for (size_t i = 0; i < chain.size(); ++i)
         LOGW("  frame %zu returns to %08x", i, chain[i]);
     static const char *const regs[8] = {"EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI"};

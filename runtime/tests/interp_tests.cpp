@@ -344,6 +344,7 @@ static X86 run_code(const std::vector<uint8_t> &code) {
     wr32(c.r[R_ESP] - 4, RETURN);
     c.r[R_ESP] -= 4;
     CHECK(interp_call(&c, CODE) == 1);
+    x86_cc_settle(&c);
     return c;
 }
 

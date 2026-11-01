@@ -624,7 +624,8 @@ def publish_generated(build_root, translate, partial=False, main=True):
     try:
         translate(stage)
         # x86.h sits beside the generated sources so #include "x86.h" resolves.
-        shutil.copy(ROOT / "runtime/x86.h", stage / "x86.h")
+        for name in ("x86.h", "memory_map.h"):
+            shutil.copy(ROOT / "runtime" / name, stage / name)
         if not partial:
             sync_tree(stage, gen)
         else:
@@ -725,7 +726,7 @@ def build_diff_harness(build_root, out):
                ROOT / "platform/os_posix.cpp", ROOT / "platform/env.cpp",
                ROOT / "tools/recomp/diff/host.cpp", ROOT / "runtime/guest_strings.cpp",
                ROOT / "runtime/dispatch.cpp"]
-    inputs = sources + [Path(__file__), archive, ROOT / "runtime/x86.h", gen / "table.c",
+    inputs = sources + [Path(__file__), archive, ROOT / "runtime/x86.h", ROOT / "runtime/memory_map.h", gen / "table.c",
                         gen / "body.h"] + pieces
     if cache.is_file():
         inputs.append(cache)
@@ -1033,15 +1034,16 @@ def main():
                         stamped.update((key, fingerprints[key]) for key in selection if key in fingerprints)
                         write_translation_stamp(stamp, {key: value for key, value in stamped.items()
                                                         if key in fingerprints})
-            # Generated sources include the adjacent runtime header. Refresh
-            # it under the same lock even when their translation is unchanged.
-            header = args.build_root / "recomp/gen/x86.h"
-            if args.target != "run" and header.parent.is_dir():
-                current = (ROOT / "runtime/x86.h").read_bytes()
-                if not header.is_file() or header.read_bytes() != current:
-                    temporary = header.with_suffix(".h.new")
-                    temporary.write_bytes(current)
-                    temporary.replace(header)
+            # Generated sources include adjacent runtime headers. Refresh them under
+            # the same lock even when their translation is unchanged.
+            if args.target != "run" and (args.build_root / "recomp/gen").is_dir():
+                for name in ("x86.h", "memory_map.h"):
+                    header = args.build_root / "recomp/gen" / name
+                    current = (ROOT / "runtime" / name).read_bytes()
+                    if not header.is_file() or header.read_bytes() != current:
+                        temporary = header.with_suffix(".h.new")
+                        temporary.write_bytes(current)
+                        temporary.replace(header)
             if args.target == "gen":
                 return
             pcode_disabled = (args.no_pcode or args.target in {"ios", "android", "web"} or

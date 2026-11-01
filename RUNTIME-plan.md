@@ -82,10 +82,10 @@ the opt-in for stricter behaviour.
 
 ### 1.2 Small renames and moves
 
-- [ ] Rename `win32_return_chain` to an x86 name (used by `cpu.cpp`, `jit.cpp`).
-- [ ] Move the guest memory map (heap, stack, mod heap, TEB, trampolines) out
+- [x] Rename `win32_return_chain` to an x86 name (used by `cpu.cpp`, `jit.cpp`).
+- [x] Move the guest memory map (heap, stack, mod heap, TEB, trampolines) out
       of `x86.h` into its own header; `x86.h` keeps only `fs_base`.
-- [ ] `host/smoke_main.cpp`: call `recomp_readable_path` rather than
+- [x] `host/smoke_main.cpp`: call `recomp_readable_path` rather than
       `win32_host_path_op`.
 
 ### 1.3 Split the loader

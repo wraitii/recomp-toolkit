@@ -37,7 +37,7 @@ PAD_BUTTONS = ("cross", "circle", "square", "triangle", "l1", "r1", "l2", "r2", 
 # axis maps to.
 NATIVE_AXES = ("x", "y", "z", "rx", "ry", "rz")
 HEAP_END = 0x0e000000        # default heap end; reserved low runtime regions start here
-GUEST_SIZE_DEFAULT = 0x10000000   # runtime/x86.h GUEST_SIZE: the arena, 256 MB unless a module needs more
+GUEST_SIZE_DEFAULT = 0x10000000   # runtime/memory_map.h GUEST_SIZE: the arena, 256 MB unless a module needs more
 AUX_REQUIRED_KEYS = ("name", "sha256", "base", "size")
 
 GUID_RE = re.compile(

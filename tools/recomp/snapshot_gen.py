@@ -29,7 +29,8 @@ def snapshot(destination, gen, attempts=5, pause=5.0):
             print("snapshot_gen: build/recomp/gen is being rewritten, retrying (%d)" % attempt, file=sys.stderr)
             time.sleep(pause)
             continue
-        required = [destination / "table.c", destination / "funcs.h", destination / "x86.h"]
+        required = [destination / "table.c", destination / "funcs.h", destination / "x86.h",
+                    destination / "memory_map.h"]
         if not all(p.is_file() for p in required):
             print("snapshot_gen: incomplete snapshot, retrying (%d)" % attempt, file=sys.stderr)
             time.sleep(pause)

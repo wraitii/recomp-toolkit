@@ -116,7 +116,6 @@ std::string win32_host_path_op(const std::string &guest_path, int op);
 // for the shim to log, since the runtime cannot unwind the throw.
 std::string win32_describe_cxx_throw(uint32_t code, uint32_t nargs, uint32_t args);
 // Return addresses inside the image along the EBP chain from `ebp`, at most `max`.
-std::vector<uint32_t> win32_return_chain(uint32_t ebp, size_t max);
 // If `value` points at an object whose vtable carries MSVC RTTI, the class's
 // mangled name; otherwise an empty string.
 std::string win32_describe_pointer(uint32_t value);

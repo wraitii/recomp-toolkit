@@ -587,7 +587,7 @@ bool canary_check(uint32_t addr, const Blk &b, const char *when) {
         LOGW("heap canary:   allocated near guest eip %08x", live->second.site);
     if (const X86 *c = guest_current_context()) {
         LOGW("heap canary:   now eip=%08x esp=%08x ebp=%08x", c->eip, c->r[R_ESP], c->r[R_EBP]);
-        auto chain = win32_return_chain(c->r[R_EBP], 8);
+        auto chain = x86_return_chain(c->r[R_EBP], 8);
         for (size_t i = 0; i < chain.size(); ++i)
             LOGW("heap canary:   frame %zu returns to %08x", i, chain[i]);
     }
@@ -616,7 +616,7 @@ void poison_check(uint32_t addr, const Blk &b, const char *when) {
     LOGW("heap canary:   freed near guest eip %08x", fs != g_free_site.end() ? fs->second : 0);
     if (const X86 *c = guest_current_context()) {
         LOGW("heap canary:   now eip=%08x esp=%08x ebp=%08x", c->eip, c->r[R_ESP], c->r[R_EBP]);
-        auto chain = win32_return_chain(c->r[R_EBP], 8);
+        auto chain = x86_return_chain(c->r[R_EBP], 8);
         for (size_t i = 0; i < chain.size(); ++i)
             LOGW("heap canary:   frame %zu returns to %08x", i, chain[i]);
     }
@@ -763,7 +763,7 @@ uint32_t heap_alloc(uint32_t size, bool zero, uint32_t align) {
                  "ESP=%08x EBP=%08x ESI=%08x EDI=%08x",
                  c->eip, c->r[R_EAX], c->r[R_ECX], c->r[R_EDX], c->r[R_EBX], c->r[R_ESP],
                  c->r[R_EBP], c->r[R_ESI], c->r[R_EDI]);
-            auto chain = win32_return_chain(c->r[R_EBP], 12);
+            auto chain = x86_return_chain(c->r[R_EBP], 12);
             for (size_t i = 0; i < chain.size(); ++i)
                 LOGW("  frame %zu returns to %08x", i, chain[i]);
             // Frameless RTL helpers do not appear in the EBP chain. Include
@@ -867,7 +867,7 @@ bool heap_free(uint32_t addr) {
             if (const X86 *c = guest_current_context()) {
                 LOGW("heap canary:   now eip=%08x esp=%08x ebp=%08x", c->eip, c->r[R_ESP],
                      c->r[R_EBP]);
-                auto chain = win32_return_chain(c->r[R_EBP], 8);
+                auto chain = x86_return_chain(c->r[R_EBP], 8);
                 for (size_t i = 0; i < chain.size(); ++i)
                     LOGW("heap canary:   frame %zu returns to %08x", i, chain[i]);
             }

@@ -2066,7 +2066,7 @@ static void test_cxx_throw_description(X86 *c) {
     wr32(f1 + 4, loader_image_base() + 0x1234);
     wr32(f2, 0);
     wr32(f2 + 4, loader_image_base() + 0x5678);
-    std::vector<uint32_t> chain = win32_return_chain(f1, 8);
+    std::vector<uint32_t> chain = x86_return_chain(f1, 8);
     check(chain.size() == 2 && chain[0] == loader_image_base() + 0x1234 &&
               chain[1] == loader_image_base() + 0x5678,
           "the return chain walks EBP through %zu frames", chain.size());

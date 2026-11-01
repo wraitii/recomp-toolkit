@@ -56,12 +56,13 @@ void recomp_unknown_jump(X86 *c, uint32_t target) { stub_trap(c, "unknown jump",
 
 
 def write(out):
-    """Write table.c, funcs.h and a copy of x86.h into `out`."""
+    """Write table.c, funcs.h and runtime headers into `out`."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "funcs.h").write_text(FUNCS_H)
     (out / "table.c").write_text(TABLE_C)
-    shutil.copy(ROOT / "runtime/x86.h", out / "x86.h")
+    for name in ("x86.h", "memory_map.h"):
+        shutil.copy(ROOT / "runtime" / name, out / name)
 
 
 def main():

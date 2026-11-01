@@ -186,7 +186,7 @@ void blit_shim(X86 *c, int mode) {
             // says the routine was entered past its own setup, which the
             // caller chain identifies.
             std::string line;
-            for (uint32_t ret : win32_return_chain(c->r[R_EBP], 8)) {
+            for (uint32_t ret : x86_return_chain(c->r[R_EBP], 8)) {
                 char word[16];
                 snprintf(word, sizeof word, " %08x", ret);
                 line += word;
