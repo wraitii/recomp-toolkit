@@ -68,10 +68,7 @@ pub struct FlagPlan {
 }
 
 fn is_flag(field: Field) -> bool {
-    matches!(
-        field,
-        Field::Cf | Field::Pf | Field::Af | Field::Zf | Field::Sf | Field::Of
-    )
+    Fields::FLAGS.contains(field)
 }
 
 impl Ssa {

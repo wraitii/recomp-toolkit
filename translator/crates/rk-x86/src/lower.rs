@@ -7,8 +7,8 @@ use rk_ir::{
 };
 
 use crate::correct::{
-    correct_arithmetic, correct_bsr, correct_div_cg, correct_extra, correct_neg, correct_sar,
-    correct_shift, correct_sse, defer_flags, with_af_zero,
+    correct_bsr, correct_div_cg, correct_extra, correct_sar, correct_shift, correct_sse,
+    defer_flags, lazy_flags,
 };
 use crate::string;
 
@@ -20,7 +20,6 @@ fn plain(ops: Vec<CgOp>) -> Lowered {
     Lowered {
         ops,
         x87: false,
-        flag_operands: None,
         apply_policy: false,
     }
 }
@@ -413,7 +412,6 @@ impl IsaLowering for Lowering<'_> {
             return Ok(Lowered {
                 ops: converted,
                 x87: false,
-                flag_operands: None,
                 apply_policy: has_address,
             });
         }
@@ -446,23 +444,18 @@ impl IsaLowering for Lowering<'_> {
         } else {
             Ok(ops.clone())
         };
-        let mut flag_operands = None;
-        let mut lazy_flags = None;
+        let shape = flag_shape(&mnem);
+        let mut lazy = None;
         let corrected = prepared.and_then(|ops| {
             let corrected = match mnem.as_str() {
-                "ADD" | "SUB" | "CMP" | "INC" | "DEC" | "ADC" | "SBB" => correct_arithmetic(
-                    &mnem,
-                    &ops,
-                    regs,
-                    &mut |size| cx.fresh(size),
-                    &mut flag_operands,
-                    &mut lazy_flags,
-                ),
+                _ if shape.is_some() => lazy_flags(&mnem, &ops, regs, &mut |size| cx.fresh(size))
+                    .map(|(ops, inputs)| {
+                        lazy = Some(inputs);
+                        ops
+                    }),
                 "SHL" | "SHR" => correct_shift(&mnem, &ops, regs, &mut |size| cx.fresh(size)),
                 "SAR" => correct_sar(&ops, regs, &mut |size| cx.fresh(size)),
                 "BSR" => correct_bsr(&ops, regs, &mut |size| cx.fresh(size)),
-                "NEG" => correct_neg(&ops, regs, &mut |size| cx.fresh(size)),
-                "AND" | "OR" | "XOR" | "TEST" => Ok(with_af_zero(&ops, regs)),
                 _ => Ok(ops.clone()),
             }?;
             Ok(if rewrites_memory {
@@ -504,7 +497,7 @@ impl IsaLowering for Lowering<'_> {
         if let Some(cond) = crate::flags::cond(&mnem) {
             converted = with_cond(converted, cond, cx.fresh(1));
         }
-        if let (Some(inputs), Some(shape)) = (lazy_flags, self.flag_shape(insn)) {
+        if let (Some(inputs), Some(shape)) = (lazy, shape) {
             converted.push(CgOp {
                 op: Op::Flags(shape),
                 output: None,
@@ -514,7 +507,6 @@ impl IsaLowering for Lowering<'_> {
         Ok(Lowered {
             ops: converted,
             x87: false,
-            flag_operands,
             apply_policy: true,
         })
     }
@@ -522,19 +514,19 @@ impl IsaLowering for Lowering<'_> {
     fn flag_recipes(&self) -> &'static dyn rk_ir::FlagRecipes {
         &crate::flags::X86Flags
     }
+}
 
-    fn flag_shape(&self, insn: &Insn) -> Option<FlagShape> {
-        match insn.mnemonic.to_ascii_uppercase().as_str() {
-            "ADD" => Some(FlagShape::Add),
-            "SUB" => Some(FlagShape::Sub),
-            "CMP" => Some(FlagShape::Cmp),
-            "INC" => Some(FlagShape::Inc),
-            "DEC" => Some(FlagShape::Dec),
-            "ADC" => Some(FlagShape::Adc),
-            "SBB" => Some(FlagShape::Sbb),
-            "AND" | "OR" | "XOR" | "TEST" => Some(FlagShape::Logic),
-            _ => None,
-        }
+fn flag_shape(mnem: &str) -> Option<FlagShape> {
+    match mnem {
+        "ADD" => Some(FlagShape::Add),
+        "SUB" | "NEG" => Some(FlagShape::Sub),
+        "CMP" => Some(FlagShape::Cmp),
+        "INC" => Some(FlagShape::Inc),
+        "DEC" => Some(FlagShape::Dec),
+        "ADC" => Some(FlagShape::Adc),
+        "SBB" => Some(FlagShape::Sbb),
+        "AND" | "OR" | "XOR" | "TEST" => Some(FlagShape::Logic),
+        _ => None,
     }
 }
 

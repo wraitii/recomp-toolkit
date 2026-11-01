@@ -16,7 +16,6 @@ pub struct PrepareOptions<'a> {
     pub call_facts: &'a dyn CallFacts,
     pub allow_slow: bool,
     pub value_budget: usize,
-    pub signed_sub: bool,
     pub lazy_publications: bool,
     pub fault_state: FaultState,
     pub coalesce_roots: bool,
@@ -38,7 +37,6 @@ impl<'a> PrepareOptions<'a> {
             call_facts,
             allow_slow: true,
             value_budget: DEFAULT_VALUE_BUDGET,
-            signed_sub: true,
             lazy_publications: true,
             fault_state: FaultState::Relaxed,
             coalesce_roots: true,
@@ -102,7 +100,7 @@ fn prepare_using(
         crate::validate(&ssa)?;
         ssa.assume_private_stack = opts.assume_private_stack && opts.policy == Policy::Optimizing;
         ssa.assume_stack_pointer_bases = opts.assume_stack_pointer_bases;
-        canonicalize(&mut ssa, opts.signed_sub);
+        canonicalize(&mut ssa);
         Ok(ssa)
     };
     let mut ssa = build(None)?;
@@ -144,7 +142,7 @@ fn prepare_using(
     }
     crate::flags::build_joins(&mut ssa);
     crate::coalesce::coalesce(&mut ssa, opts.coalesce_roots);
-    canonicalize(&mut ssa, opts.signed_sub);
+    canonicalize(&mut ssa);
     let plans = opts.lazy_publications.then(|| {
         let base = publications(&ssa, opts.call_facts);
         let simplify = ssa

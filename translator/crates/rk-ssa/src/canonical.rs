@@ -150,119 +150,6 @@ fn same_packed(s: &Ssa, alias: &DenseAliases, left: ValueId, right: ValueId) -> 
         .all(|(&x, &y)| resolve_alias(alias, x) == resolve_alias(alias, y))
 }
 
-fn signed_sub_parts(
-    s: &Ssa,
-    alias: &DenseAliases,
-    id: ValueId,
-) -> Option<(ValueId, ValueId, ValueId)> {
-    use rk_core::ir::OpCode as C;
-    let value = &s.values[id as usize];
-    if value.size != 1
-        || !matches!(
-            value.op,
-            Op::P(C::IntXor | C::IntNotEqual | C::IntEqual | C::BoolXor)
-        )
-    {
-        return None;
-    }
-    let args = &s.args[value.args_start as usize..(value.args_start + value.args_len) as usize];
-    if args.len() != 2 {
-        return None;
-    }
-    let left = &s.values[resolve_alias(alias, args[0]) as usize];
-    let right = &s.values[resolve_alias(alias, args[1]) as usize];
-    if left.size != 1 || right.size != 1 {
-        return None;
-    }
-    for (sign, overflow) in [(left, right), (right, left)] {
-        if sign.op != Op::P(C::IntSLess)
-            || sign.args_len != 2
-            || overflow.op != Op::P(C::IntSBorrow)
-            || overflow.args_len != 2
-        {
-            continue;
-        }
-        let sign_args =
-            &s.args[sign.args_start as usize..(sign.args_start + sign.args_len) as usize];
-        let overflow_args = &s.args
-            [overflow.args_start as usize..(overflow.args_start + overflow.args_len) as usize];
-        let result = &s.values[resolve_alias(alias, sign_args[0]) as usize];
-        let zero = &s.values[resolve_alias(alias, sign_args[1]) as usize];
-        let a = resolve_alias(alias, overflow_args[0]);
-        let b = resolve_alias(alias, overflow_args[1]);
-        if result.op != Op::P(C::IntSub)
-            || result.size == 0
-            || result.size != s.values[a as usize].size
-            || s.values[a as usize].size != s.values[b as usize].size
-            || zero.op != Op::Const(0)
-            || zero.size != result.size
-        {
-            continue;
-        }
-        let sub_args =
-            &s.args[result.args_start as usize..(result.args_start + result.args_len) as usize];
-        if sub_args.len() == 2
-            && same_packed(s, alias, sub_args[0], a)
-            && same_packed(s, alias, sub_args[1], b)
-        {
-            return Some((a, b, resolve_alias(alias, sign_args[0])));
-        }
-    }
-    None
-}
-
-fn signed_sub_le(s: &Ssa, alias: &DenseAliases, id: ValueId) -> Option<(ValueId, ValueId)> {
-    use rk_core::ir::OpCode as C;
-    let value = &s.values[id as usize];
-    if value.size != 1 || !matches!(value.op, Op::P(C::IntOr | C::BoolOr)) || value.args_len != 2 {
-        return None;
-    }
-    let args = &s.args[value.args_start as usize..(value.args_start + value.args_len) as usize];
-    for (relation, equal) in [(args[0], args[1]), (args[1], args[0])] {
-        let relation = &s.values[resolve_alias(alias, relation) as usize];
-        if relation.op != Op::P(C::IntSLess) || relation.size != 1 || relation.args_len != 2 {
-            continue;
-        }
-        let relation_args = &s.args
-            [relation.args_start as usize..(relation.args_start + relation.args_len) as usize];
-        let a = resolve_alias(alias, relation_args[0]);
-        let b = resolve_alias(alias, relation_args[1]);
-        if s.values[a as usize].size == 0 || s.values[a as usize].size != s.values[b as usize].size
-        {
-            continue;
-        }
-        let equal = &s.values[resolve_alias(alias, equal) as usize];
-        if equal.op != Op::P(C::IntEqual) || equal.size != 1 || equal.args_len != 2 {
-            continue;
-        }
-        let equal_args =
-            &s.args[equal.args_start as usize..(equal.args_start + equal.args_len) as usize];
-        let left = &s.values[resolve_alias(alias, equal_args[0]) as usize];
-        let right = &s.values[resolve_alias(alias, equal_args[1]) as usize];
-        let (zero, result) = if left.op == Op::Const(0) {
-            (left, resolve_alias(alias, equal_args[1]))
-        } else if right.op == Op::Const(0) {
-            (right, resolve_alias(alias, equal_args[0]))
-        } else {
-            continue;
-        };
-        let result_value = &s.values[result as usize];
-        if zero.size != result_value.size
-            || result_value.op != Op::P(C::IntSub)
-            || result_value.size != s.values[a as usize].size
-            || result_value.args_len != 2
-        {
-            continue;
-        }
-        let sub_args = &s.args[result_value.args_start as usize
-            ..(result_value.args_start + result_value.args_len) as usize];
-        if same_packed(s, alias, sub_args[0], a) && same_packed(s, alias, sub_args[1], b) {
-            return Some((a, b));
-        }
-    }
-    None
-}
-
 fn fold(s: &Ssa, code: rk_core::ir::OpCode, args: &[ValueId], result_size: u8) -> Option<u64> {
     use rk_core::ir::OpCode as C;
     if !(1..=8).contains(&result_size) || !(1..=2).contains(&args.len()) {
@@ -394,7 +281,7 @@ fn identity(s: &Ssa, code: rk_core::ir::OpCode, args: &[ValueId], size: u8) -> O
     }
 }
 
-pub fn canonicalize(s: &mut Ssa, signed_sub: bool) {
+pub fn canonicalize(s: &mut Ssa) {
     let mut cache = BTreeMap::new();
     for (index, value) in s.values.iter().enumerate() {
         if let Op::Const(data) = value.op {
@@ -452,140 +339,103 @@ pub fn canonicalize(s: &mut Ssa, signed_sub: bool) {
                 changed = true;
             }
         }
-        let mut rewrote_predicate = false;
-        if signed_sub && value.size == 1 {
-            use rk_core::ir::OpCode as C;
-            let rewritten = match value.op {
-                Op::P(C::IntXor | C::IntNotEqual) => {
-                    signed_sub_parts(s, &alias, id).map(|(a, b, _)| {
-                        s.values[id as usize].op = Op::P(C::IntSLess);
-                        (a, b)
-                    })
+        let replacement = match value.op {
+            Op::Phi => {
+                let mut distinct = Vec::new();
+                for &arg in &args {
+                    if arg != id && !distinct.contains(&arg) {
+                        distinct.push(arg);
+                    }
                 }
-                Op::P(C::BoolXor) => signed_sub_parts(s, &alias, id).map(|(a, b, _)| {
-                    s.values[id as usize].op = Op::P(C::IntSLess);
-                    (a, b)
-                }),
-                Op::P(C::IntEqual) => signed_sub_parts(s, &alias, id).map(|(a, b, _)| {
-                    s.values[id as usize].op = Op::P(C::IntSLessEqual);
-                    (b, a)
-                }),
-                Op::P(C::IntOr | C::BoolOr) => signed_sub_le(s, &alias, id).map(|(a, b)| {
-                    s.values[id as usize].op = Op::P(C::IntSLessEqual);
-                    (a, b)
-                }),
-                _ => None,
-            };
-            if let Some((a, b)) = rewritten {
-                let start = s.values[id as usize].args_start as usize;
-                s.args[start] = a;
-                s.args[start + 1] = b;
-                changed = true;
-                rewrote_predicate = true;
+                (distinct.len() == 1).then(|| distinct[0])
             }
-        }
-        let replacement = if rewrote_predicate {
-            None
-        } else {
-            match value.op {
-                Op::Phi => {
-                    let mut distinct = Vec::new();
-                    for &arg in &args {
-                        if arg != id && !distinct.contains(&arg) {
-                            distinct.push(arg);
+            Op::Byte(index) if args.len() == 1 => {
+                let source = &s.values[args[0] as usize];
+                if source.op == Op::Pack {
+                    let source_args = &s.args[source.args_start as usize
+                        ..(source.args_start + source.args_len) as usize];
+                    source_args.get(index as usize).copied()
+                } else if let Op::Const(data) = source.op {
+                    Some(s.constant(&mut cache, 1, data >> (8 * index)))
+                } else {
+                    None
+                }
+            }
+            Op::Pack => {
+                let all_const = args
+                    .iter()
+                    .all(|&arg| matches!(s.values[arg as usize].op, Op::Const(_)));
+                if all_const {
+                    let mut data = 0u64;
+                    for (index, &arg) in args.iter().enumerate() {
+                        if let Op::Const(byte) = s.values[arg as usize].op {
+                            data |= (byte & 0xff) << (8 * index);
                         }
                     }
-                    (distinct.len() == 1).then(|| distinct[0])
+                    Some(s.constant(&mut cache, value.size, data))
+                } else if args.iter().enumerate().all(|(index, &arg)| {
+                    let byte = &s.values[arg as usize];
+                    byte.op == Op::Byte(index as u8)
+                        && byte.args_len == 1
+                        && resolve_alias(&alias, s.args[byte.args_start as usize])
+                            == resolve_alias(&alias, s.args(args[0])[0])
+                }) {
+                    let first = &s.values[args[0] as usize];
+                    let source = resolve_alias(&alias, s.args[first.args_start as usize]);
+                    (s.values[source as usize].size == value.size).then_some(source)
+                } else {
+                    None
                 }
-                Op::Byte(index) if args.len() == 1 => {
-                    let source = &s.values[args[0] as usize];
-                    if source.op == Op::Pack {
-                        let source_args = &s.args[source.args_start as usize
-                            ..(source.args_start + source.args_len) as usize];
-                        source_args.get(index as usize).copied()
-                    } else if let Op::Const(data) = source.op {
-                        Some(s.constant(&mut cache, 1, data >> (8 * index)))
-                    } else {
-                        None
+            }
+            Op::P(code) => {
+                use rk_core::ir::OpCode as C;
+                match code {
+                    C::Copy | C::IntZExt
+                        if !args.is_empty() && s.values[args[0] as usize].size == value.size =>
+                    {
+                        Some(args[0])
                     }
-                }
-                Op::Pack => {
-                    let all_const = args
-                        .iter()
-                        .all(|&arg| matches!(s.values[arg as usize].op, Op::Const(_)));
-                    if all_const {
-                        let mut data = 0u64;
-                        for (index, &arg) in args.iter().enumerate() {
-                            if let Op::Const(byte) = s.values[arg as usize].op {
-                                data |= (byte & 0xff) << (8 * index);
-                            }
-                        }
-                        Some(s.constant(&mut cache, value.size, data))
-                    } else if args.iter().enumerate().all(|(index, &arg)| {
-                        let byte = &s.values[arg as usize];
-                        byte.op == Op::Byte(index as u8)
-                            && byte.args_len == 1
-                            && resolve_alias(&alias, s.args[byte.args_start as usize])
-                                == resolve_alias(&alias, s.args(args[0])[0])
-                    }) {
-                        let first = &s.values[args[0] as usize];
-                        let source = resolve_alias(&alias, s.args[first.args_start as usize]);
-                        (s.values[source as usize].size == value.size).then_some(source)
-                    } else {
-                        None
+                    _ if args.len() == 2
+                        && same_packed(s, &alias, args[0], args[1])
+                        && matches!(
+                            code,
+                            C::IntEqual
+                                | C::IntLessEqual
+                                | C::IntSLessEqual
+                                | C::IntNotEqual
+                                | C::IntLess
+                                | C::IntSLess
+                                | C::IntXor
+                                | C::IntSub
+                                | C::IntSBorrow
+                        ) =>
+                    {
+                        let result = match code {
+                            C::IntEqual | C::IntLessEqual | C::IntSLessEqual => 1,
+                            _ => 0,
+                        };
+                        Some(s.constant(&mut cache, value.size, result))
                     }
-                }
-                Op::P(code) => {
-                    use rk_core::ir::OpCode as C;
-                    match code {
-                        C::Copy | C::IntZExt
-                            if !args.is_empty()
-                                && s.values[args[0] as usize].size == value.size =>
-                        {
-                            Some(args[0])
+                    _ if args.len() == 2
+                        && same_packed(s, &alias, args[0], args[1])
+                        && s.values[args[0] as usize].size == value.size
+                        && matches!(code, C::IntAnd | C::IntOr | C::BoolAnd | C::BoolOr) =>
+                    {
+                        Some(args[0])
+                    }
+                    _ if args.len() == 2 => match identity(s, code, &args, value.size) {
+                        Some(Identity::Value(id)) => Some(id),
+                        Some(Identity::Const(data)) => {
+                            Some(s.constant(&mut cache, value.size, data))
                         }
-                        _ if args.len() == 2
-                            && same_packed(s, &alias, args[0], args[1])
-                            && matches!(
-                                code,
-                                C::IntEqual
-                                    | C::IntLessEqual
-                                    | C::IntSLessEqual
-                                    | C::IntNotEqual
-                                    | C::IntLess
-                                    | C::IntSLess
-                                    | C::IntXor
-                                    | C::IntSub
-                                    | C::IntSBorrow
-                            ) =>
-                        {
-                            let result = match code {
-                                C::IntEqual | C::IntLessEqual | C::IntSLessEqual => 1,
-                                _ => 0,
-                            };
-                            Some(s.constant(&mut cache, value.size, result))
-                        }
-                        _ if args.len() == 2
-                            && same_packed(s, &alias, args[0], args[1])
-                            && s.values[args[0] as usize].size == value.size
-                            && matches!(code, C::IntAnd | C::IntOr | C::BoolAnd | C::BoolOr) =>
-                        {
-                            Some(args[0])
-                        }
-                        _ if args.len() == 2 => match identity(s, code, &args, value.size) {
-                            Some(Identity::Value(id)) => Some(id),
-                            Some(Identity::Const(data)) => {
-                                Some(s.constant(&mut cache, value.size, data))
-                            }
-                            None => fold(s, code, &args, value.size)
-                                .map(|data| s.constant(&mut cache, value.size, data)),
-                        },
-                        _ => fold(s, code, &args, value.size)
+                        None => fold(s, code, &args, value.size)
                             .map(|data| s.constant(&mut cache, value.size, data)),
-                    }
+                    },
+                    _ => fold(s, code, &args, value.size)
+                        .map(|data| s.constant(&mut cache, value.size, data)),
                 }
-                _ => None,
             }
+            _ => None,
         };
         if let Some(replacement) = replacement {
             let replacement = resolve_alias(&alias, replacement);

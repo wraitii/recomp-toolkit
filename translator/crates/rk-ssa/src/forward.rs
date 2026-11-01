@@ -175,7 +175,7 @@ pub fn forward(s: &mut Ssa, call_facts: Option<&dyn CallFacts>) -> bool {
         value.args_len = 1;
     }
     rewrite_aliases(s, &alias);
-    canonicalize(s, true);
+    canonicalize(s);
     true
 }
 

@@ -36,17 +36,8 @@ const FLAGS: [Field; 6] = [
     Field::Of,
 ];
 const ALL: u64 = (1u64 << 38) - 1;
-const GPR_LANES: u64 = (1u64 << 32) - 1;
-const FLAG_LANES: u64 = ALL & !GPR_LANES;
 const MAX_INSTRUCTIONS: usize = 16384;
 const MAX_ROUNDS: usize = 4096;
-const AF_WRITERS: &[&str] = &[
-    "ADD", "ADC", "SUB", "SBB", "CMP", "INC", "DEC", "AND", "OR", "XOR", "TEST",
-];
-const FLAG_FREE: &[&str] = &[
-    "MOV", "MOVSX", "MOVZX", "XCHG", "NOT", "LEAVE", "LEA", "PUSH", "POP", "RET", "NOP", "CALL",
-    "JMP", "CLD", "STD", "CDQ", "CWDE", "CBW", "WAIT",
-];
 
 pub(crate) struct ContractAnalysis {
     pub contracts: BTreeMap<Addr, Contract>,
@@ -687,12 +678,6 @@ fn prepare(
             }
         }
         let mnemonic = mnemonic(source);
-        if AF_WRITERS.contains(&mnemonic.as_ref()) {
-            defs[index] |= field_mask(Field::Af);
-        }
-        if !flag_free(&mnemonic) {
-            writes |= FLAG_LANES;
-        }
         if unknown {
             use_[index] = ALL;
             writes = ALL;
@@ -950,15 +935,6 @@ fn stack_info(program: &Program, fir: &FunctionIr) -> (bool, Fields) {
         saved.insert(Field::Ebp);
     }
     (!pushed.is_empty() && (!popped.is_empty() || leave), saved)
-}
-
-fn flag_free(mnemonic: &str) -> bool {
-    FLAG_FREE.contains(&mnemonic)
-        || mnemonic.starts_with('J')
-        || mnemonic.starts_with("SET")
-        || mnemonic.starts_with("CMOV")
-        || (mnemonic.starts_with('F')
-            && !matches!(mnemonic, "FCOMI" | "FCOMIP" | "FUCOMI" | "FUCOMIP"))
 }
 
 fn conservative_reason(error: &Error) -> Reason {

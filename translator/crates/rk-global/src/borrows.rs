@@ -123,7 +123,7 @@ fn prepare(
         },
     )
     .ok()?;
-    rk_ssa::canonicalize(&mut s, true);
+    rk_ssa::canonicalize(&mut s);
     let accesses = rk_ssa::memory::accesses(&s, None);
     let mut addresses = rk_ssa::address::Addresses::with_parameters(&s);
     let mut derived: LookupSet<_> = s

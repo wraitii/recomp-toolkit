@@ -350,7 +350,7 @@ fn lift_one(addr: u32, bytes: &[u8]) -> Result<(u8, String, Vec<RpOp>), String> 
         x87: &rk_x87::Recipes,
     };
     let mut lowerer = InstructionLowerer::new(&isa).with_pcode_control();
-    let (ops, _, _) = lowerer.lower_insn(&insn).map_err(|e| e.to_string())?;
+    let (ops, _) = lowerer.lower_insn(&insn).map_err(|e| e.to_string())?;
     let ops = if rk_ir::wide::required(&ops) {
         rk_ir::wide::legalize(&ops, insn.addr).map_err(|e| e.to_string())?
     } else {

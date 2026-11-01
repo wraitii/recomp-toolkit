@@ -652,12 +652,6 @@ pub(crate) fn correct_cmpxchg8b(
     Ok(out)
 }
 
-pub(crate) fn with_af_zero(ops: &[PcodeOp], regs: &Registers) -> Vec<PcodeOp> {
-    let mut out = ops.to_vec();
-    out.push(copy(regs.arch().x86.af, Varnode::constant(0, 1)));
-    out
-}
-
 pub(crate) fn correct_bsr(
     ops: &[PcodeOp],
     regs: &Registers,
@@ -775,141 +769,74 @@ fn without_flags(ops: Vec<PcodeOp>, regs: &Registers, live: &[Varnode]) -> Vec<P
     out
 }
 
-pub(crate) fn correct_arithmetic(
+pub(crate) fn lazy_flags(
     mnem: &str,
     ops: &[PcodeOp],
     regs: &Registers,
     fresh: &mut dyn FnMut(u32) -> Varnode,
-    flag_operands: &mut Option<(Varnode, Varnode)>,
-    lazy_flags: &mut Option<Vec<Varnode>>,
-) -> Result<Vec<PcodeOp>, Reason> {
+) -> Result<(Vec<PcodeOp>, Vec<Varnode>), Reason> {
+    let unsupported = || Reason::UnsupportedArithmetic {
+        mnemonic: mnem.into(),
+    };
+    let flags = regs.arch().x86;
     let mut ops = ops.to_vec();
-    let (_, a, b, result, insert) = if mnem == "ADC" || mnem == "SBB" {
-        let opcode = if mnem == "ADC" {
-            OpCode::IntAdd
-        } else {
-            OpCode::IntSub
-        };
-        let primary = ops
+    let sign = ops
+        .iter()
+        .position(|op| op.output == Some(flags.sf) && op.opcode == OpCode::IntSLess)
+        .ok_or_else(unsupported)?;
+    let result = ops[sign].inputs[0];
+    let zero = Varnode::constant(0, result.size);
+    let kept = fresh(result.size);
+    ops.insert(sign, copy(kept, result));
+    let carry_in = matches!(mnem, "ADC" | "SBB");
+    let (at, operands) = if carry_in {
+        let at = ops
             .iter()
-            .rposition(|op| {
-                op.opcode == opcode
-                    && op
-                        .output
-                        .is_some_and(|v| matches!(v.space, Space::Register | Space::Unique))
-            })
-            .ok_or_else(|| Reason::UnsupportedArithmetic {
-                mnemonic: mnem.into(),
-            })?;
-        let result = ops[primary].output.unwrap();
-        let first_cf = ops
-            .iter()
-            .position(|op| op.output == Some(regs.arch().x86.cf))
-            .ok_or_else(|| Reason::UnsupportedArithmetic {
-                mnemonic: mnem.into(),
-            })?;
-        let expected = if mnem == "ADC" {
-            OpCode::IntCarry
-        } else {
-            OpCode::IntLess
-        };
-        let inputs = if ops[first_cf].opcode == expected {
-            ops[first_cf].inputs.clone()
-        } else if ops[first_cf].opcode == OpCode::Copy
-            && ops[first_cf].inputs == [Varnode::constant(0, 1)]
-        {
-            vec![result, result]
-        } else {
-            return Err(Reason::UnsupportedArithmetic {
-                mnemonic: mnem.into(),
-            });
-        };
-        if inputs.len() < 2 {
-            return Err(Reason::UnsupportedArithmetic {
-                mnemonic: mnem.into(),
-            });
+            .position(|op| op.output == Some(flags.cf))
+            .ok_or_else(unsupported)?;
+        match ops[at].opcode {
+            OpCode::IntCarry | OpCode::IntLess => (at, ops[at].inputs.clone()),
+            OpCode::Copy => (at, vec![zero, zero]),
+            _ => return Err(unsupported()),
         }
-        let a = fresh(result.size);
-        let b = fresh(result.size);
-        *flag_operands = Some((a, b));
-        ops.splice(first_cf..first_cf, [copy(a, inputs[0]), copy(b, inputs[1])]);
-        (primary + 2, a, b, result, first_cf + 3)
     } else {
-        let opcode = if mnem == "ADD" || mnem == "INC" {
-            OpCode::IntAdd
-        } else {
-            OpCode::IntSub
+        let codes: &[OpCode] = match mnem {
+            "ADD" | "INC" => &[OpCode::IntAdd],
+            "SUB" | "CMP" | "DEC" => &[OpCode::IntSub],
+            "NEG" => &[OpCode::Int2Comp],
+            _ => &[OpCode::IntAnd, OpCode::IntOr, OpCode::IntXor],
         };
-        let Some(primary) = ops.iter().rposition(|op| {
-            op.opcode == opcode
+        let primary = ops[..sign].iter().rposition(|op| {
+            codes.contains(&op.opcode)
                 && op
                     .output
-                    .is_some_and(|v| v.space == Space::Register || v.space == Space::Unique)
-        }) else {
-            let is_flag = |v: Varnode| {
-                regs.arch().x86.arithmetic_flags().iter().any(|flag| {
-                    v.space == Space::Register && v.offset == flag.offset && v.size == flag.size
-                })
-            };
-            let zero_result = ops.iter().any(|op| {
-                op.opcode == OpCode::Copy
-                    && op
-                        .inputs
-                        .first()
-                        .is_some_and(|v| v.space == Space::Const && v.offset == 0)
-                    && op
-                        .output
-                        .is_some_and(|v| v.space == Space::Register && !is_flag(v))
-            });
-            if (mnem == "SUB" || mnem == "CMP") && zero_result {
-                let mut out = ops.to_vec();
-                let af = regs.arch().x86.af;
-                if !out.iter().any(|op| op.output == Some(af)) {
-                    out.push(copy(af, Varnode::constant(0, 1)));
-                }
-                return Ok(out);
-            }
-            return Err(Reason::UnsupportedArithmetic {
-                mnemonic: mnem.into(),
-            });
-        };
-        let result = ops[primary].output.unwrap();
-        let inputs = ops[primary].inputs.clone();
-        if inputs.len() < 2 {
-            return Err(Reason::UnsupportedArithmetic {
-                mnemonic: mnem.into(),
-            });
+                    .is_some_and(|v| matches!(v.space, Space::Register | Space::Unique))
+        });
+        match primary {
+            Some(at) if mnem == "NEG" => (at, vec![zero, ops[at].inputs[0]]),
+            Some(at) => (at, ops[at].inputs.clone()),
+            None if !matches!(mnem, "ADD" | "INC" | "DEC" | "NEG") => (sign, vec![zero, zero]),
+            None => return Err(unsupported()),
         }
-        let a = fresh(result.size);
-        let b = fresh(result.size);
-        ops.splice(primary..primary, [copy(a, inputs[0]), copy(b, inputs[1])]);
-        if matches!(mnem, "ADD" | "SUB" | "CMP") {
-            let kept = fresh(result.size);
-            ops.insert(primary + 3, copy(kept, result));
-            *lazy_flags = Some(vec![a, b, kept]);
-            return Ok(without_flags(ops, regs, &[a, b, kept]));
-        }
-        (primary + 2, a, b, result, primary + 3)
     };
-    let x = fresh(result.size);
-    let y = fresh(result.size);
-    let z = fresh(result.size);
-    let recipe = vec![
-        op(OpCode::IntXor, x, vec![a, b]),
-        op(OpCode::IntXor, y, vec![x, result]),
-        op(
-            OpCode::IntRight,
-            z,
-            vec![y, Varnode::constant(4, result.size)],
-        ),
-        op(
-            OpCode::IntAnd,
-            regs.arch().x86.af,
-            vec![z, Varnode::constant(1, result.size)],
-        ),
-    ];
-    ops.splice(insert..insert, recipe);
-    Ok(ops)
+    let [x, y] = operands[..] else {
+        return Err(unsupported());
+    };
+    let a = fresh(result.size);
+    let b = fresh(result.size);
+    ops.splice(at..at, [copy(a, x), copy(b, y)]);
+    let mut inputs = vec![a, b];
+    if carry_in {
+        let carry = ops
+            .iter()
+            .find(|op| op.opcode == OpCode::IntZExt && op.inputs == [flags.cf])
+            .and_then(|op| op.output)
+            .ok_or_else(unsupported)?;
+        inputs.push(carry);
+    }
+    inputs.push(kept);
+    let ops = without_flags(ops, regs, &inputs);
+    Ok((ops, inputs))
 }
 
 // OF is undefined for counts above 1; this and correct_sar match the runtime's
@@ -1021,42 +948,6 @@ pub(crate) fn correct_sar(
         },
         op(OpCode::IntAnd, updated, vec![zero, old_of]),
         copy(regs.arch().x86.of, updated),
-    ]);
-    Ok(ops)
-}
-
-pub(crate) fn correct_neg(
-    ops: &[PcodeOp],
-    regs: &Registers,
-    fresh: &mut dyn FnMut(u32) -> Varnode,
-) -> Result<Vec<PcodeOp>, Reason> {
-    let mut ops = ops.to_vec();
-    let result = ops
-        .iter()
-        .find(|op| {
-            op.opcode == OpCode::Int2Comp
-                && op
-                    .output
-                    .is_some_and(|v| matches!(v.space, Space::Register | Space::Unique))
-        })
-        .and_then(|op| op.output)
-        .ok_or_else(|| Reason::UnsupportedArithmetic {
-            mnemonic: "NEG".into(),
-        })?;
-    let low = fresh(result.size);
-    let af = fresh(1);
-    ops.extend([
-        op(
-            OpCode::IntAnd,
-            low,
-            vec![result, Varnode::constant(0xf, result.size)],
-        ),
-        op(
-            OpCode::IntNotEqual,
-            af,
-            vec![low, Varnode::constant(0, result.size)],
-        ),
-        copy(regs.arch().x86.af, af),
     ]);
     Ok(ops)
 }

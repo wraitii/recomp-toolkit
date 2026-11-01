@@ -1339,8 +1339,6 @@ mod tests {
                     length: 1,
                     ops: vec![op],
                     x87: false,
-                    flag: None,
-                    flag_operands: None,
                 })
                 .collect(),
             succ: (0..n)
@@ -1371,7 +1369,7 @@ mod tests {
             },
         )
         .unwrap();
-        crate::canonicalize(&mut s, true);
+        crate::canonicalize(&mut s);
         s
     }
 

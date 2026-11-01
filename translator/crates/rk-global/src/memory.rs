@@ -64,7 +64,7 @@ fn prepare(input: &GlobalInput<'_>, addr: Addr, facts: &dyn CallFacts) -> Option
         ..BuildOptions::default()
     };
     let mut s = rk_ssa::build(&cg, &opts).ok()?;
-    rk_ssa::canonicalize(&mut s, true);
+    rk_ssa::canonicalize(&mut s);
     let accesses = rk_ssa::memory::accesses(&s, None);
     let mut addresses = rk_ssa::address::Addresses::new(&s);
     let mut local = Effects::default();

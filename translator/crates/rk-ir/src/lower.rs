@@ -54,8 +54,6 @@ pub struct CgInsn {
     pub length: u8,
     pub ops: Vec<CgOp>,
     pub x87: bool,
-    pub flag: Option<FlagShape>,
-    pub flag_operands: Option<(Varnode, Varnode)>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,7 +84,6 @@ impl CgFunction {
 pub struct Lowered {
     pub ops: Vec<CgOp>,
     pub x87: bool,
-    pub flag_operands: Option<(Varnode, Varnode)>,
     pub apply_policy: bool,
 }
 
@@ -97,8 +94,6 @@ pub trait IsaLowering: Sync {
         import_tail: Option<Addr>,
         cx: &mut InstructionLowerer,
     ) -> rk_core::Result<Lowered>;
-
-    fn flag_shape(&self, insn: &Insn) -> Option<FlagShape>;
 
     fn flag_recipes(&self) -> &'static dyn FlagRecipes;
 }
@@ -159,7 +154,6 @@ pub fn lower_with(
         let Lowered {
             mut ops,
             x87: is_x87,
-            flag_operands,
             apply_policy,
         } = lowered;
         if apply_policy {
@@ -204,15 +198,12 @@ pub fn lower_with(
             }
         }
         lowerer.add_tail(fir, index as u32, &mut ops);
-        let flag = if is_x87 { None } else { isa.flag_shape(insn) };
         insns.push(CgInsn {
             insn: index as u32,
             addr: insn.addr,
             length: insn.length,
             ops,
             x87: is_x87,
-            flag,
-            flag_operands,
         });
     }
     Ok(CgFunction {
@@ -282,12 +273,9 @@ impl<'a> InstructionLowerer<'a> {
         self.slow(insn, family)
     }
 
-    pub fn lower_insn(
-        &mut self,
-        insn: &Insn,
-    ) -> rk_core::Result<(Vec<CgOp>, bool, Option<(Varnode, Varnode)>)> {
+    pub fn lower_insn(&mut self, insn: &Insn) -> rk_core::Result<(Vec<CgOp>, bool)> {
         let lowered = self.lower_insn_with_import(insn, None)?;
-        Ok((lowered.ops, lowered.x87, lowered.flag_operands))
+        Ok((lowered.ops, lowered.x87))
     }
 
     fn lower_insn_with_import(

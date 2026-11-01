@@ -21,57 +21,78 @@ impl FlagRecipes for X86Flags {
         inputs: &[Varnode],
         fresh: &mut dyn FnMut(u32) -> Varnode,
     ) -> Vec<PcodeOp> {
-        let flags = Registers::get().arch().x86;
-        let &[a, b, result] = inputs else {
-            panic!("{shape:?} flags take a, b and the result");
+        let f = Registers::get().arch().x86;
+        let (&result, operands) = inputs.split_last().expect("flag inputs");
+        let (a, b) = (operands[0], operands[1]);
+        let n = result.size;
+        let zero = Varnode::constant(0, n);
+        let mut ops = Vec::new();
+        let mut pair = |carry: OpCode, overflow: OpCode, ops: &mut Vec<PcodeOp>| {
+            let Some(&c) = operands.get(2) else {
+                ops.push(op(carry, f.cf, vec![a, b]));
+                ops.push(op(overflow, f.of, vec![a, b]));
+                return;
+            };
+            let partial = fresh(n);
+            let (c1, c2, o1, o2) = (fresh(1), fresh(1), fresh(1), fresh(1));
+            let combine = if carry == OpCode::IntCarry {
+                OpCode::IntAdd
+            } else {
+                OpCode::IntSub
+            };
+            ops.extend([
+                op(combine, partial, vec![a, b]),
+                op(carry, c1, vec![a, b]),
+                op(carry, c2, vec![partial, c]),
+                op(OpCode::BoolOr, f.cf, vec![c1, c2]),
+                op(overflow, o1, vec![a, b]),
+                op(overflow, o2, vec![partial, c]),
+                op(OpCode::BoolXor, f.of, vec![o1, o2]),
+            ]);
         };
-        let (carry, overflow) = match shape {
-            FlagShape::Add => (OpCode::IntCarry, OpCode::IntSCarry),
-            FlagShape::Sub | FlagShape::Cmp => (OpCode::IntLess, OpCode::IntSBorrow),
-            _ => panic!("{shape:?} flags are not lazy"),
-        };
-        let zero = Varnode::constant(0, result.size);
-        let low = fresh(result.size);
+        match shape {
+            FlagShape::Add | FlagShape::Adc => pair(OpCode::IntCarry, OpCode::IntSCarry, &mut ops),
+            FlagShape::Sub | FlagShape::Cmp | FlagShape::Sbb => {
+                pair(OpCode::IntLess, OpCode::IntSBorrow, &mut ops)
+            }
+            FlagShape::Inc => ops.push(op(OpCode::IntSCarry, f.of, vec![a, b])),
+            FlagShape::Dec => ops.push(op(OpCode::IntSBorrow, f.of, vec![a, b])),
+            FlagShape::Logic => {
+                ops.push(copy(f.cf, Varnode::constant(0, 1)));
+                ops.push(copy(f.of, Varnode::constant(0, 1)));
+            }
+        }
+        let low = fresh(n);
         let count = fresh(1);
         let parity = fresh(1);
-        let x = fresh(result.size);
-        let y = fresh(result.size);
-        let z = fresh(result.size);
-        vec![
-            op(carry, flags.cf, vec![a, b]),
-            op(overflow, flags.of, vec![a, b]),
-            op(OpCode::IntSLess, flags.sf, vec![result, zero]),
-            op(OpCode::IntEqual, flags.zf, vec![result, zero]),
+        ops.extend([
+            op(OpCode::IntSLess, f.sf, vec![result, zero]),
+            op(OpCode::IntEqual, f.zf, vec![result, zero]),
             op(
                 OpCode::IntAnd,
                 low,
-                vec![result, Varnode::constant(0xff, result.size)],
+                vec![result, Varnode::constant(0xff, n)],
             ),
-            PcodeOp {
-                opcode: OpCode::PopCount,
-                output: Some(count),
-                inputs: vec![low],
-                userop: None,
-            },
+            op(OpCode::PopCount, count, vec![low]),
             op(OpCode::IntAnd, parity, vec![count, Varnode::constant(1, 1)]),
             op(
                 OpCode::IntEqual,
-                flags.pf,
+                f.pf,
                 vec![parity, Varnode::constant(0, 1)],
             ),
-            op(OpCode::IntXor, x, vec![a, b]),
-            op(OpCode::IntXor, y, vec![x, result]),
-            op(
-                OpCode::IntRight,
-                z,
-                vec![y, Varnode::constant(4, result.size)],
-            ),
-            op(
-                OpCode::IntAnd,
-                flags.af,
-                vec![z, Varnode::constant(1, result.size)],
-            ),
-        ]
+        ]);
+        if shape == FlagShape::Logic {
+            ops.push(copy(f.af, Varnode::constant(0, 1)));
+        } else {
+            let (x, y, z) = (fresh(n), fresh(n), fresh(n));
+            ops.extend([
+                op(OpCode::IntXor, x, vec![a, b]),
+                op(OpCode::IntXor, y, vec![x, result]),
+                op(OpCode::IntRight, z, vec![y, Varnode::constant(4, n)]),
+                op(OpCode::IntAnd, f.af, vec![z, Varnode::constant(1, n)]),
+            ]);
+        }
+        ops
     }
 
     fn reads(&self, cond: Cond) -> Vec<Varnode> {
@@ -140,21 +161,30 @@ impl FlagRecipes for X86Flags {
         inputs: &[Varnode],
         output: Varnode,
     ) -> Option<Vec<PcodeOp>> {
-        if !matches!(shape, FlagShape::Sub | FlagShape::Cmp) {
-            return None;
-        }
-        let &[a, b, _] = inputs else { return None };
-        let (code, x, y) = match cond {
-            Cond::Equal => (OpCode::IntEqual, a, b),
-            Cond::NotEqual => (OpCode::IntNotEqual, a, b),
-            Cond::Below => (OpCode::IntLess, a, b),
-            Cond::AboveEqual => (OpCode::IntLessEqual, b, a),
-            Cond::BelowEqual => (OpCode::IntLessEqual, a, b),
-            Cond::Above => (OpCode::IntLess, b, a),
-            Cond::Less => (OpCode::IntSLess, a, b),
-            Cond::GreaterEqual => (OpCode::IntSLessEqual, b, a),
-            Cond::LessEqual => (OpCode::IntSLessEqual, a, b),
-            Cond::Greater => (OpCode::IntSLess, b, a),
+        let &[a, b, result] = inputs else { return None };
+        let zero = Varnode::constant(0, result.size);
+        let (code, x, y) = match (shape, cond) {
+            (FlagShape::Logic, Cond::Equal | Cond::BelowEqual) => (OpCode::IntEqual, result, zero),
+            (FlagShape::Logic, Cond::NotEqual | Cond::Above) => (OpCode::IntNotEqual, result, zero),
+            (FlagShape::Logic, Cond::Sign | Cond::Less) => (OpCode::IntSLess, result, zero),
+            (FlagShape::Logic, Cond::NoSign | Cond::GreaterEqual) => {
+                (OpCode::IntSLessEqual, zero, result)
+            }
+            (FlagShape::Logic, Cond::LessEqual) => (OpCode::IntSLessEqual, result, zero),
+            (FlagShape::Logic, Cond::Greater) => (OpCode::IntSLess, zero, result),
+            (FlagShape::Sub | FlagShape::Cmp, Cond::Below) => (OpCode::IntLess, a, b),
+            (FlagShape::Sub | FlagShape::Cmp, Cond::AboveEqual) => (OpCode::IntLessEqual, b, a),
+            (FlagShape::Sub | FlagShape::Cmp, Cond::BelowEqual) => (OpCode::IntLessEqual, a, b),
+            (FlagShape::Sub | FlagShape::Cmp, Cond::Above) => (OpCode::IntLess, b, a),
+            (FlagShape::Sub | FlagShape::Cmp | FlagShape::Dec, cond) => match cond {
+                Cond::Equal => (OpCode::IntEqual, a, b),
+                Cond::NotEqual => (OpCode::IntNotEqual, a, b),
+                Cond::Less => (OpCode::IntSLess, a, b),
+                Cond::GreaterEqual => (OpCode::IntSLessEqual, b, a),
+                Cond::LessEqual => (OpCode::IntSLessEqual, a, b),
+                Cond::Greater => (OpCode::IntSLess, b, a),
+                _ => return None,
+            },
             _ => return None,
         };
         Some(vec![op(code, output, vec![x, y])])

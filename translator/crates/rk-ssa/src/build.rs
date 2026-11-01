@@ -152,18 +152,10 @@ struct Builder<'a> {
     value_addr: Vec<Addr>,
     block_addrs: Vec<Addr>,
     current_addr: Addr,
-    pending: Pending,
+    pending: Option<(FlagShape, Vec<ValueId>)>,
     flag_source: Lookup<ValueId, (FlagShape, [ValueId; 3])>,
     access_indices: Vec<usize>,
     observable_faults: bool,
-}
-
-#[derive(Default)]
-struct Pending {
-    flag: Option<(ValueId, Vec<ValueId>, u8)>,
-    ab: Option<Vec<ValueId>>,
-    shape: Option<FlagShape>,
-    carry: Option<ValueId>,
 }
 
 struct PendingPhi {
@@ -328,7 +320,7 @@ impl<'a> Builder<'a> {
             value_addr: Vec::new(),
             block_addrs: Vec::new(),
             current_addr: 0,
-            pending: Pending::default(),
+            pending: None,
             flag_source: Lookup::default(),
             access_indices,
             // DIVERGENCE(original): relaxed fault state does not preserve exact register state at a fault inside __try, nor ESP/EBP/EIP at a faulting store under lazy stack writes.
@@ -510,24 +502,6 @@ impl<'a> Builder<'a> {
             let mut temps = Lookup::default();
             for index in start..end {
                 let insn = &cg.insns[index as usize];
-                self.pending = Pending {
-                    shape: insn.flag,
-                    ..Pending::default()
-                };
-                let cf = Registers::get().arch().x86.cf;
-                let touches_cf =
-                    |v: Varnode| v.space == Space::Register && v.offset == cf.offset && v.size == 1;
-                let reads_cf = insn
-                    .ops
-                    .iter()
-                    .any(|op| op.inputs.iter().copied().any(touches_cf));
-                let writes_cf = insn.ops.iter().any(|op| op.output.is_some_and(touches_cf));
-                if reads_cf && writes_cf {
-                    let cf_key = StateKey::Register(cf.offset as u32);
-                    if let Some(&cf_index) = self.key_index.get(&cf_key) {
-                        self.pending.carry = Some(self.state_slot(&mut state, cf_index, block_id)?);
-                    }
-                }
                 for (position, cg_op) in insn.ops.iter().enumerate() {
                     if self.values.len() >= self.opts.value_budget {
                         return Err(Diagnostic::new(
@@ -572,11 +546,6 @@ impl<'a> Builder<'a> {
                     if ops.len() > emitted {
                         self.origins.insert(*ops.last().unwrap(), self.origin);
                     }
-                }
-                if let Some((a, b)) = insn.flag_operands {
-                    let a = self.read(&a, &mut state, &mut temps, block_id)?;
-                    let b = self.read(&b, &mut state, &mut temps, block_id)?;
-                    self.pending.ab = Some(vec![a, b]);
                 }
                 self.record_flags(&mut state, block_id)?;
             }
@@ -805,49 +774,32 @@ impl<'a> Builder<'a> {
         alias
     }
 
-    fn is_flag(&self, varnode: Varnode) -> bool {
-        if varnode.space != Space::Register {
-            return false;
-        }
-        let cf = Registers::get().arch().x86.cf;
-        varnode.offset >= cf.offset && varnode.offset < cf.offset + 6
-    }
-
     fn record_flags(
         &mut self,
         state: &mut [Option<ValueId>],
         block: BlockId,
     ) -> Result<(), Diagnostic> {
-        let carry = self.pending.carry.take();
-        let Some((op, args, size)) = self.pending.flag.take() else {
+        let Some((shape, args)) = self.pending.take() else {
             return Ok(());
         };
-        let kind = match self.pending.shape {
-            Some(FlagShape::Add) => crate::FlagKind::Add,
-            Some(FlagShape::Sub) => crate::FlagKind::Sub,
-            Some(FlagShape::Cmp) => crate::FlagKind::Cmp,
-            Some(FlagShape::Inc) => crate::FlagKind::Inc,
-            Some(FlagShape::Dec) => crate::FlagKind::Dec,
-            Some(FlagShape::Adc) => crate::FlagKind::Adc,
-            Some(FlagShape::Sbb) => crate::FlagKind::Sbb,
-            Some(FlagShape::Logic) => crate::FlagKind::Logic,
-            None => return Ok(()),
+        let result = args[args.len() - 1];
+        let mut carry = (args.len() == 4).then_some(args[2]);
+        if let Some(value) = carry.filter(|&v| self.values[v as usize].op == Op::P(OpCode::IntZExt))
+        {
+            carry = Some(self.args[self.values[value as usize].args_start as usize]);
+        }
+        let kind = match shape {
+            FlagShape::Add => crate::FlagKind::Add,
+            FlagShape::Sub => crate::FlagKind::Sub,
+            FlagShape::Cmp => crate::FlagKind::Cmp,
+            FlagShape::Inc => crate::FlagKind::Inc,
+            FlagShape::Dec => crate::FlagKind::Dec,
+            FlagShape::Adc => crate::FlagKind::Adc,
+            FlagShape::Sbb => crate::FlagKind::Sbb,
+            FlagShape::Logic => crate::FlagKind::Logic,
         };
-        let operands = self
-            .pending
-            .ab
-            .take()
-            .filter(|operands| operands.len() >= 2)
-            .unwrap_or(args);
         let mut flags = BTreeMap::new();
-        for field in [
-            Field::Cf,
-            Field::Pf,
-            Field::Af,
-            Field::Zf,
-            Field::Sf,
-            Field::Of,
-        ] {
+        for field in Fields::FLAGS.iter() {
             if let Some(index) = self
                 .field_of
                 .iter()
@@ -856,29 +808,17 @@ impl<'a> Builder<'a> {
                 flags.insert(field, self.state_slot(state, index, block)?);
             }
         }
-        let writes_cf = !matches!(kind, crate::FlagKind::Inc | crate::FlagKind::Dec);
-        let defined: Fields = [
-            Field::Cf,
-            Field::Pf,
-            Field::Af,
-            Field::Zf,
-            Field::Sf,
-            Field::Of,
-        ]
-        .into_iter()
-        .filter(|field| writes_cf || *field != Field::Cf)
-        .collect();
         self.flags.push(FlagRecord {
             kind,
-            size,
-            op: Some(op),
+            size: self.values[result as usize].size,
+            op: Some(result),
             kind_value: None,
-            a: operands.first().copied(),
-            b: operands.get(1).copied(),
+            a: Some(args[0]),
+            b: Some(args[1]),
             carry,
-            result: Some(op),
+            result: Some(result),
             flags,
-            defined,
+            defined: rk_ir::flag_recipes().defines(shape),
             guarded: false,
         });
         Ok(())
@@ -1074,17 +1014,14 @@ impl<'a> Builder<'a> {
                 let mut fresh = Self::fresh_temps(inputs.len());
                 let expansion = rk_ir::flag_recipes().expand(shape, &inputs, &mut fresh);
                 self.apply_pcode(expansion, addr, state, temps, ops, memory_index, block)?;
-                if let [a, b, result] = args[..] {
-                    let size = self.values[result as usize].size;
-                    self.pending.ab = Some(vec![a, b]);
-                    self.pending.flag = Some((result, vec![a, b], size));
-                    let regs = Registers::get();
-                    for field in rk_ir::flag_recipes().defines(shape).iter() {
-                        let flag = regs.require(field.name());
-                        let value = self.read(&flag, state, temps, block)?;
-                        self.flag_source.insert(value, (shape, [a, b, result]));
-                    }
+                let (a, b, result) = (args[0], args[1], args[args.len() - 1]);
+                let regs = Registers::get();
+                for field in rk_ir::flag_recipes().defines(shape).iter() {
+                    let flag = regs.require(field.name());
+                    let value = self.read(&flag, state, temps, block)?;
+                    self.flag_source.insert(value, (shape, [a, b, result]));
                 }
+                self.pending = Some((shape, args));
             }
             Op::Cond(cond) => {
                 let output = cg_op.output.expect("condition output");
@@ -1357,28 +1294,6 @@ impl<'a> Builder<'a> {
                 let value = self.value(cg_op.op, size, &args);
                 if let Some(output) = cg_op.output {
                     self.write(&output, value, state, temps)?;
-                }
-                if let Op::P(code) = cg_op.op {
-                    let expected = match self.pending.shape {
-                        Some(FlagShape::Add | FlagShape::Inc | FlagShape::Adc) => {
-                            matches!(code, OpCode::IntAdd)
-                        }
-                        Some(FlagShape::Sub | FlagShape::Cmp | FlagShape::Dec | FlagShape::Sbb) => {
-                            matches!(code, OpCode::IntSub)
-                        }
-                        Some(FlagShape::Logic) => {
-                            matches!(code, OpCode::IntAnd | OpCode::IntOr | OpCode::IntXor)
-                        }
-                        None => false,
-                    };
-                    let replace = expected
-                        && cg_op.output.is_some_and(|output| !self.is_flag(output))
-                        && (!matches!(self.pending.shape, Some(FlagShape::Logic))
-                            || self.pending.flag.is_none());
-                    if replace {
-                        self.pending.ab = Some(args.clone());
-                        self.pending.flag = Some((value, args, size));
-                    }
                 }
                 ops.push(value);
             }
