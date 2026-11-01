@@ -107,9 +107,9 @@ pub(crate) fn rewrite_aliases(s: &mut Ssa, alias: &impl Aliases) {
     }
     for record in &mut s.flags {
         for value in record
-            .op
+            .kind_value
             .iter_mut()
-            .chain(record.kind_value.iter_mut())
+            .chain(record.size_value.iter_mut())
             .chain(record.a.iter_mut())
             .chain(record.b.iter_mut())
             .chain(record.carry.iter_mut())

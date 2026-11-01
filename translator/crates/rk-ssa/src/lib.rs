@@ -105,15 +105,14 @@ pub enum FlagKind {
 pub struct FlagRecord {
     pub kind: FlagKind,
     pub size: u8,
-    pub op: Option<ValueId>,
     pub kind_value: Option<ValueId>,
+    pub size_value: Option<ValueId>,
     pub a: Option<ValueId>,
     pub b: Option<ValueId>,
     pub carry: Option<ValueId>,
     pub result: Option<ValueId>,
     pub flags: BTreeMap<Field, ValueId>,
     pub defined: Fields,
-    pub guarded: bool,
 }
 
 #[derive(Clone, Debug)]

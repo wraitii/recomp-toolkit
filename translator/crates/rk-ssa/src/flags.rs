@@ -19,6 +19,7 @@ pub enum FlagSource {
 pub struct FlagDescriptor {
     pub kind: FlagKind,
     pub kind_value: Option<ValueId>,
+    pub size_value: Option<ValueId>,
     pub size: u8,
     pub mask: Fields,
     pub a: Option<ValueId>,
@@ -42,6 +43,7 @@ impl FlagDescriptor {
             FlagKind::Join => self
                 .kind_value
                 .into_iter()
+                .chain(self.size_value)
                 .chain(self.a)
                 .chain(self.b)
                 .chain(self.carry)
@@ -169,6 +171,84 @@ fn record_index(s: &Ssa) -> BTreeMap<(ValueId, Field), FlagId> {
     index
 }
 
+#[derive(Clone, Copy)]
+enum JoinSource {
+    Record(FlagId),
+    Settled,
+    Zero,
+}
+
+fn settled_at(s: &Ssa, field: Field, value: ValueId) -> Option<ValueId> {
+    match s.value(value).op {
+        Op::StateReload(key) | Op::StateKeep(key) if s.field(key) == Some(field) => {
+            Some(s.args(value)[0])
+        }
+        Op::Input(key) if s.field(key) == Some(field) => Some(ValueId::MAX),
+        _ => None,
+    }
+}
+
+fn const_of(s: &Ssa, value: ValueId) -> Option<u64> {
+    match s.value(value).op {
+        Op::Const(data) => Some(data),
+        _ => None,
+    }
+}
+
+fn explains(s: &Ssa, source: JoinSource, field: Field, value: ValueId) -> bool {
+    match source {
+        JoinSource::Settled => settled_at(s, field, value).is_some(),
+        JoinSource::Zero => {
+            const_of(s, value) == Some(matches!(field, Field::Zf | Field::Pf) as u64)
+        }
+        JoinSource::Record(id) => s.flag(id).is_some_and(|record| {
+            record.defined.contains(field)
+                && record.flags.get(&field).is_some_and(|&own| {
+                    own == value
+                        || const_of(s, own).is_some_and(|data| const_of(s, value) == Some(data))
+                })
+        }),
+    }
+}
+
+fn join_source(
+    s: &Ssa,
+    values: &[(Field, ValueId)],
+    index: &BTreeMap<(ValueId, Field), FlagId>,
+) -> Option<JoinSource> {
+    let sites: Option<Vec<ValueId>> = values
+        .iter()
+        .map(|&(field, value)| settled_at(s, field, value))
+        .collect();
+    if sites.is_some_and(|sites| sites.windows(2).all(|pair| pair[0] == pair[1])) {
+        return Some(JoinSource::Settled);
+    }
+    let mut counts: BTreeMap<FlagId, usize> = BTreeMap::new();
+    for &(field, value) in values {
+        if let Some(&id) = index.get(&(value, field)) {
+            *counts.entry(id).or_default() += 1;
+        }
+    }
+    let usable = |id: &FlagId| {
+        s.flag(*id)
+            .is_some_and(|record| (1..=4).contains(&record.size) && record_has_operands(record))
+    };
+    match counts
+        .into_iter()
+        .filter(|(id, _)| usable(id))
+        .max_by_key(|(_, count)| *count)
+    {
+        Some((id, _)) => Some(JoinSource::Record(id)),
+        None if values
+            .iter()
+            .all(|&(_, value)| const_of(s, value).is_some()) =>
+        {
+            Some(JoinSource::Zero)
+        }
+        None => None,
+    }
+}
+
 fn merge_join_sources(
     s: &mut Ssa,
     block: usize,
@@ -176,169 +256,166 @@ fn merge_join_sources(
     flag_keys: &BTreeMap<Field, usize>,
     index: &mut BTreeMap<(ValueId, Field), FlagId>,
 ) {
-    let mut candidates = Fields::NONE;
-    let mut ids_by_field: BTreeMap<Field, Vec<FlagId>> = BTreeMap::new();
+    let entry = block_entry_state(s, block);
+    let mut incoming: Vec<Vec<(Field, ValueId)>> = vec![Vec::new(); preds.len()];
+    let mut merged = Vec::new();
     for field in Fields::FLAGS.iter() {
-        let mut values = Vec::with_capacity(preds.len());
-        let mut complete = true;
-        for position in 0..preds.len() {
-            let Some(value) = entry_flag_value(s, block, field, flag_keys, position) else {
-                complete = false;
-                break;
-            };
-            values.push(value);
-        }
-        if !complete || values.windows(2).all(|pair| pair[0] == pair[1]) {
+        let Some(Some(phi)) = flag_keys.get(&field).and_then(|key| entry.get(*key)) else {
             continue;
-        }
-        let mut ids = Vec::with_capacity(preds.len());
-        let mut size = None;
-        let mut compatible = true;
-        for value in values {
-            let Some(&id) = index.get(&(value, field)) else {
-                compatible = false;
-                break;
-            };
-            let Some(record) = s.flag(id) else {
-                compatible = false;
-                break;
-            };
-            if !record.defined.contains(field)
-                || record.size == 0
-                || record.size > 4
-                || size.is_some_and(|size| size != record.size)
-            {
-                compatible = false;
-                break;
-            }
-            size = Some(record.size);
-            ids.push(id);
-        }
-        if compatible {
-            candidates.insert(field);
-            ids_by_field.insert(field, ids);
+        };
+        let values: Option<Vec<ValueId>> = (0..preds.len())
+            .map(|position| entry_flag_value(s, block, field, flag_keys, position))
+            .collect();
+        let Some(values) = values.filter(|values| values.windows(2).any(|pair| pair[0] != pair[1]))
+        else {
+            continue;
+        };
+        merged.push((field, *phi));
+        for (position, value) in values.into_iter().enumerate() {
+            incoming[position].push((field, value));
         }
     }
-    if candidates.is_empty() {
+    if merged.is_empty() {
         return;
     }
-    let entry = block_entry_state(s, block);
-    let mut groups: BTreeMap<u8, Vec<(Field, Vec<FlagId>, ValueId)>> = BTreeMap::new();
-    for field in candidates.iter() {
-        let Some(&key) = flag_keys.get(&field) else {
-            continue;
-        };
-        let Some(Some(value)) = entry.get(key) else {
-            continue;
-        };
-        let ids = ids_by_field.remove(&field).unwrap_or_default();
-        let Some(record) = ids.first().and_then(|id| s.flag(*id)) else {
-            continue;
-        };
-        groups
-            .entry(record.size)
-            .or_default()
-            .push((field, ids, *value));
-    }
-    let Some((size, fields)) = groups.into_iter().max_by_key(|(_, fields)| fields.len()) else {
+    let Some(sources) = incoming
+        .iter()
+        .map(|values| join_source(s, values, index))
+        .collect::<Option<Vec<_>>>()
+    else {
         return;
     };
-    let mut pred_records = Vec::with_capacity(preds.len());
-    for position in 0..preds.len() {
-        let mut id = None;
-        for (_, ids, _) in &fields {
-            let current = ids[position];
-            if id.is_some_and(|id| id != current) {
-                return;
-            }
-            id = Some(current);
-        }
-        let Some(id) = id else { return };
-        pred_records.push(id);
-    }
-    let records: Vec<crate::FlagRecord> = pred_records
+    if !sources
         .iter()
-        .filter_map(|id| s.flag(*id).cloned())
-        .collect();
-    if records.len() != preds.len() {
+        .any(|source| matches!(source, JoinSource::Record(_)))
+    {
+        return;
+    }
+    let mut mask = Fields::NONE;
+    for (slot, &(field, _)) in merged.iter().enumerate() {
+        if (0..preds.len())
+            .all(|position| explains(s, sources[position], field, incoming[position][slot].1))
+        {
+            mask.insert(field);
+        }
+    }
+    if mask.is_empty() {
         return;
     }
     let addr = s.blocks[block]
         .phis
         .first()
         .map_or(0, |value| s.value_addr[*value as usize]);
-    let mut kind_args = Vec::with_capacity(preds.len());
-    let mut part_values: [Vec<Option<ValueId>>; 4] =
-        std::array::from_fn(|_| Vec::with_capacity(preds.len()));
-    for record in &records {
-        if record.kind == FlagKind::Join {
-            let Some(value) = record.kind_value else {
-                return;
-            };
-            kind_args.push(value);
-        } else {
-            let Some(kind) = cc_kind(record.kind) else {
-                return;
-            };
-            kind_args.push(s.new_value(Op::Symbol(kind), 1, &[], addr));
-        }
-        let Some(result_value) = record.result else {
-            return;
-        };
-        part_values[0].push(record.a);
-        part_values[1].push(record.b);
-        part_values[2].push(record.carry);
-        part_values[3].push(Some(result_value));
-    }
+    let mut kinds = Vec::with_capacity(preds.len());
+    let mut sizes = Vec::with_capacity(preds.len());
+    let mut parts: [Vec<Option<ValueId>>; 4] = std::array::from_fn(|_| Vec::new());
     let mut constants = BTreeMap::new();
-    let mut parts = Vec::with_capacity(4);
-    for values in part_values.iter() {
-        let mut part_size = None;
-        for value in values.iter().flatten() {
-            let value_size = s.value(*value).size;
-            if part_size.is_some_and(|size| size != value_size) {
-                return;
-            }
-            part_size = Some(value_size);
-        }
-        let part_size = part_size.unwrap_or(size);
-        let zero = s.constant(&mut constants, part_size, 0);
-        let args: Vec<ValueId> = values.iter().map(|value| value.unwrap_or(zero)).collect();
-        parts.push(s.new_value(Op::Phi, part_size, &args, addr));
-    }
-    let kind_value = s.new_value(Op::Phi, 1, &kind_args, addr);
-    let [a, b, carry, result_value] = parts.as_slice() else {
-        return;
+    let mut symbols: BTreeMap<&'static str, ValueId> = BTreeMap::new();
+    let mut symbol = |s: &mut Ssa, name: &'static str| {
+        *symbols
+            .entry(name)
+            .or_insert_with(|| s.new_value(Op::Symbol(name), 1, &[], addr))
     };
-    let (a, b, carry, result_value) = (*a, *b, *carry, *result_value);
-    s.blocks[block].phis.push(kind_value);
-    s.blocks[block].phis.push(a);
-    s.blocks[block].phis.push(b);
-    s.blocks[block].phis.push(carry);
-    s.blocks[block].phis.push(result_value);
+    for (position, source) in sources.iter().enumerate() {
+        let (kind, size, operands) = match *source {
+            JoinSource::Record(id) => {
+                let record = s.flag(id).cloned().expect("join record");
+                let kind = match (record.kind, record.kind_value) {
+                    (FlagKind::Join, Some(value)) => value,
+                    (kind, _) => symbol(s, cc_kind(kind).expect("record kind")),
+                };
+                let size = record
+                    .size_value
+                    .unwrap_or_else(|| s.constant(&mut constants, 1, record.size as u64));
+                (
+                    kind,
+                    Some(size),
+                    [record.a, record.b, record.carry, record.result],
+                )
+            }
+            JoinSource::Settled => {
+                let keep = incoming[position].first().map(|(_, value)| *value);
+                (symbol(s, "X86_CC_NONE"), None, [None, None, keep, None])
+            }
+            JoinSource::Zero => (symbol(s, "X86_CC_LOGIC"), None, [None, None, None, None]),
+        };
+        kinds.push(kind);
+        sizes.push(size);
+        for (part, operand) in parts.iter_mut().zip(operands) {
+            part.push(operand);
+        }
+    }
+    let fill = match sizes.iter().flatten().find_map(|size| const_of(s, *size)) {
+        Some(size) => s.constant(&mut constants, 1, size),
+        None => s.constant(&mut constants, 1, 4),
+    };
+    let sizes: Vec<ValueId> = sizes.iter().map(|size| size.unwrap_or(fill)).collect();
+    let widths: Vec<u8> = parts
+        .iter()
+        .enumerate()
+        .map(|(slot, values)| {
+            let widest = values
+                .iter()
+                .flatten()
+                .map(|value| s.value(*value).size)
+                .max();
+            if slot == 2 {
+                1
+            } else {
+                widest.unwrap_or(4)
+            }
+        })
+        .collect();
+    if parts[2]
+        .iter()
+        .flatten()
+        .any(|value| s.value(*value).size != 1)
+    {
+        return;
+    }
+    let mut phis = Vec::with_capacity(4);
+    for (values, &size) in parts.iter().zip(&widths) {
+        let args: Vec<ValueId> = values
+            .iter()
+            .map(|value| match *value {
+                Some(value) if s.value(value).size == size => value,
+                Some(value) => match const_of(s, value) {
+                    Some(data) => s.constant(&mut constants, size, data),
+                    None => {
+                        let addr = s.value_addr[value as usize];
+                        s.new_value(Op::P(rk_core::ir::OpCode::IntZExt), size, &[value], addr)
+                    }
+                },
+                None => s.constant(&mut constants, size, 0),
+            })
+            .collect();
+        phis.push(s.new_value(Op::Phi, size, &args, addr));
+    }
+    let kind_value = s.new_value(Op::Phi, 1, &kinds, addr);
+    let size_value = s.new_value(Op::Phi, 1, &sizes, addr);
+    s.blocks[block].phis.extend([kind_value, size_value]);
+    s.blocks[block].phis.extend(phis.iter().copied());
+    let flags: BTreeMap<Field, ValueId> = merged
+        .iter()
+        .filter(|(field, _)| mask.contains(*field))
+        .copied()
+        .collect();
     let id = s.flags.len() as FlagId;
-    let mut flags = BTreeMap::new();
-    let mut defined = Fields::NONE;
-    for (field, _, value) in &fields {
-        flags.insert(*field, *value);
-        defined.insert(*field);
+    for (&field, &value) in &flags {
+        index.insert((value, field), id);
     }
     s.flags.push(crate::FlagRecord {
         kind: FlagKind::Join,
-        size,
-        op: None,
+        size: 4,
         kind_value: Some(kind_value),
-        a: Some(a),
-        b: Some(b),
-        carry: Some(carry),
-        result: Some(result_value),
+        size_value: Some(size_value),
+        a: Some(phis[0]),
+        b: Some(phis[1]),
+        carry: Some(phis[2]),
+        result: Some(phis[3]),
         flags,
-        defined,
-        guarded: true,
+        defined: mask,
     });
-    for (field, _, value) in &fields {
-        index.insert((*value, *field), id);
-    }
 }
 
 pub fn cc_kind(kind: FlagKind) -> Option<&'static str> {
@@ -469,6 +546,7 @@ impl FlagPlan {
             s.flag(id).map(|record| FlagDescriptor {
                 kind: record.kind,
                 kind_value: record.kind_value,
+                size_value: record.size_value,
                 size: record.size,
                 mask,
                 a: record.a,
@@ -499,6 +577,7 @@ fn record_has_operands(record: &crate::FlagRecord) -> bool {
         }
         FlagKind::Join => {
             record.kind_value.is_some()
+                && record.size_value.is_some()
                 && record.a.is_some()
                 && record.b.is_some()
                 && record.carry.is_some()

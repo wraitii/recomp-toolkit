@@ -811,15 +811,14 @@ impl<'a> Builder<'a> {
         self.flags.push(FlagRecord {
             kind,
             size: self.values[result as usize].size,
-            op: Some(result),
             kind_value: None,
+            size_value: None,
             a: Some(args[0]),
             b: Some(args[1]),
             carry,
             result: Some(result),
             flags,
             defined: rk_ir::flag_recipes().defines(shape),
-            guarded: false,
         });
         Ok(())
     }

@@ -163,6 +163,7 @@ fn prepare_using(
             }
             crate::FlagKind::Join => vec![
                 record.kind_value,
+                record.size_value,
                 record.a,
                 record.b,
                 record.carry,

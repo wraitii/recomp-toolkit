@@ -2460,8 +2460,12 @@ impl<'a> Emitter<'a> {
             ),
         };
         let result = self.expr(descriptor.result)?;
+        let size = match descriptor.size_value {
+            Some(value) => self.expr(value)?,
+            None => format!("{}u", descriptor.size),
+        };
         let _ = writeln!(self.out, "c->cc_op = {op};");
-        let _ = writeln!(self.out, "c->cc_size = {}u;", descriptor.size);
+        let _ = writeln!(self.out, "c->cc_size = {size};");
         let _ = writeln!(self.out, "c->cc_mask = 0x{:02x}u;", cc_mask(mask));
         let _ = writeln!(self.out, "c->cc_carry = (uint8_t)(({carry}) & 1u);");
         let _ = writeln!(self.out, "c->cc_a = (uint32_t)({a});");
