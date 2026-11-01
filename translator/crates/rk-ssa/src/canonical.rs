@@ -339,6 +339,15 @@ pub fn canonicalize(s: &mut Ssa) {
                 changed = true;
             }
         }
+        if value.op == Op::P(rk_core::ir::OpCode::IntLess)
+            && s.values[args[0] as usize].op == Op::Const(0)
+        {
+            s.values[id as usize].op = Op::P(rk_core::ir::OpCode::IntNotEqual);
+            s.args.swap(start, start + 1);
+            args.swap(0, 1);
+            changed = true;
+        }
+        let value = s.values[id as usize];
         let replacement = match value.op {
             Op::Phi => {
                 let mut distinct = Vec::new();

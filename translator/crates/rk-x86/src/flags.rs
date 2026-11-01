@@ -27,37 +27,54 @@ impl FlagRecipes for X86Flags {
         let n = result.size;
         let zero = Varnode::constant(0, n);
         let mut ops = Vec::new();
-        let mut pair = |carry: OpCode, overflow: OpCode, ops: &mut Vec<PcodeOp>| {
-            let Some(&c) = operands.get(2) else {
-                ops.push(op(carry, f.cf, vec![a, b]));
-                ops.push(op(overflow, f.of, vec![a, b]));
-                return;
-            };
-            let partial = fresh(n);
-            let (c1, c2, o1, o2) = (fresh(1), fresh(1), fresh(1), fresh(1));
-            let combine = if carry == OpCode::IntCarry {
-                OpCode::IntAdd
-            } else {
-                OpCode::IntSub
-            };
+        let sign_bit = 1u64 << (n * 8 - 1);
+        let mut overflow = |[w, x]: [Varnode; 2], [y, z]: [Varnode; 2], ops: &mut Vec<PcodeOp>| {
+            let (left, right, both) = (fresh(n), fresh(n), fresh(n));
             ops.extend([
-                op(combine, partial, vec![a, b]),
-                op(carry, c1, vec![a, b]),
-                op(carry, c2, vec![partial, c]),
-                op(OpCode::BoolOr, f.cf, vec![c1, c2]),
-                op(overflow, o1, vec![a, b]),
-                op(overflow, o2, vec![partial, c]),
-                op(OpCode::BoolXor, f.of, vec![o1, o2]),
+                op(OpCode::IntXor, left, vec![w, x]),
+                op(OpCode::IntXor, right, vec![y, z]),
+                op(OpCode::IntAnd, both, vec![left, right]),
+                op(OpCode::IntSLess, f.of, vec![both, zero]),
             ]);
         };
-        match shape {
-            FlagShape::Add | FlagShape::Adc => pair(OpCode::IntCarry, OpCode::IntSCarry, &mut ops),
-            FlagShape::Sub | FlagShape::Cmp | FlagShape::Sbb => {
-                pair(OpCode::IntLess, OpCode::IntSBorrow, &mut ops)
+        match (shape, operands.get(2)) {
+            (FlagShape::Adc | FlagShape::Sbb, Some(&c)) => {
+                let (combine, carry, overflow) = if shape == FlagShape::Adc {
+                    (OpCode::IntAdd, OpCode::IntCarry, OpCode::IntSCarry)
+                } else {
+                    (OpCode::IntSub, OpCode::IntLess, OpCode::IntSBorrow)
+                };
+                let partial = fresh(n);
+                let (c1, c2, o1, o2) = (fresh(1), fresh(1), fresh(1), fresh(1));
+                ops.extend([
+                    op(combine, partial, vec![a, b]),
+                    op(carry, c1, vec![a, b]),
+                    op(carry, c2, vec![partial, c]),
+                    op(OpCode::BoolOr, f.cf, vec![c1, c2]),
+                    op(overflow, o1, vec![a, b]),
+                    op(overflow, o2, vec![partial, c]),
+                    op(OpCode::BoolXor, f.of, vec![o1, o2]),
+                ]);
             }
-            FlagShape::Inc => ops.push(op(OpCode::IntSCarry, f.of, vec![a, b])),
-            FlagShape::Dec => ops.push(op(OpCode::IntSBorrow, f.of, vec![a, b])),
-            FlagShape::Logic => {
+            (FlagShape::Add | FlagShape::Adc, _) => {
+                ops.push(op(OpCode::IntLess, f.cf, vec![result, a]));
+                overflow([a, result], [b, result], &mut ops);
+            }
+            (FlagShape::Sub | FlagShape::Cmp | FlagShape::Sbb, _) => {
+                ops.push(op(OpCode::IntLess, f.cf, vec![a, b]));
+                overflow([a, b], [a, result], &mut ops);
+            }
+            (FlagShape::Inc, _) => ops.push(op(
+                OpCode::IntEqual,
+                f.of,
+                vec![result, Varnode::constant(sign_bit, n)],
+            )),
+            (FlagShape::Dec, _) => ops.push(op(
+                OpCode::IntEqual,
+                f.of,
+                vec![result, Varnode::constant(sign_bit - 1, n)],
+            )),
+            (FlagShape::Logic, _) => {
                 ops.push(copy(f.cf, Varnode::constant(0, 1)));
                 ops.push(copy(f.of, Varnode::constant(0, 1)));
             }

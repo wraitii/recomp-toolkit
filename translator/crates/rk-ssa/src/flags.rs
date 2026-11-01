@@ -501,6 +501,7 @@ impl FlagPlan {
         let mut forwarded = Fields::NONE;
         let mut hot = Fields::NONE;
         let mut groups: BTreeMap<FlagId, Fields> = BTreeMap::new();
+        let mut constants = Vec::new();
         for (key, value) in state {
             if wanted.get(key).is_none() {
                 continue;
@@ -520,6 +521,9 @@ impl FlagPlan {
                 continue;
             }
             let FlagSource::Record(id) = self.source(s, field, *value) else {
+                if const_of(s, *value).is_some() {
+                    constants.push((field, *value));
+                }
                 continue;
             };
             let Some(record) = s.flag(id) else { continue };
@@ -542,7 +546,12 @@ impl FlagPlan {
                     best
                 }
             });
-        let descriptor = best.and_then(|(id, mask)| {
+        let descriptor = best.and_then(|(id, mut mask)| {
+            for &(field, value) in &constants {
+                if explains(s, JoinSource::Record(id), field, value) {
+                    mask.insert(field);
+                }
+            }
             s.flag(id).map(|record| FlagDescriptor {
                 kind: record.kind,
                 kind_value: record.kind_value,

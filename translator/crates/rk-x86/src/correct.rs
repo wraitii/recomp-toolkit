@@ -21,8 +21,8 @@ pub(crate) fn correct_extra(
         return correct_cmov(ops, insn, fresh).map_err(|_| unsupported());
     }
     match mnem {
-        "XADD" => correct_xadd(ops, regs, fresh),
-        "CMPXCHG" => correct_cmpxchg(ops, regs, insn, fresh),
+        "XADD" => correct_xadd(ops, fresh),
+        "CMPXCHG" => correct_cmpxchg(ops, insn, fresh),
         "CMPXCHG8B" => correct_cmpxchg8b(ops, regs, insn, fresh),
         _ => Ok(ops.to_vec()),
     }
@@ -238,32 +238,6 @@ pub(crate) fn select_value(
     ]
 }
 
-pub(crate) fn add_af(
-    a: Varnode,
-    b: Varnode,
-    result: Varnode,
-    regs: &Registers,
-    fresh: &mut dyn FnMut(u32) -> Varnode,
-) -> Vec<PcodeOp> {
-    let x = fresh(result.size);
-    let y = fresh(result.size);
-    let z = fresh(result.size);
-    vec![
-        op(OpCode::IntXor, x, vec![a, b]),
-        op(OpCode::IntXor, y, vec![x, result]),
-        op(
-            OpCode::IntRight,
-            z,
-            vec![y, Varnode::constant(4, result.size)],
-        ),
-        op(
-            OpCode::IntAnd,
-            regs.arch().x86.af,
-            vec![z, Varnode::constant(1, result.size)],
-        ),
-    ]
-}
-
 pub(crate) fn internal_target(target: Varnode, end: Addr) -> bool {
     target.space == Space::Const || (target.space == Space::Ram && target.offset == end)
 }
@@ -313,7 +287,6 @@ pub(crate) fn correct_cmov(
 
 pub(crate) fn correct_xadd(
     ops: &[PcodeOp],
-    regs: &Registers,
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
     let unsupported = || Reason::Unsupported {
@@ -396,16 +369,12 @@ pub(crate) fn correct_xadd(
             }
         }
         out.push(item);
-        if index == primary {
-            out.extend(add_af(old, source, result, regs, fresh));
-        }
     }
     Ok(out)
 }
 
 pub(crate) fn correct_cmpxchg(
     ops: &[PcodeOp],
-    regs: &Registers,
     insn: &Insn,
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
@@ -433,13 +402,12 @@ pub(crate) fn correct_cmpxchg(
     let result = ops[cmp_index].output.unwrap();
     let acc = ops[cmp_index].inputs[0];
     let old = ops[cmp_index].inputs[1];
-    let condition = *ops[if_index].inputs.get(1).ok_or_else(unsupported)?;
+    let condition = fresh(1);
     if !internal_target(ops[if_index].inputs[0], end)
         || !internal_target(ops[branch_index].inputs[0], end)
         || acc.space != Space::Register
         || acc.size != old.size
         || result.size != acc.size
-        || condition.size != 1
         || ops[..if_index]
             .iter()
             .any(|op| matches!(op.opcode, OpCode::Branch | OpCode::CBranch | OpCode::Store))
@@ -517,7 +485,7 @@ pub(crate) fn correct_cmpxchg(
         }
         out.push(item);
     }
-    out.extend(add_af(acc, old, result, regs, fresh));
+    out.push(op(OpCode::IntEqual, condition, vec![acc, old]));
     out.extend(select_value(condition, acc, old, acc, fresh));
     if let Some((_, _, unique)) = captured {
         // x86 writes the old value back on mismatch; Ghidra's p-code skips that store.
@@ -710,46 +678,6 @@ pub(crate) fn correct_bsr(
     Ok(out)
 }
 
-pub(crate) fn defer_flags(
-    ops: Vec<PcodeOp>,
-    regs: &Registers,
-    fresh: &mut dyn FnMut(u32) -> Varnode,
-) -> Vec<PcodeOp> {
-    let mut names = BTreeMap::new();
-    let mut deferred = Vec::new();
-    let mut out = Vec::with_capacity(ops.len() + 8);
-    for op in ops {
-        let mut op = op;
-        for input in &mut op.inputs {
-            if let Some(&replacement) = names.get(input) {
-                *input = replacement;
-            }
-        }
-        if let Some(output) = op.output {
-            let is_flag = output.space == Space::Register
-                && regs
-                    .arch()
-                    .x86
-                    .arithmetic_flags()
-                    .iter()
-                    .any(|flag| output.offset == flag.offset && output.size == flag.size);
-            if is_flag {
-                let replacement = fresh(output.size);
-                op.output = Some(replacement);
-                deferred.push((output, replacement));
-                names.insert(output, replacement);
-            }
-        }
-        out.push(op);
-    }
-    out.extend(
-        deferred
-            .into_iter()
-            .map(|(register, value)| copy(register, value)),
-    );
-    out
-}
-
 fn without_flags(ops: Vec<PcodeOp>, regs: &Registers, live: &[Varnode]) -> Vec<PcodeOp> {
     let flags = regs.arch().x86.arithmetic_flags();
     let mut live: Vec<Varnode> = live.to_vec();
@@ -801,8 +729,8 @@ pub(crate) fn lazy_flags(
         }
     } else {
         let codes: &[OpCode] = match mnem {
-            "ADD" | "INC" => &[OpCode::IntAdd],
-            "SUB" | "CMP" | "DEC" => &[OpCode::IntSub],
+            "ADD" | "INC" | "XADD" => &[OpCode::IntAdd],
+            "SUB" | "CMP" | "DEC" | "CMPXCHG" => &[OpCode::IntSub],
             "NEG" => &[OpCode::Int2Comp],
             _ => &[OpCode::IntAnd, OpCode::IntOr, OpCode::IntXor],
         };
@@ -815,7 +743,9 @@ pub(crate) fn lazy_flags(
         match primary {
             Some(at) if mnem == "NEG" => (at, vec![zero, ops[at].inputs[0]]),
             Some(at) => (at, ops[at].inputs.clone()),
-            None if !matches!(mnem, "ADD" | "INC" | "DEC" | "NEG") => (sign, vec![zero, zero]),
+            None if !matches!(mnem, "ADD" | "INC" | "DEC" | "NEG" | "XADD" | "CMPXCHG") => {
+                (sign, vec![zero, zero])
+            }
             None => return Err(unsupported()),
         }
     };

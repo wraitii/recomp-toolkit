@@ -7,8 +7,7 @@ use rk_ir::{
 };
 
 use crate::correct::{
-    correct_bsr, correct_div_cg, correct_extra, correct_sar, correct_shift, correct_sse,
-    defer_flags, lazy_flags,
+    correct_bsr, correct_div_cg, correct_extra, correct_sar, correct_shift, correct_sse, lazy_flags,
 };
 use crate::string;
 
@@ -458,11 +457,7 @@ impl IsaLowering for Lowering<'_> {
                 "BSR" => correct_bsr(&ops, regs, &mut |size| cx.fresh(size)),
                 _ => Ok(ops.clone()),
             }?;
-            Ok(if rewrites_memory {
-                defer_flags(corrected, regs, &mut |size| cx.fresh(size))
-            } else {
-                corrected
-            })
+            Ok(corrected)
         });
         let ops = match corrected {
             Ok(ops) => ops,
@@ -518,9 +513,9 @@ impl IsaLowering for Lowering<'_> {
 
 fn flag_shape(mnem: &str) -> Option<FlagShape> {
     match mnem {
-        "ADD" => Some(FlagShape::Add),
+        "ADD" | "XADD" => Some(FlagShape::Add),
         "SUB" | "NEG" => Some(FlagShape::Sub),
-        "CMP" => Some(FlagShape::Cmp),
+        "CMP" | "CMPXCHG" => Some(FlagShape::Cmp),
         "INC" => Some(FlagShape::Inc),
         "DEC" => Some(FlagShape::Dec),
         "ADC" => Some(FlagShape::Adc),
