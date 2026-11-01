@@ -100,6 +100,9 @@ extern "C" void recomp_jump(X86 *c, uint32_t target) {
 }
 
 extern "C" void recomp_execution_checkpoint_due(X86 *) {}
+extern "C" int discovery_enabled(void) {
+    return 0;
+}
 extern "C" void discovery_note(const char *, uint32_t, uint32_t) {}
 
 static void put(uint32_t at, const std::vector<uint8_t> &b) {

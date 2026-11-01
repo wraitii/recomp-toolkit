@@ -109,6 +109,12 @@ static void block(X86 *c) {
     final_esp = c->r[R_ESP];
 }
 
+extern "C" {
+const RecompHostMethod recomp_host_methods[1] = {};
+const uint32_t recomp_host_method_count = 0;
+RecompHostSlot recomp_host_slots[1] = {};
+}
+
 // These are the test's tiny dispatch tables. Calls never intercept an unwind;
 // jumps intercept before lookup, including an already-known landing entry.
 extern "C" int recomp_is_call_return(uint32_t target) {

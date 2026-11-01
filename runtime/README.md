@@ -110,14 +110,14 @@ uint32_t imports_alloc_trampoline("ddraw.dll", "IDirectDraw::Blt", fn, argc);
 ```
 
 Anything the loader finds in the IAT that has no registered shim still gets a
-trampoline, so a call logs `DLL!name` once and returns 0 rather than jumping
-into nothing. A `thiscall` method reads `this` from `c->r[R_ECX]` and its
+trampoline. In a DLL that has a shim table, a call logs `DLL!name` once and
+returns 0; in any other DLL, or one registered strict, it stops the run under
+that name. A `thiscall` method reads `this` from `c->r[R_ECX]` and its
 stack arguments with `arg` as usual.
 
-Four weanetr imports are variables rather than functions
-(`BFAID_INet`, `BFAID_MODEM`, `BFSPGUID_MODEM`, `options_to_parity_table`).
-Those IAT slots hold the address of zeroed guest storage instead of a
-trampoline; `imports_register_data(dll, name, size)` adds more.
+Some imports are variables rather than functions. Their IAT slots hold the
+address of zeroed guest storage instead of a trampoline;
+`imports_register_data(dll, name, size)` declares them.
 
 ## `_setjmp` / `_longjmp`
 
@@ -206,10 +206,9 @@ continuing would run the guest past a point Windows never reaches.
 ## Threads
 
 `CreateThread` starts a **cooperative** thread and returns, the way Windows
-does. The game needs that: both DirectInput service threads tell their creator
-they are ready by setting a field it polls and then loop on
-`WaitForSingleObject` for the rest of the process, so a body run to completion
-inside `CreateThread` never comes back.
+does. Guests need that: a worker often signals readiness through a field its
+creator polls and then waits for the rest of the process, so a body run to
+completion inside `CreateThread` would never come back.
 
 Each guest thread owns a register file, a 1 MB guest stack, a TEB and a TLS
 array, and runs on its own host thread so guest code can nest host C frames
@@ -220,9 +219,9 @@ flight — the same invariant the single-threaded runtime had.
 
 **Every call into the runtime is a scheduling checkpoint.** `imports_dispatch`
 yields if the running thread has held the baton for a millisecond. Scheduling
-must not depend on which API the guest happens to poll: the guest's frame limiter spins
-on `GetTickCount`, and when only blocking calls yielded it could starve the
-DirectInput workers indefinitely with their 200 ms waits already expired. The
+must not depend on which API the guest happens to poll: a frame limiter spinning
+on `GetTickCount` would otherwise starve workers whose timed waits had already
+expired. The
 millisecond rate limit bounds the yield frequency. Each slice starts when its
 thread acquires the baton; time spent waiting does not count toward that slice.
 Translated direct, indirect, tail and auxiliary-module calls also checkpoint,

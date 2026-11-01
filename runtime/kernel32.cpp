@@ -112,8 +112,9 @@ struct HObj {
     // the read tier, and the write tier is resolved by the first write. See
     // file_promote_for_write.
     bool write_pending = false;
-    int write_flags = 0;    // the open flags the caller asked for
-    std::string guest_name; // what to resolve again, as the caller spelled it
+    int write_flags = 0;     // the open flags the caller asked for
+    bool overlapped = false; // FILE_FLAG_OVERLAPPED
+    std::string guest_name;  // what to resolve again, as the caller spelled it
     // H_FIND
     std::vector<std::string> matches;
     // The host path each match actually came from. A listing can merge tiers,
@@ -1055,9 +1056,26 @@ void k_CreateFileA(X86 *c) {
     create_file_named(c, gm_str(arg(c, 0)));
 }
 
+static void file_seek_overlapped(HObj *o, const char *op, uint32_t handle, uint32_t ov) {
+    if (o->overlapped) {
+        LOGW("%s: asynchronous I/O on handle %08x (FILE_FLAG_OVERLAPPED) is unsupported", op,
+             handle);
+        fflush(stderr);
+        abort();
+    }
+    os_fd_seek(o->fd, (int64_t)((uint64_t)rd32(ov + 12) << 32 | rd32(ov + 8)), OS_SEEK_SET);
+}
+
+static void file_complete_overlapped(uint32_t ov, uint32_t status, uint32_t bytes) {
+    wr32(ov, status);
+    wr32(ov + 4, bytes);
+    if (uint32_t event = rd32(ov + 16))
+        win32_signal_event(event, false);
+}
+
 void k_ReadFile(X86 *c) {
     HObj *o = handle_get(arg(c, 0), H_FILE);
-    uint32_t buf = arg(c, 1), want = arg(c, 2), pread = arg(c, 3);
+    uint32_t buf = arg(c, 1), want = arg(c, 2), pread = arg(c, 3), ov = arg(c, 4);
     if (!o) {
         if (handle_get(arg(c, 0), H_STD)) {
             if (pread)
@@ -1074,6 +1092,8 @@ void k_ReadFile(X86 *c) {
         set_eax(c, 0);
         return;
     }
+    if (ov)
+        file_seek_overlapped(o, "ReadFile", arg(c, 0), ov);
     int64_t n = os_fd_read(o->fd, g_mem + buf, want);
     if (recomp_env("TRACE_FILES"))
         LOGW("file: read handle=%08x want=%u got=%lld", arg(c, 0), want, (long long)n);
@@ -1086,11 +1106,19 @@ void k_ReadFile(X86 *c) {
     }
     if (pread)
         wr32(pread, (uint32_t)n);
+    if (ov && n == 0 && want) {
+        file_complete_overlapped(ov, 0xC0000011u, 0); // STATUS_END_OF_FILE
+        set_last_error(ERROR_HANDLE_EOF_);
+        set_eax(c, 0);
+        return;
+    }
+    if (ov)
+        file_complete_overlapped(ov, 0, (uint32_t)n);
     set_eax(c, 1);
 }
 
 void k_WriteFile(X86 *c) {
-    uint32_t h = arg(c, 0), buf = arg(c, 1), want = arg(c, 2), pwrote = arg(c, 3);
+    uint32_t h = arg(c, 0), buf = arg(c, 1), want = arg(c, 2), pwrote = arg(c, 3), ov = arg(c, 4);
     HObj *o = handle_any(h);
     if (o && o->kind == H_STD) {
         FILE *to = o->fd == 2 ? stderr : stdout;
@@ -1114,6 +1142,8 @@ void k_WriteFile(X86 *c) {
         set_eax(c, 0);
         return;
     }
+    if (ov)
+        file_seek_overlapped(o, "WriteFile", h, ov);
     int64_t n = os_fd_write(o->fd, g_mem + buf, want);
     if (n < 0) {
         set_last_error(ERROR_ACCESS_DENIED_);
@@ -1122,6 +1152,8 @@ void k_WriteFile(X86 *c) {
     }
     if (pwrote)
         wr32(pwrote, (uint32_t)n);
+    if (ov)
+        file_complete_overlapped(ov, 0, (uint32_t)n);
     set_eax(c, 1);
 }
 
@@ -5386,6 +5418,7 @@ void create_file_named(X86 *c, const std::string &name) {
     uint32_t h = handle_new(H_FILE);
     handles()[h].fd = fd;
     handles()[h].path = host;
+    handles()[h].overlapped = (arg(c, 5) & 0x40000000u) != 0;
     if (deferred) {
         handles()[h].write_pending = true;
         handles()[h].write_flags = wanted;

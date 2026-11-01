@@ -3277,29 +3277,6 @@ const ImportShim g_misc_shims[] = {
     {"WINMM.dll", "auxGetDevCapsA", 3, m_auxGetDevCapsA},
     {"WINMM.dll", "auxGetVolume", 2, m_auxGetVolume},
     {"WINMM.dll", "auxSetVolume", 2, m_auxSetVolume},
-    // DirectX and third-party DLLs are owned by later tasks; these entries only
-    // record the callee's pop count so an early call cannot unbalance the stack.
-    // Direct3D 9, D3DX 9 and DirectInput 8: a shader-era game's graphics and
-    // input DLLs. The kit models neither yet, so these record the callee's
-    // stdcall pop count and nothing else. Without a count the runtime cannot
-    // balance the stack after the call, and a game that calls a few of them
-    // during start-up returns into rubbish.
-    {"d3d9.dll", "Direct3DCreate9", 1, nullptr},
-    {"d3dx9_26.dll", "D3DXCreateEffectPool", 1, nullptr},
-    {"d3dx9_26.dll", "D3DXCreateEffectFromResourceA", 9, nullptr},
-    {"d3dx9_26.dll", "D3DXMatrixMultiply", 3, nullptr},
-    {"d3dx9_26.dll", "D3DXMatrixInverse", 3, nullptr},
-    {"d3dx9_26.dll", "D3DXMatrixTranspose", 2, nullptr},
-    {"d3dx9_26.dll", "D3DXMatrixOrthoLH", 5, nullptr},
-    {"d3dx9_26.dll", "D3DXMatrixPerspectiveLH", 5, nullptr},
-    {"d3dx9_26.dll", "D3DXMatrixTranslation", 4, nullptr},
-    {"d3dx9_26.dll", "D3DXVec4Transform", 3, nullptr},
-    {"d3dx9_26.dll", "D3DXVec3Transform", 3, nullptr},
-    {"d3dx9_26.dll", "D3DXVec3TransformNormal", 3, nullptr},
-    {"d3dx9_26.dll", "D3DXVec3TransformCoordArray", 6, nullptr},
-    {"d3dx9_26.dll", "D3DXVec3Normalize", 2, nullptr},
-    {"DINPUT8.dll", "DirectInput8Create", 5, nullptr},
-    {"DSOUND.dll", "ord6", 3, nullptr}, // DirectSoundCaptureCreate
     {"WINMM.dll", "waveOutGetNumDevs", 0, m_waveGetNumDevs},
     {"WINMM.dll", "waveOutGetDevCapsA", 3, m_waveBadDevice},
     {"WINMM.dll", "waveOutOpen", 6, m_waveBadDevice},
@@ -3400,41 +3377,6 @@ const ImportShim g_misc_shims[] = {
     {"WS2_32.dll", "WSARecvFrom", 9, w_WSARecvFrom},
     {"WS2_32.dll", "WSAGetOverlappedResult", 5, w_WSAGetOverlappedResult},
     {"NETAPI32.dll", "Netbios", 1, n_Netbios},
-    {"DDRAW.dll", "DirectDrawCreate", 3, nullptr},
-    {"DDRAW.dll", "DirectDrawEnumerateA", 2, nullptr},
-    {"DINPUT.dll", "DirectInputCreateA", 4, nullptr},
-    {"DSOUND.dll", "ord1", 3, nullptr}, // DirectSoundCreate
-
-    // QMIXER and weanetr: the audio and network tasks own the behaviour, but a
-    // callee-cleanup DLL must pop its arguments or the guest stack drifts. The
-    // counts below are recovered, not guessed: each one is the `ret n` the
-    // export actually executes in original/gog/QMixer.dll and
-    // original/gog/WEANETR.dll, reached by a fall-through walk from the export
-    // address. For weanetr every count independently matches the MSVC name
-    // mangling (`QAE` = __thiscall, `this` in ECX, the rest on the stack), so
-    // the two derivations agree on all 17 methods.
-    {"QMIXER.dll", "QSWaveMixSetSpeakerPlacement", 2, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetSpeedOfSound", 3, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetPanRate", 4, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetListenerOrientation", 4, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetListenerPosition", 3, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetVolume", 4, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetDistanceMapping", 4, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetSourceCone", 6, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetFrequency", 4, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetListenerVelocity", 3, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetSourceVelocity", 4, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetSourcePosition", 4, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetPosition", 4, nullptr},
-    {"QMIXER.dll", "QSWaveMixRestartChannel", 3, nullptr},
-    {"QMIXER.dll", "QSWaveMixPauseChannel", 3, nullptr},
-    {"QMIXER.dll", "QSWaveMixStopChannel", 3, nullptr},
-    {"QMIXER.dll", "QSWaveMixConfigureChannel", 5, nullptr},
-    {"QMIXER.dll", "QSWaveMixGetChannelParams", 3, nullptr},
-    {"QMIXER.dll", "QSWaveMixEnableChannel", 4, nullptr},
-    {"QMIXER.dll", "QSWaveMixOpenWaveEx", 3, nullptr},
-    {"QMIXER.dll", "QSWaveMixFreeWave", 2, nullptr},
-    {"QMIXER.dll", "QSWaveMixPlayEx", 6, nullptr},
     {"AVIFIL32.dll", "AVIFileInit", 0, avi_noop},
     {"AVIFIL32.dll", "AVIFileExit", 0, avi_noop},
     {"AVIFIL32.dll", "AVIFileOpenA", 4, avi_open_unsupported},
@@ -3449,32 +3391,5 @@ const ImportShim g_misc_shims[] = {
     {"AVIFIL32.dll", "AVIStreamFindSample", 3, avi_no_sample},
     {"AVIFIL32.dll", "AVIStreamSampleToTime", 2, avi_no_sample},
     {"AVIFIL32.dll", "AVIStreamTimeToSample", 2, avi_no_sample},
-    {"QMIXER.dll", "QSWaveMixCloseSession", 1, nullptr},
-    {"QMIXER.dll", "QSWaveMixGetDirectSound", 2, nullptr},
-    {"QMIXER.dll", "QSWaveMixInitEx", 1, nullptr},
-    {"QMIXER.dll", "QSWaveMixActivate", 2, nullptr},
-    {"QMIXER.dll", "QSWaveMixOpenChannel", 3, nullptr},
-    {"QMIXER.dll", "QSWaveMixSetOptions", 3, nullptr},
-    {"QMIXER.dll", "QSWaveMixPump", 0, nullptr},
-    {"weanetr.dll", "?SendData@MLDPlay@@QAEHKPAXKKPAK@Z", 5, nullptr},
-    {"weanetr.dll", "?GetPlayerInfo@MLDPlay@@QAEHPAUMLDPLAY_PLAYERINFO@@@Z", 1, nullptr},
-    {"weanetr.dll", "?EnumerateServices@MLDPlay@@QAEHP6GXPAXPAGPAU_GUID@@K0@Z0@Z", 2, nullptr},
-    {"weanetr.dll",
-     "?AreWeLobbied@MLDPlay@@QAEKP6GXKPAXKK0@ZPAU_GUID@@PAUMLDPLAY_LOBBYINFO@@PAKPAG5KK@Z", 8,
-     nullptr},
-    {"weanetr.dll", "?StartupNetwork@MLDPlay@@QAEHP6GXKPAXKK0@Z@Z", 1, nullptr},
-    {"weanetr.dll", "?ShutdownNetwork@MLDPlay@@QAEHXZ", 0, nullptr},
-    {"weanetr.dll", "?SendMSResults@MLDPlay@@QAEKPAD@Z", 1, nullptr},
-    {"weanetr.dll", "?EnumerateNetworkMediums@MLDPlay@@QAEKP6GXPAGPAX@Z1@Z", 2, nullptr},
-    {"weanetr.dll", "?GetCurrentMs@MLDPlay@@QAEKXZ", 0, nullptr},
-    {"weanetr.dll", "?CreateSession@MLDPlay@@QAEHPAKPAG1PAXK@Z", 5, nullptr},
-    {"weanetr.dll", "?EnumerateSessions@MLDPlay@@QAEHKP6GXPAUMLDPLAY_SESSIONDESC@@PAX@ZK1@Z", 4,
-     nullptr},
-    {"weanetr.dll", "?JoinSession@MLDPlay@@QAEHPAUMLDPLAY_SESSIONDESC@@PAKPAGPAX@Z", 4, nullptr},
-    {"weanetr.dll", "?CreateNetworkAddress@MLDPlay@@QAEHPAXK0PAK@Z", 4, nullptr},
-    {"weanetr.dll", "?EnableNewPlayers@MLDPlay@@QAEXH@Z", 1, nullptr},
-    {"weanetr.dll", "?DestroySession@MLDPlay@@QAEHXZ", 0, nullptr},
-    {"weanetr.dll", "?SetupConnection@MLDPlay@@QAEHPAXPAU_GUID@@0@Z", 3, nullptr},
-    {"weanetr.dll", "?SendChat@MLDPlay@@QAEHKPAGKPAK@Z", 4, nullptr},
 };
 const size_t g_misc_shim_count = sizeof(g_misc_shims) / sizeof(g_misc_shims[0]);

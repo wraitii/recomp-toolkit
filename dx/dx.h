@@ -1,16 +1,12 @@
 // dx.h - what the host application and the runtime call into for the
 // graphics, audio and input shims.
 //
-// The runtime registers logging-only entries for DDRAW/DINPUT/DSOUND/QMIXER/
-// weanetr in imports_init(). dx_register_shims() replaces them with these
-// implementations, so the host must call it AFTER loader_load():
+// The runtime has no table for DDRAW/DINPUT/DSOUND/QMIXER/weanetr and the
+// other DLLs implemented here. dx_register_shims() upgrades their trampolines
+// in place, so the host calls it after loader_load() and before guest code:
 //
-//     loader_load(...);        // runs imports_init(), patches the IAT
-//     dx_register_shims();     // upgrades the DirectX entries in place
-//
-// imports_register upgrades an already-allocated trampoline in place, so the
-// IAT addresses the loader patched stay valid and no runtime file needs to
-// change. Registering twice is harmless.
+//     loader_load(...);
+//     dx_register_shims();
 #pragma once
 #include "../runtime/guest.h"
 #include <stdio.h>

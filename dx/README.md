@@ -123,18 +123,18 @@ Wine header plus `d3d8_bindings.json`; see [Testing](../docs/testing.md).
 
 ## Wiring it up
 
-`imports_init()` runs from `loader_load()` and installs logging-only entries
-for these DLLs. `dx_register_shims()` replaces them, so the host must call it
-**after** `loader_load()`:
+The runtime has no table for these DLLs, so `loader_load()` binds their IAT
+slots to unsupported trampolines. The host calls `dx_register_shims()` after
+it, before any guest code runs:
 
 ```c
 loader_load(...);        /* runs imports_init(), patches the IAT */
-dx_register_shims();     /* upgrades the DirectX entries in place */
+dx_register_shims();     /* installs the DirectX handlers and pop counts */
 ```
 
 `imports_register` upgrades an already-allocated trampoline in place, so the
-addresses the loader wrote into the IAT stay valid and no runtime file needs
-to change. Registering twice is a no-op.
+addresses the loader wrote into the IAT stay valid. Registering twice is a
+no-op.
 
 After `mem_init()` — which discards the guest heap the COM objects and
 vtables live in — call `dx_reset()` before using any of this again.

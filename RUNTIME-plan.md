@@ -56,8 +56,9 @@ real logging-only stubs returning 0. Some games depend on calls like these
 failing quietly, so none may start aborting; per-game `strict_imports` stays
 the opt-in for stricter behaviour.
 
-- [ ] Mark the ~64 overridden rows as declared-ABI placeholders so coverage
-      reports stop counting them as stubs.
+- [x] ~~Mark the ~64 overridden rows as declared-ABI placeholders.~~ Deleted
+      instead: `dx/` registers all 66 with the same pop counts and upgrades the
+      trampolines before guest code runs.
 - [x] ~~Give each real stub a real shim, a declined shim or
       `imports_unsupported`.~~ Done; `GetDesktopWindow` was already
       implemented in `user32_vcl.cpp`.
@@ -70,12 +71,14 @@ the opt-in for stricter behaviour.
         `VerLanguageNameW`, `GetScrollBarInfo`, `SendInput`,
         `URLDownloadToFileW`, `aux*`, `Netbios`.
       - Unsupported: `DebugBreak`, `GetOverlappedResult`.
-- [ ] `ReadFile` ignores its OVERLAPPED argument: no `Offset`, no byte count.
-      Needed before `GetOverlappedResult` can be real.
-- [ ] Resolve the 24 `ARGC_UNKNOWN` entries.
-- [ ] Remove the game address from `intrinsics.h:6` (`0x0055db78`).
-- [ ] Remove game-specific passages from `runtime/README.md` (weanetr data
-      imports, DirectInput service threads, game paths).
+- [x] ~~`ReadFile` ignores its OVERLAPPED argument.~~ `ReadFile`/`WriteFile`
+      honour `Offset` on synchronous handles and abort on `FILE_FLAG_OVERLAPPED`
+      handles; `GetOverlappedResult` stays unsupported.
+- [x] ~~Resolve the 24 `ARGC_UNKNOWN` entries.~~ Outdated: no shim table row
+      has an unknown count; only unregistered imports get one at load.
+- [x] ~~Remove the game address from `intrinsics.h:6` (`0x0055db78`).~~
+- [x] ~~Remove game-specific passages from `runtime/README.md` (weanetr data
+      imports, DirectInput service threads, game paths).~~
 
 ### 1.2 Small renames and moves
 

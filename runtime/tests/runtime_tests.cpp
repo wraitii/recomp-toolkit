@@ -784,9 +784,7 @@ static void test_loader() {
               "%u IAT slots hold data symbols (expected %u)", loader_iat_data_imports(),
               data_slots);
 
-        // imports_has_dll reports the shim registry, not which DLLs this PE
-        // imports. Require both so another image cannot use unallocated data.
-        if (imports_weanetr && imports_has_dll("weanetr.dll")) {
+        if (imports_weanetr) {
             uint32_t guid = imports_data_address("weanetr.dll", "?BFAID_INet@@3U_GUID@@A");
             check(guid != 0 && !imports_is_trampoline(guid),
                   "weanetr!BFAID_INet resolved to guest storage at %08x", guid);
@@ -4196,7 +4194,7 @@ static void test_registry(X86 *c) {
 // hold for a zero-argument and a multi-argument shim.
 static void test_import_coverage(X86 *c) {
     section("import coverage");
-    // The application upgrades the loader's logging-only IAT entries by
+    // The application upgrades the loader's unsupported IAT entries by
     // registering DX after loading. Coverage must include those modules too.
     dx_register_shims();
     ExpectedImage expect;

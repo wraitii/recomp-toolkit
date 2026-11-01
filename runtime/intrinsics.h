@@ -3,7 +3,7 @@
  *
  * Included by generated C, so this header stays C-compatible.
  *
- * Currently: the MSVC CRT's _setjmp/_longjmp pair (_longjmp is 0x0055db78).
+ * Currently: the MSVC CRT's _setjmp/_longjmp pair.
  * Both are cdecl, so each intrinsic emulates the guest RET by popping only the
  * return address; the caller cleans up the arguments.
  *
