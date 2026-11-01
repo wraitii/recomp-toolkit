@@ -703,32 +703,33 @@ void crt_qsort(X86 *c) {
                 goto split;
         }
 
-    split: {
-        const int32_t left = (int32_t)(high - low_bound);
-        const int32_t right = (int32_t)(high_bound - low);
-        if (left < right) {
-            if (low < high_bound) {
-                stack_low[stack_count] = low;
-                stack_high[stack_count] = high_bound;
-                ++stack_count;
+    split:
+        {
+            const int32_t left = (int32_t)(high - low_bound);
+            const int32_t right = (int32_t)(high_bound - low);
+            if (left < right) {
+                if (low < high_bound) {
+                    stack_low[stack_count] = low;
+                    stack_high[stack_count] = high_bound;
+                    ++stack_count;
+                }
+                if (low_bound >= high)
+                    goto pop;
+                low = low_bound;
+                high_bound = high;
+            } else {
+                if (low_bound < high) {
+                    stack_low[stack_count] = low_bound;
+                    stack_high[stack_count] = high;
+                    ++stack_count;
+                }
+                if (low >= high_bound)
+                    goto pop;
+                low_bound = low;
+                high = high_bound;
             }
-            if (low_bound >= high)
-                goto pop;
-            low = low_bound;
-            high_bound = high;
-        } else {
-            if (low_bound < high) {
-                stack_low[stack_count] = low_bound;
-                stack_high[stack_count] = high;
-                ++stack_count;
-            }
-            if (low >= high_bound)
-                goto pop;
-            low_bound = low;
-            high = high_bound;
+            continue;
         }
-        continue;
-    }
 
     pop:
         if (--stack_count < 0) {
