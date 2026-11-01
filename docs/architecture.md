@@ -3,7 +3,7 @@
 The build translates the supported executable's x86 instructions into C, then
 compiles that C alongside a handwritten native runtime. The loader verifies the
 executable's hash and maps its original image. Translated code runs natively;
-dispatch gaps use the p-code interpreter described below.
+dispatch gaps use the Cranelift baseline described below.
 
 ```mermaid
 flowchart TD
@@ -285,45 +285,46 @@ instruction lengths and full discovery report: seed evidence and ranks, gaps, tr
 conflicts, rejected functions and entries, pointer runs and switch tables. It also
 includes the original mapped spans, entries and tables for comparison.
 
-The p-code interpreter is the default fallback for missing translated code.
-`RECOMP_INTERP=off` disables it at runtime; `pcode` explicitly selects the default.
+The Cranelift baseline is the fallback for missing translated code.
+`RECOMP_INTERP=off` disables it at runtime; other values are rejected.
 Unsupported semantics stop with diagnostics, without fabricating a return.
-`tools/build.py --no-pcode` omits the runtime SLEIGH library and evaluator;
+`tools/build.py --no-pcode` omits the runtime SLEIGH library and baseline;
 missing code then fails explicitly. Mobile, web and Windows builds currently
 omit this linkage too. A complete static map does not cover heap-generated code,
-which still requires the interpreter when used by the guest. When a game supplies
+which still requires the baseline when used by the guest. When a game supplies
 a reloc manifest, heap bodies matching a translated template are bound at run
-time by `runtime/reloc.cpp` before the interpreter; each entry revalidates the
-guest bytes and import slots, `RECOMP_RELOC=off` restores the interpreter path.
+time by `runtime/reloc.cpp` before the baseline; each entry revalidates the
+guest bytes and import slots, `RECOMP_RELOC=off` restores the baseline path.
 `rk-pcode-ffi` lifts live bytes through the translator's pinned SLEIGH backend and
-shared instruction lowering before `runtime/pcode.cpp` evaluates them;
-`pcode_x86.cpp` maps guest state and dispatch. Corrected internal p-code branches
-are rejected when their relative targets cannot be preserved; unchanged sequences
-retain their original branch offsets. Cached lifts are byte-validated, and nested
-execution retains shared ownership.
-The evaluator supports scalar integer p-code; x87/MMX/SSE, other userops, SHRD,
-16-bit segmentation and guest divide-exception delivery remain explicit gaps. Memory checks cover the
+shared instruction lowering, then compiles blocks of up to 16 instructions with
+Cranelift; `runtime/baseline.cpp` caches byte-validated blocks, supplies helpers
+and handles branches, calls and returns. The two sides share one `cxx` bridge
+(`baseline/abi.rs`), whose generated header and source `tools/build.py` stages
+for the runtime. Corrected internal p-code branches are rejected when their
+relative targets cannot be preserved; unchanged sequences retain their original
+branch offsets. SHRD, MMX arithmetic, 16-bit segmentation and guest
+divide-exception delivery remain explicit gaps. Memory checks cover the
 null page and arena bounds, not page permissions. Scheduler checkpoints run per
-instruction and periodically during repeated string operations; p-code operations and host recursion are bounded, but whole guest
+block and periodically during repeated string operations; p-code operations and host recursion are bounded, but whole guest
 execution has no instruction cap. Unsupported sites inside translated bodies
 remain fatal; this fallback only handles dispatch gaps.
 
 `RECOMP_DISCOVERY=<file>` writes `target kind site hits` rows for addresses absent
-from the current translation, including calls handled by the interpreter and
-taken guest branches retained inside the p-code interpreter. P-code internal
+from the current translation, including calls handled by the baseline and
+taken guest branches retained inside the baseline. P-code internal
 branches and returns are excluded. Targets must lie in a loaded PE executable
 section; heap-generated code is excluded. Each target keeps its first kind/site
 and a hit count; new targets flush immediately, with final counts written at exit.
 A call site is `00000000` unless explicitly supplied by call-site observation;
 `c->eip` is not reliable provenance in translated callers. Jump sites inside the
-p-code interpreter are exact instruction addresses.
+baseline are exact instruction addresses.
 These are execution evidence, not recovered function boundaries or a complete
 code map. Naming the file as `discovery_evidence` in `[translate]` seeds the next
 sweep; permanent map repairs still go through Ghidra and re-export.
 
 For the experimental in-process JIT, set `RECOMP_JIT_INPUT` to the resolved
 `recomp/translate-input.json` and `RECOMP_JIT_OUT` to an output directory.
-Targets qualify after eight interpreter encounters. A background worker batches
+Targets qualify after eight baseline encounters. A background worker batches
 up to 16 targets over 100 ms, selecting the highest current encounter counts
 from an ordered set with one record per pending target. New hot targets can
 overtake earlier requests; there is no fixed queue capacity. It recovers and
@@ -348,7 +349,7 @@ until exit. Calls use host dispatch and the dynamic-return stack; batch return
 sites stay local to each library. Backward branches in interpreted code can
 resume at published native entries when the invocation has a known continuation.
 Batches that establish SEH checkpoints are not eligible for this handoff.
-Native region transfers use a trampoline and yield back to the interpreter when
+Native region transfers use a trampoline and yield back to the baseline when
 their destination has no eligible native entry.
 
 `RECOMP_JIT_TARGET=<hex address>` restricts recovery requests to one target.
@@ -363,7 +364,7 @@ entry and branch-handoff counts, flushed on first entry, invalidation and normal
 and publication failures also name their reason on stderr. Shutdown finishes
 the current job and drops queued work.
 `python3 tools/recomp/jit_report.py <per-run directory>` joins these diagnostics
-and the exported module entries to summarize the hottest interpreter targets.
+and the exported module entries to summarize the hottest baseline targets.
 It distinguishes compiled entries, rejected batches, dropped queued work and
 targets that never entered the queue in older runs. It separates published but
 unused entries from entries actually entered natively. Encounter counts include

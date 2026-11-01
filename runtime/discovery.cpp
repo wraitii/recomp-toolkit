@@ -5,7 +5,7 @@
 #include "win32.h"
 #include "loader.h"
 #if RECOMP_PCODE_FALLBACK
-#include "pcode_abi.h"
+#include "jit_abi.h"
 #endif
 
 #include "../platform/os.h"

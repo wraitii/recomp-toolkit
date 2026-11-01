@@ -1,43 +1,29 @@
-#include "pcode_x87.h"
+#include "baseline_x87.h"
 
 #include <cmath>
 
-bool pcode_x87_supported(uint64_t id, const RpOp &op) {
-    return (id >> 32) == 1 && (id & 255) >= 1 && (id & 255) <= 20 && op.input_count >= 1 &&
-           op.input_count <= 2 && op.inputs[0].offset == id;
-}
+using rp::baseline::X87Kind;
 
-bool pcode_x87_execute(PcodeHost &host, X86 *c, uint64_t id, uint32_t input_count,
-                       const uint64_t *args, uint64_t &result, std::string &why) {
-    unsigned kind = id & 255, a = (id >> 8) & 255;
-    unsigned bits = (id >> 16) & 255, flags = (id >> 24) & 15;
-    unsigned extra = (id >> 28) & 15;
-    bool memory = (kind == 1 && a == 8) || kind == 2 || kind == 15 || (kind == 3 && a == 8) ||
-                  ((kind == 4 || kind == 5) && bits);
-    uint32_t addr = memory ? (uint32_t)args[0] : 0;
-    if (memory && (input_count != 2 || args[0] > UINT32_MAX ||
-                   !host.memory_supported(args[0], bits / 8, kind == 3 || kind == 15, why))) {
-        if (why.empty())
-            why = "invalid x87 memory operand";
-        return false;
-    }
-    switch (kind) {
-    case 1:
-        pcode_x87_push(c, a, bits, addr);
+bool baseline_x87_execute(X86 *c, const rp::baseline::X87Call &call, uint32_t addr,
+                          uint64_t &result, std::string &why) {
+    const unsigned a = call.operand, bits = call.bits, flags = call.flags, extra = call.extra;
+    switch (call.kind) {
+    case X87Kind::Push:
+        baseline_x87_push(c, a, bits, addr);
         break;
-    case 2:
-        pcode_x87_push_integer(c, bits, addr);
+    case X87Kind::PushInteger:
+        baseline_x87_push_integer(c, bits, addr);
         break;
-    case 3:
-        pcode_x87_store(c, a, bits, flags, extra, addr);
+    case X87Kind::Store:
+        baseline_x87_store(c, a, bits, flags, extra, addr);
         break;
-    case 4:
-        pcode_x87_arithmetic(c, a, bits, flags, extra, addr);
+    case X87Kind::Arithmetic:
+        baseline_x87_arithmetic(c, a, bits, flags, extra, addr);
         break;
-    case 5: {
+    case X87Kind::Compare: {
         double rhs = (flags & 4) ? 0.0
-                     : bits      ? ((flags & 2) ? (double)pcode_x87_integer(addr, bits)
-                                                : pcode_x87_real(addr, bits))
+                     : bits      ? ((flags & 2) ? (double)baseline_x87_integer(addr, bits)
+                                                : baseline_x87_real(addr, bits))
                                  : ST(c, a);
         if (flags & 1)
             fucom(c, ST(c, 0), rhs);
@@ -47,29 +33,29 @@ bool pcode_x87_execute(PcodeHost &host, X86 *c, uint64_t id, uint32_t input_coun
             fdrop(c);
         break;
     }
-    case 6:
+    case X87Kind::CompareFlags:
         result = fcomi_flags_sw(&c->fpu_sw, ST(c, 0), ST(c, a), flags);
         if (extra)
             fdrop(c);
         break;
-    case 7:
+    case X87Kind::Exchange:
         fxch(c, a);
         break;
-    case 8:
+    case X87Kind::Free:
         ftag_put(c, (c->fpu_top + a) & 7u, FTAG_EMPTY);
         break;
-    case 9:
+    case X87Kind::Status:
         result = fstsw(c);
         break;
-    case 10:
+    case X87Kind::Init:
         x87_finit(c);
         break;
-    case 11:
+    case X87Kind::Rotate:
         c->fpu_top = (c->fpu_top + (a ? 1u : 7u)) & 7u;
         break;
-    case 12:
+    case X87Kind::Nop:
         break;
-    case 13: {
+    case X87Kind::Unary: {
         double v = ST(c, 0);
         if (a == 0)
             v = fabs(v);
@@ -88,7 +74,7 @@ bool pcode_x87_execute(PcodeHost &host, X86 *c, uint64_t id, uint32_t input_coun
         fset(c, 0, v);
         break;
     }
-    case 14: {
+    case X87Kind::Constant: {
         static const double values[] = {0.0,
                                         1.0,
                                         3.14159265358979323846,
@@ -99,23 +85,23 @@ bool pcode_x87_execute(PcodeHost &host, X86 *c, uint64_t id, uint32_t input_coun
         fpush(c, values[a]);
         break;
     }
-    case 15:
+    case X87Kind::StoreStatus:
         wr16(addr, fstsw(c));
         break;
-    case 16:
+    case X87Kind::Examine:
         fxam(c);
         break;
-    case 17:
+    case X87Kind::Remainder:
         fset(c, 0, fprem_common(c, ST(c, 0), ST(c, 1), a));
         break;
-    case 18:
+    case X87Kind::Yl2x:
         fset(c, 1, fx87_exact(c, ST(c, 1) * log2(ST(c, 0))));
         fdrop(c);
         break;
-    case 19:
+    case X87Kind::Scale:
         fset(c, 0, fx87_exact(c, fscale(ST(c, 0), ST(c, 1))));
         break;
-    case 20:
+    case X87Kind::Tangent:
         fset(c, 0, fx87_exact(c, tan(ST(c, 0))));
         fpush(c, 1.0);
         break;

@@ -1,13 +1,13 @@
 #define RECOMP_GUEST_MEMORY_OWNER 1 /* defines and maps g_mem */
 #include "../platform/os.h"
-// interp_tests.cpp - the heap-code interpreter (runtime/interp.cpp).
+// interp_tests.cpp - the missing-code fallback (runtime/interp.cpp, runtime/baseline.cpp).
 //
 //   interp_tests               the checks below
 //   interp_tests --run HEX     runs HEX as a routine from a fixed state and
 //                              prints the final state
 #include "interp.h"
 #if RECOMP_PCODE_FALLBACK
-#include "pcode.h"
+#include "baseline.h"
 #endif
 
 #include <csignal>
@@ -25,7 +25,7 @@
 #endif
 
 uint8_t *g_mem;
-// This test links the interpreter alone, so it owns the definitions the
+// This test links the fallback alone, so it owns the definitions the
 // runtime would otherwise supply: guest memory, and the dirty-region list
 // x86.h's stores record.
 RecompDirty g_dirty[RECOMP_DIRTY_SLOTS];
@@ -33,7 +33,7 @@ uint32_t g_dirty_count, g_store_hook;
 uint32_t g_watch_base, g_watch_len; // the memory watch, never armed here
 extern "C" void recomp_watch_hit(uint32_t, uint32_t, uint64_t) {}
 
-// The interpreter tests link neither cpu.cpp nor a guest with handlers, so a
+// The fallback tests link neither cpu.cpp nor a guest with handlers, so a
 // null dereference has nowhere to raise to: report it and stop, which is what
 // the real one does when the guest has no handler either.
 extern "C" void recomp_null_access(uint32_t addr, int write) {
@@ -56,7 +56,7 @@ const uint32_t NATIVE = 0x00401000, RETURN = 0x00400ff0;
 static uint32_t g_native_arg = 0, g_native_calls = 0;
 
 // The generated table's stand-in: NATIVE is a "translated" cdecl function
-// that returns its argument plus one; heap addresses go to the interpreter.
+// that returns its argument plus one; heap addresses go to the baseline.
 extern "C" void recomp_call(X86 *c, uint32_t target) {
     if (target == NATIVE) {
         ++g_native_calls;
@@ -75,7 +75,7 @@ extern "C" void recomp_call(X86 *c, uint32_t target) {
 }
 
 // NATIVE is the one "translated" entry the table knows, so a JMP to it is a
-// tail call the interpreter hands back rather than decoding into.
+// tail call the baseline hands back rather than decoding into.
 extern "C" int recomp_is_call_return(uint32_t target) {
     return target == RETURN;
 }
@@ -123,9 +123,9 @@ static X86 fresh() {
 // ---- lazy arithmetic flag descriptor (x86.h) --------------------------
 //
 // x86_cc_settle materialises a pending ADD/SUB/LOGIC/INC/DEC descriptor. Its
-// recipes must match the eager ones the decoded emitter and the interpreter
+// recipes must match the eager ones the decoded emitter and the baseline
 // use, for every operation and operand width. Compare them over random
-// operands rather than the fixed register table the interpreter fixtures use.
+// operands rather than the fixed register table the baseline fixtures use.
 struct EagerFlags {
     uint32_t cf, pf, af, zf, sf, of;
 };
@@ -337,7 +337,7 @@ static int run_hex(const char *hex) {
     return 0;
 }
 
-static X86 pcode_run(const std::vector<uint8_t> &code) {
+static X86 run_code(const std::vector<uint8_t> &code) {
     put(CODE, code);
     memset(g_mem + DATA, 0, 0x100);
     X86 c = fresh();
@@ -347,40 +347,40 @@ static X86 pcode_run(const std::vector<uint8_t> &code) {
     return c;
 }
 
-static void test_pcode_boundaries() {
-    X86 c = pcode_run({0xa1, 0x00, 0x00, 0x00, 0x02, // mov eax,[02000000]
-                       0x83, 0xc0, 0x05,             // add eax,5
-                       0xa3, 0x04, 0x00, 0x00, 0x02, // mov [02000004],eax
-                       0xc3});
+static void test_baseline_boundaries() {
+    X86 c = run_code({0xa1, 0x00, 0x00, 0x00, 0x02, // mov eax,[02000000]
+                      0x83, 0xc0, 0x05,             // add eax,5
+                      0xa3, 0x04, 0x00, 0x00, 0x02, // mov [02000004],eax
+                      0xc3});
     CHECK(c.eip == RETURN);
     CHECK(rd32(DATA + 4) == 5);
-    c = pcode_run({0xb0, 0x12, 0xb4, 0x34, 0x66, 0x05, 0x01, 0x01,
-                   0xc3}); // mov al,12h; mov ah,34h; add ax,0101h
+    c = run_code({0xb0, 0x12, 0xb4, 0x34, 0x66, 0x05, 0x01, 0x01,
+                  0xc3}); // mov al,12h; mov ah,34h; add ax,0101h
     CHECK((c.r[R_EAX] & 0xffff) == 0x3513);
-    c = pcode_run({0x85, 0xc0, 0x74, 0x06, 0xb8, 0x01, 0, 0, 0, 0xc3, 0xb8, 0x02, 0, 0, 0,
-                   0xc3}); // test eax,eax; je +6; mov eax,1; ret; mov eax,2; ret
+    c = run_code({0x85, 0xc0, 0x74, 0x06, 0xb8, 0x01, 0, 0, 0, 0xc3, 0xb8, 0x02, 0, 0, 0,
+                  0xc3}); // test eax,eax; je +6; mov eax,1; ret; mov eax,2; ret
     CHECK(c.r[R_EAX] == 2);
-    c = pcode_run({0x68, 0x34, 0x12, 0, 0, 0x58, 0xc3}); // push 1234h; pop eax
+    c = run_code({0x68, 0x34, 0x12, 0, 0, 0x58, 0xc3}); // push 1234h; pop eax
     CHECK(c.r[R_EAX] == 0x1234);
 
-    c = pcode_run({0xb8, 0xff, 0xff, 0xff, 0xff, 0x83, 0xc0, 0x01, 0xc3}); // mov eax,-1; add eax,1
+    c = run_code({0xb8, 0xff, 0xff, 0xff, 0xff, 0x83, 0xc0, 0x01, 0xc3}); // mov eax,-1; add eax,1
     CHECK(c.r[R_EAX] == 0 && c.eflags_cf == 1 && c.eflags_zf == 1 && c.eflags_of == 0);
-    c = pcode_run(
+    c = run_code(
         {0xb8, 0xff, 0xff, 0xff, 0x7f, 0x83, 0xc0, 0x01, 0xc3}); // mov eax,7fffffffh; add eax,1
     CHECK(c.r[R_EAX] == 0x80000000u && c.eflags_of == 1 && c.eflags_sf == 1 && c.eflags_cf == 0);
-    c = pcode_run({0xb8, 0, 0, 0, 0, 0x83, 0xe8, 0x01, 0xc3}); // mov eax,0; sub eax,1
+    c = run_code({0xb8, 0, 0, 0, 0, 0x83, 0xe8, 0x01, 0xc3}); // mov eax,0; sub eax,1
     CHECK(c.r[R_EAX] == 0xffffffffu && c.eflags_cf == 1 && c.eflags_sf == 1 && c.eflags_of == 0);
-    c = pcode_run({0xb8, 0, 0, 0, 0x80, 0x83, 0xe8, 0x01, 0xc3}); // mov eax,80000000h; sub eax,1
+    c = run_code({0xb8, 0, 0, 0, 0x80, 0x83, 0xe8, 0x01, 0xc3}); // mov eax,80000000h; sub eax,1
     CHECK(c.r[R_EAX] == 0x7fffffffu && c.eflags_of == 1 && c.eflags_cf == 0);
 
-    c = pcode_run({0xb8, 0xff, 0x56, 0x34, 0x12, 0x04, 0x01, 0xc3}); // mov eax,123456ffh; add al,1
+    c = run_code({0xb8, 0xff, 0x56, 0x34, 0x12, 0x04, 0x01, 0xc3}); // mov eax,123456ffh; add al,1
     CHECK((c.r[R_EAX] & 0xffff) == 0x5600 && c.eflags_cf == 1 && c.eflags_zf == 1);
-    c = pcode_run({0xb8, 0xff, 0xff, 0x34, 0x12, 0x66, 0x05, 0x01, 0x00,
-                   0xc3}); // mov eax,1234ffffh; add ax,1
+    c = run_code({0xb8, 0xff, 0xff, 0x34, 0x12, 0x66, 0x05, 0x01, 0x00,
+                  0xc3}); // mov eax,1234ffffh; add ax,1
     CHECK((c.r[R_EAX] & 0xffffffffu) == 0x12340000u && c.eflags_cf == 1);
-    c = pcode_run({0xb8, 0x01, 0, 0, 0x80, 0xd1, 0xe0, 0xc3}); // mov eax,80000001h; shl eax,1
+    c = run_code({0xb8, 0x01, 0, 0, 0x80, 0xd1, 0xe0, 0xc3}); // mov eax,80000001h; shl eax,1
     CHECK(c.r[R_EAX] == 2 && c.eflags_cf == 1);
-    c = pcode_run({0xb8, 0x01, 0, 0, 0x80, 0xd1, 0xf8, 0xc3}); // mov eax,80000001h; sar eax,1
+    c = run_code({0xb8, 0x01, 0, 0, 0x80, 0xd1, 0xf8, 0xc3}); // mov eax,80000001h; sar eax,1
     CHECK(c.r[R_EAX] == 0xc0000000u && c.eflags_cf == 1);
 
     const uint32_t target = CODE + 0x20;
@@ -398,7 +398,7 @@ static void test_pcode_boundaries() {
     put(HELPER, {0xb8, 0x07, 0, 0, 0, 0xc3}); // mov eax,7; ret
     put(CODE, {0xe8, 0, 0, 0, 0, 0xc3});      // call HELPER; ret
     wr32(CODE + 1, HELPER - (CODE + 5));
-    c = pcode_run(
+    c = run_code(
         {g_mem[CODE], g_mem[CODE + 1], g_mem[CODE + 2], g_mem[CODE + 3], g_mem[CODE + 4], 0xc3});
     CHECK(c.r[R_EAX] == 7 && c.eip == RETURN);
     g_mem[HELPER + 1] = 9;
@@ -424,9 +424,9 @@ static void test_pcode_boundaries() {
 }
 
 #if RECOMP_PCODE_FALLBACK && !defined(_WIN32)
-static const char *pcode_stop_needle(const char *name) {
+static const char *baseline_stop_needle(const char *name) {
     if (!strcmp(name, "x87"))
-        return "x87";
+        return "null-page";
     if (!strcmp(name, "short"))
         return "lift failed";
     if (!strcmp(name, "fault"))
@@ -436,8 +436,8 @@ static const char *pcode_stop_needle(const char *name) {
     return "";
 }
 
-static int pcode_stop(const char *name) {
-    const char *needle = pcode_stop_needle(name);
+static int baseline_stop(const char *name) {
+    const char *needle = baseline_stop_needle(name);
     bool fault_progress = false;
     if (!strcmp(name, "x87"))
         put(CODE, {0xd9, 0x46, 0x04, 0xc3});
@@ -460,10 +460,10 @@ static int pcode_stop(const char *name) {
     X86 c = fresh();
     wr32(c.r[R_ESP], RETURN);
     bool nested = !strcmp(name, "recursion");
-    int result = nested ? interp_call(&c, CODE) : pcode_interp_call(&c, CODE);
+    int result = nested ? interp_call(&c, CODE) : baseline_call(&c, CODE);
     if (nested)
         return 1;
-    const char *error = pcode_interp_last_error();
+    const char *error = baseline_last_error();
     if (error)
         fprintf(stderr, "%s\n", error);
     if (result != -1 || !error || !strstr(error, needle))
@@ -473,11 +473,11 @@ static int pcode_stop(const char *name) {
     return 0;
 }
 
-static void test_pcode_stops() {
+static void test_baseline_stops() {
     struct Case {
         const char *name, *needle;
     } cases[] = {
-        {"x87", "x87"},
+        {"x87", "null-page"},
         {"div-zero", "division"},
         {"idiv-overflow", "division"},
         {"shrd", "SHR"},
@@ -504,7 +504,7 @@ static void test_pcode_stops() {
             close(pipefd[0]);
             dup2(pipefd[1], 2);
             close(pipefd[1]);
-            execl(self, self, "--pcode-stop", item.name, (char *)nullptr);
+            execl(self, self, "--baseline-stop", item.name, (char *)nullptr);
             _exit(127);
         }
         close(pipefd[1]);
@@ -526,7 +526,8 @@ static void test_pcode_stops() {
         ++g_checks;
         if (!ok) {
             ++g_failures;
-            fprintf(stderr, "FAIL pcode stop case %s (status %d): %s\n", item.name, status, output);
+            fprintf(stderr, "FAIL baseline stop case %s (status %d): %s\n", item.name, status,
+                    output);
         }
     }
 }
@@ -552,13 +553,13 @@ int main(int argc, char **argv) {
     alarm(30);
 #endif
 #if RECOMP_PCODE_FALLBACK && !defined(_WIN32)
-    if (argc == 3 && !strcmp(argv[1], "--pcode-stop"))
-        return pcode_stop(argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "--baseline-stop"))
+        return baseline_stop(argv[2]);
 #endif
 #if RECOMP_PCODE_FALLBACK
-    test_pcode_boundaries();
+    test_baseline_boundaries();
 #ifndef _WIN32
-    test_pcode_stops();
+    test_baseline_stops();
 #endif
 #endif
     test_lazy_flags();

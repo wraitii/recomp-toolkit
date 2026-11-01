@@ -24,7 +24,7 @@ owns. Compile the runtime with `-I<repo root>` so `guest.h` can find it.
 | `misc.cpp`, `misc_dlls.cpp` | ADVAPI32 registry, SHELL32, ole32, IMM32, WSOCK32, WINMM, and small optional-DLL probes |
 | `comctl32.cpp`, `imagehlp.cpp`, `media_foundation.cpp`, `msimg32.cpp`, `oleaut32.cpp` | common controls, DbgHelp, Media Foundation, msimg32 and automation shims |
 | `seh.cpp`, `thunks.cpp` | guest exception checkpoints and thunk dispatch |
-| `interp.cpp`, `pcode.cpp`, `pcode_x86.cpp` | fallback selection, p-code evaluation and x86 state/dispatch; [behavior and build options](../docs/architecture.md#discovery-and-code-a-build-does-not-carry) |
+| `interp.cpp`, `baseline.cpp`, `baseline_x87.cpp` | fallback selection, Cranelift baseline dispatch and helpers; [behavior and build options](../docs/architecture.md#discovery-and-code-a-build-does-not-carry) |
 | `call_trace.cpp`, `linear_trace.cpp`, `discovery.cpp`, `observe.cpp`, `profile.cpp` | call tracing, discovery and profiling diagnostics |
 | `installation_manifest.cpp`, `layout.cpp`, `key_names.cpp`, `resources.cpp` | installation, input layout, key names and resource helpers |
 | `mods_seam.cpp`, `native_seam.h` | the mod and native-override seams |
@@ -144,18 +144,17 @@ continuing would run the guest past a point Windows never reaches.
   SHA-256 is not the expected one, with no override, because everything after
   it trusts that exact layout. PE parsing bounds-checks the headers, the
   section table and every import RVA against the image. The separate manual
-  runner uses an empty dispatch and the interpreter instead: build it with
+  runner uses an empty dispatch and the baseline instead: build it with
   `python3 tools/build.py --target run`, then run
   `build/manual/recomp/recomp-run --exe /path/to/program.exe --guest-args "arguments"`.
   It supports x86 PE32 GUI and console images at their preferred base, with
   imports provided by runtime shims. Unimplemented imports fail by name only
   when called; guest DLL files are not loaded. Unsupported startup features
-  fail during loading. It uses the windowed host and inherits interpreter limitations.
-  Pass `--game <id>` to the build to use a game's memory configuration. Set
-  `RECOMP_INTERP=baseline` to execute Cranelift-compiled prefixes without interpreter
-  fallback; the default `pcode` mode selects the independent interpreter. Calls,
-  returns and internal p-code branches compile natively; division, scalar SSE and
-  native userops call shared numeric helpers. Unsupported instructions and the
+  fail during loading. It uses the windowed host and inherits baseline limitations.
+  Pass `--game <id>` to the build to use a game's memory configuration. Calls,
+  returns, internal p-code branches, register access, memory bounds and division
+  compile natively; scalar SSE, store-hooked writes, string instructions, RDTSC,
+  CPUID and x87 arithmetic call runtime helpers. Unsupported instructions and the
   65,536-block allocation limit stop with named diagnostics. Prefixes contain at
   most 16 instructions. Baseline statistics are printed at normal process exit.
   Set `RECOMP_BASELINE_VERIFY=1` to enable Cranelift verification.

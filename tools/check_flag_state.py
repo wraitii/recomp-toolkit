@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIRECTORIES = ("runtime", "dx", "graphics", "host", "mods", "games/civ4-bts/native")
 SUFFIXES = {".c", ".cc", ".cpp", ".h", ".mm", ".m"}
 ALLOWED = {
-    "runtime/x86.h", "runtime/interp.cpp", "runtime/pcode.cpp", "runtime/pcode_x86.cpp", "runtime/seh.cpp", "runtime/imports.cpp",
+    "runtime/x86.h", "runtime/interp.cpp", "runtime/baseline.cpp", "runtime/seh.cpp", "runtime/imports.cpp",
     "runtime/cpu.cpp", "runtime/loader.cpp", "runtime/kernel32.cpp", "runtime/call_trace.cpp",
     "mods/hooks.cpp", "mods/native/replay.cpp",
 }

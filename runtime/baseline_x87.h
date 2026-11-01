@@ -1,8 +1,12 @@
 #pragma once
-#include "pcode_core.h"
 #include "x86.h"
+#include "rk_pcode/src/baseline/abi.rs.h"
 
-static inline int64_t pcode_x87_integer(uint32_t addr, unsigned bits) {
+#include <string>
+
+constexpr unsigned kX87MemoryOperand = unsigned(rp::baseline::X87Operand::Memory);
+
+static inline int64_t baseline_x87_integer(uint32_t addr, unsigned bits) {
     if (bits == 16)
         return (int16_t)rd16(addr);
     if (bits == 32)
@@ -10,7 +14,7 @@ static inline int64_t pcode_x87_integer(uint32_t addr, unsigned bits) {
     return (int64_t)rd64(addr);
 }
 
-static inline double pcode_x87_real(uint32_t addr, unsigned bits) {
+static inline double baseline_x87_real(uint32_t addr, unsigned bits) {
     if (bits == 32)
         return rdf32(addr);
     if (bits == 64)
@@ -18,20 +22,20 @@ static inline double pcode_x87_real(uint32_t addr, unsigned bits) {
     return rdf80(addr);
 }
 
-static inline void pcode_x87_push(X86 *c, unsigned a, unsigned bits, uint32_t addr) {
-    if (a == 8)
-        fpush(c, pcode_x87_real(addr, bits));
+static inline void baseline_x87_push(X86 *c, unsigned a, unsigned bits, uint32_t addr) {
+    if (a == kX87MemoryOperand)
+        fpush(c, baseline_x87_real(addr, bits));
     else
         fpush_st(c, a);
 }
 
-static inline void pcode_x87_push_integer(X86 *c, unsigned bits, uint32_t addr) {
-    fpush_int(c, pcode_x87_integer(addr, bits));
+static inline void baseline_x87_push_integer(X86 *c, unsigned bits, uint32_t addr) {
+    fpush_int(c, baseline_x87_integer(addr, bits));
 }
 
-static inline void pcode_x87_store(X86 *c, unsigned a, unsigned bits, unsigned flags,
-                                   unsigned extra, uint32_t addr) {
-    if (a != 8)
+static inline void baseline_x87_store(X86 *c, unsigned a, unsigned bits, unsigned flags,
+                                      unsigned extra, uint32_t addr) {
+    if (a != kX87MemoryOperand)
         fcopy(c, a, 0);
     else if (extra) {
         if (bits == 16)
@@ -50,11 +54,11 @@ static inline void pcode_x87_store(X86 *c, unsigned a, unsigned bits, unsigned f
         fdrop(c);
 }
 
-static inline void pcode_x87_arithmetic(X86 *c, unsigned a, unsigned bits, unsigned flags,
-                                        unsigned extra, uint32_t addr) {
+static inline void baseline_x87_arithmetic(X86 *c, unsigned a, unsigned bits, unsigned flags,
+                                           unsigned extra, uint32_t addr) {
     unsigned dst = a & 15, src = a >> 4;
-    double lhs = ST(c, dst), rhs = bits ? ((flags & 8) ? (double)pcode_x87_integer(addr, bits)
-                                                       : pcode_x87_real(addr, bits))
+    double lhs = ST(c, dst), rhs = bits ? ((flags & 8) ? (double)baseline_x87_integer(addr, bits)
+                                                       : baseline_x87_real(addr, bits))
                                         : ST(c, src);
     if (flags & 4) {
         double t = lhs;
@@ -81,6 +85,5 @@ static inline void pcode_x87_arithmetic(X86 *c, unsigned a, unsigned bits, unsig
         fdrop(c);
 }
 
-bool pcode_x87_supported(uint64_t id, const RpOp &op);
-bool pcode_x87_execute(PcodeHost &host, X86 *c, uint64_t id, uint32_t input_count,
-                       const uint64_t *args, uint64_t &result, std::string &why);
+bool baseline_x87_execute(X86 *c, const rp::baseline::X87Call &call, uint32_t addr,
+                          uint64_t &result, std::string &why);

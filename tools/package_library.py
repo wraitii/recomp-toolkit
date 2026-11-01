@@ -129,8 +129,9 @@ def package(bundle, build_root, python_root):
     dependencies.mkdir()
     (dependencies / "bin").mkdir()
     shutil.copy2(translator, dependencies / "bin/recomp-translate")
-    pcode = rust_pcode_library(dependency_build)
+    pcode, bridge = rust_pcode_library(dependency_build)
     shutil.copy2(pcode, dependencies / "bin" / pcode.name)
+    shutil.copytree(bridge, dependencies / "pcode-bridge")
     cmake_build = dependency_build / "cmake/macos-stub"
     subprocess.run([str(python / "bin/cmake"), "--install", str(cmake_build / "_deps/sdl3-build"),
                     "--prefix", str(dependencies / "sdl")], check=True)

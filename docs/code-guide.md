@@ -26,7 +26,7 @@ translated locally into `build/recomp/gen/` and are never edited in place.
 | Translation driver, chunks, tables | [Translator](translator.md), [recomp-translate](../translator/crates/recomp-translate/src/main.rs), [rk-output](../translator/crates/rk-output/src/lib.rs) | `main`, `build_bodies`, `rk_output::write` |
 | Instruction semantics, SSA emission | [rk-ssa](../translator/crates/rk-ssa/src/lib.rs), [rk-emit](../translator/crates/rk-emit/src/lib.rs), [x86.h](../runtime/x86.h) | `prepare`, `emit`; register/flag/x87 helpers |
 | Lazy flags and conditions | [rk-x86 flags](../translator/crates/rk-x86/src/flags.rs), [rk-ssa flags](../translator/crates/rk-ssa/src/flags.rs) | `FlagRecipes` (`expand`, `direct`, `lazy_op`); `build_joins`, `FlagPlan::publication` |
-| Missing-code execution | [pcode.cpp](../runtime/pcode.cpp), [pcode_x86.cpp](../runtime/pcode_x86.cpp), [rk-pcode-ffi](../translator/crates/rk-pcode-ffi/src/lib.rs) | `PcodeMachine::step`, `pcode_interp_call`, `rp_lift` |
+| Missing-code execution | [baseline.cpp](../runtime/baseline.cpp), [rk-pcode-ffi](../translator/crates/rk-pcode-ffi/src/baseline/mod.rs) | `baseline_call`, `Routine::step`, `compile` |
 | Heap-loaded relocatable code | [reloc.cpp](../runtime/reloc.cpp) | `recomp_reloc_register`, `recomp_reloc_call` |
 | Offline dispatch bounds | [Analysis facts](translator.md#analysis-facts), [rk-analysis](../translator/crates/rk-analysis/src/guest.rs) | `produce`, stack summaries, table census |
 | Translator checks | [diff/run.py](../tools/recomp/diff/run.py), [corpus](../tools/recomp/corpus/README.md) | Unicorn comparison; eager/SSA/native corpus |

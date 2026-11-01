@@ -381,23 +381,41 @@ def translator_cargo(build_root, command, *args):
 
 
 def rust_pcode_library(build_root):
-    """Return the bundled p-code evaluator library or build it for this desktop host."""
+    """Return the baseline library and its generated C++ bridge, building them for this host."""
     names = {"Darwin": "librk_pcode_ffi.dylib", "Windows": "rk_pcode_ffi.dll"}
     name = names.get(platform.system(), "librk_pcode_ffi.so")
-    bundled = ROOT.parent / "dependencies/bin" / name
-    if (ROOT.parent / "dependencies/manifest.json").is_file():
-        if not bundled.is_file():
+    dependencies = ROOT.parent / "dependencies"
+    if (dependencies / "manifest.json").is_file():
+        library, bridge = dependencies / "bin" / name, dependencies / "pcode-bridge"
+        if not library.is_file() or not bridge.is_dir():
             raise ValueError("Bundled p-code library is missing; reinstall Recomp Toolkit")
-        return bundled
-    target = translator_cargo(build_root, "build", "--release", "-p", "rk-pcode-ffi")
-    source = target / "release" / name
+        return library, bridge
+    target = Path(build_root) / "recomp/cargo"
+    messages = subprocess.run(
+        ["cargo", "build", "--quiet", "--locked", "--release", "-p", "rk-pcode-ffi",
+         "--message-format=json-render-diagnostics",
+         "--manifest-path", str(ROOT / "translator/Cargo.toml"), "--target-dir", str(target)],
+        check=True, stdout=subprocess.PIPE, text=True).stdout.splitlines()
+    out_dir = next(Path(message["out_dir"]) for message in map(json.loads, messages)
+                   if message.get("reason") == "build-script-executed"
+                   and "rk-pcode-ffi" in message["package_id"])
+    stage = Path(build_root) / "recomp/pcode"
+    bridge = stage / "bridge"
+    generated = out_dir / "cxxbridge"
+    for source, destination in (
+            (generated / "include/rk_pcode/src/baseline/abi.rs.h",
+             bridge / "include/rk_pcode/src/baseline/abi.rs.h"),
+            (generated / "sources/rk_pcode/src/baseline/abi.rs.cc", bridge / "abi.rs.cc")):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not destination.is_file() or destination.read_bytes() != source.read_bytes():
+            shutil.copyfile(source, destination)
+    library = target / "release" / name
     if platform.system() == "Darwin":
-        staged = Path(build_root) / "recomp/pcode" / name
-        staged.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, staged)
+        staged = stage / name
+        shutil.copy2(library, staged)
         subprocess.run(["install_name_tool", "-id", "@rpath/" + name, str(staged)], check=True)
-        return staged
-    return source
+        library = staged
+    return library, bridge
 
 
 def rust_analysis(build_root):
@@ -1192,7 +1210,8 @@ def main():
                 return
             pcode_disabled = (args.no_pcode or args.target in {"ios", "android", "web"} or
                               platform.system() == "Windows" or preset.startswith("windows-cross"))
-            defines.append("-DRECOMP_PCODE_LIB=" + ("" if pcode_disabled else str(rust_pcode_library(args.build_root))))
+            pcode = ("", "") if pcode_disabled else rust_pcode_library(args.build_root)
+            defines += ["-DRECOMP_PCODE_LIB=" + str(pcode[0]), "-DRECOMP_PCODE_BRIDGE=" + str(pcode[1])]
             if args.target == "ios":
                 if not args.stub and not (args.build_root / "recomp/gen/table.c").is_file():
                     parser.error("No translation in %s/recomp/gen; run tools/build.py --regenerate on macOS first"
