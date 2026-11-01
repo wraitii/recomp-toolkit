@@ -1,7 +1,6 @@
 #include "baseline.h"
 #include "baseline_x87.h"
 #include "discovery.h"
-#include "jit.h"
 #include "../platform/os.h"
 
 #include <array>
@@ -441,16 +440,7 @@ Compiled &block(ThreadState &state, uint32_t start) {
 
 class Routine {
   public:
-    Routine(X86 *c, ThreadState &state) : c_(c), state_(state) {
-        if (c->dynamic_return_count)
-            continuation_ = c->dynamic_returns[c->dynamic_return_count - 1];
-        if (!memory_fault(c->r[R_ESP], 4)) {
-            const uint32_t target = rd32(c->r[R_ESP]);
-            if (target == GUEST_RETURN_SENTINEL || recomp_is_call_return(target) ||
-                recomp_module_is_call_return(target))
-                continuation_ = target;
-        }
-    }
+    Routine(X86 *c, ThreadState &state) : c_(c), state_(state) {}
 
     bool step(uint32_t &pc) {
         const uint32_t start = pc;
@@ -549,14 +539,6 @@ class Routine {
         if (noting_)
             discovery_note("jump", target, at);
         pc = target;
-        if (target <= at && continuation_) {
-            uint32_t next = target;
-            const int result = recomp_jit_resume(c_, target, continuation_, &next);
-            if (result) {
-                pc = next;
-                return result != 1;
-            }
-        }
         return true;
     }
 
@@ -584,7 +566,6 @@ class Routine {
 
     X86 *c_;
     ThreadState &state_;
-    uint32_t continuation_ = 0;
     uint32_t checked_ = 0;
     Compiled *next_ = nullptr;
     Link *pending_ = nullptr;

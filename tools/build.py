@@ -13,7 +13,6 @@ from pathlib import Path
 import platform
 import re
 import shutil
-import shlex
 import subprocess
 import hashlib
 import sys
@@ -706,34 +705,6 @@ def host_entry_stubs(gen, out):
     return out
 
 
-def build_jit_module(directory, input_path):
-    directory = Path(directory).resolve()
-    build_root = Path(input_path).resolve().parent.parent
-    database = build_root / "cmake" / default_preset(platform.system()) / "compile_commands.json"
-    commands = json.loads(database.read_text())
-    sample = next(row for row in commands
-                  if Path(row["file"]).name.startswith("chunk_") and row["file"].endswith(".c"))
-    command = sample.get("arguments") or shlex.split(sample["command"])
-    flags = []
-    skip = False
-    for arg in command[1:]:
-        if skip:
-            skip = False
-        elif arg in ("-o", "-c"):
-            skip = True
-        elif arg.startswith("-DRECOMP_OVERRIDE_HEADER"):
-            continue
-        else:
-            flags.append(arg)
-    extension = ".dylib" if platform.system() == "Darwin" else ".so"
-    link = (["-dynamiclib", "-Wl,-undefined,dynamic_lookup"]
-            if platform.system() == "Darwin" else ["-shared"])
-    subprocess.run([command[0], "-I", str(directory), *flags, "-fPIC", "-fvisibility=hidden",
-                    str(directory / "batch.c"), str(directory / "module.c"),
-                    *link, "-o", str(directory / ("module" + extension))],
-                   cwd=sample["directory"], check=True)
-
-
 def build_translator_harness(gen, out):
     """Compile a synthetic translation and the diff host without a game build."""
     gen = Path(gen).resolve()
@@ -918,8 +889,6 @@ def parse_args(argv, system=None):
     game_config.add_game_args(parser)
     parser.add_argument("--stub", action="store_true",
                         help="Link the hosts against a stub translation (no game code; CI's build)")
-    parser.add_argument("--jit-module", type=Path)
-    parser.add_argument("--jit-input", type=Path)
     parser.add_argument("--no-pcode", action="store_true",
                         help="Omit the runtime SLEIGH lifter and p-code interpreter; missing code remains fatal")
     parser.add_argument("--no-observe", action="store_true",
@@ -950,10 +919,6 @@ def parse_args(argv, system=None):
                         help="Android: push the configured game install minus [bundle].exclude before launch")
     parser.add_argument("--console", action="store_true", help="After launching on the device, stream its console")
     args = parser.parse_args(argv)
-    if args.jit_module:
-        if not args.jit_input:
-            parser.error("--jit-module requires --jit-input")
-        return args, parser
     if args.stack_return_report and any((args.regenerate, args.regen_function, args.diff_harness,
                                          args.translator_harness, args.function_corpus, args.stub,
                                          args.produce_analysis_facts, args.target != "app")):
@@ -1043,9 +1008,6 @@ def regenerate_selection(value, cfg, parser):
 def main():
     """Check inputs, translate under the build lock when needed, then configure and build."""
     args, parser = parse_args(sys.argv[1:])
-    if args.jit_module:
-        build_jit_module(args.jit_module, args.jit_input)
-        return
     if args.renderer_consumer or args.compositor_consumer:
         from cargo_build import native_target_args
         try:

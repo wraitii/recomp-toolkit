@@ -40,8 +40,6 @@ int main(int argc, char **argv) {
         return 2;
     }
     os_setenv("RECOMP_GUEST_ARGS", guest_command_line(argc, argv).c_str());
-    os_unsetenv("RECOMP_JIT_INPUT");
-    os_setenv("RECOMP_JIT_EXEC", "off");
     g_max_frames = 0;
     g_max_seconds = 0;
     g_frame_every = 0;

@@ -13,13 +13,7 @@ rk-ir.workspace = true
 rk-x86.workspace = true
 rk-x87.workspace = true
 rk-sleigh.workspace = true
-rk-discover.workspace = true
-rk-image.workspace = true
-rk-output.workspace = true
-recomp-translate = { path = "../recomp-translate" }
-serde_json.workspace = true
 rk-emit.workspace = true
-anyhow.workspace = true
 cranelift-codegen = "=0.132.0"
 cranelift-frontend = "=0.132.0"
 cranelift-jit = "=0.132.0"

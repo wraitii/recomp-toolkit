@@ -874,7 +874,6 @@ dependencies = [
 name = "rk-pcode-ffi"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
@@ -882,17 +881,12 @@ dependencies = [
  "cranelift-native",
  "cxx",
  "cxx-build",
- "recomp-translate",
  "rk-core",
- "rk-discover",
  "rk-emit",
- "rk-image",
  "rk-ir",
- "rk-output",
  "rk-sleigh",
  "rk-x86",
  "rk-x87",
- "serde_json",
 ]
 
 [[package]]

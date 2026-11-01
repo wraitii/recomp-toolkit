@@ -1,12 +1,8 @@
-#include "jit.h"
 // discovery.cpp - see discovery.h.
 #include "discovery.h"
 
 #include "win32.h"
 #include "loader.h"
-#if RECOMP_PCODE_FALLBACK
-#include "jit_abi.h"
-#endif
 
 #include "../platform/os.h"
 
@@ -64,29 +60,11 @@ void write_locked();
 
 } // namespace
 
-bool jit_noting() {
-#if RECOMP_PCODE_FALLBACK
-    static const bool enabled = recomp_env("JIT_INPUT") && recomp_env("JIT_OUT");
-    return enabled;
-#else
-    return false;
-#endif
-}
-
 extern "C" int discovery_enabled(void) {
-    return jit_noting() || path();
+    return path() != nullptr;
 }
 
 extern "C" void discovery_note(const char *kind, uint32_t target, uint32_t from) {
-#if RECOMP_PCODE_FALLBACK
-    if (jit_noting() && in_code_section(target) && target >= loader_image_base() &&
-        target < loader_image_limit()) {
-        static std::once_flag registered;
-        std::call_once(registered, [] { atexit(rp_jit_shutdown); });
-        rp_jit_note(target, kind && !strcmp(kind, "call"), loader_image_base(), loader_exe_sha256(),
-                    recomp_jit_compile);
-    }
-#endif
     if (!path())
         return;
     if (!in_code_section(target))

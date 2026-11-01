@@ -304,16 +304,7 @@ pub fn discover_from_entries_excluding(
     limit: usize,
     excluded: &[(Addr, Addr)],
 ) -> Result<Discovered> {
-    discover_entries(program, entries, limit, excluded, false)
-}
-
-pub fn discover_jit_from_entries_excluding(
-    program: &Program,
-    entries: &[Addr],
-    limit: usize,
-    excluded: &[(Addr, Addr)],
-) -> Result<Discovered> {
-    discover_entries(program, entries, limit, excluded, true)
+    discover_entries(program, entries, limit, excluded)
 }
 
 fn discover_entries(
@@ -321,11 +312,9 @@ fn discover_entries(
     entries: &[Addr],
     limit: usize,
     excluded: &[(Addr, Addr)],
-    jit: bool,
 ) -> Result<Discovered> {
     let check = FlowCache::default();
     let mut recovery = Recovery::new(program, None, &check, excluded.to_vec());
-    recovery.jit = jit;
     recovery.instruction_limit = limit;
     for &entry in entries {
         recovery.seed(entry, "explicit entry", RANK_TRUSTED, true);
@@ -371,7 +360,6 @@ pub fn merge(program: &mut Program, discovered: &Discovered) -> Result<()> {
 }
 
 struct Recovery<'a> {
-    jit: bool,
     instruction_limit: usize,
     image: &'a Image,
     check: &'a FlowCache,
@@ -461,7 +449,6 @@ impl<'a> Recovery<'a> {
             mapped_tables.entry(site).or_default().extend(targets);
         }
         let mut recovery = Self {
-            jit: false,
             instruction_limit: usize::MAX,
             image,
             delta: details.map_or(0, |details| details.delta),
@@ -784,20 +771,18 @@ impl<'a> Recovery<'a> {
             self.speculative.insert(ins.addr);
         }
         if let Some((target, call)) = ins.flow_target() {
-            if !self.jit || !call {
-                self.seed_from(
-                    ins.addr,
-                    target,
-                    "direct",
-                    rank,
-                    call && rank >= RANK_MAPPED_FLOW,
-                );
-            }
+            self.seed_from(
+                ins.addr,
+                target,
+                "direct",
+                rank,
+                call && rank >= RANK_MAPPED_FLOW,
+            );
         }
         if let Some(target) = ins
             .shape
             .pointer
-            .filter(|&t| !self.jit && self.clean_start(t))
+            .filter(|&t| self.clean_start(t))
         {
             let (immediate_rank, root) = if self.clean_pointer_start(target) {
                 (rank.min(RANK_IMMEDIATE), true)
@@ -1425,10 +1410,7 @@ impl<'a> Recovery<'a> {
     fn finish(&mut self) {
         for (&at, ins) in &self.instructions {
             if !self.speculative.contains(&at) {
-                if let Some((target, call)) = ins.flow_target() {
-                    if self.jit && call {
-                        continue;
-                    }
+                if let Some((target, _)) = ins.flow_target() {
                     if !self.instructions.contains_key(&target) {
                         self.traps.insert(
                             at,
@@ -2045,22 +2027,6 @@ impl<'a> Recovery<'a> {
             })
             .collect();
         DiscoveryReport {
-            external_calls: if self.jit {
-                self.instructions
-                    .values()
-                    .filter_map(|ins| {
-                        let (target, call) = ins.flow_target()?;
-                        (call && !self.instructions.contains_key(&target)).then(|| {
-                            report::ExternalCall {
-                                site: Hex(ins.addr).to_string(),
-                                target: Hex(target).to_string(),
-                            }
-                        })
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            },
             instructions: self.instructions.len(),
             passes: self.pass,
             converged: false,

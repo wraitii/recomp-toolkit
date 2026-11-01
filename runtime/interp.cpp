@@ -2,7 +2,6 @@
 
 #if RECOMP_PCODE_FALLBACK
 #include "baseline.h"
-#include "jit_abi.h"
 #endif
 
 #include <cstdio>
@@ -36,7 +35,6 @@ extern "C" int interp_call(X86 *c, uint32_t target) {
     snprintf(g_error, sizeof g_error, "%s", baseline_last_error());
     fprintf(stderr, "[recomp] baseline: routine %08x stopped: %s\n", target, g_error);
     fflush(stderr);
-    rp_jit_shutdown();
     abort();
 #else
     snprintf(g_error, sizeof g_error,

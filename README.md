@@ -88,7 +88,7 @@ log when [reporting an issue](https://github.com/wraitii/recomp-kit/issues).
 Static recompilation translates the original game's 32-bit x86 Windows machine
 code into native code ahead of time. The toolkit supplies the operating-system,
 graphics and audio interfaces the game expects. Translated code runs natively,
-with a p-code interpreter for missing code and no JIT. Each port uses your game's
+with a baseline JIT for missing code. Each port uses your game's
 original data and translation metadata for the exact executable it supports.
 
 ### How this differs from Wine

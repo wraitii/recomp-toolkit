@@ -3,7 +3,6 @@
 //! model from `rk-emit`. Callers stage into a fresh directory because stale chunks are not
 //! removed.
 
-pub mod jit;
 pub mod reloc;
 mod symbols;
 mod table;

@@ -305,7 +305,7 @@ supplies helpers and handles branches, calls and returns. Each block packs its e
 status and position into its return value and remembers its fallthrough and taken
 successors; a remembered successor skips the lookup and byte check until the thread's
 link epoch advances, every 65536 blocks or when a block is replaced. Branch links are
-off while discovery or the p-code JIT is active, so jump notes and resumes still run. The two sides share one `cxx` bridge
+off while discovery is active, so jump notes still run. The two sides share one `cxx` bridge
 (`baseline/abi.rs`), whose generated header and source `tools/build.py` stages
 for the runtime. Corrected internal p-code branches are rejected when their
 relative targets cannot be preserved; unchanged sequences retain their original
@@ -329,55 +329,7 @@ These are execution evidence, not recovered function boundaries or a complete
 code map. Naming the file as `discovery_evidence` in `[translate]` seeds the next
 sweep; permanent map repairs still go through Ghidra and re-export.
 
-For the experimental in-process JIT, set `RECOMP_JIT_INPUT` to the resolved
-`recomp/translate-input.json` and `RECOMP_JIT_OUT` to an output directory.
-Targets qualify after eight baseline encounters. A background worker batches
-up to 16 targets over 100 ms, selecting the highest current encounter counts
-from an ordered set with one record per pending target. New hot targets can
-overtake earlier requests; there is no fixed queue capacity. It recovers and
-emits main-image code into a new per-run directory. Mapped and compiled ranges
-are excluded from later batches.
-JIT recovery follows branch targets and call continuations, leaving callees to
-host dispatch and ignoring embedded code pointers as recovery seeds. Static
-discovery retains its broader policy. Requests are keyed by transfer target,
-so calls to one callee deduplicate across call sites; branch targets inside a
-function remain distinct entries.
-Recovery defaults to 8,192 instructions per batch; `RECOMP_JIT_MAX_INSNS=0`
-removes this budget, or set a positive limit. Capped recovery skips analysis and
-emission and retries grouped requests separately once. Trapping emission and
-unvalidated switch tables also prevent publication.
 
-Eligible batches export a native descriptor and compile through
-`tools/build.py --jit-module`, reusing the build's compiler flags. The guest
-thread loads completed libraries, validates their ABI, image identity and
-recovered instruction bytes, and publishes a fallback lookup. Each native entry
-revalidates those bytes; stale batches are disabled. Libraries remain loaded
-until exit. Calls use host dispatch and the dynamic-return stack; batch return
-sites stay local to each library. Backward branches in interpreted code can
-resume at published native entries when the invocation has a known continuation.
-Batches that establish SEH checkpoints are not eligible for this handoff.
-Native region transfers use a trampoline and yield back to the baseline when
-their destination has no eligible native entry.
-
-`RECOMP_JIT_TARGET=<hex address>` restricts recovery requests to one target.
-`RECOMP_JIT_EXEC=off` keeps compilation enabled but disables loading and native
-execution for comparison. Uncompiled ranges do not exclude later requests;
-other failures need a new entry or a new run. `requests.json` records decisions,
-each `jit.json` records selection hit counts, eligibility and compilation status,
-recovery sizes per region, exported entries and external direct call sites.
-Shutdown writes call and branch encounter counts to `encounters.json`.
-Each batch's `runtime.json` records publication failures or success and native
-entry and branch-handoff counts, flushed on first entry, invalidation and normal shutdown. Loading
-and publication failures also name their reason on stderr. Shutdown finishes
-the current job and drops queued work.
-`python3 tools/recomp/jit_report.py <per-run directory>` joins these diagnostics
-and the exported module entries to summarize the hottest baseline targets.
-It distinguishes compiled entries, rejected batches, dropped queued work and
-targets that never entered the queue in older runs. It separates published but
-unused entries from entries actually entered natively. Encounter counts include
-loop branches; successful compilation does not prove publication or execution.
-Loaded-module equivalence checking and complete dependency validation remain
-outstanding.
 
 `RECOMP_OBSERVE=<file>` writes one `site target kind count desc` row per indirect
 transfer, grouped by how it resolved: `known` (translated function table), `module`
