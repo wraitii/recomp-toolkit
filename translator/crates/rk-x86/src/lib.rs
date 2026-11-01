@@ -6,6 +6,7 @@
 
 mod correct;
 mod decode;
+mod flags;
 mod lower;
 mod shape;
 mod string;

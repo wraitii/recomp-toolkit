@@ -447,6 +447,7 @@ impl IsaLowering for Lowering<'_> {
             Ok(ops.clone())
         };
         let mut flag_operands = None;
+        let mut lazy_flags = None;
         let corrected = prepared.and_then(|ops| {
             let corrected = match mnem.as_str() {
                 "ADD" | "SUB" | "CMP" | "INC" | "DEC" | "ADC" | "SBB" => correct_arithmetic(
@@ -455,6 +456,7 @@ impl IsaLowering for Lowering<'_> {
                     regs,
                     &mut |size| cx.fresh(size),
                     &mut flag_operands,
+                    &mut lazy_flags,
                 ),
                 "SHL" | "SHR" => correct_shift(&mnem, &ops, regs, &mut |size| cx.fresh(size)),
                 "SAR" => correct_sar(&ops, regs, &mut |size| cx.fresh(size)),
@@ -487,7 +489,7 @@ impl IsaLowering for Lowering<'_> {
                 return Ok(plain(vec![cg(op)]));
             }
         };
-        let converted: Vec<CgOp> = ops
+        let mut converted: Vec<CgOp> = ops
             .into_iter()
             .map(|op| {
                 let mut converted = cx.convert(op);
@@ -499,12 +501,26 @@ impl IsaLowering for Lowering<'_> {
                 converted
             })
             .collect();
+        if let Some(cond) = crate::flags::cond(&mnem) {
+            converted = with_cond(converted, cond, cx.fresh(1));
+        }
+        if let (Some(inputs), Some(shape)) = (lazy_flags, self.flag_shape(insn)) {
+            converted.push(CgOp {
+                op: Op::Flags(shape),
+                output: None,
+                inputs,
+            });
+        }
         Ok(Lowered {
             ops: converted,
             x87: false,
             flag_operands,
             apply_policy: true,
         })
+    }
+
+    fn flag_recipes(&self) -> &'static dyn rk_ir::FlagRecipes {
+        &crate::flags::X86Flags
     }
 
     fn flag_shape(&self, insn: &Insn) -> Option<FlagShape> {
@@ -520,6 +536,44 @@ impl IsaLowering for Lowering<'_> {
             _ => None,
         }
     }
+}
+
+fn with_cond(ops: Vec<CgOp>, cond: rk_ir::Cond, output: Varnode) -> Vec<CgOp> {
+    let f = rk_ir::Registers::get().arch().x86;
+    let mut derived = vec![f.cf, f.pf, f.af, f.zf, f.sf, f.of];
+    let mut out = vec![CgOp {
+        op: Op::Cond(cond),
+        output: Some(output),
+        inputs: rk_ir::flag_recipes().reads(cond),
+    }];
+    for mut op in ops {
+        let from_flags = op.output.is_some_and(|v| v.size == 1)
+            && op.inputs.iter().any(|v| derived.contains(v))
+            && op
+                .inputs
+                .iter()
+                .all(|v| v.space == Space::Const || derived.contains(v));
+        match op.output {
+            Some(target) if from_flags && target.space == Space::Unique => {
+                derived.push(target);
+                continue;
+            }
+            Some(target) if from_flags => out.push(CgOp {
+                op: Op::P(OpCode::Copy),
+                output: Some(target),
+                inputs: vec![output],
+            }),
+            _ => {
+                for input in &mut op.inputs {
+                    if derived.contains(input) {
+                        *input = output;
+                    }
+                }
+                out.push(op);
+            }
+        }
+    }
+    out
 }
 
 const SUPPORTED: &[&str] = &[

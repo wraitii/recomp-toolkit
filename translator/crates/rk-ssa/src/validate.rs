@@ -187,7 +187,7 @@ fn shape(s: &Ssa, id: ValueId) -> bool {
         Op::X87(rk_ir::x87::X87Op::StoreValue { bits, integer, .. }) => {
             n == 0 && u16::from(z) * 8 == bits && (matches!(bits, 32 | 64) || integer && bits == 16)
         }
-        Op::Simd(_) => false,
+        Op::Simd(_) | Op::Flags(_) | Op::Cond(_) => false,
         Op::X87(op) => {
             let memory = usize::from(op.touches_memory());
             let address =

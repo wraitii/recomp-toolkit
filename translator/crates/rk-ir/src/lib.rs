@@ -12,8 +12,8 @@ pub mod wide;
 pub mod x87;
 
 pub use lower::{
-    lower, lower_with, CgFunction, CgInsn, CgOp, FlagShape, InstructionLowerer, IsaLowering,
-    Lowered,
+    flag_recipes, lower, lower_with, CgFunction, CgInsn, CgOp, Cond, FlagRecipes, FlagShape,
+    InstructionLowerer, IsaLowering, Lowered,
 };
 pub use op::{
     properties, Native, NoX87, Op, Properties, SimdOp, SlowFamily, SlowInsn, StateKey, X87Recipes,

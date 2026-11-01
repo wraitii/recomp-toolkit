@@ -756,12 +756,32 @@ pub(crate) fn defer_flags(
     out
 }
 
+fn without_flags(ops: Vec<PcodeOp>, regs: &Registers, live: &[Varnode]) -> Vec<PcodeOp> {
+    let flags = regs.arch().x86.arithmetic_flags();
+    let mut live: Vec<Varnode> = live.to_vec();
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops.into_iter().rev() {
+        if let Some(output) = op.output {
+            let dead = flags.contains(&output)
+                || (output.space == Space::Unique && !live.contains(&output));
+            if dead {
+                continue;
+            }
+        }
+        live.extend(op.inputs.iter().copied());
+        out.push(op);
+    }
+    out.reverse();
+    out
+}
+
 pub(crate) fn correct_arithmetic(
     mnem: &str,
     ops: &[PcodeOp],
     regs: &Registers,
     fresh: &mut dyn FnMut(u32) -> Varnode,
     flag_operands: &mut Option<(Varnode, Varnode)>,
+    lazy_flags: &mut Option<Vec<Varnode>>,
 ) -> Result<Vec<PcodeOp>, Reason> {
     let mut ops = ops.to_vec();
     let (_, a, b, result, insert) = if mnem == "ADC" || mnem == "SBB" {
@@ -820,7 +840,7 @@ pub(crate) fn correct_arithmetic(
         } else {
             OpCode::IntSub
         };
-        let Some(primary) = ops.iter().position(|op| {
+        let Some(primary) = ops.iter().rposition(|op| {
             op.opcode == opcode
                 && op
                     .output
@@ -863,6 +883,12 @@ pub(crate) fn correct_arithmetic(
         let a = fresh(result.size);
         let b = fresh(result.size);
         ops.splice(primary..primary, [copy(a, inputs[0]), copy(b, inputs[1])]);
+        if matches!(mnem, "ADD" | "SUB" | "CMP") {
+            let kept = fresh(result.size);
+            ops.insert(primary + 3, copy(kept, result));
+            *lazy_flags = Some(vec![a, b, kept]);
+            return Ok(without_flags(ops, regs, &[a, b, kept]));
+        }
         (primary + 2, a, b, result, primary + 3)
     };
     let x = fresh(result.size);

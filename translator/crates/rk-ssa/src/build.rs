@@ -15,6 +15,7 @@ use crate::{
 };
 
 pub const DEFAULT_VALUE_BUDGET: usize = 40_000_000;
+const FLAG_TEMPS: u64 = 1 << 40;
 
 #[derive(Clone, Copy, Debug)]
 pub struct CallEffect {
@@ -152,6 +153,7 @@ struct Builder<'a> {
     block_addrs: Vec<Addr>,
     current_addr: Addr,
     pending: Pending,
+    flag_source: Lookup<ValueId, (FlagShape, [ValueId; 3])>,
     access_indices: Vec<usize>,
     observable_faults: bool,
 }
@@ -327,6 +329,7 @@ impl<'a> Builder<'a> {
             block_addrs: Vec::new(),
             current_addr: 0,
             pending: Pending::default(),
+            flag_source: Lookup::default(),
             access_indices,
             // DIVERGENCE(original): relaxed fault state does not preserve exact register state at a fault inside __try, nor ESP/EBP/EIP at a faulting store under lazy stack writes.
             observable_faults: fault_state == FaultState::Exact && !cg.seh.is_empty(),
@@ -881,6 +884,49 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    fn bind(
+        &mut self,
+        values: &[ValueId],
+        state: &mut [Option<ValueId>],
+        temps: &mut Lookup<(u64, u32), ValueId>,
+    ) -> Result<Vec<Varnode>, Diagnostic> {
+        let mut bound = Vec::with_capacity(values.len());
+        for (index, &value) in values.iter().enumerate() {
+            let size = self.values[value as usize].size as u32;
+            let temp = Varnode::new(Space::Unique, FLAG_TEMPS + index as u64 * 0x10, size);
+            self.write(&temp, value, state, temps)?;
+            bound.push(temp);
+        }
+        Ok(bound)
+    }
+
+    fn fresh_temps(skip: usize) -> impl FnMut(u32) -> Varnode {
+        let mut next = FLAG_TEMPS + skip as u64 * 0x10;
+        move |size| {
+            let temp = Varnode::new(Space::Unique, next, size);
+            next += 0x10;
+            temp
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_pcode(
+        &mut self,
+        expansion: Vec<rk_core::ir::PcodeOp>,
+        addr: Addr,
+        state: &mut [Option<ValueId>],
+        temps: &mut Lookup<(u64, u32), ValueId>,
+        ops: &mut Vec<ValueId>,
+        memory_index: usize,
+        block: BlockId,
+    ) -> Result<(), Diagnostic> {
+        for op in expansion {
+            let op = rk_ir::lower::from_pcode(op);
+            self.apply_op(&op, addr, state, temps, ops, memory_index, block)?;
+        }
+        Ok(())
+    }
+
     fn memory_index(&self) -> usize {
         *self.key_index.get(&StateKey::Memory).expect("memory key")
     }
@@ -1015,6 +1061,53 @@ impl<'a> Builder<'a> {
         block: BlockId,
     ) -> Result<(), Diagnostic> {
         match cg_op.op {
+            Op::Flags(shape) => {
+                let mut args = Vec::with_capacity(cg_op.inputs.len());
+                for input in &cg_op.inputs {
+                    let mut value = self.read(input, state, temps, block)?;
+                    while self.values[value as usize].op == Op::P(OpCode::Copy) {
+                        value = self.args[self.values[value as usize].args_start as usize];
+                    }
+                    args.push(value);
+                }
+                let inputs = self.bind(&args, state, temps)?;
+                let mut fresh = Self::fresh_temps(inputs.len());
+                let expansion = rk_ir::flag_recipes().expand(shape, &inputs, &mut fresh);
+                self.apply_pcode(expansion, addr, state, temps, ops, memory_index, block)?;
+                if let [a, b, result] = args[..] {
+                    let size = self.values[result as usize].size;
+                    self.pending.ab = Some(vec![a, b]);
+                    self.pending.flag = Some((result, vec![a, b], size));
+                    let regs = Registers::get();
+                    for field in rk_ir::flag_recipes().defines(shape).iter() {
+                        let flag = regs.require(field.name());
+                        let value = self.read(&flag, state, temps, block)?;
+                        self.flag_source.insert(value, (shape, [a, b, result]));
+                    }
+                }
+            }
+            Op::Cond(cond) => {
+                let output = cg_op.output.expect("condition output");
+                let recipes = rk_ir::flag_recipes();
+                let mut sources = Vec::new();
+                for flag in recipes.reads(cond) {
+                    let value = self.read(&flag, state, temps, block)?;
+                    sources.push(self.flag_source.get(&value).copied());
+                }
+                sources.dedup();
+                let direct = match sources[..] {
+                    [Some((shape, args))] => {
+                        let inputs = self.bind(&args, state, temps)?;
+                        recipes.direct(shape, cond, &inputs, output)
+                    }
+                    _ => None,
+                };
+                let expansion = match direct {
+                    Some(expansion) => expansion,
+                    None => recipes.condition(cond, output, &mut Self::fresh_temps(3)),
+                };
+                self.apply_pcode(expansion, addr, state, temps, ops, memory_index, block)?;
+            }
             Op::Slow(index) => {
                 let memory = self.state_slot(state, memory_index, block)?;
                 let value = self.value(Op::Slow(index), 0, &[memory]);

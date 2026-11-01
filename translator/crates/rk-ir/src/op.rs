@@ -2,6 +2,7 @@ use rk_core::contract::Fields;
 use rk_core::ir::{Insn, OpCode, SehEffect, Varnode};
 use rk_core::Addr;
 
+use crate::lower::{Cond, FlagShape};
 use crate::x87::{X87Lowering, X87Op};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -96,6 +97,8 @@ pub enum Op {
     StateReload(StateKey),
     StateKeep(StateKey),
     Symbol(&'static str),
+    Flags(FlagShape),
+    Cond(Cond),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -253,6 +256,7 @@ pub fn properties(op: Op) -> Properties {
         },
         Op::Native(_) => Properties::effect(),
         Op::Simd(_) => Properties::pure(),
+        Op::Flags(_) | Op::Cond(_) => Properties::new(),
         Op::Slow(_) | Op::CallOther(_) => Properties::effect(),
         Op::Tail { .. } | Op::ImportTail { .. } | Op::BranchInd | Op::Return => Properties {
             observes: true,

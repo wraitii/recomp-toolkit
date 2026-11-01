@@ -663,6 +663,12 @@ fn prepare(
                     defs[index] |= produced;
                     continue;
                 }
+                Op::Flags(shape) => {
+                    let produced = fields_mask(rk_ir::flag_recipes().defines(shape));
+                    local |= produced;
+                    defs[index] |= produced;
+                    continue;
+                }
                 Op::DivMod { .. } => {
                     let regs = Registers::get();
                     for register in [regs.arch().x86.eax, regs.arch().x86.edx] {

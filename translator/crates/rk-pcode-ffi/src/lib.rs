@@ -375,6 +375,24 @@ fn lift_one(addr: u32, bytes: &[u8]) -> Result<(u8, String, Vec<RpOp>), String> 
         let encoded = raw.ops.iter().map(pcode).collect::<Result<_, _>>()?;
         return Ok((length, insn.mnemonic, encoded));
     }
+    let ops: Vec<CgOp> = ops
+        .into_iter()
+        .flat_map(|op| match op.op {
+            Op::Flags(shape) => rk_ir::flag_recipes()
+                .expand(shape, &op.inputs, &mut |size| lowerer.fresh(size))
+                .into_iter()
+                .map(rk_ir::lower::from_pcode)
+                .collect(),
+            Op::Cond(cond) => rk_ir::flag_recipes()
+                .condition(cond, op.output.expect("condition output"), &mut |size| {
+                    lowerer.fresh(size)
+                })
+                .into_iter()
+                .map(rk_ir::lower::from_pcode)
+                .collect(),
+            _ => vec![op],
+        })
+        .collect();
     let encoded = ops
         .into_iter()
         .map(|op| interpreter_op(op, &insn, lowerer.slow_insns()))

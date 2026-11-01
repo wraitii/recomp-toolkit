@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
+use rk_core::contract::Fields;
 use rk_core::ir::{FunctionIr, Insn, OpCode, PcodeOp, SehEffect, Space, Varnode};
 use rk_core::{Addr, Diagnostic, Reason};
 
@@ -23,6 +25,26 @@ pub enum FlagShape {
     Adc,
     Sbb,
     Logic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cond {
+    Overflow,
+    NoOverflow,
+    Below,
+    AboveEqual,
+    Equal,
+    NotEqual,
+    BelowEqual,
+    Above,
+    Sign,
+    NoSign,
+    Parity,
+    NoParity,
+    Less,
+    GreaterEqual,
+    LessEqual,
+    Greater,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +99,38 @@ pub trait IsaLowering: Sync {
     ) -> rk_core::Result<Lowered>;
 
     fn flag_shape(&self, insn: &Insn) -> Option<FlagShape>;
+
+    fn flag_recipes(&self) -> &'static dyn FlagRecipes;
+}
+
+pub trait FlagRecipes: Sync {
+    fn defines(&self, shape: FlagShape) -> Fields;
+    fn expand(
+        &self,
+        shape: FlagShape,
+        inputs: &[Varnode],
+        fresh: &mut dyn FnMut(u32) -> Varnode,
+    ) -> Vec<PcodeOp>;
+    fn reads(&self, cond: Cond) -> Vec<Varnode>;
+    fn condition(
+        &self,
+        cond: Cond,
+        output: Varnode,
+        fresh: &mut dyn FnMut(u32) -> Varnode,
+    ) -> Vec<PcodeOp>;
+    fn direct(
+        &self,
+        shape: FlagShape,
+        cond: Cond,
+        inputs: &[Varnode],
+        output: Varnode,
+    ) -> Option<Vec<PcodeOp>>;
+}
+
+static FLAG_RECIPES: OnceLock<&'static dyn FlagRecipes> = OnceLock::new();
+
+pub fn flag_recipes() -> &'static dyn FlagRecipes {
+    *FLAG_RECIPES.get().expect("flag recipes installed")
 }
 
 pub struct InstructionLowerer<'a> {
@@ -179,6 +233,7 @@ pub fn lower_with(
 
 impl<'a> InstructionLowerer<'a> {
     pub fn new(isa: &'a dyn IsaLowering) -> Self {
+        FLAG_RECIPES.get_or_init(|| isa.flag_recipes());
         Self {
             isa,
             regs: Registers::get(),
