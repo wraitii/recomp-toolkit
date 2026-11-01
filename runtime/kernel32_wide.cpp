@@ -1,5 +1,6 @@
 // UTF-16 kernel32 entry points and shared profile APIs.
 #include "kernel32_internal.h"
+#include "game_config.h"
 #include "windows_version.h"
 #include "loader.h"
 #include "resources.h"
@@ -169,6 +170,68 @@ void k_GetLongPathNameW(X86 *c) {
         return;
     }
     set_eax(c, gm_put_wstr(buf, path, len));
+}
+void k_ExpandEnvironmentStringsW(X86 *c) {
+    const std::string src = gm_wstr(arg(c, 0));
+    uint32_t out = arg(c, 1), cap = arg(c, 2);
+    std::string text;
+    for (size_t i = 0; i < src.size();) {
+        size_t close = src[i] == '%' ? src.find('%', i + 1) : std::string::npos;
+        std::string value;
+        if (close != std::string::npos &&
+            kernel32_guest_environment_lookup(src.substr(i + 1, close - i - 1), value)) {
+            text += value;
+            i = close + 1;
+        } else {
+            text += src[i++];
+        }
+    }
+    uint32_t need = utf16_units(text) + 1;
+    if (out && cap >= need)
+        gm_put_wstr(out, text, cap);
+    set_eax(c, need);
+}
+void k_SearchPathW(X86 *c) {
+    log_once("SearchPathW", "SearchPathW: searching the given path, or the game and current "
+                            "directories; system directories and PATH are not searched");
+    std::string dirs = arg(c, 0) ? gm_wstr(arg(c, 0)) : std::string(RECOMP_GUEST_ROOT) + ";.";
+    std::string name = gm_wstr(arg(c, 1));
+    uint32_t len = arg(c, 3), buf = arg(c, 4), pfile = arg(c, 5);
+    if (arg(c, 2) && name.find('.', name.find_last_of("\\/") + 1) == std::string::npos)
+        name += gm_wstr(arg(c, 2));
+    bool qualified = name.find_first_of("\\/:") != std::string::npos;
+    std::string found;
+    for (size_t start = 0; found.empty() && start <= dirs.size();) {
+        size_t end = std::min(dirs.find(';', start), dirs.size());
+        std::string dir = dirs.substr(start, end - start);
+        start = end + 1;
+        if (dir.empty() && !qualified)
+            continue;
+        std::string candidate = qualified ? name : dir + "\\" + name;
+        std::string host = win32_host_path(candidate);
+        OsStat st;
+        if (!host.empty() && os_stat(host.c_str(), &st) == 0 && !st.is_dir)
+            found = full_path_named(candidate);
+        if (qualified)
+            break;
+    }
+    if (found.empty()) {
+        set_last_error(2);
+        set_eax(c, 0);
+        return;
+    }
+    uint32_t need = utf16_units(found) + 1;
+    if (!buf || len < need) {
+        set_eax(c, need);
+        return;
+    }
+    uint32_t n = gm_put_wstr(buf, found, len);
+    if (pfile)
+        wr32(pfile, buf + 2 * utf16_units(found.substr(0, found.find_last_of('\\') + 1)));
+    set_eax(c, n);
+}
+void k_VerLanguageNameW(X86 *c) {
+    imports_decline(c, "VerLanguageNameW", 0);
 }
 void k_GetSystemDirectoryW(X86 *c) {
     const std::string dir = "C:\\Windows\\System32";
@@ -612,44 +675,7 @@ void k_FileTimeToDosDateTime(X86 *c) {
     set_eax(c, 1);
 }
 void k_GetDateFormatW(X86 *c) {
-    uint32_t input = arg(c, 2), out = arg(c, 4), cap = arg(c, 5);
-    int year, month, day;
-    if (input) {
-        if (!gm_valid(input, 16)) {
-            set_eax(c, 0);
-            return;
-        }
-        year = rd16(input);
-        month = rd16(input + 2);
-        day = rd16(input + 6);
-    } else {
-        struct tm t{};
-        if (os_localtime((int64_t)(os_wall_time_us() / 1000000), &t) != 0) {
-            set_eax(c, 0);
-            return;
-        }
-        year = t.tm_year + 1900;
-        month = t.tm_mon + 1;
-        day = t.tm_mday;
-    }
-    if (month < 1 || month > 12 || day < 1 || day > 31) {
-        set_last_error(87);
-        set_eax(c, 0);
-        return;
-    }
-    char text[32];
-    snprintf(text, sizeof text, "%04d-%02d-%02d", year, month, day);
-    uint32_t need = (uint32_t)strlen(text) + 1;
-    if (cap == 0) {
-        set_eax(c, need);
-        return;
-    }
-    if (!out || cap < need) {
-        set_last_error(122);
-        set_eax(c, 0);
-        return;
-    }
-    set_eax(c, gm_put_wstr(out, text, cap) + 1);
+    kernel32_get_date_format(c, true);
 }
 
 // The caller passes LOCALE_USER_DEFAULT (0x400), but the runtime has a single
@@ -1186,6 +1212,9 @@ static const ImportShim g_kernel32_wide[] = {
     {"KERNEL32.dll", "FindNextFileW", 2, k_FindNextFileW},
     {"KERNEL32.dll", "GetFullPathNameW", 4, k_GetFullPathNameW},
     {"KERNEL32.dll", "GetLongPathNameW", 3, k_GetLongPathNameW},
+    {"KERNEL32.dll", "ExpandEnvironmentStringsW", 3, k_ExpandEnvironmentStringsW},
+    {"KERNEL32.dll", "SearchPathW", 6, k_SearchPathW},
+    {"KERNEL32.dll", "VerLanguageNameW", 3, k_VerLanguageNameW},
     {"KERNEL32.dll", "SetCurrentDirectoryW", 1, k_SetCurrentDirectoryW},
     {"KERNEL32.dll", "GetCurrentDirectoryW", 2, k_GetCurrentDirectoryW},
     {"KERNEL32.dll", "GetFileAttributesW", 1, k_GetFileAttributesW},
@@ -1206,6 +1235,48 @@ static const ImportShim g_kernel32_wide[] = {
     {"KERNEL32.dll", "QueryDosDeviceW", 3, k_QueryDosDeviceW},
 };
 } // namespace
+
+void kernel32_get_date_format(X86 *c, bool wide) {
+    log_once("GetDateFormat", "GetDateFormat: ignoring flags and picture, writing yyyy-MM-dd");
+    uint32_t input = arg(c, 2), out = arg(c, 4), cap = arg(c, 5);
+    int year, month, day;
+    if (input) {
+        if (!gm_valid(input, 16)) {
+            set_eax(c, 0);
+            return;
+        }
+        year = rd16(input);
+        month = rd16(input + 2);
+        day = rd16(input + 6);
+    } else {
+        struct tm t{};
+        if (os_localtime((int64_t)(os_wall_time_us() / 1000000), &t) != 0) {
+            set_eax(c, 0);
+            return;
+        }
+        year = t.tm_year + 1900;
+        month = t.tm_mon + 1;
+        day = t.tm_mday;
+    }
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+        set_last_error(87);
+        set_eax(c, 0);
+        return;
+    }
+    char text[32];
+    snprintf(text, sizeof text, "%04d-%02d-%02d", year, month, day);
+    uint32_t need = (uint32_t)strlen(text) + 1;
+    if (cap == 0) {
+        set_eax(c, need);
+        return;
+    }
+    if (!out || cap < need) {
+        set_last_error(122);
+        set_eax(c, 0);
+        return;
+    }
+    set_eax(c, (wide ? gm_put_wstr(out, text, cap) : gm_put_str(out, text, cap)) + 1);
+}
 
 void kernel32_get_time_format(X86 *c, bool wide) {
     uint32_t flags = arg(c, 1), input = arg(c, 2), picture = arg(c, 3);

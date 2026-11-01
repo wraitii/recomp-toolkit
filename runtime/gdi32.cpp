@@ -414,6 +414,9 @@ bool gdi_delete_icon(uint32_t icon) {
 
 // CreateCompatibleBitmap(hdc, width, height): a bitmap at the DC's depth,
 // else 32 bpp; its pixels are addressable like a section's.
+void g_CombineRgn(X86 *c) {
+    imports_decline(c, "CombineRgn", 0 /* ERROR */);
+}
 void g_CreateCompatibleBitmap(X86 *c) {
     int32_t width = (int32_t)arg(c, 1), height = (int32_t)arg(c, 2);
     Dib *in = dib_in_dc(arg(c, 0));
@@ -792,10 +795,8 @@ void g_SetTextCharacterExtra(X86 *c) {
 }
 
 const ImportShim g_gdi32_shims[] = {
-    {"GDI32.dll", "CreateFontA", 14, nullptr},
     {"GDI32.dll", "CreateCompatibleBitmap", 3, g_CreateCompatibleBitmap},
-    // Named for its argument count; the result is ERROR, which is honest.
-    {"GDI32.dll", "CombineRgn", 4, nullptr},
+    {"GDI32.dll", "CombineRgn", 4, g_CombineRgn},
     {"GDI32.dll", "GetObjectA", 3, g_GetObjectA},
     {"GDI32.dll", "GetObjectW", 3, g_GetObjectA},
     {"GDI32.dll", "DeleteObject", 1, g_DeleteObject},

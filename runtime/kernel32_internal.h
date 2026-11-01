@@ -66,3 +66,4 @@ std::string kernel32_format_time(int hour, int minute, int second, const std::st
 
 // Shared GetTimeFormatA/W input, validation, size query and buffer handling.
 void kernel32_get_time_format(X86 *c, bool wide);
+void kernel32_get_date_format(X86 *c, bool wide);

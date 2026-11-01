@@ -1694,6 +1694,15 @@ void w_WSAWaitForMultipleEvents(X86 *c) {
         g_wsa_last_error = (int)get_last_error();
     set_eax(c, result);
 }
+// No NetBIOS adapters: NRC_BRIDGE, "invalid LANA", in the result and the NCB.
+void n_Netbios(X86 *c) {
+    const uint32_t ncb = arg(c, 0);
+    if (ncb && gm_valid(ncb, 50)) {
+        wr8(ncb + 1, 0x23);
+        wr8(ncb + 49, 0x23);
+    }
+    imports_decline(c, "Netbios", 0x23);
+}
 void w_WSAGetOverlappedResult(X86 *c) {
     g_wsa_last_error = WSAENETDOWN_;
     set_eax(c, 0);
@@ -2275,6 +2284,16 @@ void m_auxGetNumDevs(X86 *c) {
     set_eax(c, 0);
 } // no aux devices
 
+// No auxiliary audio devices: every device ID is MMSYSERR_BADDEVICEID.
+void m_auxGetDevCapsA(X86 *c) {
+    imports_decline(c, "auxGetDevCapsA", 2);
+}
+void m_auxGetVolume(X86 *c) {
+    imports_decline(c, "auxGetVolume", 2);
+}
+void m_auxSetVolume(X86 *c) {
+    imports_decline(c, "auxSetVolume", 2);
+}
 void m_midiOutGetDevCapsA(X86 *c) {
     uint32_t id = arg(c, 0), out = arg(c, 1), size = arg(c, 2);
     // MIDI_MAPPER is (UINT)-1 and names the system's default device, which
@@ -3255,11 +3274,9 @@ const ImportShim g_misc_shims[] = {
     {"VERSION.dll", "GetFileVersionInfoSizeW", 2, v_GetFileVersionInfoSizeW},
     {"VERSION.dll", "GetFileVersionInfoW", 4, v_GetFileVersionInfoW},
     {"VERSION.dll", "VerQueryValueW", 4, v_VerQueryValueW},
-    // WINMM: logging-only, correct stdcall pop counts so the guest stack stays
-    // balanced. MIDI and aux output belong to the audio task.
-    {"WINMM.dll", "auxGetDevCapsA", 3, nullptr},
-    {"WINMM.dll", "auxGetVolume", 2, nullptr},
-    {"WINMM.dll", "auxSetVolume", 2, nullptr},
+    {"WINMM.dll", "auxGetDevCapsA", 3, m_auxGetDevCapsA},
+    {"WINMM.dll", "auxGetVolume", 2, m_auxGetVolume},
+    {"WINMM.dll", "auxSetVolume", 2, m_auxSetVolume},
     // DirectX and third-party DLLs are owned by later tasks; these entries only
     // record the callee's pop count so an early call cannot unbalance the stack.
     // Direct3D 9, D3DX 9 and DirectInput 8: a shader-era game's graphics and
@@ -3382,7 +3399,7 @@ const ImportShim g_misc_shims[] = {
     {"WS2_32.dll", "WSARecv", 7, w_WSARecv},
     {"WS2_32.dll", "WSARecvFrom", 9, w_WSARecvFrom},
     {"WS2_32.dll", "WSAGetOverlappedResult", 5, w_WSAGetOverlappedResult},
-    {"NETAPI32.dll", "Netbios", 1, nullptr},
+    {"NETAPI32.dll", "Netbios", 1, n_Netbios},
     {"DDRAW.dll", "DirectDrawCreate", 3, nullptr},
     {"DDRAW.dll", "DirectDrawEnumerateA", 2, nullptr},
     {"DINPUT.dll", "DirectInputCreateA", 4, nullptr},

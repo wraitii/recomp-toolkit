@@ -26,6 +26,11 @@ void imports_unsupported(X86 *) {
     abort();
 }
 
+void imports_decline(X86 *c, const char *name, uint32_t result) {
+    log_once(name, "declined import %s: returning failure %#x", name, result);
+    set_eax(c, result);
+}
+
 namespace {
 
 constexpr uint8_t kTraceFiltered = 1;

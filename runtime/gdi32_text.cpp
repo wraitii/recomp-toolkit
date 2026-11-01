@@ -55,6 +55,22 @@ void create_font_a(X86 *c) {
     }
     set_eax(c, make_object(font));
 }
+// CreateFontA passes the LOGFONT fields as arguments: five LONGs, eight BYTEs
+// and the face name, stored in the same wide record as create_font_a.
+void create_font_args(X86 *c) {
+    Object font;
+    font.kind = Object::Font;
+    for (int i = 0; i < 5; ++i) {
+        uint32_t v = arg(c, i);
+        memcpy(font.logfont.data() + 4 * i, &v, 4);
+    }
+    for (int i = 0; i < 8; ++i)
+        font.logfont[20 + i] = (uint8_t)arg(c, 5 + i);
+    const std::string face = gm_str(arg(c, 13), 31);
+    for (size_t i = 0; i < face.size(); ++i)
+        font.logfont[28 + 2 * i] = (uint8_t)face[i];
+    set_eax(c, make_object(font));
+}
 // TEXTMETRICW is 60 bytes on x86: eleven DWORDs, four UTF-16
 // characters, five BYTE fields and three bytes of trailing padding.
 void metrics(uint32_t out, int32_t scale, uint32_t weight, bool wide = true) {
@@ -596,6 +612,7 @@ void register_text() {
     }
     static const ImportShim shims[] = {G("CreateFontIndirectW", 1, create_font),
                                        G("CreateFontIndirectA", 1, create_font_a),
+                                       G("CreateFontA", 14, create_font_args),
                                        G("TextOutA", 5, text_out_a),
                                        G("TextOutW", 5, text_out_w),
                                        G("ExtTextOutA", 8, ext_text_out_a),

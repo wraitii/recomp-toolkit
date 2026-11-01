@@ -31,6 +31,9 @@ struct ImportShim {
 // Explicit unsupported handler: dispatch logs the import name and aborts.
 // Use it when only the ABI is known; no guest result is fabricated.
 void imports_unsupported(X86 *c);
+// A declined call: the runtime answers with the import's documented failure
+// `result`, logs `name` once and continues. The caller sets any last error.
+void imports_decline(X86 *c, const char *name, uint32_t result);
 
 // Registers a shim table. Later registrations override earlier ones for the
 // same (dll, name); a null fn never overrides a non-null one.

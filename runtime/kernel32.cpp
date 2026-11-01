@@ -2111,23 +2111,14 @@ void k_GetSystemTime(X86 *c) {
 // The date arithmetic is exact rather than a trip through mktime: mktime
 // reads the host's timezone, and a FILETIME is UTC by definition. Windows
 // ignores wDayOfWeek on the way in, so this does too.
-void k_SystemTimeToFileTime(X86 *c) {
-    const uint32_t in = arg(c, 0), out = arg(c, 1);
-    if (!in || !out || !gm_valid(in, 16) || !gm_valid(out, 8)) {
-        set_last_error(87 /* ERROR_INVALID_PARAMETER */);
-        set_eax(c, 0);
-        return;
-    }
+bool systemtime_seconds(uint32_t in, int64_t &seconds, int &millis) {
     const int year = rd16(in), month = rd16(in + 2), day = rd16(in + 6);
     const int hour = rd16(in + 8), minute = rd16(in + 10), second = rd16(in + 12);
-    const int millis = rd16(in + 14);
+    millis = rd16(in + 14);
     // 1601 is where a FILETIME starts; below it there is nothing to express.
     if (year < 1601 || month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 ||
-        second > 59 || millis > 999) {
-        set_last_error(87);
-        set_eax(c, 0);
-        return;
-    }
+        second > 59 || millis > 999)
+        return false;
     // Days from the civil date, counting from 1970-01-01. The era trick puts
     // the leap day at the end of a 400-year cycle so no special cases remain.
     const int shifted = year - (month <= 2);
@@ -2136,11 +2127,59 @@ void k_SystemTimeToFileTime(X86 *c) {
     const unsigned doy = (unsigned)((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1);
     const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     const int64_t days = (int64_t)era * 146097 + (int64_t)doe - 719468;
-    const int64_t seconds = days * 86400 + hour * 3600 + minute * 60 + second;
+    seconds = days * 86400 + hour * 3600 + minute * 60 + second;
+    return true;
+}
+
+void k_SystemTimeToFileTime(X86 *c) {
+    const uint32_t in = arg(c, 0), out = arg(c, 1);
+    int64_t seconds;
+    int millis;
+    if (!in || !out || !gm_valid(in, 16) || !gm_valid(out, 8) ||
+        !systemtime_seconds(in, seconds, millis)) {
+        set_last_error(87 /* ERROR_INVALID_PARAMETER */);
+        set_eax(c, 0);
+        return;
+    }
     const uint64_t ft = filetime((time_t)seconds) + (uint64_t)millis * 10000ull;
     wr32(out, (uint32_t)ft);
     wr32(out + 4, (uint32_t)(ft >> 32));
     set_eax(c, 1);
+}
+
+// (lpTimeZoneInformation, lpIn, lpOut). A null zone is the machine's, which
+// GetTimeZoneInformation reports as UTC. An explicit zone applies its Bias;
+// daylight rules are declined rather than ignored.
+void tz_specific_shift(X86 *c, const char *name, int direction) {
+    const uint32_t tz = arg(c, 0), in = arg(c, 1), out = arg(c, 2);
+    int64_t seconds;
+    int millis;
+    struct tm t{};
+    if (!in || !out || !gm_valid(in, 16) || !gm_valid(out, 16) || (tz && !gm_valid(tz, 172)) ||
+        !systemtime_seconds(in, seconds, millis)) {
+        set_last_error(87);
+        set_eax(c, 0);
+        return;
+    }
+    if (tz && rd16(tz + 154) != 0) {
+        set_last_error(120 /* ERROR_CALL_NOT_IMPLEMENTED */);
+        imports_decline(c, name, 0);
+        return;
+    }
+    seconds += direction * (tz ? (int64_t)(int32_t)rd32(tz) * 60 : 0);
+    if (os_gmtime(seconds, &t) != 0) {
+        set_last_error(87);
+        set_eax(c, 0);
+        return;
+    }
+    put_systemtime(out, t, millis);
+    set_eax(c, 1);
+}
+void k_SystemTimeToTzSpecificLocalTime(X86 *c) {
+    tz_specific_shift(c, "SystemTimeToTzSpecificLocalTime", -1);
+}
+void k_TzSpecificLocalTimeToSystemTime(X86 *c) {
+    tz_specific_shift(c, "TzSpecificLocalTimeToSystemTime", 1);
 }
 
 // (lpFileTime1, lpFileTime2). A FILETIME is an unsigned 64-bit tick count,
@@ -2168,6 +2207,55 @@ void k_GetTimeZoneInformation(X86 *c) {
 // the same text and errors.
 void k_GetTimeFormatA(X86 *c) {
     kernel32_get_time_format(c, false);
+}
+void k_GetDateFormatA(X86 *c) {
+    kernel32_get_date_format(c, false);
+}
+void k_GetLongPathNameA(X86 *c) {
+    std::string path = gm_str(arg(c, 0));
+    std::replace(path.begin(), path.end(), '/', '\\');
+    uint32_t buf = arg(c, 1), len = arg(c, 2);
+    uint32_t need = (uint32_t)path.size() + 1;
+    if (!buf || len < need) {
+        set_eax(c, need);
+        return;
+    }
+    set_eax(c, gm_put_str(buf, path.c_str(), len));
+}
+// The same virtual volume GetDiskFreeSpaceA describes: 4 GiB free of 8 GiB.
+void k_GetDiskFreeSpaceExA(X86 *c) {
+    log_once("GetDiskFreeSpaceExA", "GetDiskFreeSpaceExA: reporting a fixed virtual volume");
+    const uint64_t free_bytes = 8ull * 512 * 0x00100000, total = 8ull * 512 * 0x00200000;
+    const uint64_t values[] = {free_bytes, total, free_bytes};
+    for (int i = 0; i < 3; ++i) {
+        uint32_t p = arg(c, 1 + i);
+        if (p && gm_valid(p, 8)) {
+            wr32(p, (uint32_t)values[i]);
+            wr32(p + 4, (uint32_t)(values[i] >> 32));
+        }
+    }
+    set_eax(c, 1);
+}
+void k_HeapValidate(X86 *c) {
+    log_once("HeapValidate", "HeapValidate: checks block ownership only, not heap integrity");
+    set_eax(c, !arg(c, 2) || heap_owns(arg(c, 2)));
+}
+void k_FatalAppExitA(X86 *c) {
+    fprintf(stderr, "FatalAppExitA: %s\n", gm_str(arg(c, 1)).c_str());
+    fflush(stderr);
+    kernel32_exit_process(0x40000015u /* STATUS_FATAL_APP_EXIT */);
+}
+void k_TerminateThread(X86 *c) {
+    set_last_error(5 /* ERROR_ACCESS_DENIED */);
+    imports_decline(c, "TerminateThread", 0);
+}
+void k_OpenProcess(X86 *c) {
+    set_last_error(5);
+    imports_decline(c, "OpenProcess", 0);
+}
+void k_SetFileTime(X86 *c) {
+    set_last_error(50 /* ERROR_NOT_SUPPORTED */);
+    imports_decline(c, "SetFileTime", 0);
 }
 
 // -------------------------------------------------------------------------
@@ -6223,17 +6311,17 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "SetThreadAffinityMask", 2, k_SetThreadAffinityMask},
     {"KERNEL32.dll", "CreateProcessA", 10, k_CreateProcessA},
     {"KERNEL32.dll", "GetExitCodeProcess", 2, k_GetExitCodeProcess},
-    {"KERNEL32.dll", "DebugBreak", 0, nullptr},
-    {"KERNEL32.dll", "FatalAppExitA", 2, nullptr},
-    {"KERNEL32.dll", "GetDateFormatA", 6, nullptr},
+    {"KERNEL32.dll", "DebugBreak", 0, imports_unsupported},
+    {"KERNEL32.dll", "FatalAppExitA", 2, k_FatalAppExitA},
+    {"KERNEL32.dll", "GetDateFormatA", 6, k_GetDateFormatA},
     {"KERNEL32.dll", "GetTimeFormatA", 6, k_GetTimeFormatA},
-    {"KERNEL32.dll", "GetDiskFreeSpaceExA", 4, nullptr},
-    {"KERNEL32.dll", "GetLongPathNameA", 3, nullptr},
-    {"KERNEL32.dll", "GetOverlappedResult", 4, nullptr},
-    {"KERNEL32.dll", "HeapValidate", 3, nullptr},
+    {"KERNEL32.dll", "GetDiskFreeSpaceExA", 4, k_GetDiskFreeSpaceExA},
+    {"KERNEL32.dll", "GetLongPathNameA", 3, k_GetLongPathNameA},
+    {"KERNEL32.dll", "GetOverlappedResult", 4, imports_unsupported},
+    {"KERNEL32.dll", "HeapValidate", 3, k_HeapValidate},
     {"KERNEL32.dll", "QueueUserAPC", 3, k_QueueUserAPC},
     {"KERNEL32.dll", "SetConsoleCtrlHandler", 2, k_SetConsoleCtrlHandler},
-    {"KERNEL32.dll", "TerminateThread", 2, nullptr},
+    {"KERNEL32.dll", "TerminateThread", 2, k_TerminateThread},
     {"KERNEL32.dll", "GetTimeZoneInformation", 1, k_GetTimeZoneInformation},
     // TLS / interlocked / critical sections
     {"KERNEL32.dll", "TlsAlloc", 0, k_TlsAlloc},
@@ -6299,20 +6387,13 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "MultiByteToWideChar", 6, k_MultiByteToWideChar},
     {"KERNEL32.dll", "WideCharToMultiByte", 8, k_WideCharToMultiByte},
     {"KERNEL32.dll", "FlushInstructionCache", 3, k_FlushInstructionCache},
-    // Named for their argument counts. An import the kit does not know is
-    // called with its arguments left on the stack, which is corruption at a
-    // distance; a logging-only entry with the right count is what a guest
-    // survives, and the log says which of these it wanted.
-    {"KERNEL32.dll", "SetFileTime", 4, nullptr},
+    {"KERNEL32.dll", "SetFileTime", 4, k_SetFileTime},
     {"KERNEL32.dll", "SystemTimeToFileTime", 2, k_SystemTimeToFileTime},
     {"KERNEL32.dll", "CompareFileTime", 2, k_CompareFileTime},
-    {"KERNEL32.dll", "SystemTimeToTzSpecificLocalTime", 3, nullptr},
-    {"KERNEL32.dll", "TzSpecificLocalTimeToSystemTime", 3, nullptr},
-    {"KERNEL32.dll", "OpenProcess", 3, nullptr},
-    {"KERNEL32.dll", "ExpandEnvironmentStringsW", 3, nullptr},
+    {"KERNEL32.dll", "SystemTimeToTzSpecificLocalTime", 3, k_SystemTimeToTzSpecificLocalTime},
+    {"KERNEL32.dll", "TzSpecificLocalTimeToSystemTime", 3, k_TzSpecificLocalTimeToSystemTime},
+    {"KERNEL32.dll", "OpenProcess", 3, k_OpenProcess},
     {"KERNEL32.dll", "GetEnvironmentVariableW", 3, k_GetEnvironmentVariableW},
-    {"KERNEL32.dll", "VerLanguageNameW", 3, nullptr},
-    {"KERNEL32.dll", "SearchPathW", 6, nullptr},
     {"KERNEL32.dll", "GetStringTypeA", 5, k_GetStringTypeA},
     // The Ex form takes the same five arguments in the same order.
     {"KERNEL32.dll", "GetStringTypeExA", 5, k_GetStringTypeA},

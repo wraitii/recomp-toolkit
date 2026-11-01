@@ -1139,6 +1139,13 @@ void u_PostMessageA(X86 *c) {
 // exist; the runtime's guest thread table is not reachable from here, so any id
 // is accepted and a message to a thread that never retrieves it simply stays
 // queued, as it would for a live thread without a message loop.
+void u_GetScrollBarInfo(X86 *c) {
+    imports_decline(c, "GetScrollBarInfo", 0);
+}
+void u_SendInput(X86 *c) {
+    set_last_error(5 /* ERROR_ACCESS_DENIED */);
+    imports_decline(c, "SendInput", 0);
+}
 void u_PostThreadMessageA(X86 *c) {
     uint32_t tid = arg(c, 0);
     if (arg(c, 1) == 0x000c || arg(c, 1) == 0x000d) {
@@ -2211,7 +2218,7 @@ const ImportShim g_user32_shims[] = {
     {"USER32.dll", "ValidateRect", 2, u_ValidateRect},
     {"USER32.dll", "GetUpdateRect", 3, u_GetUpdateRect},
     {"USER32.dll", "GetUpdateRgn", 3, u_GetUpdateRgn},
-    {"USER32.dll", "GetScrollBarInfo", 3, nullptr},
+    {"USER32.dll", "GetScrollBarInfo", 3, u_GetScrollBarInfo},
     {"USER32.dll", "LoadCursorFromFileA", 1, u_LoadCursorFromFileA},
     {"USER32.dll", "LoadCursorFromFileW", 1, u_LoadCursorFromFileW},
     {"USER32.dll", "CreateIconIndirect", 1, u_CreateIconIndirect},
@@ -2254,7 +2261,7 @@ const ImportShim g_user32_shims[] = {
     {"USER32.dll", "ToAscii", 5, u_ToAscii},
     {"USER32.dll", "ToAsciiEx", 6, u_ToAsciiEx},
     {"USER32.dll", "ToUnicode", 6, u_ToUnicode},
-    {"USER32.dll", "SendInput", 3, nullptr},
+    {"USER32.dll", "SendInput", 3, u_SendInput},
     {"USER32.dll", "PostThreadMessageA", 4, u_PostThreadMessageA},
     {"USER32.dll", "GetQueueStatus", 1, u_GetQueueStatus},
     {"USER32.dll", "GetForegroundWindow", 0, u_GetForegroundWindow},

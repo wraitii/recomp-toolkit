@@ -306,6 +306,9 @@ void crt_memset(X86 *c) {
 }
 // All supported per-user settings locations use the same Documents guest path;
 // the file overlay decides where that path resides in the writable profile.
+void url_download_to_file(X86 *c) {
+    imports_decline(c, "URLDownloadToFileW", 0x800c0008u /* INET_E_DOWNLOAD_FAILURE */);
+}
 void folder_path(X86 *c) {
     uint32_t csidl = arg(c, 1), out = arg(c, 4);
     switch (csidl & 0xff) {
@@ -427,7 +430,7 @@ const ImportShim shims[] = {
     {"SHLWAPI.dll", "UrlUnescapeW", 4, imports_unsupported},
     {"SHLWAPI.dll", "UrlGetLocationW", 1, imports_unsupported},
     {"SHLWAPI.dll", "UrlIsW", 2, imports_unsupported},
-    {"URLMON.dll", "URLDownloadToFileW", 5, nullptr},
+    {"URLMON.dll", "URLDownloadToFileW", 5, url_download_to_file},
     // Symbol APIs have known ABIs but remain unsupported.
     {"DBGHELP.dll", "SymGetOptions", 0, imports_unsupported},
     {"DBGHELP.dll", "SymSetOptions", 1, imports_unsupported},
