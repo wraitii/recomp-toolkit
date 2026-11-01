@@ -10,6 +10,7 @@ use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::{FunctionBuilder, Variable};
 use rk_core::ir::{OpCode, PcodeOp, Space, Varnode};
 use rk_emit::cc_mask;
+use rk_ir::lower::op;
 use rk_ir::{Cond, FlagRecipes, FlagShape};
 
 use super::abi::{CcOp, Config, Frame, Status, X87Call};
@@ -524,7 +525,18 @@ impl Emitter<'_, '_> {
         let mut fresh = scratch();
         let (mut env, ops) = match self.pending.clone() {
             Some(pending) => {
-                let ops = match self.recipes.direct(pending.shape, cond, &pending.keys, out) {
+                let result = *pending.keys.last().unwrap();
+                let zero = Varnode::constant(0, result.size);
+                let direct_result = match cond {
+                    Cond::Equal => Some((OpCode::IntEqual, result, zero)),
+                    Cond::NotEqual => Some((OpCode::IntNotEqual, result, zero)),
+                    Cond::Sign => Some((OpCode::IntSLess, result, zero)),
+                    Cond::NoSign => Some((OpCode::IntSLessEqual, zero, result)),
+                    _ => None,
+                };
+                let direct = self.recipes.direct(pending.shape, cond, &pending.keys, out)
+                    .or_else(|| direct_result.map(|(code, a, b)| vec![op(code, out, vec![a, b])]));
+                let ops = match direct {
                     Some(ops) => ops,
                     None => {
                         let mut ops = self
