@@ -17,6 +17,14 @@ use crate::{
 pub const DEFAULT_VALUE_BUDGET: usize = 40_000_000;
 const FLAG_TEMPS: u64 = 1 << 40;
 
+fn flag_temps() -> impl FnMut(u32) -> Varnode {
+    let mut next = FLAG_TEMPS;
+    move |size| {
+        next += 0x10;
+        Varnode::new(Space::Unique, next, size)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct CallEffect {
     pub reads: Fields,
@@ -120,6 +128,7 @@ pub(crate) fn build_with_faults(
 
 struct Builder<'a> {
     opts: &'a BuildOptions<'a>,
+    recipes: &'static dyn rk_ir::FlagRecipes,
     lazy_stack_writes: bool,
     frame: Option<&'a FramePlan>,
     sizes: Vec<u8>,
@@ -290,6 +299,7 @@ impl<'a> Builder<'a> {
             opts,
             lazy_stack_writes: false,
             frame,
+            recipes: cg.recipes,
             sizes,
             origin: (0, 0),
             origins: Lookup::default(),
@@ -599,6 +609,7 @@ impl<'a> Builder<'a> {
             field_of: self.field_of,
             slow: self.slow,
             flags: self.flags,
+            recipes: self.recipes,
             loc: self.loc,
             value_addr: self.value_addr,
             stack_states: self.stack_states,
@@ -788,16 +799,6 @@ impl<'a> Builder<'a> {
         {
             carry = Some(self.args[self.values[value as usize].args_start as usize]);
         }
-        let kind = match shape {
-            FlagShape::Add => crate::FlagKind::Add,
-            FlagShape::Sub => crate::FlagKind::Sub,
-            FlagShape::Cmp => crate::FlagKind::Cmp,
-            FlagShape::Inc => crate::FlagKind::Inc,
-            FlagShape::Dec => crate::FlagKind::Dec,
-            FlagShape::Adc => crate::FlagKind::Adc,
-            FlagShape::Sbb => crate::FlagKind::Sbb,
-            FlagShape::Logic => crate::FlagKind::Logic,
-        };
         let mut flags = BTreeMap::new();
         for field in Fields::FLAGS.iter() {
             if let Some(index) = self
@@ -809,7 +810,7 @@ impl<'a> Builder<'a> {
             }
         }
         self.flags.push(FlagRecord {
-            kind,
+            kind: crate::FlagKind::Shape(shape),
             size: self.values[result as usize].size,
             kind_value: None,
             size_value: None,
@@ -818,7 +819,7 @@ impl<'a> Builder<'a> {
             carry,
             result: Some(result),
             flags,
-            defined: rk_ir::flag_recipes().defines(shape),
+            defined: self.recipes.defines(shape),
         });
         Ok(())
     }
@@ -826,26 +827,17 @@ impl<'a> Builder<'a> {
     fn bind(
         &mut self,
         values: &[ValueId],
+        fresh: &mut impl FnMut(u32) -> Varnode,
         state: &mut [Option<ValueId>],
         temps: &mut Lookup<(u64, u32), ValueId>,
     ) -> Result<Vec<Varnode>, Diagnostic> {
         let mut bound = Vec::with_capacity(values.len());
-        for (index, &value) in values.iter().enumerate() {
-            let size = self.values[value as usize].size as u32;
-            let temp = Varnode::new(Space::Unique, FLAG_TEMPS + index as u64 * 0x10, size);
+        for &value in values {
+            let temp = fresh(self.values[value as usize].size as u32);
             self.write(&temp, value, state, temps)?;
             bound.push(temp);
         }
         Ok(bound)
-    }
-
-    fn fresh_temps(skip: usize) -> impl FnMut(u32) -> Varnode {
-        let mut next = FLAG_TEMPS + skip as u64 * 0x10;
-        move |size| {
-            let temp = Varnode::new(Space::Unique, next, size);
-            next += 0x10;
-            temp
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1009,13 +1001,13 @@ impl<'a> Builder<'a> {
                     }
                     args.push(value);
                 }
-                let inputs = self.bind(&args, state, temps)?;
-                let mut fresh = Self::fresh_temps(inputs.len());
-                let expansion = rk_ir::flag_recipes().expand(shape, &inputs, &mut fresh);
+                let mut fresh = flag_temps();
+                let inputs = self.bind(&args, &mut fresh, state, temps)?;
+                let expansion = self.recipes.expand(shape, &inputs, &mut fresh);
                 self.apply_pcode(expansion, addr, state, temps, ops, memory_index, block)?;
                 let (a, b, result) = (args[0], args[1], args[args.len() - 1]);
                 let regs = Registers::get();
-                for field in rk_ir::flag_recipes().defines(shape).iter() {
+                for field in self.recipes.defines(shape).iter() {
                     let flag = regs.require(field.name());
                     let value = self.read(&flag, state, temps, block)?;
                     self.flag_source.insert(value, (shape, [a, b, result]));
@@ -1024,7 +1016,7 @@ impl<'a> Builder<'a> {
             }
             Op::Cond(cond) => {
                 let output = cg_op.output.expect("condition output");
-                let recipes = rk_ir::flag_recipes();
+                let recipes = self.recipes;
                 let mut sources = Vec::new();
                 for flag in recipes.reads(cond) {
                     let value = self.read(&flag, state, temps, block)?;
@@ -1033,14 +1025,14 @@ impl<'a> Builder<'a> {
                 sources.dedup();
                 let direct = match sources[..] {
                     [Some((shape, args))] => {
-                        let inputs = self.bind(&args, state, temps)?;
+                        let inputs = self.bind(&args, &mut flag_temps(), state, temps)?;
                         recipes.direct(shape, cond, &inputs, output)
                     }
                     _ => None,
                 };
                 let expansion = match direct {
                     Some(expansion) => expansion,
-                    None => recipes.condition(cond, output, &mut Self::fresh_temps(3)),
+                    None => recipes.condition(cond, output, &mut flag_temps()),
                 };
                 self.apply_pcode(expansion, addr, state, temps, ops, memory_index, block)?;
             }

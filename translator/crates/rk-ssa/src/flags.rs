@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use rk_core::contract::{Field, Fields};
 use rk_core::Lookup;
-use rk_ir::{Op, StateKey};
+use rk_ir::{FlagShape, Op, StateKey};
 
 use crate::{BlockId, FlagId, FlagKind, Ssa, ValueId, DISPATCH_BLOCK};
 
@@ -30,32 +30,17 @@ pub struct FlagDescriptor {
 
 impl FlagDescriptor {
     pub fn values(&self) -> Vec<ValueId> {
-        match self.kind {
-            FlagKind::Logic => vec![self.result],
-            FlagKind::Inc | FlagKind::Dec => self.a.into_iter().chain([self.result]).collect(),
-            FlagKind::Adc | FlagKind::Sbb => self
-                .a
-                .into_iter()
-                .chain(self.b)
-                .chain(self.carry)
-                .chain([self.result])
-                .collect(),
-            FlagKind::Join => self
-                .kind_value
-                .into_iter()
-                .chain(self.size_value)
-                .chain(self.a)
-                .chain(self.b)
-                .chain(self.carry)
-                .chain([self.result])
-                .collect(),
-            _ => self
-                .a
-                .into_iter()
-                .chain(self.b)
-                .chain([self.result])
-                .collect(),
-        }
+        self.kind
+            .select([
+                self.kind_value,
+                self.size_value,
+                self.a,
+                self.b,
+                self.carry,
+                Some(self.result),
+            ])
+            .flatten()
+            .collect()
     }
 }
 
@@ -64,6 +49,8 @@ pub struct FlagPublication {
     pub descriptor: Option<FlagDescriptor>,
     pub forwarded: Fields,
 }
+
+const MAX_LAZY_SIZE: u8 = 4;
 
 pub struct FlagPlan {
     record_of: Lookup<ValueId, FlagId>,
@@ -178,12 +165,18 @@ enum JoinSource {
     Zero,
 }
 
-fn settled_at(s: &Ssa, field: Field, value: ValueId) -> Option<ValueId> {
+#[derive(PartialEq)]
+enum Settled {
+    Entry,
+    At(ValueId),
+}
+
+fn settled_at(s: &Ssa, field: Field, value: ValueId) -> Option<Settled> {
     match s.value(value).op {
         Op::StateReload(key) | Op::StateKeep(key) if s.field(key) == Some(field) => {
-            Some(s.args(value)[0])
+            Some(Settled::At(s.args(value)[0]))
         }
-        Op::Input(key) if s.field(key) == Some(field) => Some(ValueId::MAX),
+        Op::Input(key) if s.field(key) == Some(field) => Some(Settled::Entry),
         _ => None,
     }
 }
@@ -199,7 +192,7 @@ fn explains(s: &Ssa, source: JoinSource, field: Field, value: ValueId) -> bool {
     match source {
         JoinSource::Settled => settled_at(s, field, value).is_some(),
         JoinSource::Zero => {
-            const_of(s, value) == Some(matches!(field, Field::Zf | Field::Pf) as u64)
+            const_of(s, value) == Some(s.recipes.zero_result().contains(field) as u64)
         }
         JoinSource::Record(id) => s.flag(id).is_some_and(|record| {
             record.defined.contains(field)
@@ -216,7 +209,7 @@ fn join_source(
     values: &[(Field, ValueId)],
     index: &BTreeMap<(ValueId, Field), FlagId>,
 ) -> Option<JoinSource> {
-    let sites: Option<Vec<ValueId>> = values
+    let sites: Option<Vec<Settled>> = values
         .iter()
         .map(|&(field, value)| settled_at(s, field, value))
         .collect();
@@ -231,7 +224,7 @@ fn join_source(
     }
     let usable = |id: &FlagId| {
         s.flag(*id)
-            .is_some_and(|record| (1..=4).contains(&record.size) && record_has_operands(record))
+            .is_some_and(|record| (1..=MAX_LAZY_SIZE).contains(&record.size) && complete(record))
     };
     match counts
         .into_iter()
@@ -299,9 +292,17 @@ fn merge_join_sources(
             mask.insert(field);
         }
     }
-    if mask.is_empty() {
+    let narrow_carry = |source: &JoinSource| match *source {
+        JoinSource::Record(id) => s
+            .flag(id)
+            .and_then(|record| record.carry)
+            .is_none_or(|carry| s.value(carry).size == 1),
+        _ => true,
+    };
+    if mask.is_empty() || !sources.iter().all(narrow_carry) {
         return;
     }
+    let recipes = s.recipes;
     let addr = s.blocks[block]
         .phis
         .first()
@@ -316,13 +317,13 @@ fn merge_join_sources(
             .entry(name)
             .or_insert_with(|| s.new_value(Op::Symbol(name), 1, &[], addr))
     };
-    for (position, source) in sources.iter().enumerate() {
+    for source in &sources {
         let (kind, size, operands) = match *source {
             JoinSource::Record(id) => {
                 let record = s.flag(id).cloned().expect("join record");
                 let kind = match (record.kind, record.kind_value) {
-                    (FlagKind::Join, Some(value)) => value,
-                    (kind, _) => symbol(s, cc_kind(kind).expect("record kind")),
+                    (FlagKind::Shape(shape), _) => symbol(s, recipes.lazy_op(Some(shape))),
+                    (FlagKind::Join, value) => value.expect("join kind"),
                 };
                 let size = record
                     .size_value
@@ -333,11 +334,12 @@ fn merge_join_sources(
                     [record.a, record.b, record.carry, record.result],
                 )
             }
-            JoinSource::Settled => {
-                let keep = incoming[position].first().map(|(_, value)| *value);
-                (symbol(s, "X86_CC_NONE"), None, [None, None, keep, None])
-            }
-            JoinSource::Zero => (symbol(s, "X86_CC_LOGIC"), None, [None, None, None, None]),
+            JoinSource::Settled => (symbol(s, recipes.lazy_op(None)), None, [None; 4]),
+            JoinSource::Zero => (
+                symbol(s, recipes.lazy_op(Some(FlagShape::Logic))),
+                None,
+                [None; 4],
+            ),
         };
         kinds.push(kind);
         sizes.push(size);
@@ -347,7 +349,7 @@ fn merge_join_sources(
     }
     let fill = match sizes.iter().flatten().find_map(|size| const_of(s, *size)) {
         Some(size) => s.constant(&mut constants, 1, size),
-        None => s.constant(&mut constants, 1, 4),
+        None => s.constant(&mut constants, 1, MAX_LAZY_SIZE as u64),
     };
     let sizes: Vec<ValueId> = sizes.iter().map(|size| size.unwrap_or(fill)).collect();
     let widths: Vec<u8> = parts
@@ -362,17 +364,10 @@ fn merge_join_sources(
             if slot == 2 {
                 1
             } else {
-                widest.unwrap_or(4)
+                widest.unwrap_or(MAX_LAZY_SIZE)
             }
         })
         .collect();
-    if parts[2]
-        .iter()
-        .flatten()
-        .any(|value| s.value(*value).size != 1)
-    {
-        return;
-    }
     let mut phis = Vec::with_capacity(4);
     for (values, &size) in parts.iter().zip(&widths) {
         let args: Vec<ValueId> = values
@@ -406,7 +401,7 @@ fn merge_join_sources(
     }
     s.flags.push(crate::FlagRecord {
         kind: FlagKind::Join,
-        size: 4,
+        size: MAX_LAZY_SIZE,
         kind_value: Some(kind_value),
         size_value: Some(size_value),
         a: Some(phis[0]),
@@ -418,25 +413,12 @@ fn merge_join_sources(
     });
 }
 
-pub fn cc_kind(kind: FlagKind) -> Option<&'static str> {
-    match kind {
-        FlagKind::Add => Some("X86_CC_ADD"),
-        FlagKind::Sub | FlagKind::Cmp => Some("X86_CC_SUB"),
-        FlagKind::Logic => Some("X86_CC_LOGIC"),
-        FlagKind::Inc => Some("X86_CC_INC"),
-        FlagKind::Dec => Some("X86_CC_DEC"),
-        FlagKind::Adc => Some("X86_CC_ADC"),
-        FlagKind::Sbb => Some("X86_CC_SBB"),
-        FlagKind::Incoming | FlagKind::Join => None,
-    }
-}
-
 pub(crate) fn build_joins(s: &mut Ssa) {
     let mut index = record_index(s);
     let flag_keys = flag_key_indices(s);
     for block in 0..s.blocks.len() {
         let preds = s.blocks[block].preds.clone();
-        if preds.len() < 2 || preds.iter().any(|pred| *pred == DISPATCH_BLOCK) {
+        if preds.len() < 2 || preds.contains(&DISPATCH_BLOCK) {
             continue;
         }
         merge_join_sources(s, block, &preds, &flag_keys, &mut index);
@@ -528,9 +510,9 @@ impl FlagPlan {
             };
             let Some(record) = s.flag(id) else { continue };
             if record.size == 0
-                || record.size > 4
+                || record.size > MAX_LAZY_SIZE
                 || !record.defined.contains(field)
-                || !record_has_operands(record)
+                || !complete(record)
             {
                 continue;
             }
@@ -571,27 +553,6 @@ impl FlagPlan {
     }
 }
 
-fn record_has_operands(record: &crate::FlagRecord) -> bool {
-    match record.kind {
-        FlagKind::Logic => record.result.is_some(),
-        FlagKind::Inc | FlagKind::Dec => record.a.is_some() && record.result.is_some(),
-        FlagKind::Adc | FlagKind::Sbb => {
-            record.a.is_some()
-                && record.b.is_some()
-                && record.carry.is_some()
-                && record.result.is_some()
-        }
-        FlagKind::Add | FlagKind::Sub | FlagKind::Cmp => {
-            record.a.is_some() && record.b.is_some() && record.result.is_some()
-        }
-        FlagKind::Join => {
-            record.kind_value.is_some()
-                && record.size_value.is_some()
-                && record.a.is_some()
-                && record.b.is_some()
-                && record.carry.is_some()
-                && record.result.is_some()
-        }
-        FlagKind::Incoming => false,
-    }
+fn complete(record: &crate::FlagRecord) -> bool {
+    record.operands().all(|value| value.is_some())
 }

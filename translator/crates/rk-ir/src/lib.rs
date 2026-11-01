@@ -12,7 +12,7 @@ pub mod wide;
 pub mod x87;
 
 pub use lower::{
-    flag_recipes, lower, lower_with, CgFunction, CgInsn, CgOp, Cond, FlagRecipes, FlagShape,
+    lower, lower_with, CgFunction, CgInsn, CgOp, Cond, FlagRecipes, FlagShape,
     InstructionLowerer, IsaLowering, Lowered,
 };
 pub use op::{

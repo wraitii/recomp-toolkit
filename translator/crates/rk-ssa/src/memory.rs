@@ -1330,6 +1330,9 @@ mod tests {
         let n = ops.len();
         let cg = CgFunction {
             addr: 0x1000,
+            recipes: rk_ir::IsaLowering::flag_recipes(&rk_x86::Lowering {
+                x87: &rk_ir::NoX87,
+            }),
             insns: ops
                 .into_iter()
                 .enumerate()

@@ -655,7 +655,7 @@ fn prepare(
                     continue;
                 }
                 Op::Flags(shape) => {
-                    let produced = fields_mask(rk_ir::flag_recipes().defines(shape));
+                    let produced = fields_mask(cg.recipes.defines(shape));
                     local |= produced;
                     defs[index] |= produced;
                     continue;

@@ -6,7 +6,7 @@ use std::slice;
 use rk_core::ir::{Insn, OpCode, PcodeOp, Space, Varnode};
 use rk_core::Addr;
 use rk_ir::x87::X87Environment;
-use rk_ir::{CgOp, InstructionLowerer, Op, SlowInsn, X87Op};
+use rk_ir::{CgOp, InstructionLowerer, IsaLowering, Op, SlowInsn, X87Op};
 use rk_sleigh::Lifter;
 
 mod jit;
@@ -378,12 +378,14 @@ fn lift_one(addr: u32, bytes: &[u8]) -> Result<(u8, String, Vec<RpOp>), String> 
     let ops: Vec<CgOp> = ops
         .into_iter()
         .flat_map(|op| match op.op {
-            Op::Flags(shape) => rk_ir::flag_recipes()
+            Op::Flags(shape) => isa
+                .flag_recipes()
                 .expand(shape, &op.inputs, &mut |size| lowerer.fresh(size))
                 .into_iter()
                 .map(rk_ir::lower::from_pcode)
                 .collect(),
-            Op::Cond(cond) => rk_ir::flag_recipes()
+            Op::Cond(cond) => isa
+                .flag_recipes()
                 .condition(cond, op.output.expect("condition output"), &mut |size| {
                     lowerer.fresh(size)
                 })

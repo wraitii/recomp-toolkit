@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
 
 use rk_core::contract::Fields;
 use rk_core::ir::{FunctionIr, Insn, OpCode, PcodeOp, SehEffect, Space, Varnode};
@@ -59,6 +58,7 @@ pub struct CgInsn {
 #[derive(Clone, Debug)]
 pub struct CgFunction {
     pub addr: Addr,
+    pub recipes: &'static dyn FlagRecipes,
     pub insns: Vec<CgInsn>,
     pub succ: Vec<Vec<u32>>,
     pub exits: BTreeMap<u32, Vec<Addr>>,
@@ -106,7 +106,6 @@ pub trait FlagRecipes: Sync {
         inputs: &[Varnode],
         fresh: &mut dyn FnMut(u32) -> Varnode,
     ) -> Vec<PcodeOp>;
-    fn reads(&self, cond: Cond) -> Vec<Varnode>;
     fn condition(
         &self,
         cond: Cond,
@@ -120,12 +119,30 @@ pub trait FlagRecipes: Sync {
         inputs: &[Varnode],
         output: Varnode,
     ) -> Option<Vec<PcodeOp>>;
+    fn lazy_op(&self, shape: Option<FlagShape>) -> &'static str;
+    fn zero_result(&self) -> Fields;
+
+    fn reads(&self, cond: Cond) -> Vec<Varnode> {
+        let mut next = 0;
+        let output = Varnode::new(Space::Unique, next, 1);
+        let ops = self.condition(cond, output, &mut |size| {
+            next += 0x10;
+            Varnode::new(Space::Unique, next, size)
+        });
+        let mut reads = Vec::new();
+        for input in ops.iter().flat_map(|op| &op.inputs) {
+            if input.space == Space::Register && !reads.contains(input) {
+                reads.push(*input);
+            }
+        }
+        reads
+    }
 }
 
-static FLAG_RECIPES: OnceLock<&'static dyn FlagRecipes> = OnceLock::new();
-
-pub fn flag_recipes() -> &'static dyn FlagRecipes {
-    *FLAG_RECIPES.get().expect("flag recipes installed")
+impl std::fmt::Debug for dyn FlagRecipes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FlagRecipes")
+    }
 }
 
 pub struct InstructionLowerer<'a> {
@@ -207,6 +224,7 @@ pub fn lower_with(
         });
     }
     Ok(CgFunction {
+        recipes: isa.flag_recipes(),
         addr: fir.addr,
         insns,
         succ: fir.succ.clone(),
@@ -224,7 +242,6 @@ pub fn lower_with(
 
 impl<'a> InstructionLowerer<'a> {
     pub fn new(isa: &'a dyn IsaLowering) -> Self {
-        FLAG_RECIPES.get_or_init(|| isa.flag_recipes());
         Self {
             isa,
             regs: Registers::get(),

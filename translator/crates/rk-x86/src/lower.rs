@@ -2,13 +2,14 @@ use rk_core::ir::{Insn, OpCode, PcodeOp, Space, Varnode};
 use rk_core::{Addr, Reason};
 use rk_ir::lower::{cg, copy, from_pcode, normalize_direct_ram, op, prepare_rmw};
 use rk_ir::{
-    CgOp, FlagShape, InstructionLowerer, IsaLowering, Lowered, Op, SlowFamily, X87Recipes,
+    CgOp, InstructionLowerer, IsaLowering, Lowered, Op, SlowFamily, X87Recipes,
     EFLAGS_MISC,
 };
 
 use crate::correct::{
     correct_bsr, correct_div_cg, correct_extra, correct_sar, correct_shift, correct_sse, lazy_flags,
 };
+use crate::flags::flag_op;
 use crate::string;
 
 pub struct Lowering<'a> {
@@ -443,19 +444,20 @@ impl IsaLowering for Lowering<'_> {
         } else {
             Ok(ops.clone())
         };
-        let shape = flag_shape(&mnem);
+        let flag = flag_op(&mnem);
+        let shape = flag.as_ref().map(|flag| flag.shape);
         let mut lazy = None;
         let corrected = prepared.and_then(|ops| {
-            let corrected = match mnem.as_str() {
-                _ if shape.is_some() => lazy_flags(&mnem, &ops, regs, &mut |size| cx.fresh(size))
+            let corrected = match (&flag, mnem.as_str()) {
+                (Some(flag), _) => lazy_flags(&mnem, flag, &ops, regs, &mut |size| cx.fresh(size))
                     .map(|(ops, inputs)| {
                         lazy = Some(inputs);
                         ops
                     }),
-                "SHL" | "SHR" => correct_shift(&mnem, &ops, regs, &mut |size| cx.fresh(size)),
-                "SAR" => correct_sar(&ops, regs, &mut |size| cx.fresh(size)),
-                "BSR" => correct_bsr(&ops, regs, &mut |size| cx.fresh(size)),
-                _ => Ok(ops.clone()),
+                (None, "SHL" | "SHR") => correct_shift(&mnem, &ops, regs, &mut |size| cx.fresh(size)),
+                (None, "SAR") => correct_sar(&ops, regs, &mut |size| cx.fresh(size)),
+                (None, "BSR") => correct_bsr(&ops, regs, &mut |size| cx.fresh(size)),
+                (None, _) => Ok(ops.clone()),
             }?;
             Ok(corrected)
         });
@@ -511,27 +513,13 @@ impl IsaLowering for Lowering<'_> {
     }
 }
 
-fn flag_shape(mnem: &str) -> Option<FlagShape> {
-    match mnem {
-        "ADD" | "XADD" => Some(FlagShape::Add),
-        "SUB" | "NEG" => Some(FlagShape::Sub),
-        "CMP" | "CMPXCHG" => Some(FlagShape::Cmp),
-        "INC" => Some(FlagShape::Inc),
-        "DEC" => Some(FlagShape::Dec),
-        "ADC" => Some(FlagShape::Adc),
-        "SBB" => Some(FlagShape::Sbb),
-        "AND" | "OR" | "XOR" | "TEST" => Some(FlagShape::Logic),
-        _ => None,
-    }
-}
-
 fn with_cond(ops: Vec<CgOp>, cond: rk_ir::Cond, output: Varnode) -> Vec<CgOp> {
     let f = rk_ir::Registers::get().arch().x86;
     let mut derived = vec![f.cf, f.pf, f.af, f.zf, f.sf, f.of];
     let mut out = vec![CgOp {
         op: Op::Cond(cond),
         output: Some(output),
-        inputs: rk_ir::flag_recipes().reads(cond),
+        inputs: rk_ir::FlagRecipes::reads(&crate::flags::X86Flags, cond),
     }];
     for mut op in ops {
         let from_flags = op.output.is_some_and(|v| v.size == 1)

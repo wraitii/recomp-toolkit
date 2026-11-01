@@ -155,23 +155,7 @@ fn prepare_using(
     let flag_roots: Vec<ValueId> = ssa
         .flags
         .iter()
-        .flat_map(|record| match record.kind {
-            crate::FlagKind::Logic => vec![record.result],
-            crate::FlagKind::Inc | crate::FlagKind::Dec => vec![record.a, record.result],
-            crate::FlagKind::Adc | crate::FlagKind::Sbb => {
-                vec![record.a, record.b, record.carry, record.result]
-            }
-            crate::FlagKind::Join => vec![
-                record.kind_value,
-                record.size_value,
-                record.a,
-                record.b,
-                record.carry,
-                record.result,
-            ],
-            _ => vec![record.a, record.b, record.result],
-        })
-        .flatten()
+        .flat_map(|record| record.operands().flatten())
         .collect();
     simplify(
         &mut ssa,

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use rk_core::contract::{Field, Fields};
 use rk_core::{Addr, Lookup};
-use rk_ir::{Op, SlowInsn, StateKey};
+use rk_ir::{FlagRecipes, FlagShape, Op, SlowInsn, StateKey};
 
 pub mod address;
 mod build;
@@ -32,7 +32,7 @@ pub use build::{
 };
 pub use canonical::canonicalize;
 pub use dump::dump;
-pub use flags::{cc_kind, FlagDescriptor, FlagPlan, FlagPublication, FlagSource};
+pub use flags::{FlagDescriptor, FlagPlan, FlagPublication, FlagSource};
 pub use forward::forward;
 pub use liveness::{live_values, simplify};
 pub use prepare::{
@@ -87,18 +87,44 @@ pub struct Boundary {
     pub state_len: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlagKind {
-    Incoming,
-    Add,
-    Sub,
-    Adc,
-    Sbb,
-    Cmp,
-    Logic,
-    Inc,
-    Dec,
+    Shape(FlagShape),
     Join,
+}
+
+impl FlagKind {
+    pub fn uses(self) -> [bool; 6] {
+        let [none, all] = [false, true];
+        let operands = match self {
+            FlagKind::Join => return [all; 6],
+            FlagKind::Shape(FlagShape::Logic) => [none, none, none],
+            FlagKind::Shape(FlagShape::Inc | FlagShape::Dec) => [all, none, none],
+            FlagKind::Shape(FlagShape::Adc | FlagShape::Sbb) => [all, all, all],
+            FlagKind::Shape(_) => [all, all, none],
+        };
+        [none, none, operands[0], operands[1], operands[2], all]
+    }
+
+    fn select(self, slots: [Option<ValueId>; 6]) -> impl Iterator<Item = Option<ValueId>> {
+        slots
+            .into_iter()
+            .zip(self.uses())
+            .filter_map(|(slot, used)| used.then_some(slot))
+    }
+}
+
+impl FlagRecord {
+    pub fn operands(&self) -> impl Iterator<Item = Option<ValueId>> {
+        self.kind.select([
+            self.kind_value,
+            self.size_value,
+            self.a,
+            self.b,
+            self.carry,
+            self.result,
+        ])
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +169,7 @@ pub struct Ssa {
     pub field_of: Vec<Option<Field>>,
     pub slow: Vec<SlowInsn>,
     pub flags: Vec<FlagRecord>,
+    pub recipes: &'static dyn FlagRecipes,
     pub loc: Vec<Option<InsnLoc>>,
     pub value_addr: Vec<Addr>,
     pub(crate) stack_states: BTreeMap<ValueId, [ValueId; 4]>,

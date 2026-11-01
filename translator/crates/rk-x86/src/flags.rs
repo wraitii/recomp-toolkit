@@ -3,6 +3,34 @@ use rk_core::ir::{OpCode, PcodeOp, Varnode};
 use rk_ir::lower::{copy, op};
 use rk_ir::{Cond, FlagRecipes, FlagShape, Registers};
 
+pub(crate) struct FlagOp {
+    pub(crate) shape: FlagShape,
+    pub(crate) primary: &'static [OpCode],
+    pub(crate) needs_primary: bool,
+}
+
+pub(crate) fn flag_op(mnem: &str) -> Option<FlagOp> {
+    use OpCode::{Int2Comp, IntAdd, IntAnd, IntOr, IntSub, IntXor};
+    let (shape, primary, needs_primary) = match mnem {
+        "ADD" | "XADD" => (FlagShape::Add, &[IntAdd][..], true),
+        "INC" => (FlagShape::Inc, &[IntAdd][..], true),
+        "SUB" => (FlagShape::Sub, &[IntSub][..], false),
+        "NEG" => (FlagShape::Sub, &[Int2Comp][..], true),
+        "CMP" => (FlagShape::Cmp, &[IntSub][..], false),
+        "CMPXCHG" => (FlagShape::Cmp, &[IntSub][..], true),
+        "DEC" => (FlagShape::Dec, &[IntSub][..], true),
+        "ADC" => (FlagShape::Adc, &[][..], false),
+        "SBB" => (FlagShape::Sbb, &[][..], false),
+        "AND" | "OR" | "XOR" | "TEST" => (FlagShape::Logic, &[IntAnd, IntOr, IntXor][..], false),
+        _ => return None,
+    };
+    Some(FlagOp {
+        shape,
+        primary,
+        needs_primary,
+    })
+}
+
 pub(crate) struct X86Flags;
 
 impl FlagRecipes for X86Flags {
@@ -37,8 +65,9 @@ impl FlagRecipes for X86Flags {
                 op(OpCode::IntSLess, f.of, vec![both, zero]),
             ]);
         };
-        match (shape, operands.get(2)) {
-            (FlagShape::Adc | FlagShape::Sbb, Some(&c)) => {
+        match shape {
+            FlagShape::Adc | FlagShape::Sbb => {
+                let c = operands[2];
                 let (combine, carry, overflow) = if shape == FlagShape::Adc {
                     (OpCode::IntAdd, OpCode::IntCarry, OpCode::IntSCarry)
                 } else {
@@ -56,25 +85,25 @@ impl FlagRecipes for X86Flags {
                     op(OpCode::BoolXor, f.of, vec![o1, o2]),
                 ]);
             }
-            (FlagShape::Add | FlagShape::Adc, _) => {
+            FlagShape::Add => {
                 ops.push(op(OpCode::IntLess, f.cf, vec![result, a]));
                 overflow([a, result], [b, result], &mut ops);
             }
-            (FlagShape::Sub | FlagShape::Cmp | FlagShape::Sbb, _) => {
+            FlagShape::Sub | FlagShape::Cmp => {
                 ops.push(op(OpCode::IntLess, f.cf, vec![a, b]));
                 overflow([a, b], [a, result], &mut ops);
             }
-            (FlagShape::Inc, _) => ops.push(op(
+            FlagShape::Inc => ops.push(op(
                 OpCode::IntEqual,
                 f.of,
                 vec![result, Varnode::constant(sign_bit, n)],
             )),
-            (FlagShape::Dec, _) => ops.push(op(
+            FlagShape::Dec => ops.push(op(
                 OpCode::IntEqual,
                 f.of,
                 vec![result, Varnode::constant(sign_bit - 1, n)],
             )),
-            (FlagShape::Logic, _) => {
+            FlagShape::Logic => {
                 ops.push(copy(f.cf, Varnode::constant(0, 1)));
                 ops.push(copy(f.of, Varnode::constant(0, 1)));
             }
@@ -112,18 +141,21 @@ impl FlagRecipes for X86Flags {
         ops
     }
 
-    fn reads(&self, cond: Cond) -> Vec<Varnode> {
-        let f = Registers::get().arch().x86;
-        match cond {
-            Cond::Overflow | Cond::NoOverflow => vec![f.of],
-            Cond::Below | Cond::AboveEqual => vec![f.cf],
-            Cond::Equal | Cond::NotEqual => vec![f.zf],
-            Cond::BelowEqual | Cond::Above => vec![f.cf, f.zf],
-            Cond::Sign | Cond::NoSign => vec![f.sf],
-            Cond::Parity | Cond::NoParity => vec![f.pf],
-            Cond::Less | Cond::GreaterEqual => vec![f.of, f.sf],
-            Cond::LessEqual | Cond::Greater => vec![f.zf, f.of, f.sf],
+    fn lazy_op(&self, shape: Option<FlagShape>) -> &'static str {
+        match shape {
+            None => "X86_CC_NONE",
+            Some(FlagShape::Add) => "X86_CC_ADD",
+            Some(FlagShape::Sub | FlagShape::Cmp) => "X86_CC_SUB",
+            Some(FlagShape::Logic) => "X86_CC_LOGIC",
+            Some(FlagShape::Inc) => "X86_CC_INC",
+            Some(FlagShape::Dec) => "X86_CC_DEC",
+            Some(FlagShape::Adc) => "X86_CC_ADC",
+            Some(FlagShape::Sbb) => "X86_CC_SBB",
         }
+    }
+
+    fn zero_result(&self) -> Fields {
+        [Field::Zf, Field::Pf].into_iter().collect()
     }
 
     fn condition(

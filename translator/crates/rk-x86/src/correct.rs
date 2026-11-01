@@ -3,9 +3,11 @@ use std::collections::BTreeMap;
 use rk_core::ir::{Insn, OpCode, PcodeOp, Space, Varnode};
 use rk_core::{Addr, Reason};
 use rk_ir::lower::{copy, from_pcode, is_control, op};
-use rk_ir::{CgOp, Op, Registers};
+use rk_ir::{CgOp, FlagShape, Op, Registers};
 
 use rk_ir::wide::{wide_lanes, wide_output};
+
+use crate::flags::FlagOp;
 
 pub(crate) fn correct_extra(
     mnem: &str,
@@ -699,6 +701,7 @@ fn without_flags(ops: Vec<PcodeOp>, regs: &Registers, live: &[Varnode]) -> Vec<P
 
 pub(crate) fn lazy_flags(
     mnem: &str,
+    flag: &FlagOp,
     ops: &[PcodeOp],
     regs: &Registers,
     fresh: &mut dyn FnMut(u32) -> Varnode,
@@ -716,7 +719,7 @@ pub(crate) fn lazy_flags(
     let zero = Varnode::constant(0, result.size);
     let kept = fresh(result.size);
     ops.insert(sign, copy(kept, result));
-    let carry_in = matches!(mnem, "ADC" | "SBB");
+    let carry_in = matches!(flag.shape, FlagShape::Adc | FlagShape::Sbb);
     let (at, operands) = if carry_in {
         let at = ops
             .iter()
@@ -728,24 +731,18 @@ pub(crate) fn lazy_flags(
             _ => return Err(unsupported()),
         }
     } else {
-        let codes: &[OpCode] = match mnem {
-            "ADD" | "INC" | "XADD" => &[OpCode::IntAdd],
-            "SUB" | "CMP" | "DEC" | "CMPXCHG" => &[OpCode::IntSub],
-            "NEG" => &[OpCode::Int2Comp],
-            _ => &[OpCode::IntAnd, OpCode::IntOr, OpCode::IntXor],
-        };
         let primary = ops[..sign].iter().rposition(|op| {
-            codes.contains(&op.opcode)
+            flag.primary.contains(&op.opcode)
                 && op
                     .output
                     .is_some_and(|v| matches!(v.space, Space::Register | Space::Unique))
         });
         match primary {
-            Some(at) if mnem == "NEG" => (at, vec![zero, ops[at].inputs[0]]),
-            Some(at) => (at, ops[at].inputs.clone()),
-            None if !matches!(mnem, "ADD" | "INC" | "DEC" | "NEG" | "XADD" | "CMPXCHG") => {
-                (sign, vec![zero, zero])
+            Some(at) if ops[at].opcode == OpCode::Int2Comp => {
+                (at, vec![zero, ops[at].inputs[0]])
             }
+            Some(at) => (at, ops[at].inputs.clone()),
+            None if !flag.needs_primary => (sign, vec![zero, zero]),
             None => return Err(unsupported()),
         }
     };

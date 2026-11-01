@@ -2435,30 +2435,21 @@ impl<'a> Emitter<'a> {
 
     fn publish_descriptor(&mut self, descriptor: &FlagDescriptor, mask: Fields) -> Result<()> {
         let op = match (descriptor.kind, descriptor.kind_value) {
+            (rk_ssa::FlagKind::Shape(shape), _) => self.s.recipes.lazy_op(Some(shape)).to_string(),
             (rk_ssa::FlagKind::Join, Some(value)) => self.expr(value)?,
-            (kind, _) => match rk_ssa::cc_kind(kind) {
-                Some(kind) => kind.to_string(),
-                None => return Ok(()),
-            },
+            (rk_ssa::FlagKind::Join, None) => return Ok(()),
         };
-        let (a, b, carry) = match descriptor.kind {
-            rk_ssa::FlagKind::Logic => ("0u".to_string(), "0u".to_string(), "0u".to_string()),
-            rk_ssa::FlagKind::Inc | rk_ssa::FlagKind::Dec => (
-                self.expr(descriptor.a.unwrap_or(0))?,
-                "0u".to_string(),
-                "0u".to_string(),
-            ),
-            rk_ssa::FlagKind::Adc | rk_ssa::FlagKind::Sbb | rk_ssa::FlagKind::Join => (
-                self.expr(descriptor.a.unwrap_or(0))?,
-                self.expr(descriptor.b.unwrap_or(0))?,
-                self.expr(descriptor.carry.unwrap_or(0))?,
-            ),
-            _ => (
-                self.expr(descriptor.a.unwrap_or(0))?,
-                self.expr(descriptor.b.unwrap_or(0))?,
-                "0u".to_string(),
-            ),
+        let [_, _, uses_a, uses_b, uses_carry, _] = descriptor.kind.uses();
+        let operand = |used: bool, value: Option<ValueId>| {
+            if used {
+                self.expr(value.unwrap_or(0))
+            } else {
+                Ok("0u".to_string())
+            }
         };
+        let a = operand(uses_a, descriptor.a)?;
+        let b = operand(uses_b, descriptor.b)?;
+        let carry = operand(uses_carry, descriptor.carry)?;
         let result = self.expr(descriptor.result)?;
         let size = match descriptor.size_value {
             Some(value) => self.expr(value)?,
