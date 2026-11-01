@@ -92,6 +92,8 @@ mod ffi {
         Yl2x,
         Scale,
         Tangent,
+        Arctangent,
+        SinCos,
     }
 
     #[repr(u8)]

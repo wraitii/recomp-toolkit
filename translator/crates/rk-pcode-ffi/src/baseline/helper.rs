@@ -72,6 +72,8 @@ impl X87Call {
             X87Op::Eager(X87Eager::Fyl2x) => call(K::Yl2x, 0, 0, 0, 0),
             X87Op::Eager(X87Eager::Fscale) => call(K::Scale, 0, 0, 0, 0),
             X87Op::Eager(X87Eager::Fptan) => call(K::Tangent, 0, 0, 0, 0),
+            X87Op::Eager(X87Eager::Fpatan) => call(K::Arctangent, 0, 0, 0, 0),
+            X87Op::Eager(X87Eager::Fsincos) => call(K::SinCos, 0, 0, 0, 0),
             X87Op::Push { src, bits } => call(K::Push, memory_or(src), bits.into(), 0, 0),
             X87Op::PushInteger { bits } => call(K::PushInteger, 0, bits.into(), 0, 0),
             X87Op::Store {

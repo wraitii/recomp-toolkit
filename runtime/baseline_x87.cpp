@@ -105,6 +105,16 @@ bool baseline_x87_execute(X86 *c, const rp::baseline::X87Call &call, uint32_t ad
         fset(c, 0, fx87_exact(c, tan(ST(c, 0))));
         fpush(c, 1.0);
         break;
+    case X87Kind::Arctangent:
+        fset(c, 1, fx87_exact(c, atan2(ST(c, 1), ST(c, 0))));
+        fdrop(c);
+        break;
+    case X87Kind::SinCos: {
+        double value = ST(c, 0);
+        fset(c, 0, fx87_exact(c, sin(value)));
+        fpush(c, fx87_exact(c, cos(value)));
+        break;
+    }
     default:
         why = "unsupported x87 operation";
         return false;
