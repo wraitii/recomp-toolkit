@@ -64,10 +64,22 @@ void write_locked();
 
 } // namespace
 
+bool jit_noting() {
+#if RECOMP_PCODE_FALLBACK
+    static const bool enabled = recomp_env("JIT_INPUT") && recomp_env("JIT_OUT");
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+extern "C" int discovery_enabled(void) {
+    return jit_noting() || path();
+}
+
 extern "C" void discovery_note(const char *kind, uint32_t target, uint32_t from) {
 #if RECOMP_PCODE_FALLBACK
-    static const bool jit_enabled = recomp_env("JIT_INPUT") && recomp_env("JIT_OUT");
-    if (jit_enabled && in_code_section(target) && target >= loader_image_base() &&
+    if (jit_noting() && in_code_section(target) && target >= loader_image_base() &&
         target < loader_image_limit()) {
         static std::once_flag registered;
         std::call_once(registered, [] { atexit(rp_jit_shutdown); });

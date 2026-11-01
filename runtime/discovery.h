@@ -20,6 +20,9 @@ extern "C" {
 // `kind` is "call" or "jump". Ignored when RECOMP_DISCOVERY is unset.
 void discovery_note(const char *kind, uint32_t target, uint32_t from);
 
+// Whether discovery_note records anything in this run.
+int discovery_enabled(void);
+
 // Writes the file RECOMP_DISCOVERY names. Registered with atexit() on the
 // first note, and called directly on the paths that end the process without
 // running atexit handlers.

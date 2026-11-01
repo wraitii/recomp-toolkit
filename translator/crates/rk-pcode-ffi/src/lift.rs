@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use rk_core::ir::{Insn, OpCode, PcodeOp, Space, Varnode};
 use rk_core::Addr;
 use rk_ir::x87::X87Environment;
-use rk_ir::{CgOp, InstructionLowerer, IsaLowering, Op, Registers, X87Op};
+use rk_ir::{CgOp, FlagRecipes, InstructionLowerer, IsaLowering, Op, Registers, X87Op};
 use rk_sleigh::Lifter;
 
 const LIFTED_BYTES_LIMIT: usize = 65536;
@@ -102,6 +102,13 @@ fn normalize(op: CgOp) -> CgOp {
     }
 }
 
+pub fn recipes() -> &'static dyn FlagRecipes {
+    rk_x86::Lowering {
+        x87: &rk_x87::Recipes,
+    }
+    .flag_recipes()
+}
+
 pub fn lift(addr: u32, bytes: &[u8]) -> Result<Lifted, String> {
     invalidate_changed_bytes(addr, bytes);
     rk_x86::install().map_err(|e| e.to_string())?;
@@ -153,34 +160,19 @@ pub fn lift(addr: u32, bytes: &[u8]) -> Result<Lifted, String> {
             ops: raw.ops.into_iter().map(from_raw).collect(),
         });
     }
-    let mut expanded = Vec::with_capacity(ops.len());
-    for op in ops {
-        let recipe = match op.op {
-            Op::Flags(shape) => isa
-                .flag_recipes()
-                .expand(shape, &op.inputs, &mut |size| lowerer.fresh(size)),
-            Op::Cond(cond) => isa.flag_recipes().condition(
-                cond,
-                op.output.expect("condition output"),
-                &mut |size| lowerer.fresh(size),
-            ),
-            Op::Slow(index) if !matches!(insn.mnemonic.as_str(), "RDTSC" | "CPUID") => {
-                return Err(format!(
-                    "{}: unsupported {:?}",
-                    insn.mnemonic,
-                    lowerer.slow_insns()[index as usize].family
-                ));
-            }
-            _ => {
-                expanded.push(normalize(op));
-                continue;
-            }
-        };
-        expanded.extend(recipe.into_iter().map(rk_ir::lower::from_pcode));
+    if let Some(index) = ops.iter().find_map(|op| match op.op {
+        Op::Slow(index) if !matches!(insn.mnemonic.as_str(), "RDTSC" | "CPUID") => Some(index),
+        _ => None,
+    }) {
+        return Err(format!(
+            "{}: unsupported {:?}",
+            insn.mnemonic,
+            lowerer.slow_insns()[index as usize].family
+        ));
     }
     Ok(Lifted {
         length,
         mnemonic: insn.mnemonic,
-        ops: expanded,
+        ops: ops.into_iter().map(normalize).collect(),
     })
 }

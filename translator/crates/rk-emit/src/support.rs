@@ -83,7 +83,7 @@ pub(crate) fn x87_reads_flags(line: &str) -> bool {
     .any(|field| line.contains(field))
 }
 
-pub(crate) fn cc_mask(fields: Fields) -> u8 {
+pub fn cc_mask(fields: Fields) -> u8 {
     let mut mask = 0u8;
     for (field, bit) in [
         (Field::Cf, 0),

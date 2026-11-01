@@ -27,15 +27,42 @@ using rb::FloatOp;
 using rb::Status;
 using rb::X87Kind;
 
+static_assert(offsetof(X86, cc_size) == offsetof(X86, cc_op) + 1 &&
+              offsetof(X86, cc_mask) == offsetof(X86, cc_op) + 2 &&
+              offsetof(X86, cc_carry) == offsetof(X86, cc_op) + 3);
+static_assert(uint8_t(rb::CcOp::None) == X86_CC_NONE && uint8_t(rb::CcOp::Add) == X86_CC_ADD &&
+              uint8_t(rb::CcOp::Sub) == X86_CC_SUB && uint8_t(rb::CcOp::Logic) == X86_CC_LOGIC &&
+              uint8_t(rb::CcOp::Inc) == X86_CC_INC && uint8_t(rb::CcOp::Dec) == X86_CC_DEC &&
+              uint8_t(rb::CcOp::Adc) == X86_CC_ADC && uint8_t(rb::CcOp::Sbb) == X86_CC_SBB);
+
 constexpr uint32_t kMaxDepth = 256;
 constexpr uint32_t kMaxCache = 65536;
+
+constexpr uint32_t kRecent = 4096;
+constexpr uint32_t kEpochSteps = 65536;
+
+struct Compiled;
+
+struct Link {
+    uint32_t target = 0;
+    uint32_t epoch = 0;
+    Compiled *next = nullptr;
+};
+
+struct Compiled {
+    rb::Block block;
+    std::array<Link, 2> links{};
+};
 
 struct ThreadState {
     unsigned depth = 0;
     char error[512]{};
-    std::unordered_map<uint32_t, const rb::Block *> blocks;
-    std::vector<std::unique_ptr<rb::Block>> storage;
+    std::unordered_map<uint32_t, Compiled *> blocks;
+    std::array<std::pair<uint32_t, Compiled *>, kRecent> recent{};
+    uint64_t hits = 0, executions = 0, instructions = 0;
+    std::vector<std::unique_ptr<Compiled>> storage;
     uint32_t countdown = 0;
+    uint32_t epoch = 1;
     std::chrono::steady_clock::time_point next = std::chrono::steady_clock::now();
 };
 thread_local ThreadState g_state;
@@ -60,8 +87,12 @@ void report() {
 }
 
 void progress(ThreadState &state) {
-    if (state.countdown++ % 65536 != 0)
+    if (state.countdown++ % kEpochSteps != 0)
         return;
+    ++state.epoch;
+    g_stats.hits += std::exchange(state.hits, 0);
+    g_stats.executions += std::exchange(state.executions, 0);
+    g_stats.instructions += std::exchange(state.instructions, 0);
     const auto now = std::chrono::steady_clock::now();
     if (now < state.next)
         return;
@@ -105,7 +136,9 @@ struct Fault {
 };
 
 struct Context {
-    explicit Context(X86 *cpu) : cpu(cpu) {}
+    explicit Context(X86 *cpu) : cpu(cpu) {
+        why[0] = 0;
+    }
 
     int fail(const char *reason) {
         snprintf(why, sizeof why, "%s", reason);
@@ -114,7 +147,7 @@ struct Context {
 
     rb::Frame frame{};
     X86 *cpu;
-    char why[512]{};
+    char why[512];
 };
 static_assert(offsetof(Context, frame) == 0);
 
@@ -124,6 +157,10 @@ Context &context(rb::Frame *frame) {
 
 bool translated_entry(uint32_t target) {
     return recomp_thunk_target_kind(target) == 1;
+}
+
+void settle(X86 *cpu, uint32_t need) {
+    x86_cc_settle_or_drop(cpu, need);
 }
 
 void write_memory(uint32_t addr, uint32_t size, uint64_t value) {
@@ -309,6 +346,7 @@ rb::Config config() {
         return value && strcmp(value, "1") == 0;
     }();
     rb::Config config{};
+    config.size = sizeof config;
     config.cpu = {offsetof(X86, r),
                   offsetof(X86, eip),
                   offsetof(X86, eflags_misc),
@@ -321,7 +359,11 @@ rb::Config config() {
                   offsetof(X86, xmm),
                   {offsetof(X86, eflags_cf), offsetof(X86, eflags_pf), offsetof(X86, eflags_af),
                    offsetof(X86, eflags_zf), offsetof(X86, eflags_sf), offsetof(X86, eflags_df),
-                   offsetof(X86, eflags_of)}};
+                   offsetof(X86, eflags_of)},
+                  offsetof(X86, cc_op),
+                  offsetof(X86, cc_a),
+                  offsetof(X86, cc_b),
+                  offsetof(X86, cc_res)};
     config.guest_base = reinterpret_cast<size_t>(g_mem);
     config.guest_size = GUEST_SIZE;
     config.null_limit = GUEST_NULL_LIMIT;
@@ -337,6 +379,7 @@ rb::Config config() {
     float_ops(callbacks.float_ops,
               std::make_index_sequence<std::tuple_size_v<decltype(callbacks.float_ops)>>{});
     callbacks.clock_ns = address(os_monotonic_ns);
+    callbacks.settle = address(settle);
     config.pid = jitdump ? (uint32_t)os_process_id() : 0;
     config.tid = jitdump ? os_profile_thread_id() : 0;
     return config;
@@ -346,19 +389,29 @@ const char *text(const uint8_t *bytes) {
     return reinterpret_cast<const char *>(bytes);
 }
 
-const rb::Block &block(ThreadState &state, uint32_t start) {
-    auto it = state.blocks.find(start);
-    if (it != state.blocks.end()) {
-        ++g_stats.hits;
-        if (memcmp(it->second->bytes.data(), g_mem + start, it->second->byte_count) == 0)
-            return *it->second;
-        state.blocks.erase(it);
+Compiled &block(ThreadState &state, uint32_t start) {
+    auto &slot = state.recent[(start ^ start >> 12) % kRecent];
+    Compiled *entry = slot.first == start ? slot.second : nullptr;
+    if (!entry) {
+        auto it = state.blocks.find(start);
+        if (it != state.blocks.end())
+            entry = it->second;
+    }
+    if (entry) {
+        ++state.hits;
+        const rb::Block &code = entry->block;
+        if (memcmp(code.bytes.data(), g_mem + start, code.byte_count) == 0) {
+            slot = {start, entry};
+            return *entry;
+        }
+        state.blocks.erase(start);
+        ++state.epoch;
     }
     rb::Rejection rejection{};
-    auto compiled = std::make_unique<rb::Block>();
+    auto compiled = std::make_unique<Compiled>();
     const auto time = std::chrono::steady_clock::now();
     const auto result =
-        rb::compile(start, g_mem + start, GUEST_SIZE - start, config(), *compiled, rejection);
+        rb::compile(start, g_mem + start, GUEST_SIZE - start, config(), compiled->block, rejection);
     g_stats.compile_us += std::chrono::duration_cast<std::chrono::microseconds>(
                               std::chrono::steady_clock::now() - time)
                               .count();
@@ -374,11 +427,15 @@ const rb::Block &block(ThreadState &state, uint32_t start) {
         throw Fault{why, start, rejection.length};
     }
     ++g_stats.compiles;
-    const auto *entry = compiled.get();
+    entry = compiled.get();
     state.storage.push_back(std::move(compiled));
-    if (state.blocks.size() >= kMaxCache)
+    if (state.blocks.size() >= kMaxCache) {
         state.blocks.clear();
+        state.recent.fill({});
+        ++state.epoch;
+    }
     state.blocks.insert_or_assign(start, entry);
+    slot = {start, entry};
     return *entry;
 }
 
@@ -396,37 +453,51 @@ class Routine {
     }
 
     bool step(uint32_t &pc) {
-        if (memory_fault(pc, 1))
-            throw Fault{"baseline instruction address outside arena", pc, 0};
         const uint32_t start = pc;
-        const rb::Block &compiled = block(state_, start);
-        ++g_stats.executions;
+        Compiled *compiled = std::exchange(next_, nullptr);
+        if (!compiled) {
+            if (memory_fault(pc, 1))
+                throw Fault{"baseline instruction address outside arena", pc, 0};
+            compiled = &block(state_, start);
+            if (pending_)
+                *pending_ = Link{start, state_.epoch, compiled};
+        }
+        pending_ = nullptr;
+        ++state_.executions;
         Context context(c_);
-        x86_cc_settle(c_);
-        using Code = int (*)(rb::Frame *, X86 *);
-        const auto status = Status(reinterpret_cast<Code>(compiled.code)(&context.frame, c_));
-        g_stats.instructions += context.frame.index + 1;
-        uint32_t at = start;
-        for (uint32_t i = 0; i < context.frame.index; ++i)
-            at += compiled.lengths[i];
-        const uint32_t length = compiled.lengths[context.frame.index];
+        using Code = uint32_t (*)(rb::Frame *, X86 *);
+        const uint32_t result = reinterpret_cast<Code>(compiled->block.code)(&context.frame, c_);
+        const auto status = Status(result & 0xff);
+        const uint32_t index = result >> 8 & 0xff;
+        const uint32_t at = start + (result >> 16 & 0xff), length = result >> 24;
+        state_.instructions += index + 1;
         switch (status) {
-        case Status::Fallthrough: {
-            static std::atomic<bool> reported{false};
-            if (!reported.exchange(true)) {
-                fprintf(stderr,
-                        "[recomp] baseline: first native block completed at %08x (%u "
-                        "instructions)\n",
-                        start, compiled.count);
-                fflush(stderr);
-            }
+        case Status::Fallthrough:
+            announce_native(start, compiled->block.count);
             pc = at + length;
+            follow(compiled->links[0], pc);
+            return true;
+        case Status::Branch: {
+            const uint32_t target = guest(context.frame.target, at, length);
+            if (noting_)
+                return branch(target, at, pc);
+            Link &link = compiled->links[1];
+            if (link.target == target && link.epoch == state_.epoch) {
+                pc = target;
+                next_ = link.next;
+                return true;
+            }
+            if (!branch(target, at, pc))
+                return false;
+            if (pc == target)
+                pending_ = &link;
             return true;
         }
-        case Status::Branch:
-            return branch(guest(context.frame.target, at, length), at, pc);
         case Status::Call:
-            return call(guest(context.frame.target, at, length), at, length, pc);
+            if (!call(guest(context.frame.target, at, length), at, length, pc))
+                return false;
+            follow(compiled->links[0], pc);
+            return true;
         case Status::Return:
             c_->eip = guest(context.frame.target, at, length);
             return false;
@@ -438,7 +509,28 @@ class Routine {
         }
     }
 
+    bool checked(uint32_t pc) const {
+        return next_ || pc == checked_;
+    }
+
   private:
+    static void announce_native(uint32_t start, uint32_t count) {
+        static std::atomic<bool> reported{false};
+        if (reported.load(std::memory_order_relaxed) || reported.exchange(true))
+            return;
+        fprintf(stderr,
+                "[recomp] baseline: first native block completed at %08x (%u instructions)\n",
+                start, count);
+        fflush(stderr);
+    }
+
+    void follow(Link &link, uint32_t pc) {
+        if (link.target == pc && link.epoch == state_.epoch)
+            next_ = link.next;
+        else
+            pending_ = &link;
+    }
+
     static uint32_t guest(uint64_t target, uint32_t at, uint32_t length) {
         if (target > UINT32_MAX)
             throw Fault{status_message(Status::WideAddress), at, length};
@@ -453,13 +545,14 @@ class Routine {
             recomp_jump(c_, target);
             return false;
         }
-        discovery_note("jump", target, at);
+        checked_ = target;
+        if (noting_)
+            discovery_note("jump", target, at);
         pc = target;
         if (target <= at && continuation_) {
             uint32_t next = target;
             const int result = recomp_jit_resume(c_, target, continuation_, &next);
             if (result) {
-                x86_cc_settle(c_);
                 pc = next;
                 return result != 1;
             }
@@ -479,7 +572,6 @@ class Routine {
         recomp_call(c_, target);
         --state_.depth;
         recomp_dynamic_return_pop(c_, dynamic_depth);
-        x86_cc_settle(c_);
         pc = c_->eip;
         if (pc != expected)
             return false;
@@ -493,6 +585,13 @@ class Routine {
     X86 *c_;
     ThreadState &state_;
     uint32_t continuation_ = 0;
+    uint32_t checked_ = 0;
+    Compiled *next_ = nullptr;
+    Link *pending_ = nullptr;
+    const bool noting_ = [] {
+        static const bool enabled = discovery_enabled();
+        return enabled;
+    }();
 };
 
 void report_fault(ThreadState &state, const Fault &fault) {
@@ -529,13 +628,12 @@ extern "C" int baseline_call(X86 *c, uint32_t target) {
             --state.depth;
         }
     } leave{state};
-    x86_cc_settle(c);
     announce();
     Routine routine(c, state);
     uint32_t pc = target;
     try {
         for (;;) {
-            if (translated_entry(pc)) {
+            if (!routine.checked(pc) && translated_entry(pc)) {
                 c->eip = pc;
                 recomp_jump(c, pc);
                 return 1;

@@ -4,7 +4,6 @@ pub use ffi::*;
 mod ffi {
     #[derive(Default)]
     struct Frame {
-        index: u32,
         target: u64,
     }
 
@@ -42,6 +41,18 @@ mod ffi {
         Less,
         LessEqual,
         Nan,
+    }
+
+    #[repr(u8)]
+    enum CcOp {
+        None,
+        Add,
+        Sub,
+        Logic,
+        Inc,
+        Dec,
+        Adc,
+        Sbb,
     }
 
     #[repr(i32)]
@@ -123,6 +134,10 @@ mod ffi {
         mm: u32,
         xmm: u32,
         split_flags: [u32; 7],
+        cc_descriptor: u32,
+        cc_a: u32,
+        cc_b: u32,
+        cc_res: u32,
     }
 
     struct Callbacks {
@@ -135,9 +150,11 @@ mod ffi {
         x87: usize,
         float_ops: [usize; 14],
         clock_ns: usize,
+        settle: usize,
     }
 
     struct Config {
+        size: usize,
         cpu: CpuLayout,
         guest_base: usize,
         guest_size: u32,
@@ -189,6 +206,7 @@ impl Callbacks {
             self.cpuid,
             self.x87,
             self.clock_ns,
+            self.settle,
         ];
         if required.iter().chain(&self.float_ops).any(|&f| f == 0) {
             return Err("baseline configuration is missing a callback");
@@ -220,6 +238,9 @@ impl Callbacks {
 
 impl Config {
     pub fn validate(&self) -> Result<(), &'static str> {
+        if self.size != size_of::<Config>() {
+            return Err("baseline ABI mismatch: rebuild every binary that loads this library");
+        }
         self.callbacks.validate()?;
         if self.guest_base == 0 || self.guest_size < 8 || self.null_limit > self.guest_size {
             return Err("invalid baseline memory configuration");

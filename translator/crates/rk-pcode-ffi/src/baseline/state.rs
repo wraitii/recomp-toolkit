@@ -8,6 +8,7 @@ use super::abi::CpuLayout;
 const SPLIT_FLAGS: usize = 7;
 pub const SPLIT_FLAG_BITS: [u32; SPLIT_FLAGS] = [0, 2, 4, 6, 7, 10, 11];
 const SPLIT_FLAG_NAMES: [&str; SPLIT_FLAGS] = ["CF", "PF", "AF", "ZF", "SF", "DF", "OF"];
+pub const DIRECTION_FLAG: usize = 5;
 const OTHER_FLAGS: [(&str, u32); 13] = [
     ("F1", 1),
     ("F3", 3),

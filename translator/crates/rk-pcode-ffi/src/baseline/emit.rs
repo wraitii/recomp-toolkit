@@ -3,24 +3,64 @@ use std::mem::offset_of;
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, Inst, InstBuilder, MemFlags, SigRef, Signature, SourceLoc,
+    types, AbiParam, Block, BlockArg, Inst, InstBuilder, MemFlags, SigRef, Signature, SourceLoc,
     StackSlotData, StackSlotKind, Type, Value,
 };
 use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::{FunctionBuilder, Variable};
-use rk_core::ir::{OpCode, Space, Varnode};
+use rk_core::ir::{OpCode, PcodeOp, Space, Varnode};
+use rk_emit::cc_mask;
+use rk_ir::{Cond, FlagRecipes, FlagShape};
 
-use super::abi::{Config, Frame, Status, X87Call};
+use super::abi::{CcOp, Config, Frame, Status, X87Call};
 use super::helper::Helper;
 use super::ir::{register, Exit, Instruction, Op, Target};
 use super::state::{
-    Register, EFLAGS_RESERVED_ONE, EFLAGS_SPLIT_MASK, FPU_STATUS_CLEARED_BY_FNCLEX, FPU_TAGS_EMPTY,
-    SPLIT_FLAG_BITS,
+    Field, Register, DIRECTION_FLAG, EFLAGS_RESERVED_ONE, EFLAGS_SPLIT_MASK,
+    FPU_STATUS_CLEARED_BY_FNCLEX, FPU_TAGS_EMPTY, SPLIT_FLAG_BITS,
 };
+use crate::lift::recipes;
 
 const OP_BUDGET: i64 = 65536;
 const FLOAT_SIGN: i64 = 0x8000_0000;
 const LOW_HALF: i64 = 0xffff;
+const SCRATCH: u64 = 1 << 48;
+const ALL_FLAGS: u8 = 0x3f;
+
+fn scratch() -> impl FnMut(u32) -> Varnode {
+    let mut next = SCRATCH;
+    move |size| {
+        next += 0x10;
+        Varnode::new(Space::Unique, next, size)
+    }
+}
+
+fn cc_op(shape: FlagShape) -> CcOp {
+    match shape {
+        FlagShape::Add => CcOp::Add,
+        FlagShape::Sub | FlagShape::Cmp => CcOp::Sub,
+        FlagShape::Logic => CcOp::Logic,
+        FlagShape::Inc => CcOp::Inc,
+        FlagShape::Dec => CcOp::Dec,
+        FlagShape::Adc => CcOp::Adc,
+        FlagShape::Sbb => CcOp::Sbb,
+    }
+}
+
+fn observes_flags(register: Register) -> bool {
+    match register {
+        Register::SplitFlag(index) => index != DIRECTION_FLAG,
+        Register::Eflags => true,
+        _ => false,
+    }
+}
+
+#[derive(Clone)]
+struct Pending {
+    shape: FlagShape,
+    inputs: BTreeMap<Varnode, Value>,
+    keys: Vec<Varnode>,
+}
 
 fn mask(size: u32) -> u64 {
     if size >= 8 {
@@ -67,6 +107,7 @@ struct Signatures {
     write_memory: SigRef,
     string: SigRef,
     cpu: SigRef,
+    settle: SigRef,
     x87: SigRef,
     x87_specialized: SigRef,
     float: SigRef,
@@ -90,6 +131,7 @@ impl Signatures {
             write_memory: import(&[i32, i32, i64], None),
             string: import(&[pointer, byte, byte, byte], Some(types::I32)),
             cpu: import(&[pointer], None),
+            settle: import(&[pointer, i32], None),
             x87: import(&[pointer, pointer, i64, pointer], Some(types::I32)),
             x87_specialized: import(&[pointer, i64, i32], Some(types::I32)),
             float: import(&[pointer, i64, i64], Some(types::I64)),
@@ -98,7 +140,7 @@ impl Signatures {
 }
 
 enum Uniques {
-    Static(BTreeMap<u64, Value>),
+    Static(BTreeMap<u64, (u32, Value)>),
     Dynamic(BTreeMap<u64, (Variable, Variable)>),
 }
 
@@ -109,8 +151,17 @@ struct Emitter<'a, 'f> {
     frame: Value,
     cpu: Value,
     signatures: Signatures,
-    exits: BTreeMap<Status, Block>,
+    exits: BTreeMap<(Status, u32), Block>,
+    faults: BTreeMap<u32, Block>,
     uniques: Uniques,
+    recipes: &'static dyn FlagRecipes,
+    pending: Option<Pending>,
+    incoming: bool,
+    index: u32,
+    pc: u32,
+    eip_stored: bool,
+    start: u32,
+    positions: Vec<u32>,
 }
 
 pub fn build(
@@ -135,7 +186,16 @@ pub fn build(
         cpu,
         signatures,
         exits: BTreeMap::new(),
+        faults: BTreeMap::new(),
         uniques: Uniques::Static(BTreeMap::new()),
+        recipes: recipes(),
+        pending: None,
+        incoming: true,
+        index: 0,
+        pc,
+        eip_stored: false,
+        start: pc,
+        positions: Vec::with_capacity(instructions.len()),
     };
     let mut pc = pc;
     for (index, instruction) in instructions.iter().enumerate() {
@@ -146,11 +206,26 @@ pub fn build(
         pc = pc.wrapping_add(u32::from(instruction.length));
     }
     emitter.b.set_srcloc(SourceLoc::default());
+    emitter.flush();
     emitter.leave(Status::Fallthrough);
-    for (status, block) in std::mem::take(&mut emitter.exits) {
+    for ((status, index), block) in std::mem::take(&mut emitter.exits) {
         emitter.b.switch_to_block(block);
         emitter.b.set_cold_block(block);
-        emitter.leave(status);
+        emitter.leave_at(status, index);
+    }
+    for (index, block) in std::mem::take(&mut emitter.faults) {
+        emitter.b.switch_to_block(block);
+        emitter.b.set_cold_block(block);
+        let addr = emitter.b.block_params(block)[0];
+        let null = emitter.b.ins().icmp_imm(
+            IntCC::UnsignedLessThan,
+            addr,
+            i64::from(emitter.config.null_limit),
+        );
+        let null_access = emitter.result(Status::NullAccess, index);
+        let outside = emitter.result(Status::OutsideArena, index);
+        let status = emitter.b.ins().select(null, null_access, outside);
+        emitter.b.ins().return_(&[status]);
     }
 }
 
@@ -159,15 +234,29 @@ impl Emitter<'_, '_> {
         self.b.ins().iconst(types::I64, value)
     }
 
+    fn result(&mut self, status: Status, index: u32) -> Value {
+        let packed = status.repr as u32 | index << 8 | self.positions[index as usize] << 16;
+        self.b.ins().iconst(types::I32, i64::from(packed))
+    }
+
+    fn sync(&mut self) {
+        let pc = self.b.ins().iconst(types::I32, i64::from(self.pc));
+        self.store_cpu32(self.config.cpu.eip, pc);
+    }
+
     fn leave(&mut self, status: Status) {
-        let status = self.b.ins().iconst(types::I32, i64::from(status.repr));
-        self.b.ins().return_(&[status]);
+        self.leave_at(status, self.index);
+    }
+
+    fn leave_at(&mut self, status: Status, index: u32) {
+        let result = self.result(status, index);
+        self.b.ins().return_(&[result]);
     }
 
     fn guard(&mut self, failed: Value, status: Status) {
         let exit = *self
             .exits
-            .entry(status)
+            .entry((status, self.index))
             .or_insert_with(|| self.b.create_block());
         let next = self.b.create_block();
         self.b.ins().brif(failed, exit, &[], next, &[]);
@@ -180,15 +269,27 @@ impl Emitter<'_, '_> {
     }
 
     fn instruction(&mut self, index: usize, pc: u32, instruction: &Instruction) {
-        let value = self.b.ins().iconst(types::I32, index as i64);
-        self.b
-            .ins()
-            .store(flags(), value, self.frame, offset_of!(Frame, index) as i32);
-        let value = self.b.ins().iconst(types::I32, i64::from(pc));
-        self.b
-            .ins()
-            .store(flags(), value, self.cpu, self.config.cpu.eip as i32);
-        if !instruction.internal_control {
+        self.index = index as u32;
+        self.pc = pc;
+        self.positions
+            .push((pc - self.start) | u32::from(instruction.length) << 8);
+        self.eip_stored = instruction.mentions(|v| {
+            v.space == Space::Register
+                && matches!(
+                    register(v),
+                    Register::Bytes {
+                        field: Field::Eip,
+                        ..
+                    }
+                )
+        });
+        if self.eip_stored {
+            let pc = self.b.ins().iconst(types::I32, i64::from(pc));
+            self.store_cpu32(self.config.cpu.eip, pc);
+        }
+        if instruction.internal_control {
+            self.settle();
+        } else {
             self.uniques = Uniques::Static(BTreeMap::new());
             for op in &instruction.ops {
                 self.op(op, &[], 0);
@@ -262,12 +363,12 @@ impl Emitter<'_, '_> {
                 self.write(out, value);
             }
             Op::Load { out, addr } => {
-                let addr = self.read(addr);
+                let addr = self.address(addr);
                 let value = self.guest_load(addr, out.size);
                 self.write(out, value);
             }
             Op::Store { addr, value } => {
-                let addr = self.read(addr);
+                let addr = self.address(addr);
                 let data = self.read(value);
                 self.guest_store(addr, value.size, data);
             }
@@ -294,8 +395,157 @@ impl Emitter<'_, '_> {
                 helper,
                 argument,
                 out,
-            } => self.helper(helper, argument, out),
+            } => {
+                self.settle();
+                self.helper(helper, argument, out);
+            }
+            Op::Flags { shape, ref inputs } => self.flag_record(shape, inputs),
+            Op::Cond { cond, out } => self.condition(cond, out),
         }
+    }
+
+    fn eval(&mut self, ops: &[PcodeOp], env: &mut BTreeMap<Varnode, Value>) {
+        for op in ops {
+            let inputs: Vec<_> = op
+                .inputs
+                .iter()
+                .map(|&v| {
+                    let value = match env.get(&v) {
+                        Some(&value) => value,
+                        None => self.read_plain(v),
+                    };
+                    (v.size, value)
+                })
+                .collect();
+            let value = match inputs[..] {
+                [(size, a)] => self.unary_value(op.opcode, size, a),
+                [(size, a), (b_size, b)] => self.binary_value(op.opcode, size, b_size, a, b),
+                _ => unreachable!("flag recipe {:?}", op.opcode),
+            };
+            let out = op.output.expect("flag recipe output");
+            let value = self.truncate(value, out.size);
+            env.insert(out, value);
+        }
+    }
+
+    fn expanded(&mut self, pending: &Pending) -> (Vec<PcodeOp>, BTreeMap<Varnode, Value>) {
+        let ops = self
+            .recipes
+            .expand(pending.shape, &pending.keys, &mut scratch());
+        let mut env = pending.inputs.clone();
+        self.eval(&ops, &mut env);
+        (ops, env)
+    }
+
+    fn adopt(&mut self, need: u8) {
+        if std::mem::take(&mut self.incoming) {
+            let callee = self.config.callbacks.settle;
+            let need = self.b.ins().iconst(types::I32, i64::from(need));
+            self.call_void(self.signatures.settle, callee, &[self.cpu, need]);
+        }
+    }
+
+    fn settle(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            self.adopt(ALL_FLAGS);
+            return;
+        };
+        let (ops, env) = self.expanded(&pending);
+        let mut written = Vec::new();
+        for out in ops.iter().filter_map(|op| op.output) {
+            if out.space == Space::Register && !written.contains(&out) {
+                written.push(out);
+            }
+        }
+        for out in written {
+            self.write_register(register(out), out.size, env[&out]);
+        }
+        let none = self.byte(CcOp::None.repr);
+        self.b.ins().store(
+            flags(),
+            none,
+            self.cpu,
+            self.config.cpu.cc_descriptor as i32,
+        );
+    }
+
+    fn flush(&mut self) {
+        let Some(pending) = &self.pending else {
+            return;
+        };
+        let shape = pending.shape;
+        let values: Vec<_> = pending.keys.iter().map(|v| pending.inputs[v]).collect();
+        let size = pending.keys[pending.keys.len() - 1].size;
+        let mask = cc_mask(self.recipes.defines(shape));
+        let word = i64::from(cc_op(shape).repr) | i64::from(size) << 8 | i64::from(mask) << 16;
+        let mut word = self.iconst(word);
+        if matches!(shape, FlagShape::Adc | FlagShape::Sbb) {
+            let carry = self.b.ins().band_imm(values[2], 1);
+            let carry = self.b.ins().ishl_imm(carry, 24);
+            word = self.b.ins().bor(word, carry);
+        }
+        let cpu = self.config.cpu;
+        for (offset, value) in [
+            (cpu.cc_descriptor, word),
+            (cpu.cc_a, values[0]),
+            (cpu.cc_b, values[1]),
+            (cpu.cc_res, values[values.len() - 1]),
+        ] {
+            let value = self.b.ins().ireduce(types::I32, value);
+            self.store_cpu32(offset, value);
+        }
+    }
+
+    fn pending_flag(&mut self, v: Varnode) -> Value {
+        let pending = self.pending.clone().expect("pending flags");
+        let (_, env) = self.expanded(&pending);
+        match env.get(&v) {
+            Some(&value) => value,
+            None => self.read_plain(v),
+        }
+    }
+
+    fn flag_record(&mut self, shape: FlagShape, inputs: &[Varnode]) {
+        let values: Vec<_> = inputs.iter().map(|&v| self.read(v)).collect();
+        let mask = cc_mask(self.recipes.defines(shape));
+        match &self.pending {
+            Some(old) if cc_mask(self.recipes.defines(old.shape)) & !mask != 0 => self.settle(),
+            None if mask != ALL_FLAGS => self.adopt(ALL_FLAGS & !mask),
+            _ => self.incoming = false,
+        }
+        self.pending = Some(Pending {
+            shape,
+            inputs: inputs.iter().copied().zip(values).collect(),
+            keys: inputs.to_vec(),
+        });
+    }
+
+    fn condition(&mut self, cond: Cond, out: Varnode) {
+        let mut fresh = scratch();
+        let (mut env, ops) = match self.pending.clone() {
+            Some(pending) => {
+                let ops = match self.recipes.direct(pending.shape, cond, &pending.keys, out) {
+                    Some(ops) => ops,
+                    None => {
+                        let mut ops = self
+                            .recipes
+                            .expand(pending.shape, &pending.keys, &mut fresh);
+                        ops.extend(self.recipes.condition(cond, out, &mut fresh));
+                        ops
+                    }
+                };
+                (pending.inputs, ops)
+            }
+            None => {
+                self.adopt(ALL_FLAGS);
+                (
+                    BTreeMap::new(),
+                    self.recipes.condition(cond, out, &mut fresh),
+                )
+            }
+        };
+        self.eval(&ops, &mut env);
+        self.write(out, env[&out]);
     }
 
     fn exit(&mut self, exit: Exit, target: Target, condition: Option<Varnode>) {
@@ -322,6 +572,7 @@ impl Emitter<'_, '_> {
             self.frame,
             offset_of!(Frame, target) as i32,
         );
+        self.flush();
         self.leave(status);
         match next {
             Some(next) => self.b.switch_to_block(next),
@@ -330,6 +581,7 @@ impl Emitter<'_, '_> {
     }
 
     fn call_void(&mut self, signature: SigRef, callee: usize, args: &[Value]) -> Inst {
+        self.sync();
         let callee = self.b.ins().iconst(self.ptr, callee as i64);
         self.b.ins().call_indirect(signature, callee, args)
     }
@@ -401,7 +653,7 @@ impl Emitter<'_, '_> {
     fn x87(&mut self, call: X87Call, argument: Option<Varnode>, out: Option<Varnode>) {
         let argument = match argument {
             Some(argument) => {
-                let addr = self.read(argument);
+                let addr = self.address(argument);
                 self.guest_check(addr, call.memory_bytes());
                 addr
             }
@@ -472,6 +724,10 @@ impl Emitter<'_, '_> {
     fn unary(&mut self, code: OpCode, a: Varnode) -> Value {
         let size = a.size;
         let a = self.read(a);
+        self.unary_value(code, size, a)
+    }
+
+    fn unary_value(&mut self, code: OpCode, size: u32, a: Value) -> Value {
         match code {
             OpCode::Copy | OpCode::IntZExt => a,
             OpCode::IntSExt => self.sign_extend(a, size),
@@ -495,6 +751,10 @@ impl Emitter<'_, '_> {
     fn binary(&mut self, code: OpCode, a: Varnode, b: Varnode) -> Value {
         let size = a.size;
         let (b_size, a, b) = (b.size, self.read(a), self.read(b));
+        self.binary_value(code, size, b_size, a, b)
+    }
+
+    fn binary_value(&mut self, code: OpCode, size: u32, b_size: u32, a: Value, b: Value) -> Value {
         match code {
             OpCode::IntAdd => self.b.ins().iadd(a, b),
             OpCode::IntSub => self.b.ins().isub(a, b),
@@ -679,15 +939,61 @@ impl Emitter<'_, '_> {
                 let addr = self.iconst(v.offset as i64);
                 self.guest_load(addr, v.size)
             }
-            Space::Register => self.read_register(register(v), v.size),
+            Space::Register => {
+                let register = register(v);
+                if let Register::Bytes {
+                    field: Field::Eip,
+                    byte,
+                } = register
+                {
+                    if self.eip_stored {
+                        return self.read_register(register, v.size);
+                    }
+                    let value = u64::from(self.pc) >> (byte * 8);
+                    return self.iconst((value & mask(v.size)) as i64);
+                }
+                if observes_flags(register) {
+                    if self.pending.is_some() && matches!(register, Register::SplitFlag(_)) {
+                        return self.pending_flag(v);
+                    }
+                    self.settle();
+                }
+                self.read_register(register, v.size)
+            }
             Space::Unique => self.read_unique(v),
+        }
+    }
+
+    fn address(&mut self, v: Varnode) -> Value {
+        let addr = self.read(v);
+        if v.size > 4 {
+            let wide = self
+                .b
+                .ins()
+                .icmp_imm(IntCC::UnsignedGreaterThan, addr, i64::from(u32::MAX));
+            self.guard(wide, Status::WideAddress);
+        }
+        addr
+    }
+
+    fn read_plain(&mut self, v: Varnode) -> Value {
+        match v.space {
+            Space::Const => self.iconst((v.offset & mask(v.size)) as i64),
+            Space::Register => self.read_register(register(v), v.size),
+            _ => unreachable!("flag recipe reads {v:?}"),
         }
     }
 
     fn write(&mut self, v: Varnode, value: Value) {
         let value = self.truncate(value, v.size);
         match v.space {
-            Space::Register => self.write_register(register(v), v.size, value),
+            Space::Register => {
+                let register = register(v);
+                if observes_flags(register) {
+                    self.settle();
+                }
+                self.write_register(register, v.size, value);
+            }
             Space::Unique => self.write_unique(v, value),
             Space::Ram => {
                 let addr = self.iconst(v.offset as i64);
@@ -698,11 +1004,25 @@ impl Emitter<'_, '_> {
     }
 
     fn read_unique(&mut self, v: Varnode) -> Value {
+        if let Uniques::Static(values) = &self.uniques {
+            if let Some(&(size, value)) = values.get(&v.offset) {
+                if size >= v.size {
+                    return self.truncate(value, v.size);
+                }
+            }
+        }
         let mut value = self.iconst(0);
         for i in 0..v.size {
             let offset = v.offset.wrapping_add(u64::from(i));
             let byte = match &self.uniques {
-                Uniques::Static(values) => values[&offset],
+                Uniques::Static(values) => {
+                    let (&start, &(_, whole)) = values
+                        .range(..=offset)
+                        .next_back()
+                        .filter(|(&start, &(size, _))| offset < start + u64::from(size))
+                        .expect("defined unique byte");
+                    self.byte_of(whole, offset - start)
+                }
                 Uniques::Dynamic(variables) => {
                     let (byte, defined) = variables[&offset];
                     let defined = self.b.use_var(defined);
@@ -721,7 +1041,42 @@ impl Emitter<'_, '_> {
         value
     }
 
+    fn byte_of(&mut self, value: Value, at: u64) -> Value {
+        let part = if at == 0 {
+            value
+        } else {
+            self.b.ins().ushr_imm(value, (at * 8) as i64)
+        };
+        self.b.ins().band_imm(part, 0xff)
+    }
+
     fn write_unique(&mut self, v: Varnode, value: Value) {
+        if let Uniques::Static(values) = &mut self.uniques {
+            let end = v.offset + u64::from(v.size);
+            let overlapping: Vec<_> = values
+                .range(..end)
+                .rev()
+                .take_while(|(&start, &(size, _))| start + u64::from(size) > v.offset)
+                .map(|(&start, &entry)| (start, entry))
+                .collect();
+            let mut kept = Vec::new();
+            for (start, (size, whole)) in overlapping {
+                values.remove(&start);
+                for at in (start..start + u64::from(size)).filter(|&o| o < v.offset || o >= end) {
+                    kept.push((at, whole, at - start));
+                }
+            }
+            let kept: Vec<_> = kept
+                .into_iter()
+                .map(|(at, whole, shift)| (at, (1, self.byte_of(whole, shift))))
+                .collect();
+            let Uniques::Static(values) = &mut self.uniques else {
+                unreachable!()
+            };
+            values.extend(kept);
+            values.insert(v.offset, (v.size, value));
+            return;
+        }
         for i in 0..v.size {
             let part = if i == 0 {
                 value
@@ -731,9 +1086,7 @@ impl Emitter<'_, '_> {
             let byte = self.b.ins().band_imm(part, 0xff);
             let offset = v.offset.wrapping_add(u64::from(i));
             match &mut self.uniques {
-                Uniques::Static(values) => {
-                    values.insert(offset, byte);
-                }
+                Uniques::Static(_) => unreachable!(),
                 Uniques::Dynamic(variables) => {
                     let (variable, defined) = variables[&offset];
                     self.b.def_var(variable, byte);
@@ -847,8 +1200,6 @@ impl Emitter<'_, '_> {
             Register::SplitFlag(index) => {
                 let flag = self.b.ins().band_imm(value, 1);
                 self.store_cpu32(cpu.split_flags[index], flag);
-                let misc = self.eflags_misc_without_split(0);
-                self.store_cpu32(cpu.eflags_misc, misc);
             }
             Register::EflagsBit(bit) => {
                 let misc = self.eflags_misc_without_split(1 << bit);
@@ -879,23 +1230,23 @@ impl Emitter<'_, '_> {
     }
 
     fn guest_check(&mut self, addr: Value, size: u32) {
-        let wide = self
+        let null_limit = self.config.null_limit;
+        let span = self.config.guest_size - size - null_limit;
+        let offset = self.b.ins().iadd_imm(addr, -i64::from(null_limit));
+        let outside = self
             .b
             .ins()
-            .icmp_imm(IntCC::UnsignedGreaterThan, addr, i64::from(u32::MAX));
-        self.guard(wide, Status::WideAddress);
-        let null = self.b.ins().icmp_imm(
-            IntCC::UnsignedLessThan,
-            addr,
-            i64::from(self.config.null_limit),
-        );
-        self.guard(null, Status::NullAccess);
-        let outside = self.b.ins().icmp_imm(
-            IntCC::UnsignedGreaterThan,
-            addr,
-            i64::from(self.config.guest_size - size),
-        );
-        self.guard(outside, Status::OutsideArena);
+            .icmp_imm(IntCC::UnsignedGreaterThan, offset, i64::from(span));
+        let fault = *self.faults.entry(self.index).or_insert_with(|| {
+            let block = self.b.create_block();
+            self.b.append_block_param(block, types::I64);
+            block
+        });
+        let next = self.b.create_block();
+        self.b
+            .ins()
+            .brif(outside, fault, &[BlockArg::Value(addr)], next, &[]);
+        self.b.switch_to_block(next);
     }
 
     fn guest_pointer(&mut self, addr: Value, size: u32) -> Value {

@@ -297,8 +297,15 @@ time by `runtime/reloc.cpp` before the baseline; each entry revalidates the
 guest bytes and import slots, `RECOMP_RELOC=off` restores the baseline path.
 `rk-pcode-ffi` lifts live bytes through the translator's pinned SLEIGH backend and
 shared instruction lowering, then compiles blocks of up to 16 instructions with
-Cranelift; `runtime/baseline.cpp` caches byte-validated blocks, supplies helpers
-and handles branches, calls and returns. The two sides share one `cxx` bridge
+Cranelift. Flag records store the runtime's lazy `cc_*` descriptor; conditions in
+the same block are computed from the record's operands, and flag readers, writers
+and helpers settle it first. A descriptor left by earlier code stays pending until
+a block observes it or records a partial flag set. `runtime/baseline.cpp` caches byte-validated blocks,
+supplies helpers and handles branches, calls and returns. Each block packs its exit
+status and position into its return value and remembers its fallthrough and taken
+successors; a remembered successor skips the lookup and byte check until the thread's
+link epoch advances, every 65536 blocks or when a block is replaced. Branch links are
+off while discovery or the p-code JIT is active, so jump notes and resumes still run. The two sides share one `cxx` bridge
 (`baseline/abi.rs`), whose generated header and source `tools/build.py` stages
 for the runtime. Corrected internal p-code branches are rejected when their
 relative targets cannot be preserved; unchanged sequences retain their original

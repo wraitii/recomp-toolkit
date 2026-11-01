@@ -15,6 +15,7 @@ mod x87;
 
 pub use helpers::preludes;
 pub use model::{Body, Declaration, Preludes, Requires};
+pub use support::cc_mask;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -2580,7 +2581,10 @@ impl<'a> Emitter<'a> {
                         Some(value) => self.expr(value)?,
                         None => format!("(c->mm[{reg}] >> {})", shift + byte * 8),
                     };
-                    parts.push(format!("((uint64_t)(({expr}) & 0xffu) << {})", shift + byte * 8));
+                    parts.push(format!(
+                        "((uint64_t)(({expr}) & 0xffu) << {})",
+                        shift + byte * 8
+                    ));
                 }
                 let _ = writeln!(
                     self.out,

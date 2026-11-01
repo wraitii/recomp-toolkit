@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rk_core::ir::{OpCode, Space, Varnode};
-use rk_ir::{CgOp, Op as IrOp};
+use rk_ir::{CgOp, Cond, FlagShape, Op as IrOp};
 
 use super::abi::FloatOp;
 use super::helper::Helper;
@@ -75,6 +75,14 @@ pub enum Op {
         argument: Option<Varnode>,
         out: Option<Varnode>,
     },
+    Flags {
+        shape: FlagShape,
+        inputs: Vec<Varnode>,
+    },
+    Cond {
+        cond: Cond,
+        out: Varnode,
+    },
 }
 
 pub struct Instruction {
@@ -93,6 +101,14 @@ impl Instruction {
                 ..
             })
         )
+    }
+
+    pub fn mentions(&self, test: impl Fn(Varnode) -> bool) -> bool {
+        let mut found = false;
+        for op in &self.ops {
+            op.for_each_varnode(|v| found |= test(v));
+        }
+        found
     }
 
     pub fn uniques(&self) -> BTreeSet<u64> {
@@ -130,6 +146,8 @@ impl Op {
                 condition,
             ]),
             Self::Helper { argument, out, .. } => all(&[argument, out]),
+            Self::Flags { ref inputs, .. } => inputs.iter().for_each(|v| f(*v)),
+            Self::Cond { out, .. } => f(out),
         }
     }
 }
@@ -403,6 +421,29 @@ impl Decoder {
                     a,
                     b,
                 });
+            }
+            IrOp::Flags(shape) => {
+                Self::no_output(op)?;
+                let count = if matches!(shape, FlagShape::Adc | FlagShape::Sbb) {
+                    4
+                } else {
+                    3
+                };
+                let inputs = self.inputs(op, count)?;
+                if inputs
+                    .iter()
+                    .any(|v| v.size != inputs[count - 1].size || v.size > 4)
+                {
+                    return reject(format!("{shape:?} flag operand widths are not modelled"));
+                }
+                return Ok(Op::Flags { shape, inputs });
+            }
+            IrOp::Cond(cond) => {
+                let out = self.output(op)?;
+                if out.size != 1 {
+                    return reject("condition output must be one byte");
+                }
+                return Ok(Op::Cond { cond, out });
             }
             IrOp::P(code) => code,
             other => return reject(format!("unsupported operation {other:?}")),
