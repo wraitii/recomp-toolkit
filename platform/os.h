@@ -31,6 +31,7 @@ void os_thread_exit(void);          // ends the calling thread; never returns
 // guest's threads draw every frame. A no-op where there is no such control.
 void os_thread_prefer_performance(void);
 OsThreadId os_thread_self(void);
+uint32_t os_profile_thread_id(void);
 OsThreadId os_thread_id_of(const OsThread *t);
 
 // ---------------------------------------------------------------------------

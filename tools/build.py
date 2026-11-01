@@ -962,12 +962,13 @@ def parse_args(argv, system=None):
     if args.stub and (args.config == "Debug" or args.regenerate):
         parser.error("--stub cannot be combined with --config Debug or --regenerate")
     if args.target == "run":
-        if args.game or args.game_dir or args.stub or args.no_pcode or args.regenerate:
-            parser.error("--target run uses the neutral configuration and requires p-code")
+        if args.stub or args.no_pcode or args.regenerate:
+            parser.error("--target run requires p-code and does not translate game code")
         if (system or platform.system()) == "Windows" or args.preset.startswith("windows-cross"):
             parser.error("--target run requires the desktop p-code interpreter, unavailable on Windows")
-        args.game_dir = ROOT / "tools/recomp/manual"
-        if args.build_root is None:
+        if not args.game and not args.game_dir:
+            args.game_dir = ROOT / "tools/recomp/manual"
+        if args.build_root is None and not args.game and args.game_dir == ROOT / "tools/recomp/manual":
             args.build_root = ROOT / "build/manual"
     game_config.resolve_game_args(args)
     if args.renderer_consumer or args.compositor_consumer:
@@ -1113,6 +1114,8 @@ def main():
         "-DRECOMP_OBSERVE=" + ("OFF" if args.no_observe else "ON")]
     if args.target == "run":
         defines.append("-DRECOMP_TRANSLATE=OFF")
+    elif not args.stub and args.target not in OWN_PRESET:
+        defines.append("-DRECOMP_TRANSLATE=AUTO")
     if args.translation_piece_mb is not None:
         defines.append("-DRECOMP_SPLIT_TRANSLATION=ON")
         defines.append("-DRECOMP_GEN_PIECE_BUDGET=" + str(args.translation_piece_mb * 1000000))

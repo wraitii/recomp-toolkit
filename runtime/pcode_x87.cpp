@@ -3,99 +3,41 @@
 #include <cmath>
 
 bool pcode_x87_supported(uint64_t id, const RpOp &op) {
-    return (id >> 32) == 1 && (id & 255) >= 1 && (id & 255) <= 15 && op.input_count >= 1 &&
+    return (id >> 32) == 1 && (id & 255) >= 1 && (id & 255) <= 20 && op.input_count >= 1 &&
            op.input_count <= 2 && op.inputs[0].offset == id;
 }
 
-bool pcode_x87_execute(PcodeHost &host, X86 *c, const RpOp &op, const uint64_t *args,
-                       uint64_t &result, std::string &why) {
-    unsigned kind = op.userop & 255, a = (op.userop >> 8) & 255;
-    unsigned bits = (op.userop >> 16) & 255, flags = (op.userop >> 24) & 15;
-    unsigned extra = (op.userop >> 28) & 15;
+bool pcode_x87_execute(PcodeHost &host, X86 *c, uint64_t id, uint32_t input_count,
+                       const uint64_t *args, uint64_t &result, std::string &why) {
+    unsigned kind = id & 255, a = (id >> 8) & 255;
+    unsigned bits = (id >> 16) & 255, flags = (id >> 24) & 15;
+    unsigned extra = (id >> 28) & 15;
     bool memory = (kind == 1 && a == 8) || kind == 2 || kind == 15 || (kind == 3 && a == 8) ||
                   ((kind == 4 || kind == 5) && bits);
     uint32_t addr = memory ? (uint32_t)args[0] : 0;
-    if (memory && (op.input_count != 2 || args[0] > UINT32_MAX ||
+    if (memory && (input_count != 2 || args[0] > UINT32_MAX ||
                    !host.memory_supported(args[0], bits / 8, kind == 3 || kind == 15, why))) {
         if (why.empty())
             why = "invalid x87 memory operand";
         return false;
     }
-    auto integer = [&]() -> int64_t {
-        if (bits == 16)
-            return (int16_t)rd16(addr);
-        if (bits == 32)
-            return (int32_t)rd32(addr);
-        return (int64_t)rd64(addr);
-    };
-    auto real = [&]() -> double {
-        if (bits == 32)
-            return rdf32(addr);
-        if (bits == 64)
-            return rdf64(addr);
-        return rdf80(addr);
-    };
     switch (kind) {
     case 1:
-        if (a == 8)
-            fpush(c, real());
-        else
-            fpush_st(c, a);
+        pcode_x87_push(c, a, bits, addr);
         break;
     case 2:
-        fpush_int(c, integer());
+        pcode_x87_push_integer(c, bits, addr);
         break;
     case 3:
-        if (a != 8)
-            fcopy(c, a, 0);
-        else if (extra) {
-            if (bits == 16)
-                wr16(addr, (uint16_t)fist_i16(c));
-            else if (bits == 32)
-                wr32(addr, (uint32_t)fist_i32(c));
-            else
-                wr64(addr, (uint64_t)fist_i64(c));
-        } else if (bits == 32)
-            wrf32(addr, fto_float(c, ST(c, 0)));
-        else if (bits == 64)
-            wrf64(addr, ST(c, 0));
-        else
-            wrf80(addr, ST(c, 0));
-        if (flags)
-            fdrop(c);
+        pcode_x87_store(c, a, bits, flags, extra, addr);
         break;
-    case 4: {
-        unsigned dst = a & 15, src = a >> 4;
-        double lhs = ST(c, dst),
-               rhs = bits ? ((flags & 8) ? (double)integer() : real()) : ST(c, src);
-        if (flags & 4) {
-            double t = lhs;
-            lhs = rhs;
-            rhs = t;
-        }
-        double v;
-        switch (flags & 3) {
-        case 0:
-            v = lhs + rhs;
-            break;
-        case 1:
-            v = lhs - rhs;
-            break;
-        case 2:
-            v = lhs * rhs;
-            break;
-        default:
-            v = fdivz(c, lhs, rhs);
-            break;
-        }
-        fset(c, dst, fx87(c, v));
-        for (unsigned i = 0; i < extra; ++i)
-            fdrop(c);
+    case 4:
+        pcode_x87_arithmetic(c, a, bits, flags, extra, addr);
         break;
-    }
     case 5: {
         double rhs = (flags & 4) ? 0.0
-                     : bits      ? ((flags & 2) ? (double)integer() : real())
+                     : bits      ? ((flags & 2) ? (double)pcode_x87_integer(addr, bits)
+                                                : pcode_x87_real(addr, bits))
                                  : ST(c, a);
         if (flags & 1)
             fucom(c, ST(c, 0), rhs);
@@ -159,6 +101,23 @@ bool pcode_x87_execute(PcodeHost &host, X86 *c, const RpOp &op, const uint64_t *
     }
     case 15:
         wr16(addr, fstsw(c));
+        break;
+    case 16:
+        fxam(c);
+        break;
+    case 17:
+        fset(c, 0, fprem_common(c, ST(c, 0), ST(c, 1), a));
+        break;
+    case 18:
+        fset(c, 1, fx87_exact(c, ST(c, 1) * log2(ST(c, 0))));
+        fdrop(c);
+        break;
+    case 19:
+        fset(c, 0, fx87_exact(c, fscale(ST(c, 0), ST(c, 1))));
+        break;
+    case 20:
+        fset(c, 0, fx87_exact(c, tan(ST(c, 0))));
+        fpush(c, 1.0);
         break;
     default:
         why = "unsupported x87 operation";

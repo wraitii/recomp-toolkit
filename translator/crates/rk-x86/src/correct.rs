@@ -756,7 +756,11 @@ pub(crate) fn lazy_flags(
     if carry_in {
         let carry = ops
             .iter()
-            .find(|op| op.opcode == OpCode::IntZExt && op.inputs == [flags.cf])
+            .find(|op| {
+                matches!(op.opcode, OpCode::Copy | OpCode::IntZExt)
+                    && op.inputs == [flags.cf]
+                    && op.output.is_some_and(|v| v.size == result.size)
+            })
             .and_then(|op| op.output)
             .ok_or_else(unsupported)?;
         inputs.push(carry);

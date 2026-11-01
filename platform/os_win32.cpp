@@ -202,6 +202,9 @@ void os_thread_exit(void) {
 OsThreadId os_thread_self(void) {
     return GetCurrentThreadId();
 }
+uint32_t os_profile_thread_id(void) {
+    return GetCurrentThreadId();
+}
 OsThreadId os_thread_id_of(const OsThread *t) {
     return t->id;
 }

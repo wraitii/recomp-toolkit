@@ -1,4 +1,5 @@
 #include "pcode_core.h"
+#include "pcode_numeric.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -74,23 +75,6 @@ bool is_binary(uint32_t op) {
            op == RP_OP_INT_SREM;
 }
 
-uint64_t sign_extend(uint64_t value, uint32_t size) {
-    uint32_t bits = size * 8;
-    if (bits >= 64)
-        return value;
-    return (uint64_t)((int64_t)(value << (64 - bits)) >> (64 - bits));
-}
-
-uint64_t signed_divide(uint64_t a, uint64_t b, uint32_t size, bool remainder) {
-    if (b == 0)
-        throw std::string(remainder ? "signed remainder by zero" : "signed divide by zero");
-    int64_t sa = (int64_t)sign_extend(a, size);
-    int64_t sb = (int64_t)sign_extend(b, size);
-    if (sa == INT64_MIN && sb == -1)
-        return remainder ? 0 : (uint64_t)INT64_MIN;
-    return (uint64_t)(remainder ? sa % sb : sa / sb);
-}
-
 uint64_t binary(uint32_t op, uint32_t size, uint64_t a, uint64_t b) {
     uint32_t bits = size * 8;
     uint64_t mask = width_mask(size);
@@ -107,9 +91,9 @@ uint64_t binary(uint32_t op, uint32_t size, uint64_t a, uint64_t b) {
     case RP_OP_INT_LESSEQUAL:
         return a <= b;
     case RP_OP_INT_SLESS:
-        return (int64_t)sign_extend(a, size) < (int64_t)sign_extend(b, size);
+        return (int64_t)pcode_sign_extend(a, size) < (int64_t)pcode_sign_extend(b, size);
     case RP_OP_INT_SLESSEQUAL:
-        return (int64_t)sign_extend(a, size) <= (int64_t)sign_extend(b, size);
+        return (int64_t)pcode_sign_extend(a, size) <= (int64_t)pcode_sign_extend(b, size);
     case RP_OP_INT_ADD:
         return (a + b) & mask;
     case RP_OP_INT_SUB:
@@ -127,20 +111,13 @@ uint64_t binary(uint32_t op, uint32_t size, uint64_t a, uint64_t b) {
     case RP_OP_INT_RIGHT:
         return count >= bits ? 0 : (a & mask) >> count;
     case RP_OP_INT_SRIGHT:
-        return count >= bits ? (sign_extend(a, size) >> 63 ? mask : 0)
-                             : (uint64_t)((int64_t)sign_extend(a, size) >> count) & mask;
+        return count >= bits ? (pcode_sign_extend(a, size) >> 63 ? mask : 0)
+                             : (uint64_t)((int64_t)pcode_sign_extend(a, size) >> count) & mask;
     case RP_OP_INT_DIV:
-        if (b == 0)
-            throw std::string("integer divide by zero");
-        return (a / b) & mask;
     case RP_OP_INT_REM:
-        if (b == 0)
-            throw std::string("integer remainder by zero");
-        return (a % b) & mask;
     case RP_OP_INT_SDIV:
-        return signed_divide(a, b, size, false) & mask;
     case RP_OP_INT_SREM:
-        return signed_divide(a, b, size, true) & mask;
+        return pcode_divide(op, size, a, b);
     case RP_OP_INT_CARRY:
         return a > mask - b;
     case RP_OP_INT_SCARRY: {
@@ -525,7 +502,7 @@ bool PcodeMachine::step(uint64_t &pc) {
             }
             const RpVarnode &target = op.inputs[0];
             if (target.space == RP_SPACE_CONST) {
-                int64_t rel = (int64_t)sign_extend(target.offset, target.size);
+                int64_t rel = (int64_t)pcode_sign_extend(target.offset, target.size);
                 int64_t at = (int64_t)ip + rel;
                 if (at < 0 || (size_t)at > ops.size())
                     fail("internal p-code branch outside instruction");
@@ -587,7 +564,7 @@ bool PcodeMachine::step(uint64_t &pc) {
             break;
         case RP_OP_INT_SEXT:
             load(op.inputs[0], a);
-            store(op.output, sign_extend(a, op.inputs[0].size) & width_mask(op.output.size));
+            store(op.output, pcode_sign_extend(a, op.inputs[0].size) & width_mask(op.output.size));
             break;
         case RP_OP_INT_2COMP:
             load(op.inputs[0], a);
@@ -619,29 +596,11 @@ bool PcodeMachine::step(uint64_t &pc) {
         case RP_OP_SDIVMOD: {
             load(op.inputs[0], a);
             load(op.inputs[1], b);
-            unsigned bits = (unsigned)op.inputs[2].offset * 8;
-            uint64_t mask = (1ull << bits) - 1;
-            uint64_t q, r;
-            if (!b)
-                fail("x86 division by zero");
-            if (op.opcode == RP_OP_SDIVMOD) {
-                int64_t n = (int64_t)sign_extend(a, op.inputs[0].size);
-                int64_t d = (int64_t)sign_extend(b, op.inputs[1].size);
-                if (n == INT64_MIN && d == -1)
-                    fail("x86 division quotient overflow");
-                int64_t sq = n / d;
-                int64_t limit = 1ll << (bits - 1);
-                if (sq < -limit || sq >= limit)
-                    fail("x86 division quotient overflow");
-                q = (uint64_t)sq & mask;
-                r = (uint64_t)(n % d) & mask;
-            } else {
-                q = a / b;
-                if (q > mask)
-                    fail("x86 division quotient overflow");
-                r = a % b;
+            try {
+                store(op.output, pcode_divmod(op.opcode, (uint32_t)op.inputs[2].offset, a, b));
+            } catch (const std::string &why) {
+                fail(why);
             }
-            store(op.output, q | (r << (bits == 8 ? 8 : 32)));
             break;
         }
         case RP_OP_PIECE:

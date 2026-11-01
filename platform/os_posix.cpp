@@ -32,6 +32,9 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #if !defined(__ANDROID__)
 #include <execinfo.h>
 #endif
@@ -134,6 +137,15 @@ void os_thread_exit(void) {
 }
 OsThreadId os_thread_self(void) {
     return (OsThreadId)(uintptr_t)pthread_self();
+}
+uint32_t os_profile_thread_id(void) {
+#ifdef __APPLE__
+    uint64_t id = 0;
+    pthread_threadid_np(nullptr, &id);
+    return (uint32_t)id;
+#else
+    return (uint32_t)syscall(SYS_gettid);
+#endif
 }
 OsThreadId os_thread_id_of(const OsThread *t) {
     return (OsThreadId)(uintptr_t)t->handle;

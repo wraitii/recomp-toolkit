@@ -146,11 +146,22 @@ continuing would run the guest past a point Windows never reaches.
   section table and every import RVA against the image. The separate manual
   runner uses an empty dispatch and the interpreter instead: build it with
   `python3 tools/build.py --target run`, then run
-  `build/manual/recomp/recomp-run /path/to/program.exe [arguments...]`.
+  `build/manual/recomp/recomp-run --exe /path/to/program.exe --guest-args "arguments"`.
   It supports x86 PE32 GUI and console images at their preferred base, with
   imports provided by runtime shims. Unimplemented imports fail by name only
   when called; guest DLL files are not loaded. Unsupported startup features
-  fail during loading. It runs headlessly and inherits interpreter limitations.
+  fail during loading. It uses the windowed host and inherits interpreter limitations.
+  Pass `--game <id>` to the build to use a game's memory configuration. Set
+  `RECOMP_INTERP=baseline` to execute Cranelift-compiled prefixes without interpreter
+  fallback; the default `pcode` mode selects the independent interpreter. Calls,
+  returns and internal p-code branches compile natively; division, scalar SSE and
+  native userops call shared numeric helpers. Unsupported instructions and the
+  65,536-block allocation limit stop with named diagnostics. Prefixes contain at
+  most 16 instructions. Baseline statistics are printed at normal process exit.
+  Set `RECOMP_BASELINE_VERIFY=1` to enable Cranelift verification.
+  Set `RECOMP_BASELINE_JITDUMP=1` to write finalized native blocks to a jitdump
+  file for Samply with guest instruction source mappings and a sibling `.pcode`
+  listing. Its path is printed on creation; retain both files for source viewing.
 - **`GetMessageA` blocks, and owns the wait.** It drives the multimedia
   timers, calls the host's pump, and yields the scheduler baton, round and
   round until a message matching the filter arrives. The host's pump services

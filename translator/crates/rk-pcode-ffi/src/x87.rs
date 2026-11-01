@@ -1,5 +1,5 @@
 use rk_core::ir::{OpCode, Varnode};
-use rk_ir::x87::{ArithmeticOp, X87Environment, X87Unary};
+use rk_ir::x87::{ArithmeticOp, X87Eager, X87Environment, X87Unary};
 use rk_ir::X87Op;
 
 use crate::{op_code, rp_op, RpOp};
@@ -27,6 +27,11 @@ pub fn encode(
             0,
         ),
         X87Op::Environment(X87Environment::StoreSw) => (15, 0, 16, 0, 0),
+        X87Op::Eager(X87Eager::Fxam) => (16, 0, 0, 0, 0),
+        X87Op::Remainder { ieee } => (17, ieee as u64, 0, 0, 0),
+        X87Op::Eager(X87Eager::Fyl2x) => (18, 0, 0, 0, 0),
+        X87Op::Eager(X87Eager::Fscale) => (19, 0, 0, 0, 0),
+        X87Op::Eager(X87Eager::Fptan) => (20, 0, 0, 0, 0),
         X87Op::Push { src, bits } => (1, src.map_or(8, u64::from), bits as u64, 0, 0),
         X87Op::PushInteger { bits } => (2, 0, bits as u64, 0, 0),
         X87Op::Store {

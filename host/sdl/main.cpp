@@ -2529,6 +2529,10 @@ int main(int argc, char **argv) {
     BootOptions options;
     options.name = "windowed";
     options.exe = exe.c_str();
+#ifdef RECOMP_RUN_HOST
+    options.interpreted = true;
+    options.load_mods = false;
+#endif
     // This host has a real window with real focus, so activation is
     // delivered from the events that carry it rather than synthesised.
     options.activate = false;

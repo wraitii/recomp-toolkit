@@ -10,6 +10,8 @@ use rk_ir::{CgOp, InstructionLowerer, IsaLowering, Op, SlowInsn, X87Op};
 use rk_sleigh::Lifter;
 
 mod jit;
+mod baseline;
+mod baseline_jitdump;
 mod x87;
 
 const RP_OP_DIVMOD: u32 = 70;
@@ -402,16 +404,7 @@ fn lift_one(addr: u32, bytes: &[u8]) -> Result<(u8, String, Vec<RpOp>), String> 
     Ok((length, insn.mnemonic, encoded))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rp_lift(addr: u32, data: *const u8, len: usize, out: *mut RpLift) -> i32 {
-    if out.is_null() || (data.is_null() && len != 0) {
-        return 0;
-    }
-    let bytes = if len == 0 {
-        &[][..]
-    } else {
-        slice::from_raw_parts(data, len)
-    };
+fn invalidate_lifter(addr: u32, bytes: &[u8]) {
     // SLEIGH keeps a disassembly cache keyed by address, so rewriting live bytes at a
     // previously lifted PC would otherwise return the old instruction.
     let changed = LAST.with(|last| {
@@ -430,6 +423,19 @@ pub unsafe extern "C" fn rp_lift(addr: u32, data: *const u8, len: usize, out: *m
     if changed {
         LIFTER.with(|l| *l.borrow_mut() = None);
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rp_lift(addr: u32, data: *const u8, len: usize, out: *mut RpLift) -> i32 {
+    if out.is_null() || (data.is_null() && len != 0) {
+        return 0;
+    }
+    let bytes = if len == 0 {
+        &[][..]
+    } else {
+        slice::from_raw_parts(data, len)
+    };
+    invalidate_lifter(addr, bytes);
     (*out).length = 0;
     (*out).op_count = 0;
     (*out).ops = std::ptr::null_mut();

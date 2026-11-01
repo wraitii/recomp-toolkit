@@ -144,6 +144,24 @@ int rp_lift(uint32_t addr, const uint8_t *data, size_t len, RpLift *out);
 void rp_free(RpOp *ops, uint32_t count);
 const char *rp_error(void);
 const char *rp_mnemonic(void);
+typedef struct RpBaselineBlock {
+    const void *code;
+    uint32_t count;
+    uint32_t byte_count;
+    uint8_t lengths[16];
+    uint8_t bytes[240];
+} RpBaselineBlock;
+typedef struct RpBaselineRejection {
+    uint32_t reason, opcode, length;
+    char mnemonic[48], detail[128];
+} RpBaselineRejection;
+int rp_baseline_compile(uint32_t pc, const uint8_t *data, size_t len, RpBaselineBlock *out,
+                        uint32_t gpr_offset, const uint32_t *flag_offsets, uint32_t misc_offset,
+                        uint32_t eip_offset, int (*thunk_kind)(uint32_t),
+                        RpBaselineRejection *rejection, uint64_t (*clock_ns)(void), uint32_t pid,
+                        uint32_t tid, uintptr_t guest_base, uint32_t guest_size,
+                        uint32_t null_limit, uint32_t direct_stores,
+                        uintptr_t (*x87_select)(uint64_t));
 typedef int (*RpJitCompile)(const char *input, const char *directory);
 void rp_jit_note(uint32_t target, int is_call, uint32_t base, const char *sha256,
                  RpJitCompile compile);

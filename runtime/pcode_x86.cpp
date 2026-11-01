@@ -2,12 +2,20 @@
 #include "discovery.h"
 #include "jit.h"
 #include "pcode_core.h"
+#include "pcode_numeric.h"
 #include "pcode_x87.h"
+#include "../platform/os.h"
 
+#include <algorithm>
 #include <climits>
+#include <cstddef>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -15,20 +23,73 @@
 extern "C" int recomp_thunk_target_kind(uint32_t);
 
 namespace {
-const uint32_t kMaxDepth = 64;
+const uint32_t kMaxDepth = 256;
 const uint32_t kMaxInstruction = 15;
 const uint32_t kMaxCache = 65536;
-
-thread_local unsigned g_depth;
-thread_local char g_error[512];
 
 struct Cached {
     uint8_t bytes[kMaxInstruction];
     uint8_t len;
     std::shared_ptr<PcodeInstruction> instruction;
 };
-thread_local std::unordered_map<uint32_t, Cached> g_cache;
-thread_local std::deque<uint32_t> g_cache_order;
+
+using BaselineRead = uint64_t (*)(void *, uint64_t, uint32_t);
+using BaselineWrite = void (*)(void *, uint64_t, uint32_t, uint64_t);
+struct BaselineLocation {
+    uint32_t pc, length, index;
+};
+static_assert(offsetof(BaselineLocation, length) == 4 && offsetof(BaselineLocation, index) == 8);
+using BaselineReadMemory = int (*)(void *, uint64_t, uint32_t, uint64_t *);
+using BaselineWriteMemory = int (*)(void *, uint64_t, uint32_t, uint64_t);
+using BaselineUserop = int (*)(void *, uint64_t, uint64_t, uint32_t, uint64_t *);
+using BaselineScalar = int (*)(void *, uint64_t, uint64_t, uint64_t, uint64_t *);
+using BaselineCode = int (*)(void *, BaselineRead, BaselineWrite, BaselineLocation *,
+                             BaselineReadMemory, BaselineWriteMemory, X86 *, uint64_t *,
+                             BaselineUserop, BaselineScalar);
+struct ExecutionFrame;
+struct ThreadState {
+    unsigned depth = 0;
+    char error[512]{};
+    std::unordered_map<uint32_t, Cached> cache;
+    std::deque<uint32_t> cache_order;
+    std::unordered_map<uint32_t, const RpBaselineBlock *> baseline;
+    std::vector<std::unique_ptr<RpBaselineBlock>> baseline_blocks;
+    std::vector<std::unique_ptr<ExecutionFrame>> frames;
+    uint32_t countdown = 0;
+    std::chrono::steady_clock::time_point next = std::chrono::steady_clock::now();
+    ~ThreadState();
+};
+thread_local ThreadState g_state;
+std::atomic<uint64_t> g_baseline_compiles{0}, g_baseline_hits{0};
+std::atomic<uint64_t> g_baseline_executions{0};
+std::atomic<uint64_t> g_baseline_instructions{0};
+std::atomic<uint64_t> g_baseline_compile_us{0};
+
+void baseline_report() {
+    static const auto start = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - start)
+                             .count();
+    fprintf(stdout,
+            "[recomp] baseline: elapsed_ms=%lld compiled=%llu executions=%llu instructions=%llu "
+            "cache_hits=%llu compile_us=%llu\n",
+            (long long)elapsed, (unsigned long long)g_baseline_compiles.load(),
+            (unsigned long long)g_baseline_executions.load(),
+            (unsigned long long)g_baseline_instructions.load(),
+            (unsigned long long)g_baseline_hits.load(),
+            (unsigned long long)g_baseline_compile_us.load());
+    fflush(stdout);
+}
+
+void baseline_progress(ThreadState &state) {
+    if (state.countdown++ % 65536 != 0)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < state.next)
+        return;
+    state.next = now + std::chrono::seconds(2);
+    baseline_report();
+}
 
 bool in_arena(uint32_t addr, uint32_t size) {
     return addr >= GUEST_NULL_LIMIT && size != 0 && addr < GUEST_SIZE && size <= GUEST_SIZE - addr;
@@ -80,6 +141,27 @@ int flag_bit(uint64_t offset) {
     if (offset < 0x200 || offset > 0x214 || offset == 0x20c)
         return -1;
     return (int)(offset - 0x200) + (offset > 0x20c);
+}
+
+uint32_t *split_flag(X86 *c, uint64_t offset) {
+    switch (offset) {
+    case 0x200:
+        return &c->eflags_cf;
+    case 0x202:
+        return &c->eflags_pf;
+    case 0x204:
+        return &c->eflags_af;
+    case 0x206:
+        return &c->eflags_zf;
+    case 0x207:
+        return &c->eflags_sf;
+    case 0x20a:
+        return &c->eflags_df;
+    case 0x20b:
+        return &c->eflags_of;
+    default:
+        return nullptr;
+    }
 }
 
 enum class RegisterKind : uint8_t {
@@ -150,7 +232,7 @@ RegisterKind register_kind(const RpVarnode &v, const char *&what) {
 
 class X86Host final : public PcodeHost {
   public:
-    explicit X86Host(X86 *c) : c_(c) {
+    explicit X86Host(X86 *c, ThreadState &state) : c_(c), state_(&state) {
         if (c->dynamic_return_count)
             continuation_ = c->dynamic_returns[c->dynamic_return_count - 1];
         if (in_arena(c->r[R_ESP], 4)) {
@@ -159,6 +241,14 @@ class X86Host final : public PcodeHost {
                 recomp_module_is_call_return(target))
                 continuation_ = target;
         }
+    }
+
+    ThreadState &state() const {
+        return *state_;
+    }
+
+    X86 *cpu() const {
+        return c_;
     }
 
     std::shared_ptr<PcodeInstruction> lift(uint64_t pc64, std::string &why) override {
@@ -176,8 +266,8 @@ class X86Host final : public PcodeHost {
         uint32_t available = GUEST_SIZE - pc;
         if (available > kMaxInstruction)
             available = kMaxInstruction;
-        auto it = g_cache.find(pc);
-        if (it != g_cache.end() && it->second.len <= available &&
+        auto it = state_->cache.find(pc);
+        if (it != state_->cache.end() && it->second.len <= available &&
             memcmp(it->second.bytes, g_mem + pc, it->second.len) == 0) {
             return it->second.instruction;
         }
@@ -197,18 +287,18 @@ class X86Host final : public PcodeHost {
         auto &ops = instruction->ops;
         ops.assign(raw.ops, raw.ops + raw.op_count);
         rp_free(raw.ops, raw.op_count);
-        if (it == g_cache.end()) {
-            if (g_cache.size() >= kMaxCache) {
-                g_cache.erase(g_cache_order.front());
-                g_cache_order.pop_front();
+        if (it == state_->cache.end()) {
+            if (state_->cache.size() >= kMaxCache) {
+                state_->cache.erase(state_->cache_order.front());
+                state_->cache_order.pop_front();
             }
-            g_cache_order.push_back(pc);
+            state_->cache_order.push_back(pc);
         }
         Cached cached{};
         memcpy(cached.bytes, g_mem + pc, instruction->length);
         cached.len = (uint8_t)instruction->length;
         cached.instruction = instruction;
-        g_cache[pc] = std::move(cached);
+        state_->cache[pc] = std::move(cached);
         return instruction;
     }
 
@@ -270,6 +360,13 @@ class X86Host final : public PcodeHost {
                   (UINT32_MAX >> ((4 - v.size) * 8));
             return true;
         }
+        if (kind == RegisterKind::Flag) {
+            if (uint32_t *field = split_flag(c_, v.offset)) {
+                x86_cc_settle(c_);
+                out = *field & 1u;
+                return true;
+            }
+        }
         uint32_t flags = x86_get_eflags(c_);
         if (kind == RegisterKind::Eflags) {
             out = v.size == 2 ? (flags & 0xffffu) : flags;
@@ -325,6 +422,14 @@ class X86Host final : public PcodeHost {
             c_->eflags_misc =
                 (c_->eflags_misc & ~(mask << shift)) | (((uint32_t)value & mask) << shift);
             return true;
+        }
+        if (kind == RegisterKind::Flag) {
+            if (uint32_t *field = split_flag(c_, v.offset)) {
+                x86_cc_settle(c_);
+                *field = (uint32_t)value & 1u;
+                c_->eflags_misc = (c_->eflags_misc & ~X86_EFLAGS_SPLIT) | 2u;
+                return true;
+            }
         }
         uint32_t flags = x86_get_eflags(c_);
         if (kind == RegisterKind::Eflags) {
@@ -534,7 +639,7 @@ class X86Host final : public PcodeHost {
         if (!userop_supported(op.userop, op, why))
             return false;
         if (pcode_x87_supported(op.userop, op))
-            return pcode_x87_execute(*this, c_, op, args, result, why);
+            return pcode_x87_execute(*this, c_, op.userop, op.input_count, args, result, why);
         if (op.userop == RP_USEROP_X87_EMPTY || op.userop == RP_USEROP_X87_EMPTY_RESET) {
             c_->fpu_tag = 0xffff;
             if (op.userop == RP_USEROP_X87_EMPTY_RESET)
@@ -655,7 +760,7 @@ class X86Host final : public PcodeHost {
         uint32_t target, pc;
         if (!guest_addr(target64, target, why) || !guest_addr(pc64, pc, why))
             return false;
-        if (g_depth >= kMaxDepth) {
+        if (state_->depth >= kMaxDepth) {
             why = "interpreter host recursion limit";
             return false;
         }
@@ -664,9 +769,9 @@ class X86Host final : public PcodeHost {
             return false;
         c_->eip = pc;
         const unsigned dynamic_depth = recomp_dynamic_return_push(c_, (uint32_t)expected);
-        ++g_depth;
+        ++state_->depth;
         recomp_call(c_, target);
-        --g_depth;
+        --state_->depth;
         recomp_dynamic_return_pop(c_, dynamic_depth);
         x86_cc_settle(c_);
         next_pc = c_->eip;
@@ -697,47 +802,396 @@ class X86Host final : public PcodeHost {
     }
 
     X86 *c_;
+    ThreadState *state_;
     uint32_t continuation_ = 0;
 };
 
-struct InterpreterFrame {
-    explicit InterpreterFrame(X86 *c) : host(c), machine(host) {}
-    X86Host host;
-    PcodeMachine machine;
+struct BaselineContext {
+    BaselineContext(X86Host &host, const RpBaselineBlock &block, uint32_t start)
+        : host(host), location{start, block.lengths[0], 0} {
+        why[0] = 0;
+    }
+
+    X86Host &host;
+    BaselineLocation location;
+    char why[512];
 };
 
-thread_local std::vector<std::unique_ptr<InterpreterFrame>> g_frames;
-
-void report_fault(const PcodeFault &fault) {
-    snprintf(g_error, sizeof g_error, "%s at %08llx (pc %08llx, bytes", fault.why.c_str(),
-             (unsigned long long)fault.addr, (unsigned long long)fault.pc);
-    size_t used = strlen(g_error);
-    for (uint32_t i = 0; i < fault.len && i < 15 && fault.addr < GUEST_SIZE &&
-                         i < GUEST_SIZE - fault.addr && used + 4 < sizeof g_error;
-         ++i)
-        used +=
-            snprintf(g_error + used, sizeof g_error - used, " %02x", rd8((uint32_t)fault.addr + i));
-    snprintf(g_error + used, sizeof g_error - used, ")");
+uint64_t baseline_read(void *context, uint64_t offset, uint32_t size) {
+    auto &host = static_cast<BaselineContext *>(context)->host;
+    uint64_t value = 0;
+    std::string why;
+    if (!host.read_register({RP_SPACE_REGISTER, size, offset}, value, why)) {
+        fprintf(stderr, "baseline register read: %s\n", why.c_str());
+        abort();
+    }
+    return value;
 }
-} // namespace
 
-extern "C" int pcode_interp_call(X86 *c, uint32_t target) {
-    g_error[0] = 0;
-    ++g_depth;
-    struct Leave {
-        ~Leave() {
-            --g_depth;
+void baseline_write(void *context, uint64_t offset, uint32_t size, uint64_t value) {
+    auto &host = static_cast<BaselineContext *>(context)->host;
+    std::string why;
+    if (!host.write_register({RP_SPACE_REGISTER, size, offset}, value, why)) {
+        fprintf(stderr, "baseline register write: %s\n", why.c_str());
+        abort();
+    }
+}
+
+int baseline_read_memory(void *opaque, uint64_t addr, uint32_t size, uint64_t *out) {
+    auto &context = *static_cast<BaselineContext *>(opaque);
+    std::string why;
+    if (context.host.read_memory(addr, size, *out, why))
+        return 0;
+    snprintf(context.why, sizeof context.why, "%s", why.c_str());
+    return 1;
+}
+
+int baseline_write_memory(void *opaque, uint64_t addr, uint32_t size, uint64_t value) {
+    auto &context = *static_cast<BaselineContext *>(opaque);
+    std::string why;
+    if (context.host.write_memory(addr, size, value, why))
+        return 0;
+    snprintf(context.why, sizeof context.why, "%s", why.c_str());
+    return 1;
+}
+
+int baseline_userop(void *opaque, uint64_t id, uint64_t argument, uint32_t input_count,
+                    uint64_t *output) {
+    auto &context = *static_cast<BaselineContext *>(opaque);
+    try {
+        RpOp op{};
+        op.opcode = RP_OP_CALLOTHER;
+        op.has_userop = 1;
+        op.userop = id;
+        op.input_count = input_count;
+        op.inputs[0] = {RP_SPACE_CONST, 8, id};
+        std::string why;
+        if (context.host.execute_userop(op, &argument, *output, why))
+            return 0;
+        snprintf(context.why, sizeof context.why, "%s", why.c_str());
+    } catch (const std::exception &error) {
+        snprintf(context.why, sizeof context.why, "native userop exception: %s", error.what());
+    } catch (const std::string &why) {
+        snprintf(context.why, sizeof context.why, "%s", why.c_str());
+    }
+    return 1;
+}
+
+int baseline_scalar(void *opaque, uint64_t descriptor, uint64_t a, uint64_t b, uint64_t *out) {
+    auto &context = *static_cast<BaselineContext *>(opaque);
+    uint32_t opcode = descriptor & 255, size = (descriptor >> 8) & 255;
+    std::string why;
+    try {
+        if (opcode == RP_OP_DIVMOD || opcode == RP_OP_SDIVMOD) {
+            *out = pcode_divmod(opcode, (uint32_t)(descriptor >> 32), a, b);
+            return 0;
         }
-    } leave;
+        if (opcode >= RP_OP_INT_DIV && opcode <= RP_OP_INT_SREM) {
+            try {
+                *out = pcode_divide(opcode, size, a, b);
+            } catch (const std::string &reason) {
+                throw std::string("division: ") + reason;
+            }
+            if ((opcode != RP_OP_INT_DIV && opcode != RP_OP_INT_SDIV) ||
+                context.host.check_division_result(opcode, size, *out, why))
+                return 0;
+        } else {
+            RpOp op{};
+            op.opcode = opcode;
+            op.has_output = 1;
+            op.output.size = (descriptor >> 16) & 255;
+            op.input_count = (descriptor >> 24) & 255;
+            for (uint32_t i = 0; i < op.input_count; ++i)
+                op.inputs[i].size = size;
+            if (context.host.float_supported(op, why) &&
+                context.host.execute_float(op, a, b, *out, why))
+                return 0;
+        }
+    } catch (const std::string &reason) {
+        why = reason;
+    } catch (const std::exception &error) {
+        why = error.what();
+    }
+    snprintf(context.why, sizeof context.why, "%s", why.c_str());
+    return 1;
+}
+
+template <unsigned Kind, unsigned Bits, unsigned Flags>
+int baseline_x87_special(void *opaque, uint64_t argument, uint32_t operand) {
+    auto &context = *static_cast<BaselineContext *>(opaque);
+    if constexpr (Bits != 0) {
+        if (argument > UINT32_MAX) {
+            snprintf(context.why, sizeof context.why, "invalid x87 memory operand");
+            return 1;
+        }
+        if (argument < GUEST_NULL_LIMIT) {
+            snprintf(context.why, sizeof context.why, "guest memory access below null-page limit");
+            return 1;
+        }
+        if (!in_arena((uint32_t)argument, Bits / 8)) {
+            snprintf(context.why, sizeof context.why,
+                     "guest memory access outside arena (page permissions are not modelled)");
+            return 1;
+        }
+    }
+    try {
+        X86 *c = context.host.cpu();
+        unsigned a = operand & 255, extra = operand >> 8;
+        if constexpr (Kind == 1)
+            pcode_x87_push(c, Bits ? 8 : a, Bits, (uint32_t)argument);
+        else if constexpr (Kind == 2)
+            pcode_x87_push_integer(c, Bits, (uint32_t)argument);
+        else if constexpr (Kind == 3)
+            pcode_x87_store(c, Bits ? 8 : a, Bits, Flags & 1, Flags >> 1, (uint32_t)argument);
+        else
+            pcode_x87_arithmetic(c, Bits ? 0 : a, Bits, Flags, extra, (uint32_t)argument);
+        return 0;
+    } catch (const std::exception &error) {
+        snprintf(context.why, sizeof context.why, "x87 helper exception: %s", error.what());
+    } catch (...) {
+        snprintf(context.why, sizeof context.why, "x87 helper exception");
+    }
+    return 1;
+}
+
+using BaselineX87Special = int (*)(void *, uint64_t, uint32_t);
+
+template <unsigned Kind, unsigned Bits> BaselineX87Special baseline_x87_flags(unsigned flags) {
+    if constexpr (Kind == 1 || Kind == 2)
+        return baseline_x87_special<Kind, Bits, 0>;
+    if constexpr (Kind == 3) {
+        static constexpr BaselineX87Special choices[] = {
+            baseline_x87_special<Kind, Bits, 0>, baseline_x87_special<Kind, Bits, 1>,
+            baseline_x87_special<Kind, Bits, 2>, baseline_x87_special<Kind, Bits, 3>};
+        return choices[flags];
+    } else if constexpr (Kind == 4) {
+        static constexpr BaselineX87Special choices[] = {
+            baseline_x87_special<Kind, Bits, 0>,  baseline_x87_special<Kind, Bits, 1>,
+            baseline_x87_special<Kind, Bits, 2>,  baseline_x87_special<Kind, Bits, 3>,
+            baseline_x87_special<Kind, Bits, 4>,  baseline_x87_special<Kind, Bits, 5>,
+            baseline_x87_special<Kind, Bits, 6>,  baseline_x87_special<Kind, Bits, 7>,
+            baseline_x87_special<Kind, Bits, 8>,  baseline_x87_special<Kind, Bits, 9>,
+            baseline_x87_special<Kind, Bits, 10>, baseline_x87_special<Kind, Bits, 11>,
+            baseline_x87_special<Kind, Bits, 12>, baseline_x87_special<Kind, Bits, 13>,
+            baseline_x87_special<Kind, Bits, 14>, baseline_x87_special<Kind, Bits, 15>};
+        return choices[flags];
+    }
+    return nullptr;
+}
+
+template <unsigned Kind> BaselineX87Special baseline_x87_width(unsigned bits, unsigned flags) {
+    switch (bits) {
+    case 0:
+        return baseline_x87_flags<Kind, 0>(flags);
+    case 16:
+        return baseline_x87_flags<Kind, 16>(flags);
+    case 32:
+        return baseline_x87_flags<Kind, 32>(flags);
+    case 64:
+        return baseline_x87_flags<Kind, 64>(flags);
+    case 80:
+        return baseline_x87_flags<Kind, 80>(flags);
+    default:
+        return nullptr;
+    }
+}
+
+uintptr_t baseline_x87_select(uint64_t id) {
+    unsigned kind = id & 255, bits = (id >> 16) & 255, flags = (id >> 24) & 15;
+    unsigned extra = (id >> 28) & 15;
+    BaselineX87Special result = nullptr;
+    switch (kind) {
+    case 1:
+        result = baseline_x87_width<1>(bits, 0);
+        break;
+    case 2:
+        result = baseline_x87_width<2>(bits, 0);
+        break;
+    case 3:
+        result = baseline_x87_width<3>(bits, flags | (extra << 1));
+        break;
+    case 4:
+        result = baseline_x87_width<4>(bits, flags);
+        break;
+    }
+    return reinterpret_cast<uintptr_t>(result);
+}
+
+int baseline_step(X86Host &host, uint64_t &pc) {
+    if (pc > UINT32_MAX || !in_arena((uint32_t)pc, 1))
+        throw PcodeFault{"baseline instruction address outside arena", pc, pc, 0};
+    auto &state = host.state();
+    uint32_t start = (uint32_t)pc;
+    uint32_t available = GUEST_SIZE - start;
+    auto it = state.baseline.find(start);
+    for (;;) {
+        if (it == state.baseline.end()) {
+            RpBaselineRejection rejection{};
+            auto block = std::make_unique<RpBaselineBlock>();
+            const auto time = std::chrono::steady_clock::now();
+            const uint32_t flag_offsets[] = {offsetof(X86, eflags_cf), offsetof(X86, eflags_pf),
+                                             offsetof(X86, eflags_af), offsetof(X86, eflags_zf),
+                                             offsetof(X86, eflags_sf), offsetof(X86, eflags_df),
+                                             offsetof(X86, eflags_of)};
+            static const bool jitdump = [] {
+                const char *value = getenv("RECOMP_BASELINE_JITDUMP");
+                return value && strcmp(value, "1") == 0;
+            }();
+            int result = rp_baseline_compile(
+                start, g_mem + start, available, block.get(), offsetof(X86, r), flag_offsets,
+                offsetof(X86, eflags_misc), offsetof(X86, eip), recomp_thunk_target_kind,
+                &rejection, os_monotonic_ns, jitdump ? (uint32_t)os_process_id() : 0,
+                jitdump ? os_profile_thread_id() : 0, reinterpret_cast<uintptr_t>(g_mem),
+                GUEST_SIZE, GUEST_NULL_LIMIT, !RECOMP_STORE_HOOKS, baseline_x87_select);
+            g_baseline_compile_us += std::chrono::duration_cast<std::chrono::microseconds>(
+                                         std::chrono::steady_clock::now() - time)
+                                         .count();
+            if (result < 0) {
+                const char *error = rp_error();
+                throw std::string("baseline compilation failed: ") +
+                    (error ? error : "unknown error");
+            }
+            if (result != 1) {
+                char why[320];
+                snprintf(why, sizeof why, "baseline cannot compile %s: %s (reason %u, pcode %u)",
+                         rejection.mnemonic[0] ? rejection.mnemonic : "instruction",
+                         rejection.reason == 6 ? "native block allocation limit reached"
+                         : rejection.detail[0] ? rejection.detail
+                                               : "unsupported operation or operand shape",
+                         rejection.reason, rejection.opcode);
+                throw PcodeFault{why, start, start, rejection.length};
+            }
+            ++g_baseline_compiles;
+            const auto *compiled = block.get();
+            state.baseline_blocks.push_back(std::move(block));
+            if (state.baseline.size() >= kMaxCache)
+                state.baseline.clear();
+            it = state.baseline.insert_or_assign(start, compiled).first;
+        } else {
+            ++g_baseline_hits;
+        }
+        if (memcmp(it->second->bytes, g_mem + start, it->second->byte_count) == 0)
+            break;
+        state.baseline.erase(it);
+        it = state.baseline.end();
+    }
+    const RpBaselineBlock &block = *it->second;
+    ++g_baseline_executions;
+    BaselineContext context{host, block, start};
+    x86_cc_settle(host.cpu());
+    auto code = reinterpret_cast<BaselineCode>(const_cast<void *>(block.code));
+    uint64_t result[3]{};
+    int status =
+        code(&context, baseline_read, baseline_write, &context.location, baseline_read_memory,
+             baseline_write_memory, host.cpu(), result, baseline_userop, baseline_scalar);
+    g_baseline_instructions += context.location.index + 1;
+    if (status == 3) {
+        bool handled = false;
+        std::string why;
+        if (!host.external_branch(result[0], context.location.pc, pc, handled, why))
+            throw PcodeFault{why, context.location.pc, context.location.pc,
+                             context.location.length};
+        return handled ? -1 : 1;
+    }
+    if (status == 8) {
+        bool handled = false;
+        std::string why;
+        if (!host.call(result[0], context.location.pc, pc, handled, why))
+            throw PcodeFault{why, context.location.pc, context.location.pc,
+                             context.location.length};
+        return handled ? -1 : 1;
+    }
+    if (status == 9) {
+        std::string why;
+        if (!host.return_to(result[0], context.location.pc, why))
+            throw PcodeFault{why, context.location.pc, context.location.pc,
+                             context.location.length};
+        return -1;
+    }
+    if (status == 10 || status == 11)
+        throw PcodeFault{status == 10 ? "undefined unique read"
+                                      : "p-code operation budget exhausted",
+                         context.location.pc, context.location.pc, context.location.length};
+    if (status == 7)
+        throw PcodeFault{"guest address exceeds 32 bits", context.location.pc, context.location.pc,
+                         context.location.length};
+    if (status == 5 || status == 6)
+        throw PcodeFault{
+            status == 5 ? "guest memory access below null-page limit"
+                        : "guest memory access outside arena (page permissions are not modelled)",
+            context.location.pc, context.location.pc, context.location.length};
+    if (status == 2)
+        throw PcodeFault{context.why, context.location.pc, context.location.pc,
+                         context.location.length};
+    if (status != 0)
+        throw std::string("baseline returned invalid status");
+    static std::atomic<bool> reported{false};
+    if (!reported.load(std::memory_order_relaxed) && !reported.exchange(true)) {
+        fprintf(stderr,
+                "[recomp] baseline: first native block completed at %08x (%u instructions)\n",
+                start, block.count);
+        fflush(stderr);
+    }
+    pc = uint64_t(context.location.pc) + context.location.length;
+    return true;
+}
+
+struct ExecutionFrame {
+    explicit ExecutionFrame(X86 *c, ThreadState &state) : host(c, state) {}
+    X86Host host;
+    std::unique_ptr<PcodeMachine> interpreter;
+};
+
+ThreadState::~ThreadState() = default;
+
+void report_fault(ThreadState &state, const PcodeFault &fault) {
+    snprintf(state.error, sizeof state.error, "%s at %08llx (pc %08llx, bytes", fault.why.c_str(),
+             (unsigned long long)fault.addr, (unsigned long long)fault.pc);
+    size_t used = strlen(state.error);
+    for (uint32_t i = 0; i < fault.len && i < 15 && fault.addr < GUEST_SIZE &&
+                         i < GUEST_SIZE - fault.addr && used + 4 < sizeof state.error;
+         ++i)
+        used += snprintf(state.error + used, sizeof state.error - used, " %02x",
+                         rd8((uint32_t)fault.addr + i));
+    snprintf(state.error + used, sizeof state.error - used, ")");
+}
+template <bool Baseline> int execute_call(X86 *c, uint32_t target) {
+    auto &state = g_state;
+    state.error[0] = 0;
+    ++state.depth;
+    struct Leave {
+        ThreadState &state;
+        ~Leave() {
+            --state.depth;
+        }
+    } leave{state};
     x86_cc_settle(c);
-    if (g_frames.size() <= g_depth)
-        g_frames.resize(g_depth + 1);
-    if (!g_frames[g_depth])
-        g_frames[g_depth] = std::make_unique<InterpreterFrame>(c);
-    auto &frame = *g_frames[g_depth];
-    frame.host = X86Host(c);
+    if (state.frames.size() <= state.depth)
+        state.frames.resize(state.depth + 1);
+    if (!state.frames[state.depth])
+        state.frames[state.depth] = std::make_unique<ExecutionFrame>(c, state);
+    auto &frame = *state.frames[state.depth];
+    frame.host = X86Host(c, state);
     auto &host = frame.host;
-    auto &machine = frame.machine;
+    if constexpr (!Baseline) {
+        if (!frame.interpreter)
+            frame.interpreter = std::make_unique<PcodeMachine>(host);
+    }
+    static const bool announced = [] {
+        if constexpr (!Baseline) {
+            fprintf(stderr, "[recomp] execution backend: p-code interpreter\n");
+            return false;
+        }
+        const char *verify = getenv("RECOMP_BASELINE_VERIFY");
+        fprintf(stderr,
+                "[recomp] execution backend: Cranelift baseline "
+                "(verifier %s)\n",
+                verify && strcmp(verify, "1") == 0 ? "on" : "off");
+        baseline_report();
+        std::atexit(baseline_report);
+        return true;
+    }();
+    (void)announced;
     uint64_t pc = target;
     try {
         for (;;) {
@@ -747,21 +1201,37 @@ extern "C" int pcode_interp_call(X86 *c, uint32_t target) {
                 return 1;
             }
             host.checkpoint(pc);
-            if (!machine.step(pc))
-                return 1;
+            if constexpr (Baseline) {
+                baseline_progress(state);
+                if (baseline_step(host, pc) < 0)
+                    return 1;
+            } else {
+                if (!frame.interpreter->step(pc))
+                    return 1;
+            }
         }
     } catch (const PcodeFault &fault) {
         c->eip = fault.pc;
-        report_fault(fault);
+        report_fault(state, fault);
         return -1;
     } catch (const std::string &why) {
         PcodeFault fault{why, pc, pc, 0};
         c->eip = pc;
-        report_fault(fault);
+        report_fault(state, fault);
         return -1;
     }
 }
 
+} // namespace
+
+extern "C" int pcode_interp_call(X86 *c, uint32_t target) {
+    return execute_call<false>(c, target);
+}
+
+extern "C" int pcode_baseline_call(X86 *c, uint32_t target) {
+    return execute_call<true>(c, target);
+}
+
 extern "C" const char *pcode_interp_last_error(void) {
-    return g_error;
+    return g_state.error;
 }
