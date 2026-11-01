@@ -69,10 +69,7 @@ diagnostics. When running `runtime_tests --startup-contracts` directly, set
 
 `tools/recomp/diff/run.py` compares translated game functions with Unicorn, and
 with `--mode paired` compares the production specialization-enabled and forced
-ordinary variants on each shared input; see `AGENTS.md`. The function corpus
-(`tools/build.py --function-corpus`) compares the
-eager and SSA translations of real game functions; see its
-[README](../tools/recomp/corpus/README.md).
+ordinary variants on each shared input; see `AGENTS.md`.
 
 Diff reports include separate ordinary/original, specialized/original and
 ordinary/specialized findings, with the first failing input and iteration.
@@ -99,7 +96,7 @@ inputs that read empty x87 slots. Unicorn does not reliably report the x87 stack
 fault bit, so the harness also checks operand tags before each instruction.
 Ordinary/specialized comparisons still include every tracked flag. Accepted
 binary32 exponent-range and extended-precision differences remain visible in
-original-byte comparisons; see [historical IR tradeoffs](../tools/recomp/Deprecated.md#scalar-x87).
+original-byte comparisons.
 
 `--mode paired` compares the production specialization-enabled and forced
 ordinary variants within a run; `pair` contains those discrepancies and `oracle`

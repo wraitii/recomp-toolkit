@@ -1562,7 +1562,7 @@ def install(request, storage, prepared=None):
                    "temporaryEnvironmentRoots": {key: value.relative_to(root).as_posix()
                                                    for key, value in isolated_paths.items()}})
         run([sys.executable, str(KIT / "tools/build.py"), "--game", game_id,
-             "--build-root", str(build_root), "--regenerate", "--no-emission-cache", "--no-observe",
+             "--build-root", str(build_root), "--regenerate", "--no-observe",
              "--target", "app"], log_path,
             build_monitor={"root": staging, "volume": root,
                            "baselineBytes": monitor_baseline}, env=isolated_env)

@@ -79,7 +79,11 @@ set(ENTRY_FIXTURE_SOURCES
 add_custom_command(
   OUTPUT ${ENTRY_FIXTURE_SOURCES} ${ENTRY_FIXTURE_DIR}/body.h ${ENTRY_FIXTURE_DIR}/fixture_overrides.h
   COMMAND ${Python3_EXECUTABLE} ${RECOMP_ROOT}/tools/recomp/tests/gen_entry_fixture.py ${ENTRY_FIXTURE_DIR}
-  DEPENDS ${RECOMP_ROOT}/tools/recomp/tests/gen_entry_fixture.py ${RECOMP_ROOT}/tools/recomp/output.py
+  DEPENDS ${RECOMP_ROOT}/tools/recomp/tests/gen_entry_fixture.py
+          ${RECOMP_ROOT}/translator/crates/rk-output/templates/body_header.h
+          ${RECOMP_ROOT}/translator/crates/rk-output/templates/entry_includes.c
+          ${RECOMP_ROOT}/translator/crates/rk-output/templates/entry_prelude.c
+          ${RECOMP_ROOT}/translator/crates/rk-output/templates/entry_dispatch.c
   COMMENT "Generating stable-entry dispatch fixture"
   VERBATIM)
 foreach(entry_test entry_dispatch_tests entry_dispatch_nohooks_tests)

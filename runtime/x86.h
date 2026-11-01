@@ -1,6 +1,6 @@
 /* x86.h - guest CPU state and instruction helpers for the static recompiler.
  *
- * Used by the code tools/recomp/driver.py generates.  The generated C in
+ * Used by generated code.  The generated C in
  * build/recomp/gen/ includes this header, and so does the runtime in
  * runtime/.  Field names are fixed by the m1-recomp plan's
  * "Global constraints" section; do not rename them.

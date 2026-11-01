@@ -578,51 +578,6 @@ def code_map_files(cfg, key):
     return files + [Path(exe)]
 
 
-def translation_fingerprints(cfg, build_root=None):
-    if cfg.get("translate_engine") == "rust":
-        return rust_translation_fingerprints(cfg, build_root)
-    return python_translation_fingerprints(cfg)
-
-
-def python_translation_fingerprints(cfg):
-    """Per-image hashes of everything that can change that image's translated sources.
-
-    Each image owns its executable, code map and translation settings. Runtime
-    layout values such as the heap range are absent: they steer the build, not
-    the generated C. Adding an auxiliary module therefore leaves the main
-    image's fingerprint alone, and a partial regeneration updates only the
-    images it actually emits."""
-    from emission_cache import identity, source_revisions
-    from settings import Settings
-
-    def stable(value):
-        if isinstance(value, Path):
-            return value.as_posix()
-        if isinstance(value, bytes):
-            return value.hex()
-        if isinstance(value, dict):
-            return {key: stable(item) for key, item in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [stable(item) for item in value]
-        return value
-
-    translation_game = {key: cfg["game"][key] for key in ("image_base", "entry_point", "sha256")}
-    config = dict(cfg)
-    config["game"] = translation_game
-    images = {"main": None}
-    images.update({module["key"]: module["key"] for module in cfg["aux_modules"]})
-    finalization = json.dumps(source_revisions()["finalization"], sort_keys=True).encode()
-    fingerprints = {}
-    for key, module in images.items():
-        settings = Settings(config, module=module)
-        settings.module = stable(settings.module)
-        h = hashlib.sha256(b"recomp-translate-v3\n" + finalization + b"\0" + identity(settings).encode())
-        for path in (ROOT / "tools/game_config.py", ROOT / "tools/gen_game_config.py"):
-            h.update(path.relative_to(ROOT).as_posix().encode() + b"\0" + path.read_bytes())
-        fingerprints[key] = h.hexdigest()
-    return fingerprints
-
-
 STAMP_FORMAT = 2
 
 
@@ -819,28 +774,6 @@ def run_rust_translator(stage, cfg, build_root, aux_modules=(), main=True, reloc
         subprocess.run(command, cwd=ROOT, check=True)
 
 
-def run_translator(stage, game_dir, build_root, aux_modules=(), regen_functions=(), main=True,
-                   cache_emission=True, cfg=None, reloc_only=False):
-    if cfg is not None and cfg["translate_engine"] == "rust":
-        return run_rust_translator(stage, cfg, build_root, aux_modules, main, reloc_only)
-    if main:
-        command = [sys.executable, str(ROOT / "tools/recomp/driver.py"), "--out", str(stage),
-                   "--game", str(game_dir),
-                   "--report", str(Path(build_root) / "recomp/translate-report.json")]
-        if cache_emission or regen_functions:
-            command += ["--emission-cache", str(Path(build_root) / "recomp/emission-cache")]
-        for function in regen_functions:
-            command += ["--regen-function", function]
-        subprocess.run(command, cwd=ROOT, check=True)
-    for module in aux_modules:
-        destination = Path(stage) / ("aux-" + module["key"])
-        destination.mkdir()
-        command = [sys.executable, str(ROOT / "tools/recomp/driver.py"), "--out", str(destination),
-                   "--game", str(game_dir), "--module", module["key"],
-                   "--report", str(Path(build_root) / ("recomp/translate-%s-report.json" % module["key"]))]
-        subprocess.run(command, cwd=ROOT, check=True)
-
-
 def web_site(game_dir, build_root, preset, cfg):
     """The launcher page with this game's web build beside it, ready to serve."""
     site = Path(build_root) / (preset + "-site")
@@ -854,23 +787,6 @@ def parse_args(argv, system=None):
     parser.add_argument("--regenerate", nargs="?", const="all", default=None, metavar="MODULES",
                         help="Regenerate translated C: all images, or only the named auxiliary modules "
                              "(comma-separated; 'main' names the game image, 'reloc' the relocatable templates)")
-    parser.add_argument("--engine", choices=("python", "rust"), default=None,
-                        help="Translator to regenerate with (default: [translate] engine, else rust)")
-    parser.add_argument("--no-emission-cache", action="store_true",
-                        help="Disable prepared-body reuse and selected-function regeneration")
-    parser.add_argument("--regen-function", action="append", default=[], metavar="HEX_ADDR",
-                        help="Re-emit selected functions from validated whole-image preparation")
-    parser.add_argument("--cache-emission", action="store_true",
-                        help="Cache prepared graphs for incremental and selected-function regeneration (default)")
-    parser.add_argument("--function-corpus", type=Path, metavar="MANIFEST",
-                        help="Build/check/report a game-owned native-reference function corpus")
-    parser.add_argument("--corpus-checks", type=int, default=4096)
-    parser.add_argument("--corpus-asan", action="store_true",
-                        help="Build the corpus with AddressSanitizer; correctness only (needs --corpus-trial-ms 0)")
-    parser.add_argument("--corpus-trial-ms", type=float, default=10.0,
-                        help="Time budget per eager trial in milliseconds; each row's call count is "
-                             "calibrated once to fill it. Zero runs correctness/size only")
-    parser.add_argument("--corpus-trials", type=int, default=9)
     parser.add_argument("--target", choices=sorted(TARGETS), default="app")
     parser.add_argument("--renderer-cargo-target", default="", metavar="TRIPLE",
                         help="Explicit native Cargo target triple for the renderer")
@@ -919,25 +835,22 @@ def parse_args(argv, system=None):
                         help="Android: push the configured game install minus [bundle].exclude before launch")
     parser.add_argument("--console", action="store_true", help="After launching on the device, stream its console")
     args = parser.parse_args(argv)
-    if args.stack_return_report and any((args.regenerate, args.regen_function, args.diff_harness,
-                                         args.translator_harness, args.function_corpus, args.stub,
+    if args.stack_return_report and any((args.regenerate, args.diff_harness,
+                                         args.translator_harness, args.stub,
                                          args.produce_analysis_facts, args.target != "app")):
         parser.error("--stack-return-report is an isolated offline mode")
     if args.translator_harness:
         if not args.translator_gen or not args.harness_out:
             parser.error("--translator-harness requires --translator-gen and --harness-out")
-        if any((args.stub, args.regenerate, args.function_corpus, args.diff_harness,
+        if any((args.stub, args.regenerate, args.diff_harness,
                 args.produce_analysis_facts, args.config != "Release")):
             parser.error("--translator-harness is isolated; it cannot be combined with other build modes")
         return args, parser
-    if args.produce_analysis_facts and any((args.regenerate, args.regen_function, args.diff_harness,
-                                          args.function_corpus, args.stub, args.target != "app")):
+    if args.produce_analysis_facts and any((args.regenerate, args.diff_harness,
+                                          args.stub, args.target != "app")):
         parser.error("--produce-analysis-facts is an isolated offline mode")
     if not args.produce_analysis_facts and any((args.analysis_observation, args.analysis_report, args.analysis_compare)):
         parser.error("--analysis-* options require --produce-analysis-facts")
-    args.cache_emission = args.cache_emission or not args.no_emission_cache
-    if not args.cache_emission and args.regen_function:
-        parser.error("--regen-function requires the emission cache")
     if args.push_game and (args.target != "android" or args.no_install):
         parser.error("--push-game requires --target android without --no-install")
     if args.target == "ios" and not args.stub and not args.team:
@@ -957,8 +870,8 @@ def parse_args(argv, system=None):
     if args.renderer_consumer or args.compositor_consumer:
         if args.jobs < 1:
             parser.error("--jobs must be at least 1")
-        if any((args.regenerate, args.regen_function, args.stub, args.diff_harness,
-                args.translator_harness, args.function_corpus, args.stack_return_report,
+        if any((args.regenerate, args.stub, args.diff_harness,
+                args.translator_harness, args.stack_return_report,
                 args.produce_analysis_facts, args.target != "app", args.config != "Release")):
             parser.error("--renderer-consumer is an isolated Release build mode")
         return args, parser
@@ -974,19 +887,12 @@ def parse_args(argv, system=None):
         parser.error("--jobs must be at least 1")
     if args.translation_piece_mb is not None and args.translation_piece_mb < 1:
         parser.error("--translation-piece-mb must be at least 1")
-    if args.function_corpus and any((args.regenerate, args.stub,
-                                      args.config != "Release", args.target != "app")):
-        parser.error("--function-corpus is an isolated native Release build mode")
     if args.harness_out and not args.diff_harness:
         parser.error("--harness-out requires --diff-harness")
-    if args.diff_harness and any((args.stub, args.regenerate, args.function_corpus,
+    if args.diff_harness and any((args.stub, args.regenerate,
                                  args.target != "app", args.config != "Release")):
         parser.error("--diff-harness is isolated; it cannot be combined with --stub, "
-                     "--regenerate, --function-corpus, another target or Debug")
-    if args.corpus_asan and not args.function_corpus:
-        parser.error("--corpus-asan requires --function-corpus")
-    if args.corpus_asan and args.corpus_trial_ms != 0:
-        parser.error("--corpus-asan is a correctness build; pass --corpus-trial-ms 0")
+                     "--regenerate, another target or Debug")
     return args, parser
 
 
@@ -1034,7 +940,7 @@ def main():
                     command += ["--frames", str(args.compositor_frames)]
                 subprocess.run(command, check=True)
         return
-    if not args.function_corpus and not args.translator_harness:
+    if not args.translator_harness:
         status = subprocess.call([sys.executable, str(ROOT / "tools/check_flag_state.py")])
         if status:
             sys.exit(status)
@@ -1056,17 +962,7 @@ def main():
         with buildlock.BuildLock(args.build_root.parent, "tools/build.py --diff-harness"):
             build_diff_harness(args.build_root, out)
         return
-    if args.function_corpus:
-        from corpus.run import run_corpus
-        with buildlock.BuildLock(args.build_root.parent, "tools/build.py --function-corpus"):
-            run_corpus(args.function_corpus, args.game_dir, args.build_root / "function-corpus",
-                       cmake_tool("cmake"), args.jobs, args.corpus_checks,
-                       args.corpus_trial_ms, args.corpus_trials, asan=args.corpus_asan)
-        return
     cfg = game_config.load(args.game_dir, args.build_root)
-    cfg["translate_engine"] = args.engine or cfg["translate"].get("engine", "rust")
-    if cfg.get("reloc") and cfg["translate_engine"] != "rust":
-        parser.error("[reloc] requires the Rust translator; --engine python is unsupported")
     if args.stack_return_report:
         with buildlock.BuildLock(args.build_root.parent, "tools/build.py --stack-return-report"):
             subprocess.run([str(rust_translator(args.build_root)),
@@ -1078,12 +974,6 @@ def main():
         with buildlock.BuildLock(args.build_root.parent, "tools/build.py --produce-analysis-facts"):
             run_analysis(args, cfg, args.build_root)
         return
-    if args.regen_function and cfg["translate_engine"] == "rust":
-        parser.error("--regen-function is not available with the Rust translator")
-    if args.regen_function:
-        args.regenerate = "all"
-        if cfg["aux_modules"]:
-            parser.error("selected regeneration currently requires an image without auxiliary modules")
     if args.regenerate and not cfg["developer_exe_path"].is_file():
         parser.error("Prepare your own game installation with tools/setup.py first")
     preset = preset_name(args.preset, args.config, stub=args.stub, target=args.target)
@@ -1108,34 +998,20 @@ def main():
                 selection = regenerate_selection(args.regenerate, cfg, parser)
                 if cfg.get("reloc") and (selection is None or "main" in selection or "reloc" in selection):
                     run_reloc_extractor(cfg)
-                fingerprints = translation_fingerprints(cfg, args.build_root)
+                fingerprints = rust_translation_fingerprints(cfg, args.build_root)
                 stamp = args.build_root / "recomp/translate.stamp"
                 stamped = read_translation_stamp(stamp)
                 translated = (args.build_root / "recomp/gen/table.c").is_file()
-                if args.regen_function:
-                    if not translated or selection is not None:
-                        parser.error("--regen-function needs an existing translation and --regenerate all")
-                    def regenerate_selected(stage):
-                        shutil.copytree(args.build_root / "recomp/gen", stage, dirs_exist_ok=True)
-                        run_translator(stage, args.game_dir, args.build_root,
-                                       regen_functions=args.regen_function)
-                    publish_generated(args.build_root, regenerate_selected)
-                    stamped.pop("main", None)
-                    write_translation_stamp(stamp, stamped)
-                elif selection is None:
-                    cache_ready = (cfg["translate_engine"] == "rust" or not args.cache_emission
-                                   or (args.build_root / "recomp/emission-cache/index.pickle").is_file())
+                if selection is None:
                     current = (set(stamped) == set(fingerprints)
                                and all(stamped[key] == value and image_generated(args.build_root, key)
                                        for key, value in fingerprints.items()))
-                    if translated and cache_ready and current:
+                    if translated and current:
                         print("translation inputs unchanged; keeping %s/recomp/gen" % args.build_root)
                     else:
                         publish_generated(args.build_root,
-                                          lambda stage: run_translator(stage, args.game_dir, args.build_root,
-                                                                       aux_modules=cfg["aux_modules"],
-                                                                       cache_emission=args.cache_emission,
-                                                                       cfg=cfg))
+                                          lambda stage: run_rust_translator(stage, cfg, args.build_root,
+                                                                       aux_modules=cfg["aux_modules"]))
                         write_translation_stamp(stamp, fingerprints)
                 else:
                     if not translated:
@@ -1144,17 +1020,15 @@ def main():
                         if selection != {"reloc"}:
                             parser.error("--regenerate reloc must be used on its own")
                         publish_generated(args.build_root,
-                                          lambda stage: run_translator(stage, args.game_dir, args.build_root,
-                                                                       main=False, reloc_only=True, cfg=cfg),
+                                          lambda stage: run_rust_translator(stage, cfg, args.build_root,
+                                                                       main=False, reloc_only=True),
                                           partial=True, main=False)
                     else:
                         main_image = "main" in selection
                         aux = [module for module in cfg["aux_modules"] if module["key"] in selection]
                         publish_generated(args.build_root,
-                                          lambda stage: run_translator(stage, args.game_dir, args.build_root,
-                                                                       aux_modules=aux, main=main_image,
-                                                                       cache_emission=args.cache_emission,
-                                                                       cfg=cfg),
+                                          lambda stage: run_rust_translator(stage, cfg, args.build_root,
+                                                                       aux_modules=aux, main=main_image),
                                           partial=True, main=main_image)
                         stamped.update((key, fingerprints[key]) for key in selection if key in fingerprints)
                         write_translation_stamp(stamp, {key: value for key, value in stamped.items()

@@ -150,15 +150,18 @@ Known gaps and diagnostics:
   `GrafxResMgr::ScanAndRegisterFiles`. That scan depends on `FindFirstFile`
   returning `.` and `..` first, which the kit's kernel32 shim now does.
 
-
 ## Code map
 
-The GOG `RT3.exe` identified by [game.toml](game.toml) is the behavioral reference. The packed [code map](metadata/) contains 6,039 functions across 6,760 spans and 510,070 instruction boundaries, without executable bytes, instruction text or analysis names. The private executable supplies those bytes during translation.
+The shared exporter writes compact `recomp-code-map-v3` directly. Compare the fresh
+output with the committed map before replacing it; no Python packing is needed.
 
-Ghidra research, export scripts and engine notes remain in the game repository. To refresh the map, export `recomp-code-map-v3-export` from the matching executable into a fresh directory, then run:
+The GOG `RT3.exe` identified by [game.toml](game.toml) is the behavioral reference. The packed [code map](metadata/) contains 6,656 functions across 7,397 spans and 544,407 instruction boundaries, without executable bytes, instruction text or analysis names. The private executable supplies those bytes during translation.
+
+Ghidra research, export scripts and engine notes remain in the game repository. To refresh the map, run the shared `ExportCodeMap.java` on the matching executable with a fresh absolute destination, image base, SHA-256 and `--data-entries-first`:
 
 ```sh
-python tools/recomp/code_map.py --pack /path/to/v3-export --exe /path/to/RT3.exe --out games/railroad-tycoon-3/metadata
+./tools/ghidra_api /script/run '{"name":"ExportCodeMap.java","args":["/ABS/PATH/analysis/code-map","0x00400000","accb099b0d8ebac8b50c539a5cc91a863bc9ae399ae70da382ff1c22301e38a2","--data-entries-first"]}'
+cp /ABS/PATH/analysis/code-map/{metadata.txt,spans.tsv,tables.tsv,entries.tsv,noreturn.tsv} recomp-kit/games/railroad-tycoon-3/metadata/
 ```
 
 The map pins the executable SHA-256 and preserves disconnected function bodies and exceptional instruction boundaries. It also records Ghidra jump targets, referenced interior entries and non-returning functions/calls. Verify every boundary repair against original bytes before exporting.
@@ -214,7 +217,7 @@ indirect calls and startup-to-frame propagation remain conservative.
 The FEMMS regeneration changes 62 functions. Random-input original-byte checks
 reach no comparable returns in those functions; instruction checks cover tag
 clearing and control-word preservation. TOP follows AMD's documented reset,
-where Unicorn's Athlon model differs; see [historical IR notes](../../tools/recomp/Deprecated.md#scalar-x87).
+where Unicorn's Athlon model differs.
 
 Direct variants publish modified registers absent from the caller's SSA and
 values observed by later calls, even when the caller needs no additional
@@ -244,12 +247,10 @@ They remain oracle failures under the default policy; pair-only diagnosis can
 separate them from specialization differences. Valid x87 argument fixtures and
 full-stack/status comparisons remain validation gaps.
 
-Selected production facts use import PC/RC preservation and the explicit,
-verified cargo-entry premise in `game.toml`. `x87-boundaries.json` records the
-byte-backed native/import boundaries; `x87-facts.json` covers 479 instruction
-sites in 10 functions. It removes five ordinary arithmetic copies and six
-direct call-site CW checks while retaining other preparation and fallback
-conditions. Exploratory roots and allocator/math assumptions remain offline.
-Re-export facts with `tools/recomp/x87_audit.py propagation --facts-out` after
-changing an analysis input or bumping the analysis producer version. Specialized calls transfer state through `X86`
+The retired Python x87 audit used import PC/RC preservation and the verified
+cargo-entry premise. Its `x87-boundaries.json` and `x87-facts.json` record
+research evidence for 479 sites in 10 functions; they are not Rust translator
+inputs. That historical analysis removed five ordinary arithmetic copies and six
+direct call-site CW checks. Exploratory roots and allocator/math assumptions
+remain offline. Specialized calls transfer state through `X86`
 (CPU fields); the value/result ABI and LLVM backend trials were rejected.

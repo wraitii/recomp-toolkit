@@ -25,37 +25,11 @@ pub const CHUNK_ADDRESS_BITS: u32 = 16;
 pub const CHUNK_SOURCE_BUDGET: usize = 4 * 1024 * 1024;
 pub const ENTRY_ADDRESS_BITS: u32 = 16;
 
-const BODY_HEADER: &str = r#"/* generated -- translated bodies do not depend on replacement policy */
-#ifndef RECOMP_BODY_H
-#define RECOMP_BODY_H
-#include "x86.h"
-#include "intrinsics.h"
-#include "seh.h"
-#define RECOMP_ENTRY_CAT_(a, b) a##b
-#define RECOMP_ENTRY_CAT(a, b) RECOMP_ENTRY_CAT_(a, b)
-#define CALL_FN(a) RECOMP_ENTRY_CAT(entry_, a)(c)
-#define CALL_RAW(a) RECOMP_ENTRY_CAT(call_, a)(c)
-#endif
-"#;
+const BODY_HEADER: &str = include_str!("../templates/body_header.h");
 
-const ENTRY_STUB_INCLUDES: &str = r#"#include "x86.h"
-#ifdef RECOMP_OVERRIDE_HEADER
-#include RECOMP_OVERRIDE_HEADER
-#endif
-"#;
+const ENTRY_STUB_INCLUDES: &str = include_str!("../templates/entry_includes.c");
 
-const ENTRY_STUB_PRELUDE: &str = r#"void recomp_enter(X86 *c, uint32_t index);
-void recomp_enter_raw(X86 *c, uint32_t index, void (*raw)(X86 *));
-#if RECOMP_CALL_HOOKS
-#define RECOMP_SLOW_(i) RECOMP_UNLIKELY(__atomic_load_n(&recomp_slow[i], __ATOMIC_RELAXED))
-#else
-#define RECOMP_SLOW_(i) RECOMP_UNLIKELY(__atomic_load_n(&recomp_slow_routes, __ATOMIC_RELAXED))
-#endif
-#define RECOMP_ENTER(i, base) \
-    do { recomp_execution_checkpoint(c); if (RECOMP_SLOW_(i)) recomp_enter(c, i); else base; } while (0)
-#define RECOMP_CALL(i, raw) \
-    do { recomp_execution_checkpoint(c); if (RECOMP_SLOW_(i)) recomp_enter_raw(c, i, raw); else raw(c); } while (0)
-"#;
+const ENTRY_STUB_PRELUDE: &str = include_str!("../templates/entry_prelude.c");
 
 const MODULE_ENTRY_STUB_PRELUDE: &str = r#"
 extern uint8_t recomp_{key}_hooked[];

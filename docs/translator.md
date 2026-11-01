@@ -1,8 +1,7 @@
 # Rust translator
 
-`translator/` is the default engine. Its Cargo workspace translates a game image
-from its code map into C. `tools/build.py` selects it unless `[translate] engine`
-or `--engine` overrides the default. The generated-code contract is documented in
+The `translator/` Cargo workspace translates a game image from its code map into C.
+The generated-code contract is documented in
 [architecture](architecture.md). Each crate's `//!` doc states its responsibility.
 
 ## Pipeline

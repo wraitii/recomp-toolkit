@@ -63,11 +63,11 @@ Ghidra. Run `Evo2RebaseRenderer` before analyzing `Tridx8.dll`; it relocates bot
 the image and its HIGHLOW pointer operands. Inspect `SeedRelocationEntries`
 in `dry` mode and apply the verified candidates to recover runtime initializer
 and callback entries missed by auto-analysis, then analyze their callees.
-Run `Evo2ExportCodeMap`
-with an absolute destination and the DLL name as its second
-argument. Pack each export with `code_map.py` into `metadata-tridx8tl` or
-`metadata-tridx8`; the latter requires `--base 0x11000000`. Regenerate and
-rebuild the windowed app afterward.
+Run the shared `ExportCodeMap.java` with a fresh absolute destination, the
+configured image base and SHA-256 from `game.toml`: `0x10000000` for
+`Tridx8tl.dll`, `0x11000000` for `Tridx8.dll`. Compare the compact output with
+`metadata-tridx8tl` or `metadata-tridx8` before replacing it, then regenerate
+and rebuild the windowed app.
 
 DIVERGENCE(original): `native/startup.cpp` wraps the startup options menu
 (`0x00491d00`) to lock the renderer to Direct3D8 Hardware TnL and the color
@@ -112,17 +112,19 @@ has been added.
 
 ## Code map
 
-The code map is exported from Ghidra with the game's `Evo2ExportCodeMap.java`
+The code map is exported from Ghidra with the shared `ExportCodeMap.java`
 script. From the game repository root, after deliberate analysis has produced
 instruction boundaries (Ghidra API setup is in `../ghidra_scripts/ghidra-helpers.md`):
 
 ```sh
 GHIDRA_API_BASE=http://127.0.0.1:8169 ./tools/ghidra_api \
-  /script/run '{"name":"Evo2ExportCodeMap","args":["/ABS/PATH/analysis/code-map-export"]}'
-tools/.venv/bin/python recomp-kit/tools/recomp/code_map.py --pack analysis/code-map-export \
-  --exe build/original/4x42.exe --out recomp-kit/games/4x4-evo2/metadata
+  /script/run '{"name":"ExportCodeMap.java","args":["/ABS/PATH/analysis/code-map-export","0x00400000","ab8286e6bce8a1bf3769acddfeb0a79df2e5d43c72f462a89aa90f477951ec75"]}'
+cp /ABS/PATH/analysis/code-map-export/{metadata.txt,spans.tsv,tables.tsv,entries.tsv,noreturn.tsv} recomp-kit/games/4x4-evo2/metadata/
 tools/.venv/bin/python tools/build.py --regenerate
 ```
+
+The shared exporter writes compact `recomp-code-map-v3` directly. Compare the fresh
+output with the committed map before replacing it; no Python packing is needed.
 
 The exporter checks the executable hash, architecture and image base and refuses
 an existing output directory. Entries Ghidra cannot represent stay explicit in

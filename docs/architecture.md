@@ -274,7 +274,7 @@ slot no listing owns, a block Ghidra ended early. Each shows up at run time as
 a call or jump the address table cannot place.
 
 The translator fills part of the gap itself: a bootstrap sweep of each image
-(`bootstrap_map.py`, `discover` in `[translate]`) adds provisional bodies that the
+(`discover` in `[translate]`) adds provisional bodies that the
 Ghidra map does not name, and a branch into Ghidra-owned code is recorded as an
 entry of its owner. Provisional bodies are emitted as decoded regions; a provisional
 jump dispatches at run time, with unmapped code handled by the fallback below.

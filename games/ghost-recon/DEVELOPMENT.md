@@ -43,18 +43,19 @@ native replacements against their translated originals.
 
 ## Code map
 
-Export from Ghidra, then pack into the kit (from the game repository root):
+The shared exporter writes compact `recomp-code-map-v3` directly. Compare the fresh
+output with the committed map before replacing it; no Python packing is needed.
+
+Export a compact map from Ghidra (from the game repository root):
 
 ```sh
-./tools/ghidra_api /script/run '{"name":"GhostReconExportCodeMap.java","args":["/ABS/PATH/analysis/code-map-export"]}'
-tools/.venv/bin/python recomp-kit/tools/recomp/code_map.py --pack analysis/code-map-export \
-  --exe build/original/GhostRecon.exe --out recomp-kit/games/ghost-recon/metadata
+./tools/ghidra_api /script/run '{"name":"ExportCodeMap.java","args":["/ABS/PATH/analysis/code-map-export","0x00400000","78786b4e95fa535bb364154885bc161a92e96dddac18b66716581a8725a9735f"]}'
+cp /ABS/PATH/analysis/code-map-export/{metadata.txt,spans.tsv,tables.tsv,entries.tsv,noreturn.tsv} recomp-kit/games/ghost-recon/metadata/
 ```
 
 The map (`recomp-code-map-v3`) holds spans, jump tables, interior entries and
 non-returning calls, addresses only. Fix gaps in Ghidra (`ApplyCodeMapFixes.java`
-documents its operations), then re-export and repack; the translator model in
-`recomp-kit/tools/recomp/program.py` fails by name on anything the map lacks.
+documents its operations), then re-export and regenerate; the translator reports missing or unsupported code by name.
 The exporter refuses an existing destination. 
 ## Native replacements
 

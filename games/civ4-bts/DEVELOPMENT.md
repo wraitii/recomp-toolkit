@@ -63,6 +63,9 @@ by itself proof of the underlying playback state.
 
 ## Code map
 
+The shared exporter writes compact `recomp-code-map-v3` directly. Compare the fresh
+output with the committed map before replacing it; no Python packing is needed.
+
 The main executable's map is exported from Ghidra with `ExportCodeMap.java`, which
 takes the destination, image base and executable SHA-256 and is shared with the
 auxiliary modules.
@@ -74,8 +77,7 @@ has produced instruction boundaries:
 
 ```sh
 ./tools/ghidra_api /script/run '{"name":"ExportCodeMap.java","args":["/ABS/PATH/analysis/code-map-export","0x00400000","90dbdbdcbd6c631c9d575881d0241d9a2012b1a5957bacbe68212745da22174e"]}'
-tools/.venv/bin/python recomp-kit/tools/recomp/code_map.py --pack analysis/code-map-export \
-  --exe build/original/Civ4BeyondSword.exe --out recomp-kit/games/civ4-bts/metadata
+cp /ABS/PATH/analysis/code-map-export/{metadata.txt,spans.tsv,tables.tsv,entries.tsv,noreturn.tsv} recomp-kit/games/civ4-bts/metadata/
 tools/.venv/bin/python tools/build.py --regenerate
 ```
 
@@ -92,21 +94,16 @@ age 2), kept at `analysis/pdb/msxml3.pdb`:
 tools/.venv/bin/python recomp-kit/tools/recomp/pdb_evidence.py --exe build/original/msxml3.dll \
   --pdb analysis/pdb/msxml3.pdb --pdbutil "$(brew --prefix llvm)/bin/llvm-pdbutil" \
   --out analysis/msxml3-pdb-evidence.json
-tools/.venv/bin/python recomp-kit/tools/recomp/bootstrap_map.py --exe build/original/msxml3.dll \
-  --base 0x10a00000 --evidence analysis/msxml3-pdb-evidence.json \
-  --out recomp-kit/games/civ4-bts/metadata-msxml3 --report analysis/bootstrap-msxml3-report.json
-tools/.venv/bin/python recomp-kit/tools/recomp/bootstrap_map.py --exe build/original/zlib1.dll \
-  --base 0x10c00000 --evidence analysis/zlib1-data-evidence.json \
-  --out recomp-kit/games/civ4-bts/metadata-zlib1 --report analysis/bootstrap-zlib1-report.json
 ```
 
-`zlib1.dll` embeds strings and tables in `.text`; its data ranges were checked by
-hex dump and kept in `analysis/zlib1-data-evidence.json`.
+The maps were originally bootstrapped using this evidence. New maps require the shared
+Ghidra exporter. `zlib1.dll` embeds strings and tables in `.text`; its data ranges
+were checked by hex dump and kept in `analysis/zlib1-data-evidence.json`.
 
 ### CvGameCoreDLL
 
 `CvGameCoreDLL.dll` is mapped at guest base `0x10500000` (file base `0x10000000`).
-Its Ghidra map is seeded from evidence, then exported and packed:
+Its Ghidra map is seeded from evidence, then exported:
 
 1. Import `Assets/CvGameCoreDLL.dll` into `ghidra/Civ4BTS.gpr` with automatic
    analysis off. Make it the active program.
@@ -122,12 +119,11 @@ Its Ghidra map is seeded from evidence, then exported and packed:
 5. For pointers found in `.rdata` that name seeded code, write a `slot target`
    TSV and run `LinkDataSlots.java` on it, so the code map records them as data
    entries.
-6. Export with `ExportCodeMap.java` (`0x10500000`, the file's SHA-256), then pack:
+6. Export with `ExportCodeMap.java` (`0x10500000`, the file's SHA-256):
 
 ```sh
-tools/.venv/bin/python recomp-kit/tools/recomp/code_map.py --pack analysis/cvgamecore-export \
-  --exe "Civilization IV Complete/Civ4/Beyond the Sword/Assets/CvGameCoreDLL.dll" \
-  --out recomp-kit/games/civ4-bts/metadata-cvgamecore --base 0x10500000
+./tools/ghidra_api /script/run '{"name":"ExportCodeMap.java","args":["/ABS/PATH/analysis/cvgamecore-export","0x10500000","7f9f23905177396972f87a168ec785f006be1d5b9ff730484b05c565a9396278"]}'
+cp /ABS/PATH/analysis/cvgamecore-export/{metadata.txt,spans.tsv,tables.tsv,entries.tsv,noreturn.tsv} recomp-kit/games/civ4-bts/metadata-cvgamecore/
 tools/.venv/bin/python tools/build.py --regenerate cvgamecore --target app
 ```
 

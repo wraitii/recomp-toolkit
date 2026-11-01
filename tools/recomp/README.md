@@ -6,14 +6,12 @@ Use those wrappers for an ordinary first build.
 
 | Tool | Responsibility |
 | --- | --- |
-| `code_map.py` | Pack and read the Ghidra code map consumed by the [translator](../../docs/translator.md) |
 | `runtime/x86.h` | Register/flag/x87 state and instruction semantics used by generated code |
 | `buildlock.sh`, `buildlock.py` | The shared process lock over build/recomp, as a shell entry and a Python module |
 | `build_core.py`, `finish_bundle.py`, `snapshot_gen.py` | Install core mods reproducibly, finish the app bundle, copy one consistent generation of gen/ |
 | `texture_pack.py`, `package_texture_pack.py` | Prepare and package optional local replacement textures |
 | `performance_run.py` | Bounded presentation measurements and diagnostics |
 | `diff/`, `tests/` | Unicorn differential harness (`diff/run.py`) and the native host (`tests/harness.c`) it and the entry-thunk fixture build on |
-| `corpus/` | Eager, SSA and native comparison of real game functions ([README](corpus/README.md)) |
 
 Generated functions preserve addresses, symbol names and instruction comments.
 They are a mechanical translation, so register operations are expected. Add
@@ -28,4 +26,7 @@ same lock never sees half a generation.
 Game-specific smoke scripts and original-game comparisons belong in the game
 repository. See [Testing](../../docs/testing.md) for the kit's generic suites.
 
-Historical Python translation and shape inference are documented in [Deprecated.md](Deprecated.md).
+The legacy Python translator, eager/SSA corpus, standalone bootstrap map generator,
+type inference and x87 audit producers have been retired. Existing facts and native
+reference assets remain; Rust analysis produces some facts but does not replace every
+historical research workflow. Create initial maps with the shared Ghidra exporter.

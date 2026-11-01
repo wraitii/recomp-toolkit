@@ -108,28 +108,25 @@ directory with `--game-dir`.
 
 ### Generate a code map
 
-For an initial map, use the standalone generator from the kit root:
+Use [Ghidra 12.1.3](https://github.com/NationalSecurityAgency/ghidra/releases/tag/Ghidra_12.1.3_build)
+with a matching JDK to review function boundaries, jump tables, interior entries
+and non-returning calls.
+Use the shared `ExportCodeMap.java` in the sibling `ghidra_scripts/` directory
+(register it in Script Manager), with a fresh absolute destination, image base
+and executable SHA-256 from `game.toml`. From a game research repository with
+`tools/ghidra_api`:
 
 ```sh
-.venv/bin/python tools/recomp/bootstrap_map.py --exe /path/to/GAME.EXE \
-  --out games/<id>/metadata --report /tmp/<id>-map.json
+./tools/ghidra_api /script/run '{"name":"ExportCodeMap.java","args":["/ABS/PATH/analysis/code-map","0x00400000","EXECUTABLE_SHA256"]}'
 ```
 
-Set `[translate] code_map = "metadata"` in `game.toml`, then run setup. Build
-these provisional maps with `--regenerate`.
-The generator recovers code from the executable using entry points, relocations,
-pointer tables and an instruction sweep. Its report records gaps and conflicts.
-
-We use [Ghidra 12.1.3](https://github.com/NationalSecurityAgency/ghidra/releases/tag/Ghidra_12.1.3_build)
-with a matching JDK to produce richer maps with reviewed function boundaries,
-jump tables, interior entries and non-returning calls. Ghidra is optional.
-Adapt a game's export script from its research repository; the
-[Ghost Recon workflow](games/ghost-recon/DEVELOPMENT.md#code-map) gives an example.
-Pack the resulting `recomp-code-map-v3-export` directory against the executable:
-
-```sh
-.venv/bin/python tools/recomp/code_map.py --pack EXPORT_DIR --exe GAME.EXE --out games/<id>/metadata
-```
+It writes compact `recomp-code-map-v3` metadata directly: instruction lengths
+are omitted when fresh SLEIGH decoding of the original imported bytes matches
+the listing and retained otherwise.
+Compare the output with the committed map before replacing it. Auxiliary modules
+use their configured image base and SHA-256 after any required rebasing.
+RT3 and Black & White append `--data-entries-first` to preserve their entry
+classification when an address has both data and control-flow references.
 
 Maps contain addresses and boundary metadata, without executable bytes or
 analysis names. After correcting a map, regenerate the translation. Auxiliary
@@ -180,7 +177,6 @@ this option. A regular source build includes observation again.
 ## Check translation
 
 `tools/recomp/diff/run.py --game <id>` runs translated functions and the
-original bytes side by side and compares the results; the function corpus
-(`tools/build.py --function-corpus`) checks them against each other. See
+original bytes side by side and compares the results. See
 [AGENTS.md](AGENTS.md) for the translator-change workflow and
 [Testing](docs/testing.md) for harness details.

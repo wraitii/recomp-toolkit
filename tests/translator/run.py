@@ -359,7 +359,6 @@ windows_version = "4.10"
 store_hooks = false
 
 [translate]
-engine = "rust"
 code_map = "map"
 discover = false
 entry_points = []

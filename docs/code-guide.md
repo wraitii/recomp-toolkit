@@ -22,14 +22,14 @@ translated locally into `build/recomp/gen/` and are never edited in place.
 | D3D9 guest buffer and 2D staging | [Rust guest adapter](../graphics/d3d8-wgpu/src/guest/mod.rs), [native COM dispatch](../dx/d3d9.cpp) | `guest_buffer_lock`, `guest_rect_lock`, `guest_rect_unlock`; native memory callbacks in `dx/guest_memory.h` |
 | Imports, startup, memory | [Guest runtime](../runtime/README.md) | `loader_load`, `patch_iat`, `imports_dispatch`, `heap_realloc` |
 | Mod lifecycle and hooks | [loader.cpp](../mods/loader.cpp), [hooks.cpp](../mods/hooks.cpp) | `mods_load_all`, `build_api`, `mods_hook_dispatch`, `mods_call_next` |
-| Code map and program model | [code_map.py](../tools/recomp/code_map.py), [rk-image](../translator/crates/rk-image/src/lib.rs) | `pack`, `read_map`, `Program` |
+| Code map and program model | [rk-image](../translator/crates/rk-image/src/lib.rs) | `Program` |
 | Translation driver, chunks, tables | [Translator](translator.md), [recomp-translate](../translator/crates/recomp-translate/src/main.rs), [rk-output](../translator/crates/rk-output/src/lib.rs) | `main`, `build_bodies`, `rk_output::write` |
 | Instruction semantics, SSA emission | [rk-ssa](../translator/crates/rk-ssa/src/lib.rs), [rk-emit](../translator/crates/rk-emit/src/lib.rs), [x86.h](../runtime/x86.h) | `prepare`, `emit`; register/flag/x87 helpers |
 | Lazy flags and conditions | [rk-x86 flags](../translator/crates/rk-x86/src/flags.rs), [rk-ssa flags](../translator/crates/rk-ssa/src/flags.rs) | `FlagRecipes` (`expand`, `direct`, `lazy_op`); `build_joins`, `FlagPlan::publication` |
 | Missing-code execution | [baseline.cpp](../runtime/baseline.cpp), [rk-pcode-ffi](../translator/crates/rk-pcode-ffi/src/baseline/mod.rs) | `baseline_call`, `Routine::step`, `compile` |
 | Heap-loaded relocatable code | [reloc.cpp](../runtime/reloc.cpp) | `recomp_reloc_register`, `recomp_reloc_call` |
 | Offline dispatch bounds | [Analysis facts](translator.md#analysis-facts), [rk-analysis](../translator/crates/rk-analysis/src/guest.rs) | `produce`, stack summaries, table census |
-| Translator checks | [diff/run.py](../tools/recomp/diff/run.py), [corpus](../tools/recomp/corpus/README.md) | Unicorn comparison; eager/SSA/native corpus |
+| Translator checks | [diff/run.py](../tools/recomp/diff/run.py) | Unicorn comparison |
 | Native replacement validation | [replay.cpp](../mods/native/replay.cpp), [page_track.cpp](../mods/native/page_track.cpp) | `load`, `run`, `translated`, `begin`, `end` |
 
 ## Follow display settings
