@@ -95,9 +95,10 @@ extern "C" bool ddraw_enum_display_mode(uint32_t index, uint32_t *w, uint32_t *h
 // from opening an original asset.
 //
 // `relative` reaches the resolver normalised: '/' separators, no drive, no
-// leading root component, no "." or ".." components. It returns non-zero having
-// written a host path, or zero for "no answer", in which case the shim falls
-// back to the game directory exactly as an unmodded build does.
+// leading root component and no "." components. Parent components may address
+// sibling directories. A declined read or list falls back to the game directory;
+// a declined mutation is refused. Without a resolver, all operations use the
+// game directory.
 // ---------------------------------------------------------------------------
 enum Win32FileOp {
     WIN32_FILE_READ = 0,

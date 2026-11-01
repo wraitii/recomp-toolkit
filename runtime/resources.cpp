@@ -9,115 +9,6 @@ bool fail(std::string *why, const char *message) {
     return false;
 }
 
-// Every directory-relative offset, count and payload RVA is checked before a
-// guest read. PE resource strings carry a WORD length, not a NUL terminator.
-struct Directory {
-    uint32_t image = 0, image_size = 0, root = 0, size = 0;
-    std::string *why;
-    explicit Directory(std::string *reason) : why(reason) {
-        if (why)
-            why->clear();
-    }
-    bool image_range(uint32_t rva, uint32_t bytes) const {
-        return rva <= image_size && bytes <= image_size - rva;
-    }
-    bool relative(uint32_t offset, uint32_t bytes) const {
-        return offset <= size && bytes <= size - offset;
-    }
-    bool open(uint32_t module = 0) {
-        const LoaderModule *owner = module ? loader_module_containing(module) : nullptr;
-        if (module && !owner)
-            owner = loader_datafile(module);
-        if (module && (!owner || owner->base != module))
-            return fail(why, "invalid resource module");
-        image = owner ? owner->base : loader_image_base();
-        image_size = owner ? owner->size : loader_image_size();
-        if (!image || !gm_valid(image, image_size) || image_size < 64 || rd16(image) != 0x5a4d)
-            return fail(why, "no loaded PE image");
-        uint32_t nt = rd32(image + 0x3c);
-        if (!image_range(nt, 24) || rd32(image + nt) != 0x4550)
-            return fail(why, "invalid PE header");
-        uint32_t opt = nt + 24, opt_size = rd16(image + nt + 20);
-        if (opt_size < 120 || !image_range(opt, opt_size) || rd16(image + opt) != 0x10b ||
-            rd32(image + opt + 92) < 3)
-            return fail(why, "no PE32 resource data directory");
-        uint32_t rva = rd32(image + opt + 112);
-        size = rd32(image + opt + 116);
-        if (!rva || size < 16 || !image_range(rva, size))
-            return fail(why, "resource directory is missing or outside the image");
-        root = image + rva;
-        return true;
-    }
-    bool entries(uint32_t offset, uint32_t &first, uint32_t &count) {
-        if (!relative(offset, 16))
-            return fail(why, "truncated resource directory header");
-        uint32_t p = root + offset;
-        count = (uint32_t)rd16(p + 12) + rd16(p + 14);
-        if (!relative(offset + 16, count * 8))
-            return fail(why, "truncated resource directory entries");
-        first = p + 16;
-        return true;
-    }
-    bool name(uint32_t encoded, ResourceName &out) {
-        out = {};
-        if (!(encoded & 0x80000000u)) {
-            if (encoded > 0xffff)
-                return fail(why, "invalid integer resource identifier");
-            out.id = encoded;
-            return true;
-        }
-        uint32_t off = encoded & 0x7fffffffu;
-        if (!relative(off, 2))
-            return fail(why, "truncated resource name length");
-        uint32_t units = rd16(root + off);
-        if (!relative(off + 2, units * 2))
-            return fail(why, "truncated resource name");
-        out.is_string = true;
-        out.name = gm_wstr(root + off + 2, units);
-        return true;
-    }
-    bool child(uint32_t dir, const ResourceName &wanted, uint32_t &offset) {
-        uint32_t first, count;
-        if (!entries(dir, first, count))
-            return false;
-        for (uint32_t i = 0; i < count; ++i) {
-            uint32_t p = first + i * 8;
-            ResourceName candidate;
-            if (!name(rd32(p), candidate))
-                return false;
-            if (candidate.is_string != wanted.is_string)
-                continue;
-            bool match = candidate.is_string
-                             ? os_strcasecmp(candidate.name.c_str(), wanted.name.c_str()) == 0
-                             : candidate.id == wanted.id;
-            if (!match)
-                continue;
-            uint32_t next = rd32(p + 4);
-            if (!(next & 0x80000000u))
-                return fail(why, "expected a resource subdirectory");
-            offset = next & 0x7fffffffu;
-            if (!relative(offset, 16))
-                return fail(why, "resource subdirectory outside its bounds");
-            return true;
-        }
-        return fail(why, "resource identifier not found");
-    }
-    uint32_t data(uint32_t entry, uint32_t *bytes) {
-        if (entry < root || !relative(entry - root, 16)) {
-            fail(why, "invalid resource data entry");
-            return 0;
-        }
-        uint32_t rva = rd32(entry), n = rd32(entry + 4);
-        if (!image_range(rva, n)) {
-            fail(why, "resource payload outside the image");
-            return 0;
-        }
-        if (bytes)
-            *bytes = n;
-        return image + rva;
-    }
-};
-
 bool identifier(uint32_t p, ResourceName &out, std::string *why, bool wide = true) {
     out = {};
     if (p <= 0xffff) {
@@ -147,53 +38,47 @@ bool identifier(uint32_t p, ResourceName &out, std::string *why, bool wide = tru
 }
 } // namespace
 
+namespace {
+bool resource_image(uint32_t module, uint32_t &base, uint32_t &size, std::string *why) {
+    if (why)
+        why->clear();
+    const LoaderModule *owner = module ? loader_module_containing(module) : nullptr;
+    if (module && !owner)
+        owner = loader_datafile(module);
+    if (module && (!owner || owner->base != module))
+        return fail(why, "invalid resource module");
+    base = owner ? owner->base : loader_image_base();
+    size = owner ? owner->size : loader_image_size();
+    return true;
+}
+} // namespace
+
 uint32_t resource_find(uint32_t type_id_or_name, uint32_t name_id_or_name, std::string *why,
                        uint32_t module) {
-    Directory dir(why);
+    uint32_t base, size;
     ResourceName type, name;
-    if (!dir.open(module) || !identifier(type_id_or_name, type, why) ||
+    if (!resource_image(module, base, size, why) || !identifier(type_id_or_name, type, why) ||
         !identifier(name_id_or_name, name, why))
         return 0;
-    uint32_t type_dir, name_dir, first, count;
-    if (!dir.child(0, type, type_dir) || !dir.child(type_dir, name, name_dir) ||
-        !dir.entries(name_dir, first, count))
-        return 0;
-    if (!count) {
-        fail(why, "resource has no language entry");
-        return 0;
-    }
-    uint32_t data_offset = rd32(first + 4);
-    if ((data_offset & 0x80000000u) || !dir.relative(data_offset, 16)) {
-        fail(why, "invalid resource language data entry");
-        return 0;
-    }
-    uint32_t entry = dir.root + data_offset;
-    return dir.data(entry, nullptr) ? entry : 0;
+    return pe_resource_find(base, size, type, name, why);
 }
 uint32_t resource_data(uint32_t entry, uint32_t *size, std::string *why, uint32_t module) {
     if (size)
         *size = 0;
-    Directory dir(why);
-    return dir.open(module) ? dir.data(entry, size) : 0;
+    uint32_t base, image_size;
+    return resource_image(module, base, image_size, why)
+               ? pe_resource_data(base, image_size, entry, size, why)
+               : 0;
 }
 bool resource_names(uint32_t type_id_or_name, std::vector<ResourceName> *names, std::string *why,
                     uint32_t module, bool wide_type) {
     if (!names)
         return fail(why, "missing resource-name output");
     names->clear();
-    Directory dir(why);
+    uint32_t base, size;
     ResourceName type;
-    uint32_t type_dir, first, count;
-    if (!dir.open(module) || !identifier(type_id_or_name, type, why, wide_type) ||
-        !dir.child(0, type, type_dir) || !dir.entries(type_dir, first, count))
+    if (!resource_image(module, base, size, why) ||
+        !identifier(type_id_or_name, type, why, wide_type))
         return false;
-    for (uint32_t i = 0; i < count; ++i) {
-        ResourceName name;
-        if (!dir.name(rd32(first + i * 8), name)) {
-            names->clear();
-            return false;
-        }
-        names->push_back(name);
-    }
-    return true;
+    return pe_resource_names(base, size, type, names, why);
 }

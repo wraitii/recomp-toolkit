@@ -1,4 +1,6 @@
 #include "imports.h"
+#include "loader.h"
+#include "pe.h"
 #include "game_config.h"
 #include "../platform/os.h"
 #include "gdi32_internal.h"
@@ -975,4 +977,71 @@ void imports_init() {
     msimg32_register();
     extern void imagehlp_register();
     imagehlp_register();
+}
+
+bool imports_bind(const std::vector<PeImportModule> &modules, bool strict, uint32_t &patched,
+                  uint32_t &data_count, std::string &g_error) {
+    for (const PeImportModule &imported : modules) {
+        for (const PeImport &entry : imported.imports) {
+            if (entry.width != 4) {
+                g_error = "unsupported import slot width " + std::to_string(entry.width);
+                return false;
+            }
+            const std::string &dll = imported.dll;
+            const char *namebuf = entry.name.c_str();
+            uint32_t slot = entry.slot;
+            // DLLs can import code AND data from the executable. Both slots
+            // must hold the original guest address, not a host trampoline or
+            // a separately allocated copy of an exported global.
+            if (const LoaderModule *module = loader_module_named(dll.c_str())) {
+                if (strict) {
+                    g_error = "unsupported guest module import " + dll;
+                    return false;
+                }
+                uint32_t address = entry.by_ordinal
+                                       ? loader_module_export_ordinal(*module, entry.ordinal)
+                                       : loader_module_export(*module, namebuf);
+                if (!address) {
+                    g_error = "missing mapped export " + dll + "!" + namebuf;
+                    return false;
+                }
+                wr32(slot, address);
+                ++patched;
+                continue;
+            }
+            uint32_t data = imports_alloc_data(dll.c_str(), namebuf);
+            if (data) {
+                // An imported variable, not a function: the slot holds the
+                // address of zeroed guest storage.
+                wr32(slot, data);
+                ++patched;
+                ++data_count;
+                continue;
+            }
+            // A DLL with a shim table keeps its per-name stubs, including the
+            // deliberate logging-only ones. A strict DLL is one whose table is
+            // still being filled in: its gaps must abort under their own name,
+            // not return zero. A DLL with no table at all is not merely
+            // unimplemented either: calling into it must stop with the name of
+            // the missing dll!function rather than returning zero.
+            uint32_t tramp = strict && !imports_implemented(dll.c_str(), namebuf)
+                                 ? imports_alloc_trampoline(dll.c_str(), namebuf,
+                                                            imports_unsupported, ARGC_UNKNOWN)
+                                 : imports_resolve(dll.c_str(), namebuf);
+            if (!tramp) {
+                void (*unknown)(X86 *) =
+                    (imports_has_dll(dll.c_str()) && !imports_is_strict_dll(dll.c_str()))
+                        ? nullptr
+                        : imports_unsupported;
+                tramp = imports_alloc_trampoline(dll.c_str(), namebuf, unknown, ARGC_UNKNOWN);
+            }
+            if (!tramp) {
+                g_error = "ran out of import trampolines";
+                return false;
+            }
+            wr32(slot, tramp);
+            ++patched;
+        }
+    }
+    return true;
 }

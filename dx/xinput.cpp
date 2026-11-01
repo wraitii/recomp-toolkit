@@ -508,7 +508,7 @@ const ImportShim g_xinput910_exports[] = {
 // dx_register_shims calls this beside dinput_register(). Registration stays
 // unconditional, never gated on host_pad_mode(): the app always serves the
 // pad, while headless and test hosts keep the weak default of 0. The loader's
-// patch_iat() (runtime/loader.cpp) walks every IAT slot unconditionally and
+// Import binding walks every IAT slot unconditionally and
 // calls imports_alloc_trampoline(dll, name, nullptr, ARGC_UNKNOWN) for a
 // static import whose (dll, name) nothing has registered - it never leaves
 // the slot at 0, so a game that statically imports an XInput function still

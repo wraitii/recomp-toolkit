@@ -14,6 +14,8 @@
 #include "display_seam.h"
 #include "memory.h"
 #include "win32.h"
+#include "vfs.h"
+#include "win_path.h"
 #include "native_seam.h"
 #include "loader.h"
 
@@ -28,7 +30,6 @@
 
 #include <map>
 #include <memory>
-#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -63,10 +64,6 @@ namespace {
 // ---------------------------------------------------------------------------
 // Process-wide state
 // ---------------------------------------------------------------------------
-// The developer checkout's game directory: RECOMP_DEVELOPER_EXE without its file name.
-std::string g_game_dir =
-    std::string(RECOMP_DEVELOPER_EXE).substr(0, std::string(RECOMP_DEVELOPER_EXE).rfind('/'));
-std::string g_cur_dir = RECOMP_GUEST_ROOT;
 uint32_t g_last_error = 0;
 jmp_buf g_exit_jmp;
 bool g_exit_jmp_valid = false;
@@ -245,63 +242,7 @@ std::string lower(std::string s) {
     return s;
 }
 
-// ---------------------------------------------------------------------------
-// Path mapping
-// ---------------------------------------------------------------------------
-std::map<std::string, std::map<std::string, std::string>> &dir_cache() {
-    static std::map<std::string, std::map<std::string, std::string>> m;
-    return m;
-}
-
-int collect_listing(const char *name, void *user) {
-    auto *entries = (std::map<std::string, std::string> *)user;
-    entries->emplace(lower(name), name);
-    return 0;
-}
-
-const std::map<std::string, std::string> &listing(const std::string &dir) {
-    auto it = dir_cache().find(dir);
-    if (it != dir_cache().end())
-        return it->second;
-    std::map<std::string, std::string> entries;
-    os_listdir(dir.c_str(), collect_listing, &entries);
-    return dir_cache().emplace(dir, std::move(entries)).first->second;
-}
-
-std::vector<std::string> split_path(const std::string &p) {
-    std::vector<std::string> out;
-    std::string cur;
-    for (char ch : p) {
-        if (ch == '/' || ch == '\\') {
-            if (!cur.empty())
-                out.push_back(cur);
-            cur.clear();
-        } else {
-            cur.push_back(ch);
-        }
-    }
-    if (!cur.empty())
-        out.push_back(cur);
-    return out;
-}
-
 } // namespace
-
-static void (*g_dir_cache_hook)() = nullptr;
-
-void win32_set_dir_cache_hook(void (*hook)()) {
-    g_dir_cache_hook = hook;
-}
-
-void win32_invalidate_dir_cache() {
-    dir_cache().clear();
-    if (g_dir_cache_hook)
-        g_dir_cache_hook();
-}
-
-const std::string &win32_game_dir() {
-    return g_game_dir;
-}
 
 void win32_set_process_launcher(OsChildProcess *(*launch)(const char *, const char *)) {
     g_process_launcher = launch;
@@ -321,141 +262,6 @@ bool win32_file_handle_position(uint32_t handle, std::string *host_path, int64_t
     if (offset)
         *offset = pos;
     return true;
-}
-
-// The overlay seam. Null in an unmodded build, which is every build until the
-// mod foundation installs one.
-static int (*g_file_resolve)(const char *, int, char *, size_t) = nullptr;
-static void (*g_file_list)(const char *, void (*)(void *, const char *, const char *),
-                           void *) = nullptr;
-
-void win32_set_file_ops(int (*resolve)(const char *, int, char *, size_t),
-                        void (*list)(const char *, void (*)(void *, const char *, const char *),
-                                     void *)) {
-    g_file_resolve = resolve;
-    g_file_list = list;
-    // A different resolver answers differently for the same guest path, so
-    // everything remembered about the old one has to go.
-    win32_invalidate_dir_cache();
-}
-
-// The path a guest gave, reduced to components: drive stripped, the current
-// directory applied when it was relative, "." and ".." resolved, and a leading
-// root component dropped so <root>\data\x and \data\x are the same file.
-static std::vector<std::string> normalise_components(const std::string &guest_path) {
-    std::string p = guest_path;
-    bool absolute = false;
-    if (p.size() >= 2 && p[1] == ':') {
-        p = p.substr(2);
-        absolute = true;
-    }
-    if (!p.empty() && (p[0] == '\\' || p[0] == '/'))
-        absolute = true;
-
-    std::vector<std::string> comps;
-    if (!absolute) {
-        std::string base = g_cur_dir;
-        if (base.size() >= 2 && base[1] == ':')
-            base = base.substr(2);
-        comps = split_path(base);
-    }
-    for (const std::string &c : split_path(p))
-        comps.push_back(c);
-
-    std::vector<std::string> norm;
-    for (const std::string &c : comps) {
-        if (c == ".")
-            continue;
-        if (c == "..") {
-            if (!norm.empty())
-                norm.pop_back();
-            continue;
-        }
-        norm.push_back(c);
-    }
-    // An absolute path spelled through the guest root - which GetModuleFileNameA
-    // hands out, and which is more than one component for a game installed
-    // under C:\GOG Games\<name> - is the same file as the root-relative one.
-    static const std::vector<std::string> root = [] {
-        std::string r = RECOMP_GUEST_ROOT;
-        if (r.size() >= 2 && r[1] == ':')
-            r = r.substr(2);
-        return split_path(r);
-    }();
-    size_t common = 0;
-    while (common < root.size() && common < norm.size() &&
-           lower(norm[common]) == lower(root[common]))
-        ++common;
-    if (!root.empty() && common == root.size()) {
-        norm.erase(norm.begin(), norm.begin() + (long)root.size());
-    } else if (common > 0) {
-        // The game reaches sibling installs - Warlords and the base Assets -
-        // through ".." from the guest root's parent, so a path that leaves
-        // the root maps by climbing out of the host game directory once per
-        // root component it did not consume.
-        norm.erase(norm.begin(), norm.begin() + (long)common);
-        norm.insert(norm.begin(), root.size() - common, std::string(".."));
-    } else if (!norm.empty() && lower(norm[0]) == lower(win32_guest_root_name())) {
-        norm.erase(norm.begin());
-    }
-    return norm;
-}
-
-// The one serializer for a normalised relative path. Both the resolver and
-// the lister are given exactly this, so a listing and an open agree about
-// what path they are talking about, including at the guest root - which is
-// the empty string for both, never ".". The contract says the resolver never
-// sees a "." component, and the root is the one place it would appear.
-static std::string serialise_relative(const std::vector<std::string> &norm) {
-    std::string rel;
-    for (size_t i = 0; i < norm.size(); ++i) {
-        if (i)
-            rel += "/";
-        rel += norm[i];
-    }
-    return rel;
-}
-
-std::string normalised_relative(const std::string &guest_path) {
-    return serialise_relative(normalise_components(guest_path));
-}
-
-// A read alias consulted before the overlay and game directory. A generated
-// file handed to the original loader must not live in the game directory and
-// must not depend on an overlay layer existing. `g_file_alias_live` keeps the
-// unaliased read path free of the map lock once every alias is gone.
-static std::mutex g_file_alias_lock;
-static std::map<std::string, std::string> &file_aliases() {
-    static std::map<std::string, std::string> m;
-    return m;
-}
-// Read outside the lock as a fast path; only ever a hint. The map itself is
-// always consulted under the lock, so a stale value costs one unnecessary lock
-// and never a wrong answer. release publishes the populated map to another
-// thread that sees the acquire.
-static std::atomic<bool> g_file_alias_live{false};
-
-extern "C" int recomp_file_alias_add(const char *guest_path, const char *host_path) {
-    if (!guest_path || !guest_path[0] || !host_path || !host_path[0])
-        return 0;
-    // The guest file system is case-insensitive, so the alias key is too. A
-    // lowercased key is the one normalised spelling both sides agree on.
-    const std::string rel = lower(normalised_relative(guest_path));
-    if (rel.empty())
-        return 0;
-    std::lock_guard<std::mutex> lock(g_file_alias_lock);
-    file_aliases()[rel] = host_path;
-    g_file_alias_live.store(true, std::memory_order_release);
-    return 1;
-}
-
-extern "C" void recomp_file_alias_remove(const char *guest_path) {
-    if (!guest_path || !guest_path[0])
-        return;
-    const std::string rel = lower(normalised_relative(guest_path));
-    std::lock_guard<std::mutex> lock(g_file_alias_lock);
-    file_aliases().erase(rel);
-    g_file_alias_live.store(!file_aliases().empty(), std::memory_order_release);
 }
 
 extern "C" int recomp_temp_file(const char *suffix, const void *data, size_t len, char *out,
@@ -519,97 +325,6 @@ extern "C" uint32_t recomp_guest_alloc(uint32_t size) {
 extern "C" void recomp_guest_free(uint32_t addr) {
     if (addr)
         heap_free(addr);
-}
-
-static std::string resolve_in_game_dir(const std::vector<std::string> &norm, bool for_create) {
-    if (norm.size() > 1) {
-        std::string direct = g_game_dir + "/" + serialise_relative(norm);
-        OsStat st;
-        if (os_stat(direct.c_str(), &st) == 0)
-            return direct;
-    }
-    std::string host = g_game_dir;
-    for (size_t i = 0; i < norm.size(); ++i) {
-        std::string next = host + "/" + norm[i];
-        OsStat st;
-        if (os_stat(next.c_str(), &st) == 0) {
-            host = next;
-            continue;
-        }
-        const auto &entries = listing(host);
-        auto it = entries.find(lower(norm[i]));
-        if (it != entries.end()) {
-            host = host + "/" + it->second;
-            continue;
-        }
-        if (for_create && i + 1 == norm.size())
-            return next;
-        return std::string();
-    }
-    return host;
-}
-
-std::string win32_host_path_op(const std::string &guest_path, int op) {
-    if (guest_path.empty())
-        return std::string();
-    std::vector<std::string> norm = normalise_components(guest_path);
-    if (op == WIN32_FILE_READ && g_file_alias_live.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lock(g_file_alias_lock);
-        auto it = file_aliases().find(lower(serialise_relative(norm)));
-        if (it != file_aliases().end())
-            return it->second;
-    }
-    if (g_file_resolve) {
-        std::string rel = serialise_relative(norm);
-        char out[1024];
-        if (g_file_resolve(rel.c_str(), op, out, sizeof out))
-            return std::string(out);
-        // No answer. A read falls through to the game directory; a mutation
-        // does NOT - refusing is the whole point, and silently writing into
-        // the GOG folder is the failure this seam exists to prevent.
-        if (op != WIN32_FILE_READ && op != WIN32_FILE_LIST)
-            return std::string();
-    }
-    // A destination that does not exist yet is the normal case for both a
-    // rename and a create, so both permit a missing final component. Without
-    // this an unmodded MoveFileA or CopyFileA to a new filename fails, which
-    // is a behaviour change and not one this seam is allowed to make.
-    bool may_create = (op == WIN32_FILE_WRITE || op == WIN32_FILE_RENAME_DST);
-    return resolve_in_game_dir(norm, may_create);
-}
-
-extern "C" int recomp_writable_path(const char *guest_path, char *out, size_t out_len) {
-    // Only the resolver's answer: without an overlay a write would fall
-    // through to the game directory, which a native override must not touch.
-    if (!guest_path || !out || !out_len || !g_file_resolve)
-        return 0;
-    const std::string rel = serialise_relative(normalise_components(guest_path));
-    return g_file_resolve(rel.c_str(), WIN32_FILE_WRITE, out, out_len) ? 1 : 0;
-}
-extern "C" int recomp_readable_path(const char *guest_path, char *out, size_t out_len) {
-    if (!guest_path || !out || !out_len)
-        return 0;
-    const std::string path = win32_host_path_op(guest_path, WIN32_FILE_READ);
-    if (path.empty() || path.size() >= out_len)
-        return 0;
-    memcpy(out, path.c_str(), path.size() + 1);
-    return 1;
-}
-
-std::string win32_host_path(const std::string &guest_path, bool for_create) {
-    return win32_host_path_op(guest_path, for_create ? WIN32_FILE_WRITE : WIN32_FILE_READ);
-}
-
-std::string win32_guest_path(const std::string &host_path) {
-    std::string rel = host_path;
-    if (rel.compare(0, g_game_dir.size(), g_game_dir) == 0)
-        rel = rel.substr(g_game_dir.size());
-    std::string out = RECOMP_GUEST_ROOT;
-    for (const std::string &c : split_path(rel)) {
-        out += "\\";
-        out += c;
-    }
-    return out;
 }
 
 void set_last_error(uint32_t code) {
@@ -692,8 +407,7 @@ uint32_t loader_tls_block_for_thread(uint32_t tls_array) {
 
 void win32_init(const std::string &game_dir) {
     kernel32_wide_reset();
-    g_game_dir = game_dir.empty() ? std::string(".") : game_dir;
-    g_cur_dir = RECOMP_GUEST_ROOT;
+    win_path_init(game_dir);
     g_last_error = 0;
     g_exited = false;
     g_exit_code = 0;
@@ -705,7 +419,7 @@ void win32_init(const std::string &game_dir) {
     handles().clear();
     modules().clear();
     vm_regions().clear();
-    dir_cache().clear();
+
     g_next_handle = 0x00010004;
     modules()[lower(loader_exe_name())] = loader_image_base();
     g_process_heap = handle_new(H_HEAP);
@@ -1034,21 +748,10 @@ void k_VirtualFree(X86 *c) {
 static bool file_promote_for_write(HObj *o) {
     if (!o->write_pending)
         return true;
-    std::string host = win32_host_path_op(o->guest_name, WIN32_FILE_WRITE);
-    if (host.empty())
+    if (!vfs_promote(win_path_components(o->guest_name), o->fd, o->path, o->write_pending,
+                     o->write_flags))
         return false;
-    int64_t pos = os_fd_seek(o->fd, 0, OS_SEEK_CUR);
-    int fd = os_fd_open(host.c_str(), o->write_flags | OS_O_CREAT);
-    if (fd < 0)
-        return false;
-    if (pos > 0)
-        os_fd_seek(fd, pos, OS_SEEK_SET);
-    os_fd_close(o->fd);
-    o->fd = fd;
-    o->path = host;
-    o->write_pending = false;
-    win32_invalidate_dir_cache();
-    LOGV("CreateFileA(%s): first write, now %s", o->guest_name.c_str(), host.c_str());
+    LOGV("CreateFileA(%s): first write, now %s", o->guest_name.c_str(), o->path.c_str());
     return true;
 }
 
@@ -1378,7 +1081,7 @@ void k_GetCurrentDirectoryA(X86 *c) {
     // with a one-byte buffer and read that size; returning the 0 that
     // gm_put_str gives for an undersized write made GetCurrentDirectory look
     // like a hard failure instead of a request to retry.
-    uint32_t need = (uint32_t)g_cur_dir.size() + 1;
+    uint32_t need = (uint32_t)win_path_current().size() + 1;
     if (!buf || len == 0) {
         set_eax(c, need);
         return;
@@ -1388,7 +1091,7 @@ void k_GetCurrentDirectoryA(X86 *c) {
         set_eax(c, need);
         return;
     }
-    set_eax(c, gm_put_str(buf, g_cur_dir.c_str(), len));
+    set_eax(c, gm_put_str(buf, win_path_current().c_str(), len));
 }
 
 void k_SetCurrentDirectoryA(X86 *c) {
@@ -4123,13 +3826,7 @@ bool thread_prepare_context(GuestThread *t) {
     t->teb = block;
     t->tls = block + TEB_SIZE;
 
-    memset(&t->ctx, 0, sizeof t->ctx);
-    t->ctx.fpu_cw = 0x037f;
-    t->ctx.fpu_sw = 0;
-    t->ctx.fpu_tag = 0xffff;
-    t->ctx.fpu_top = 0;
-    t->ctx.eflags_misc = 0x00000202u;
-    t->ctx.mxcsr = 0x1f80u;
+    x86_init_context(&t->ctx);
     t->ctx.fs_base = t->teb;
     wr32(t->teb + 0x00, 0xffffffffu); // SEH chain head: empty
     wr32(t->teb + 0x04, t->stack_hi);
@@ -5326,7 +5023,7 @@ void sched_drive_release(void) {
 // ---------------------------------------------------------------------------
 // Encoding-independent bodies shared by the ANSI and wide import tables.
 std::string current_directory() {
-    return g_cur_dir;
+    return win_path_current();
 }
 
 void set_current_directory_named(X86 *c, const std::string &want) {
@@ -5336,7 +5033,7 @@ void set_current_directory_named(X86 *c, const std::string &want) {
         set_eax(c, 0);
         return;
     }
-    g_cur_dir = full_path_named(want);
+    win_path_set_current(full_path_named(want));
     set_last_error(ERROR_SUCCESS_);
     set_eax(c, 1);
 }
@@ -5607,42 +5304,27 @@ uint32_t find_first_start(const std::string &pattern) {
     if (wildcard_match(leaf.c_str(), ".."))
         add_dot("..");
 
-    if (g_file_list) {
-        // The lister is given the SAME normalised relative directory a file
-        // open would produce, so a listing and an open agree about what path
-        // they are talking about.
-        // The same serializer the resolver uses, so the root is "" on both
-        // sides rather than "." on one of them.
-        std::string rel = normalised_relative(dirpart);
-        struct Ctx {
-            HObj *o;
-            const char *leaf;
-        } ctx{&o, leaf.c_str()};
-        g_file_list(
-            rel.c_str(),
-            [](void *p, const char *nm, const char *host) {
-                Ctx *cx = (Ctx *)p;
-                if (strcmp(nm, ".") == 0 || strcmp(nm, "..") == 0)
-                    return; // synthesized above in Win32 order
-                if (!wildcard_match(cx->leaf, nm))
-                    return;
-                cx->o->matches.push_back(nm);
-                cx->o->match_paths.push_back(host);
-            },
-            &ctx);
-    } else {
-        if (host_dir.empty()) {
-            handles().erase(h);
-            set_last_error(ERROR_PATH_NOT_FOUND_);
-            return 0;
-        }
-        o.find_dir = host_dir;
-        for (const auto &kv : listing(host_dir))
-            if (wildcard_match(leaf.c_str(), kv.second.c_str())) {
-                o.matches.push_back(kv.second);
-                o.match_paths.push_back(host_dir + "/" + kv.second);
-            }
+    if (!vfs_has_lister() && host_dir.empty()) {
+        handles().erase(h);
+        set_last_error(ERROR_PATH_NOT_FOUND_);
+        return 0;
     }
+    o.find_dir = host_dir;
+    struct Ctx {
+        HObj *o;
+        const char *leaf;
+    } ctx{&o, leaf.c_str()};
+    vfs_list(
+        win_path_components(dirpart), host_dir,
+        [](void *p, const char *name, const char *host) {
+            Ctx *cx = (Ctx *)p;
+            if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
+                !wildcard_match(cx->leaf, name))
+                return;
+            cx->o->matches.push_back(name);
+            cx->o->match_paths.push_back(host);
+        },
+        &ctx);
     if (o.matches.empty()) {
         handles().erase(h);
         set_last_error(ERROR_FILE_NOT_FOUND_);
@@ -5722,37 +5404,6 @@ bool win32_crt_findclose(uint32_t handle) {
         return false;
     handles().erase(handle);
     return true;
-}
-
-std::string full_path_named(const std::string &name) {
-    std::string full;
-    if (name.size() >= 2 && name[1] == ':')
-        full = name;
-    else if (!name.empty() && (name[0] == '\\' || name[0] == '/'))
-        full = "C:" + name;
-    else
-        full = g_cur_dir + "\\" + name;
-    std::replace(full.begin(), full.end(), '/', '\\');
-    if (full.size() >= 3 && full[1] == ':' && full[2] == '\\') {
-        std::vector<std::string> components;
-        for (const auto &component : split_path(full.substr(3))) {
-            if (component == ".")
-                continue;
-            if (component == "..") {
-                if (!components.empty())
-                    components.pop_back();
-            } else {
-                components.push_back(component);
-            }
-        }
-        full.resize(3);
-        for (const auto &component : components) {
-            if (full.size() > 3)
-                full += '\\';
-            full += component;
-        }
-    }
-    return full;
 }
 
 void volume_information_named(X86 *c, const std::string &root, bool wide) {
@@ -5917,7 +5568,7 @@ void k_CreateProcessA(X86 *c) {
                     "startup options");
         return;
     }
-    std::string directory = arg(c, 7) ? gm_str(arg(c, 7)) : g_cur_dir;
+    std::string directory = arg(c, 7) ? gm_str(arg(c, 7)) : win_path_current();
     if (lower(full_path_named(directory)) != lower(full_path_named(RECOMP_GUEST_ROOT))) {
         unsupported("child working directory");
         return;

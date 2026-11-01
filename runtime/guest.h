@@ -21,6 +21,7 @@
 // ---------------------------------------------------------------------------
 // Guest address space constants.
 // ---------------------------------------------------------------------------
+void x86_init_context(X86 *c);
 std::vector<uint32_t> x86_return_chain(uint32_t ebp, size_t max);
 
 static const uint32_t IMAGE_BASE = GUEST_IMAGE_BASE; // PE preferred base, no relocation

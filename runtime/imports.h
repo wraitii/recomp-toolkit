@@ -12,6 +12,7 @@
 //   never touches ESP itself.
 #pragma once
 #include "guest.h"
+#include "pe.h"
 #include <stdio.h>
 
 // argc_stdcall sentinels.
@@ -175,3 +176,6 @@ void imports_dump_report(FILE *out);
 void imports_coverage(uint32_t *implemented, uint32_t *logging_only, uint32_t *unknown_argc);
 uint32_t imports_call_count(const char *dll, const char *name);
 uint32_t imports_count();
+
+bool imports_bind(const std::vector<PeImportModule> &modules, bool strict, uint32_t &patched,
+                  uint32_t &data_count, std::string &error);

@@ -1,5 +1,6 @@
 #include "seh.h"
 #include "loader.h"
+#include "pe.h"
 
 #include "memory.h"
 #include "imports.h"
@@ -170,7 +171,6 @@ template <typename T> T rd(const std::vector<uint8_t> &d, size_t off) {
 constexpr size_t PE32_DIRECTORY_COUNT = 92;
 constexpr size_t PE32_DIRECTORIES = 96;
 constexpr uint32_t DIRECTORY_IMPORT = 1;
-constexpr uint32_t DIRECTORY_TLS = 9;
 constexpr uint32_t DIRECTORY_BOUND_IMPORT = 11;
 constexpr uint32_t DIRECTORY_DELAY_IMPORT = 13;
 constexpr uint32_t DIRECTORY_CLR = 14;
@@ -196,140 +196,6 @@ bool rva_ok(uint32_t rva, uint32_t len) {
 // Resolve the PE import table of the image mapped at [base, base+size) to
 // runtime trampolines or registered guest data storage. Bound every descriptor
 // and RVA by the image before reading or patching it.
-bool patch_iat(const std::vector<uint8_t> &file, size_t opt_off, uint16_t opt_magic,
-               uint32_t g_base, uint32_t g_size, ImagePolicy policy) {
-    auto rva_ok = [g_size](uint32_t rva, uint32_t len) { return rva_in(g_size, rva, len); };
-    bool strict = policy == ImagePolicy::Arbitrary;
-    size_t dd_off = opt_off + (opt_magic == 0x20b ? 112 : PE32_DIRECTORIES);
-    if (strict && directory_count(file, opt_off) <= DIRECTORY_IMPORT)
-        return true;
-    if (dd_off + 16 > file.size()) {
-        g_error = "PE data directories are truncated";
-        return false;
-    }
-    uint32_t imp_rva = rd<uint32_t>(file, dd_off + 8 * 1 + 0);
-    uint32_t imp_size = rd<uint32_t>(file, dd_off + 8 * 1 + 4);
-    if (!imp_rva || !imp_size) {
-        if (strict && bool(imp_rva) != bool(imp_size)) {
-            g_error = "incomplete import directory";
-            return false;
-        }
-        if (strict || g_base != loader_image_base())
-            return true;
-        g_error = "image has no import directory";
-        return false;
-    }
-    if (!rva_ok(imp_rva, imp_size)) {
-        g_error = "import directory lies outside the image";
-        return false;
-    }
-
-    // One descriptor per DLL, bounded by the directory size.
-    uint32_t max_desc = imp_size / 20 + (strict ? 0 : 1);
-    bool terminated = false;
-    uint32_t desc_rva = imp_rva;
-    for (uint32_t d = 0; d < max_desc; ++d, desc_rva += 20) {
-        if (!rva_ok(desc_rva, 20)) {
-            g_error = "import descriptor runs past the image";
-            return false;
-        }
-        uint32_t desc = g_base + desc_rva;
-        uint32_t orig_thunk = rd32(desc + 0);
-        uint32_t name_rva = rd32(desc + 12);
-        uint32_t first_thunk = rd32(desc + 16);
-        if (!name_rva && !first_thunk && !orig_thunk) {
-            terminated = true;
-            break;
-        }
-        if (!rva_ok(name_rva, 1) || !rva_ok(first_thunk, 4)) {
-            g_error = "import descriptor points outside the image";
-            return false;
-        }
-        std::string dll = gm_str(g_base + name_rva, 260);
-
-        uint32_t lookup_rva = orig_thunk ? orig_thunk : first_thunk;
-        uint32_t slot_rva = first_thunk;
-        for (;; lookup_rva += 4, slot_rva += 4) {
-            if (!rva_ok(lookup_rva, 4) || !rva_ok(slot_rva, 4)) {
-                g_error = "import thunk array runs past the image";
-                return false;
-            }
-            uint32_t lookup = g_base + lookup_rva;
-            uint32_t slot = g_base + slot_rva;
-            uint32_t t = rd32(lookup);
-            if (!t)
-                break;
-            char namebuf[280];
-            if (t & 0x80000000u) {
-                snprintf(namebuf, sizeof namebuf, "ord%u", t & 0xffff);
-            } else {
-                if (!rva_ok(t, 3)) {
-                    g_error = "import name lies outside the image";
-                    return false;
-                }
-                std::string n = gm_str(g_base + t + 2, 260);
-                snprintf(namebuf, sizeof namebuf, "%s", n.c_str());
-            }
-            // DLLs can import code AND data from the executable. Both slots
-            // must hold the original guest address, not a host trampoline or
-            // a separately allocated copy of an exported global.
-            if (const LoaderModule *module = loader_module_named(dll.c_str())) {
-                if (strict) {
-                    g_error = "unsupported guest module import " + dll;
-                    return false;
-                }
-                uint32_t address = (t & 0x80000000u)
-                                       ? loader_module_export_ordinal(*module, t & 0xffff)
-                                       : loader_module_export(*module, namebuf);
-                if (!address) {
-                    g_error = "missing mapped export " + dll + "!" + namebuf;
-                    return false;
-                }
-                wr32(slot, address);
-                ++g_iat_patched;
-                continue;
-            }
-            uint32_t data = imports_alloc_data(dll.c_str(), namebuf);
-            if (data) {
-                // An imported variable, not a function: the slot holds the
-                // address of zeroed guest storage.
-                wr32(slot, data);
-                ++g_iat_patched;
-                ++g_iat_data;
-                continue;
-            }
-            // A DLL with a shim table keeps its per-name stubs, including the
-            // deliberate logging-only ones. A strict DLL is one whose table is
-            // still being filled in: its gaps must abort under their own name,
-            // not return zero. A DLL with no table at all is not merely
-            // unimplemented either: calling into it must stop with the name of
-            // the missing dll!function rather than returning zero.
-            uint32_t tramp = strict && !imports_implemented(dll.c_str(), namebuf)
-                                 ? imports_alloc_trampoline(dll.c_str(), namebuf,
-                                                            imports_unsupported, ARGC_UNKNOWN)
-                                 : imports_resolve(dll.c_str(), namebuf);
-            if (!tramp) {
-                void (*unknown)(X86 *) =
-                    (imports_has_dll(dll.c_str()) && !imports_is_strict_dll(dll.c_str()))
-                        ? nullptr
-                        : imports_unsupported;
-                tramp = imports_alloc_trampoline(dll.c_str(), namebuf, unknown, ARGC_UNKNOWN);
-            }
-            if (!tramp) {
-                g_error = "ran out of import trampolines";
-                return false;
-            }
-            wr32(slot, tramp);
-            ++g_iat_patched;
-        }
-    }
-    if (strict && !terminated) {
-        g_error = "import directory lacks a terminating descriptor";
-        return false;
-    }
-    return true;
-}
-
 // --------------------------------------------------------------------------
 // Auxiliary modules: DLLs game.toml names, mapped beside the main image at
 // their configured base, above the shim arena block, verified by content hash
@@ -355,6 +221,7 @@ struct AuxPending {
     uint16_t opt_magic;
     uint32_t size_image;
     uint32_t index; // position in g_aux, which is this vector's position
+    std::vector<PeImportModule> imports;
 };
 std::vector<AuxPending> g_aux_pending;
 std::vector<uint32_t> g_aux_order;        // g_aux indices in DllMain dependency order
@@ -390,111 +257,6 @@ bool answers_to(const LoaderModule &m, const std::string &normalized) {
 // The translator's Image applies the identical delta, so guest-visible absolute
 // addresses in code and data stay in step. A module given a different base
 // without a relocation table is a hard failure, never a best effort.
-bool relocate_aux_module(const char *name, uint32_t base, uint32_t preferred, uint32_t size,
-                         uint32_t reloc_rva, uint32_t reloc_size) {
-    if (base == preferred)
-        return true;
-    if (!reloc_rva || !reloc_size) {
-        g_error =
-            std::string(name) + ": configured base needs a base relocation table, and it has none";
-        return false;
-    }
-    int32_t delta = (int32_t)(base - preferred);
-    uint32_t off = reloc_rva, end = reloc_rva + reloc_size;
-    while (off + 8 <= end) {
-        if (!rva_in(size, off, 8)) {
-            g_error = std::string(name) + ": base relocation block header lies outside the image";
-            return false;
-        }
-        uint32_t page = rd32(base + off);
-        uint32_t blk = rd32(base + off + 4);
-        if (blk < 8 || off + blk > end || !rva_in(size, off, blk)) {
-            g_error = std::string(name) + ": malformed base relocation block";
-            return false;
-        }
-        for (uint32_t k = off + 8; k + 2 <= off + blk; k += 2) {
-            uint16_t e = rd16(base + k);
-            if ((e >> 12) != 3) // IMAGE_REL_BASED_HIGHLOW; ABSOLUTE padding names nothing
-                continue;
-            uint32_t site = page + (e & 0xfff);
-            if (!rva_in(size, site, 4)) {
-                g_error = std::string(name) + ": base relocation site lies outside the image";
-                return false;
-            }
-            wr32(base + site, rd32(base + site) + (uint32_t)delta);
-        }
-        off += blk;
-    }
-    return true;
-}
-
-struct PeLayout {
-    size_t opt_off = 0, sh_off = 0;
-    uint16_t opt_size = 0, nsections = 0;
-    uint32_t size_image = 0, size_hdrs = 0;
-};
-
-bool pe_layout(const std::vector<uint8_t> &file, const std::string &path, PeLayout &pe) {
-    if (file.size() < 0x40 || rd<uint16_t>(file, 0) != 0x5a4d) {
-        g_error = path + " is not an MZ image";
-        return false;
-    }
-    uint32_t pe_off = rd<uint32_t>(file, 0x3c);
-    if ((uint64_t)pe_off + 24 > file.size() || rd<uint32_t>(file, pe_off) != 0x00004550) {
-        g_error = path + " is not a PE image";
-        return false;
-    }
-    size_t fh_off = pe_off + 4;
-    pe.nsections = rd<uint16_t>(file, fh_off + 2);
-    pe.opt_size = rd<uint16_t>(file, fh_off + 16);
-    pe.opt_off = fh_off + 20;
-    if (pe.opt_off + 96 > file.size() || rd<uint16_t>(file, pe.opt_off) != 0x10b ||
-        pe.opt_size < 96) {
-        g_error = path + " is not a PE32 image";
-        return false;
-    }
-    pe.sh_off = pe.opt_off + pe.opt_size;
-    if (pe.nsections == 0 || pe.sh_off + 40ull * pe.nsections > file.size()) {
-        g_error = path + " has a truncated section table";
-        return false;
-    }
-    pe.size_image = rd<uint32_t>(file, pe.opt_off + 56);
-    pe.size_hdrs = rd<uint32_t>(file, pe.opt_off + 60);
-    return true;
-}
-
-bool pe_copy(const std::vector<uint8_t> &file, const PeLayout &pe, const std::string &name,
-             uint32_t base, std::vector<SectionInfo> *sections) {
-    size_t hdr_copy = std::min<size_t>(std::min(pe.size_hdrs, pe.size_image), file.size());
-    memcpy(g_mem + base, file.data(), hdr_copy);
-    for (uint16_t i = 0; i < pe.nsections; ++i) {
-        size_t s = pe.sh_off + 40 * i;
-        char nm[9] = {0};
-        memcpy(nm, file.data() + s, 8);
-        uint32_t vsize = rd<uint32_t>(file, s + 8);
-        uint32_t va = base + rd<uint32_t>(file, s + 12);
-        uint32_t raw_size = rd<uint32_t>(file, s + 16);
-        uint32_t raw_ptr = rd<uint32_t>(file, s + 20);
-        uint32_t span = vsize ? vsize : raw_size;
-        sections->push_back({nm, va, vsize, raw_size, raw_ptr, rd<uint32_t>(file, s + 36)});
-        if (va < base || (uint64_t)va + span > (uint64_t)base + pe.size_image) {
-            g_error = name + ": section " + nm + " lies outside the image";
-            return false;
-        }
-        uint32_t copy = raw_size;
-        if (vsize && copy > vsize)
-            copy = vsize;
-        if (raw_ptr && copy) {
-            if ((uint64_t)raw_ptr + copy > file.size()) {
-                g_error = name + ": section " + nm + " raw data is truncated";
-                return false;
-            }
-            memcpy(g_mem + va, file.data() + raw_ptr, copy);
-        }
-    }
-    return true;
-}
-
 bool map_aux_module(const AuxSpec &spec) {
     LoaderModule m;
     m.name = spec.name;
@@ -532,7 +294,7 @@ bool map_aux_module(const AuxSpec &spec) {
     }
     m.sha256 = digest;
     PeLayout pe;
-    if (!pe_layout(file, m.path, pe))
+    if (!pe_layout(file, m.path, pe, g_error))
         return false;
     size_t opt_off = pe.opt_off;
     uint16_t opt_size = pe.opt_size, opt_magic = 0x10b;
@@ -567,14 +329,14 @@ bool map_aux_module(const AuxSpec &spec) {
     if (rd<uint32_t>(file, opt_off + 92) > 9 && rd<uint32_t>(file, opt_off + 96 + 9 * 8))
         LOGW("%s has a TLS directory, which auxiliary modules do not get", spec.name);
 
-    if (!pe_copy(file, pe, spec.name, spec.base, &m.sections))
+    if (!pe_copy(file, pe, spec.name, spec.base, &m.sections, g_error))
         return false;
     uint32_t reloc_rva = 0, reloc_size = 0;
     if (opt_size >= 96 + 6 * 8) {
         reloc_rva = rd<uint32_t>(file, opt_off + 96 + 5 * 8);
         reloc_size = rd<uint32_t>(file, opt_off + 96 + 5 * 8 + 4);
     }
-    if (!relocate_aux_module(spec.name, spec.base, image_base, size_image, reloc_rva, reloc_size))
+    if (!pe_relocate(spec.name, spec.base, image_base, size_image, reloc_rva, reloc_size, g_error))
         return false;
     uint32_t index = (uint32_t)g_aux.size();
     g_aux.push_back(m);
@@ -593,23 +355,13 @@ bool bind_aux_imports() {
     for (size_t i = 0; i < n; ++i) {
         const LoaderModule &m = g_aux[i];
         const AuxPending &p = g_aux_pending[i];
-        uint32_t imp_rva = rd<uint32_t>(p.file, p.opt_off + 96 + 1 * 8);
-        uint32_t imp_size = rd<uint32_t>(p.file, p.opt_off + 96 + 1 * 8 + 4);
-        if (!imp_rva || !imp_size || !rva_in(p.size_image, imp_rva, imp_size))
-            continue;
-        uint32_t max_desc = imp_size / 20 + 1;
-        for (uint32_t d = 0; d < max_desc; ++d) {
-            uint32_t desc_rva = imp_rva + d * 20;
-            if (!rva_in(p.size_image, desc_rva, 20))
-                break;
-            uint32_t name_rva = rd32(m.base + desc_rva + 12);
-            uint32_t first = rd32(m.base + desc_rva + 16);
-            uint32_t orig = rd32(m.base + desc_rva + 0);
-            if (!name_rva && !first && !orig)
-                break;
-            if (!rva_in(p.size_image, name_rva, 1))
-                break;
-            std::string dll = normalize_module_name(gm_str(m.base + name_rva, 260).c_str());
+        if (!pe_imports(p.file, p.opt_off, p.opt_magic, m.base, p.size_image, false, false,
+                        g_aux_pending[i].imports, g_error)) {
+            g_error = m.name + ": " + g_error;
+            return false;
+        }
+        for (const PeImportModule &imported : g_aux_pending[i].imports) {
+            std::string dll = normalize_module_name(imported.dll.c_str());
             for (size_t j = 0; j < n; ++j)
                 if (i != j && answers_to(g_aux[j], dll))
                     deps[i].push_back((int)j);
@@ -641,8 +393,7 @@ bool bind_aux_imports() {
     }
     for (uint32_t i : order) {
         AuxPending &p = g_aux_pending[i];
-        if (!patch_iat(p.file, p.opt_off, p.opt_magic, g_aux[i].base, p.size_image,
-                       ImagePolicy::Game)) {
+        if (!imports_bind(p.imports, false, g_iat_patched, g_iat_data, g_error)) {
             g_error = g_aux[i].name + ": " + g_error;
             return false;
         }
@@ -657,7 +408,7 @@ bool bind_aux_imports() {
 
 bool loader_test_relocate(uint32_t base, uint32_t preferred, uint32_t size, uint32_t reloc_rva,
                           uint32_t reloc_size) {
-    return relocate_aux_module("test", base, preferred, size, reloc_rva, reloc_size);
+    return pe_relocate("test", base, preferred, size, reloc_rva, reloc_size, g_error);
 }
 
 uint32_t loader_module_count() {
@@ -734,11 +485,11 @@ uint32_t loader_map_datafile(const std::string &path, std::string *why) {
     m.size = 0;
     if (!read_file(path.c_str(), file)) {
         g_error = "cannot read " + path;
-    } else if (pe_layout(file, path, pe)) {
+    } else if (pe_layout(file, path, pe, g_error)) {
         m.base = heap_alloc(pe.size_image, true, 0x10000);
         if (!m.base)
             g_error = path + ": no guest memory for its image";
-        else if (!pe_copy(file, pe, m.name, m.base, &m.sections))
+        else if (!pe_copy(file, pe, m.name, m.base, &m.sections, g_error))
             heap_free(m.base);
         else {
             m.size = pe.size_image;
@@ -776,83 +527,29 @@ bool loader_in_image(uint32_t addr) {
 // be. Follow it into another mapped module. A system-DLL forwarder has no
 // mapped module here; the caller reports the missing export rather than
 // guessing at a trampoline.
-uint32_t loader_follow_forwarder(const LoaderModule &m, uint32_t rva) {
-    std::string s = gm_str(m.base + rva, std::min(260u, m.size - rva));
-    size_t dot = s.find('.');
-    if (dot == std::string::npos || dot == 0 || dot + 1 >= s.size())
+uint32_t loader_follow_forwarder(const std::string &forwarder) {
+    std::string module, name;
+    uint32_t ordinal = 0;
+    bool by_ordinal = false;
+    if (!pe_forwarder(forwarder, module, name, ordinal, by_ordinal))
         return 0;
-    const LoaderModule *target = loader_module_named(s.substr(0, dot).c_str());
+    const LoaderModule *target = loader_module_named(module.c_str());
     if (!target)
         return 0;
-    std::string fn = s.substr(dot + 1);
-    if (!fn.empty() && fn[0] == '#') {
-        char *end = nullptr;
-        long ord = strtol(fn.c_str() + 1, &end, 10);
-        return end && *end == '\0' ? loader_module_export_ordinal(*target, (uint32_t)ord) : 0;
-    }
-    return loader_module_export(*target, fn.c_str());
+    return by_ordinal ? loader_module_export_ordinal(*target, ordinal)
+                      : loader_module_export(*target, name.c_str());
 }
 
 // The PE export directory read from guest memory, so a lookup sees the mapped
 // bytes. Names are compared case sensitively, as GetProcAddress does.
 uint32_t loader_module_export(const LoaderModule &m, const char *name) {
-    if (!m.export_rva || !name || !rva_in(m.size, m.export_rva, 40))
-        return 0;
-    auto in = [&](uint32_t rva, uint32_t len) { return rva_in(m.size, rva, len); };
-    uint32_t dir = m.base + m.export_rva;
-    uint32_t nfuncs = rd32(dir + 20), nnames = rd32(dir + 24);
-    uint32_t funcs = rd32(dir + 28), names = rd32(dir + 32), ords = rd32(dir + 36);
-    if (nfuncs > m.size / 4 || nnames > m.size / 4 || !in(funcs, 4 * nfuncs) ||
-        !in(names, 4 * nnames) || !in(ords, 2 * nnames))
-        return 0;
-    const size_t requested_length = strlen(name);
-    for (uint32_t i = 0; i < nnames; ++i) {
-        uint32_t name_rva = rd32(m.base + names + 4 * i);
-        if (!in(name_rva, 1))
-            continue;
-        const uint32_t name_addr = m.base + name_rva;
-        size_t available = 0;
-        if (name_addr != 0 && name_addr < GUEST_SIZE)
-            available = std::min((size_t)(m.size - name_rva), (size_t)(GUEST_SIZE - name_addr));
-        if (available) {
-            const char *export_name = (const char *)(g_mem + name_addr);
-            if (requested_length > available ||
-                (requested_length && memcmp(export_name, name, requested_length) != 0) ||
-                (requested_length < available && export_name[requested_length] != 0))
-                continue;
-        } else if (requested_length != 0) {
-            continue;
-        }
-        uint32_t ordinal = rd16(m.base + ords + 2 * i);
-        if (ordinal >= nfuncs)
-            return 0;
-        uint32_t rva = rd32(m.base + funcs + 4 * ordinal);
-        if (!rva || !in(rva, 1))
-            return 0;
-        // A forwarder (an RVA inside the export directory) names another export.
-        if (rva_in(m.export_size, rva - m.export_rva, 1))
-            return loader_follow_forwarder(m, rva);
-        return m.base + rva;
-    }
-    return 0;
+    PeExport result = pe_export_name(m.base, m.size, m.export_rva, m.export_size, name);
+    return result.forwarder.empty() ? result.address : loader_follow_forwarder(result.forwarder);
 }
 
-// Ordinals index the same address table as names, offset by the directory's
-// ordinal base. Missing entries and unresolved forwards are not executable.
 uint32_t loader_module_export_ordinal(const LoaderModule &m, uint32_t ordinal) {
-    if (!m.export_rva || !rva_in(m.size, m.export_rva, 40))
-        return 0;
-    uint32_t dir = m.base + m.export_rva;
-    uint32_t first = rd32(dir + 16), count = rd32(dir + 20), table = rd32(dir + 28);
-    if (ordinal < first || ordinal - first >= count || count > m.size / 4 ||
-        !rva_in(m.size, table, 4 * count))
-        return 0;
-    uint32_t rva = rd32(m.base + table + 4 * (ordinal - first));
-    if (!rva || !rva_in(m.size, rva, 1))
-        return 0;
-    if (rva_in(m.export_size, rva - m.export_rva, 1))
-        return loader_follow_forwarder(m, rva);
-    return m.base + rva;
+    PeExport result = pe_export_ordinal(m.base, m.size, m.export_rva, m.export_size, ordinal);
+    return result.forwarder.empty() ? result.address : loader_follow_forwarder(result.forwarder);
 }
 
 const char *loader_error() {
@@ -1012,36 +709,15 @@ bool load_main(const char *exe_path, ImagePolicy policy, void (*register_shims)(
     // expected, which is why it is recorded here and not made a constant.
     g_exe_sha = digest;
 
-    if (file.size() < 0x40 || rd<uint16_t>(file, 0) != 0x5a4d) {
-        g_error = "not an MZ image";
+    PeLayout pe;
+    if (!pe_main_layout(file, pe, g_error))
         return false;
-    }
-    uint32_t pe_off = rd<uint32_t>(file, 0x3c);
-    if ((uint64_t)pe_off + 24 > file.size() || rd<uint32_t>(file, pe_off) != 0x00004550) {
-        g_error = "not a PE image";
-        return false;
-    }
-
-    size_t fh_off = pe_off + 4;
-    uint16_t machine = rd<uint16_t>(file, fh_off + 0);
-    uint16_t nsections = rd<uint16_t>(file, fh_off + 2);
-    uint16_t opt_size = rd<uint16_t>(file, fh_off + 16);
-    size_t opt_off = fh_off + 20;
-    if (opt_off + opt_size > file.size() || opt_size < PE32_DIRECTORIES) {
-        g_error = "PE optional header is truncated";
-        return false;
-    }
-    uint16_t opt_magic = rd<uint16_t>(file, opt_off);
-    if (machine != 0x014c || opt_magic != 0x10b) {
+    if (pe.machine != 0x014c) {
         g_error = "expected a 32-bit x86 PE image";
         return false;
     }
-    size_t sh_off = opt_off + opt_size;
-    if (nsections == 0 || sh_off + 40ull * nsections > file.size()) {
-        g_error = "PE section headers are truncated";
-        return false;
-    }
-
+    size_t fh_off = pe.fh_off, opt_off = pe.opt_off, sh_off = pe.sh_off;
+    uint16_t opt_size = pe.opt_size, nsections = pe.nsections, opt_magic = 0x10b;
     uint32_t entry_rva = rd<uint32_t>(file, opt_off + 16);
     uint32_t image_base = rd<uint32_t>(file, opt_off + 28);
     uint32_t size_image = rd<uint32_t>(file, opt_off + 56);
@@ -1076,41 +752,8 @@ bool load_main(const char *exe_path, ImagePolicy policy, void (*register_shims)(
         }
     }
 
-    // PE headers, then each section at its virtual address. The arena is zero
-    // filled by mmap, so the tail of a section past SizeOfRawData (.bss) is
-    // already zero.
-    size_t hdr_copy = size_hdrs < file.size() ? size_hdrs : file.size();
-    memcpy(g_mem + g_base, file.data(), hdr_copy);
-
-    for (uint16_t i = 0; i < nsections; ++i) {
-        size_t s = sh_off + 40 * i;
-        char nm[9] = {0};
-        memcpy(nm, file.data() + s, 8);
-        SectionInfo si;
-        si.name = nm;
-        si.vsize = rd<uint32_t>(file, s + 8);
-        si.va = image_base + rd<uint32_t>(file, s + 12);
-        si.raw_size = rd<uint32_t>(file, s + 16);
-        si.raw_ptr = rd<uint32_t>(file, s + 20);
-        si.characteristics = rd<uint32_t>(file, s + 36);
-
-        uint32_t span = si.vsize ? si.vsize : si.raw_size;
-        if (si.va < image_base || (uint64_t)si.va + span > (uint64_t)image_base + size_image) {
-            g_error = "section " + si.name + " lies outside the image";
-            return false;
-        }
-        uint32_t copy = si.raw_size;
-        if (si.vsize && copy > si.vsize)
-            copy = si.vsize;
-        if (si.raw_ptr && copy) {
-            if ((uint64_t)si.raw_ptr + copy > file.size()) {
-                g_error = "section " + si.name + " raw data is truncated";
-                return false;
-            }
-            memcpy(g_mem + si.va, file.data() + si.raw_ptr, copy);
-        }
-        g_sections.push_back(si);
-    }
+    if (!pe_copy(file, pe, "", g_base, &g_sections, g_error))
+        return false;
 
     imports_init();
     win32_init(dirname_of(g_exe_path));
@@ -1120,40 +763,17 @@ bool load_main(const char *exe_path, ImagePolicy policy, void (*register_shims)(
     // TLS directory. Reserve after win32_init, which clears the slot map, and
     // before IAT binding or any guest code can call TlsAlloc.
     g_tls = LoaderTls{0, 0, 0, 0, 0, 0xffffffffu};
-    if (directory_count(file, opt_off) > DIRECTORY_TLS) {
-        size_t dd_tls = opt_off + PE32_DIRECTORIES + DIRECTORY_TLS * 8;
-        if (opt_size < PE32_DIRECTORIES + (DIRECTORY_TLS + 1) * 8) {
-            g_error = "PE TLS data directory is truncated";
+    PeTls tls;
+    if (!pe_tls(file, pe, image_base, tls, g_error))
+        return false;
+    if (tls.index_addr) {
+        g_tls = {tls.raw_start, tls.raw_end,   tls.index_addr,
+                 tls.callbacks, tls.zero_fill, tls_reserve_slot()};
+        if (g_tls.index == 0xffffffffu) {
+            g_error = "no TLS slot available for the image";
             return false;
         }
-        uint32_t tls_rva = rd<uint32_t>(file, dd_tls);
-        uint32_t tls_size = rd<uint32_t>(file, dd_tls + 4);
-        if (tls_rva) {
-            if (tls_size < 24 || !rva_ok(tls_rva, tls_size)) {
-                g_error = "TLS directory is truncated or lies outside the image";
-                return false;
-            }
-            uint32_t d = image_base + tls_rva;
-            g_tls.raw_start = rd32(d + 0);
-            g_tls.raw_end = rd32(d + 4);
-            g_tls.index_addr = rd32(d + 8);
-            g_tls.callbacks = rd32(d + 12);
-            g_tls.zero_fill = rd32(d + 16);
-            if (g_tls.raw_end < g_tls.raw_start ||
-                (g_tls.raw_end > g_tls.raw_start &&
-                 !rva_ok(g_tls.raw_start - image_base, g_tls.raw_end - g_tls.raw_start)) ||
-                !rva_ok(g_tls.index_addr - image_base, 4) ||
-                (g_tls.callbacks && !rva_ok(g_tls.callbacks - image_base, 4))) {
-                g_error = "TLS directory points outside the image";
-                return false;
-            }
-            g_tls.index = tls_reserve_slot();
-            if (g_tls.index == 0xffffffffu) {
-                g_error = "no TLS slot available for the image";
-                return false;
-            }
-            wr32(g_tls.index_addr, g_tls.index);
-        }
+        wr32(g_tls.index_addr, g_tls.index);
     }
 
     // RECOMP_IMPORT_STATS=1 prints the implemented / not-reached / logging-only
@@ -1183,28 +803,15 @@ bool load_main(const char *exe_path, ImagePolicy policy, void (*register_shims)(
     // loader_attach_modules runs exactly those and load_library_named owns
     // the rest.
     g_aux_startup.assign(g_aux.size(), false);
-    {
-        size_t dd_import = opt_off + PE32_DIRECTORIES + DIRECTORY_IMPORT * 8;
-        uint32_t imp_rva = rd<uint32_t>(file, dd_import);
-        uint32_t imp_size = rd<uint32_t>(file, dd_import + 4);
-        if (!g_aux.empty() && imp_rva && imp_size && rva_ok(imp_rva, imp_size)) {
-            for (uint32_t d = 0; d < imp_size / 20 + 1; ++d) {
-                uint32_t desc = imp_rva + d * 20;
-                if (!rva_ok(desc, 20))
-                    break;
-                uint32_t name_rva = rd32(g_base + desc + 12);
-                uint32_t first = rd32(g_base + desc + 16);
-                uint32_t orig = rd32(g_base + desc);
-                if (!name_rva && !first && !orig)
-                    break;
-                if (!rva_ok(name_rva, 1))
-                    break;
-                std::string dll = normalize_module_name(gm_str(g_base + name_rva, 260).c_str());
-                for (size_t i = 0; i < g_aux.size(); ++i)
-                    if (answers_to(g_aux[i], dll))
-                        g_aux_startup[i] = true;
-            }
-        }
+    std::vector<PeImportModule> main_imports;
+    if (!pe_imports(file, opt_off, opt_magic, g_base, g_size, policy == ImagePolicy::Arbitrary,
+                    true, main_imports, g_error))
+        return false;
+    for (const PeImportModule &imported : main_imports) {
+        std::string dll = normalize_module_name(imported.dll.c_str());
+        for (size_t i = 0; i < g_aux.size(); ++i)
+            if (answers_to(g_aux[i], dll))
+                g_aux_startup[i] = true;
     }
     for (bool changed = true; changed;) {
         changed = false;
@@ -1216,7 +823,8 @@ bool load_main(const char *exe_path, ImagePolicy policy, void (*register_shims)(
                         changed = true;
                     }
     }
-    if (!patch_iat(file, opt_off, opt_magic, g_base, g_size, policy))
+    if (!imports_bind(main_imports, policy == ImagePolicy::Arbitrary, g_iat_patched, g_iat_data,
+                      g_error))
         return false;
     // Data imports the CRT reads before any call, now that the IAT holds their
     // guest addresses.
@@ -1257,18 +865,7 @@ bool loader_load_interpreted(const char *exe_path, void (*register_shims)()) {
 
 void loader_init_context(X86 *c) {
     recomp_seh_reset(c);
-    memset(c, 0, sizeof(*c));
-    // Process-start CPU state. The x87 values are the post-FINIT ones the CRT
-    // assumes: control word 0x037f (round to nearest, 64-bit precision, all
-    // exceptions masked), clear status word, all-empty tag word. __ftol,
-    // __ctrlfp and __statfp diverge immediately if these are wrong.
-    c->fpu_cw = 0x037f;
-    c->fpu_sw = 0;
-    c->fpu_tag = 0xffff;
-    c->fpu_top = 0;
-    c->mxcsr = 0x1f80u;
-    // EFLAGS with only the reserved bit 1 and IF set, so PUSHFD reads 0x202.
-    c->eflags_misc = 0x00000202u;
+    x86_init_context(c);
     c->fs_base = TEB_BASE;
 
     // TEB: FS:[0] SEH chain head (empty = -1), FS:[4] stack base (high),

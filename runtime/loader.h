@@ -2,17 +2,9 @@
 #pragma once
 #include "game_config.h"
 #include "guest.h"
+#include "pe.h"
 #include <string>
 #include <vector>
-
-struct SectionInfo {
-    std::string name;
-    uint32_t va;       // guest virtual address
-    uint32_t vsize;    // Misc_VirtualSize
-    uint32_t raw_size; // SizeOfRawData
-    uint32_t raw_ptr;  // PointerToRawData
-    uint32_t characteristics;
-};
 
 // Default image and its expected content hash.
 extern const char *const LOADER_DEFAULT_EXE; // RECOMP_DEVELOPER_EXE from game.toml

@@ -23,6 +23,14 @@
 #include <map>
 #include <vector>
 
+void x86_init_context(X86 *c) {
+    memset(c, 0, sizeof(*c));
+    c->fpu_cw = 0x037f;
+    c->fpu_tag = 0xffff;
+    c->mxcsr = 0x1f80u;
+    c->eflags_misc = 0x00000202u;
+}
+
 std::vector<uint32_t> x86_return_chain(uint32_t ebp, size_t max) {
     std::vector<uint32_t> out;
     while (ebp && gm_valid(ebp, 8) && out.size() < max) {

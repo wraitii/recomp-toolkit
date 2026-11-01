@@ -1,15 +1,10 @@
 // Shared reader for the loaded PE image's resource directory. Returned handles
 // and payloads are guest addresses. No module or host pointer is substituted.
 #pragma once
+#include "pe.h"
 #include <cstdint>
 #include <string>
 #include <vector>
-
-struct ResourceName {
-    bool is_string = false;
-    uint32_t id = 0;
-    std::string name; // UTF-8, decoded from the directory's length-prefixed UTF-16.
-};
 
 // `module` is a mapped image base: 0 for the EXE, an auxiliary module, or a data file.
 // Type and name accept integer IDs, UTF-16 "#123", or UTF-16 names. Select the

@@ -90,12 +90,12 @@ the opt-in for stricter behaviour.
 
 ### 1.3 Split the loader
 
-- [ ] `pe.cpp`: header parsing, section mapping, relocations, import
+- [x] `pe.cpp`: header parsing, section mapping, relocations, import
       enumeration (`slot, width, dll, name|ordinal`), exports, forwarders,
       resources, TLS and exception directory accessors. No guest-OS knowledge.
-- [ ] `imports.cpp`: binds enumerated imports to trampolines; only place that
+- [x] `imports.cpp`: binds enumerated imports to trampolines; only place that
       knows trampolines.
-- [ ] Windows process start: TEB, stack, `fs_base`, DLL attach order,
+- [x] Windows process start: TEB, stack, `fs_base`, DLL attach order,
       `LoadLibrary` identity, `run_entry`. Split `loader_init_context` into CPU
       defaults (x87/MXCSR/eflags) and Windows setup (`loader.cpp:1272`,
       `kernel32.cpp:4013`).
@@ -104,12 +104,12 @@ the opt-in for stricter behaviour.
 
 ### 1.4 Split the guest file system out of `kernel32.cpp`
 
-- [ ] `vfs.cpp`, taking component lists: aliases, resolver/lister hook,
+- [x] `vfs.cpp`, taking component lists: aliases, resolver/lister hook,
       case-insensitive game-directory fallback with listing cache, read-tier
       opens promoted on write, no write fall-through. Case-insensitivity as a
       flag.
-- [ ] `win_path.cpp`: Windows path parsing and `win32_guest_path`.
-- [ ] `native_seam.h` API unchanged; `mods/overlay.cpp` unchanged.
+- [x] `win_path.cpp`: Windows path parsing and `win32_guest_path`.
+- [x] `native_seam.h` API unchanged; `mods/overlay.cpp` unchanged.
 
 Covered by `runtime_tests.cpp:4374-4943`.
 
