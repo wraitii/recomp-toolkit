@@ -8,6 +8,7 @@
 #include "../runtime/imports.h"
 #include "../runtime/memory.h"
 #include "../runtime/win32.h"
+#include "../runtime/display_seam.h"
 #include "../platform/os.h"
 
 #include <algorithm>
@@ -331,6 +332,51 @@ bool read_packet(BinkPlayer &p) {
     return ok;
 }
 
+// Finds the streams, opens their decoders and reads the frame count and rate.
+bool prepare_streams(BinkPlayer &p) {
+    int rc = avformat_find_stream_info(p.input, nullptr);
+    if (rc < 0)
+        return decoder_error("find stream info", rc);
+    // The real Bink reader reports its byte budget in the realtime record; the
+    // custom I/O window knows its length and a regular file knows its size.
+    int64_t total = avio_size(p.input->pb);
+    p.total_bytes = total > 0 ? (uint64_t)total : (uint64_t)p.file_length;
+    for (unsigned i = 0; i < p.input->nb_streams; ++i) {
+        AVMediaType type = p.input->streams[i]->codecpar->codec_type;
+        if (type == AVMEDIA_TYPE_VIDEO && p.video_index < 0)
+            p.video_index = (int)i;
+        if (type == AVMEDIA_TYPE_AUDIO && p.audio_index < 0)
+            p.audio_index = (int)i;
+    }
+    if (p.video_index < 0)
+        return video_error("input has no video stream");
+    if (!open_decoder(p.input, p.video_index, &p.video) ||
+        (p.audio_index >= 0 && !open_decoder(p.input, p.audio_index, &p.audio)))
+        return false;
+    AVStream *stream = p.input->streams[p.video_index];
+    p.fps = stream->avg_frame_rate;
+    if (p.fps.num <= 0 || p.fps.den <= 0)
+        p.fps = stream->r_frame_rate;
+    if (p.fps.num <= 0 || p.fps.den <= 0 || p.video->width <= 0 || p.video->height <= 0)
+        return video_error("invalid video dimensions or frame rate");
+    int64_t count = stream->nb_frames;
+    if (count <= 0 && stream->duration > 0)
+        count = av_rescale_q(stream->duration, stream->time_base, av_inv_q(p.fps));
+    if (count <= 0 && p.input->duration > 0)
+        count = av_rescale_q(p.input->duration, AVRational{1, AV_TIME_BASE}, av_inv_q(p.fps));
+    if (count <= 0 || count > UINT32_MAX)
+        return video_error("invalid video frame count");
+    if (p.audio && (p.audio->sample_rate <= 0 || p.audio->ch_layout.nb_channels < 1 ||
+                    p.audio->ch_layout.nb_channels > 2))
+        return video_error("unsupported audio rate or channel count");
+    p.frame = av_frame_alloc();
+    p.audio_frame = av_frame_alloc();
+    if (!p.frame || !p.audio_frame)
+        return video_error("cannot allocate decoded frames");
+    p.count = (uint32_t)count;
+    return true;
+}
+
 void BinkOpen(X86 *c) {
     set_eax(c, 0);
     g_error[0] = 0;
@@ -365,57 +411,8 @@ void BinkOpen(X86 *c) {
         if (!open_file_window(*p, path, 0, io_size))
             return;
     }
-    int rc = avformat_find_stream_info(p->input, nullptr);
-    if (rc < 0) {
-        decoder_error("find stream info", rc);
+    if (!prepare_streams(*p))
         return;
-    }
-    // The real Bink reader reports its byte budget in the realtime record; the
-    // custom I/O window knows its length and a regular file knows its size.
-    int64_t total = avio_size(p->input->pb);
-    p->total_bytes = total > 0 ? (uint64_t)total : (uint64_t)p->file_length;
-    for (unsigned i = 0; i < p->input->nb_streams; ++i) {
-        AVMediaType type = p->input->streams[i]->codecpar->codec_type;
-        if (type == AVMEDIA_TYPE_VIDEO && p->video_index < 0)
-            p->video_index = (int)i;
-        if (type == AVMEDIA_TYPE_AUDIO && p->audio_index < 0)
-            p->audio_index = (int)i;
-    }
-    if (p->video_index < 0) {
-        video_error("input has no video stream");
-        return;
-    }
-    if (!open_decoder(p->input, p->video_index, &p->video) ||
-        (p->audio_index >= 0 && !open_decoder(p->input, p->audio_index, &p->audio)))
-        return;
-    AVStream *stream = p->input->streams[p->video_index];
-    p->fps = stream->avg_frame_rate;
-    if (p->fps.num <= 0 || p->fps.den <= 0)
-        p->fps = stream->r_frame_rate;
-    if (p->fps.num <= 0 || p->fps.den <= 0 || p->video->width <= 0 || p->video->height <= 0) {
-        video_error("invalid video dimensions or frame rate");
-        return;
-    }
-    int64_t count = stream->nb_frames;
-    if (count <= 0 && stream->duration > 0)
-        count = av_rescale_q(stream->duration, stream->time_base, av_inv_q(p->fps));
-    if (count <= 0 && p->input->duration > 0)
-        count = av_rescale_q(p->input->duration, AVRational{1, AV_TIME_BASE}, av_inv_q(p->fps));
-    if (count <= 0 || count > UINT32_MAX) {
-        video_error("invalid video frame count");
-        return;
-    }
-    if (p->audio && (p->audio->sample_rate <= 0 || p->audio->ch_layout.nb_channels < 1 ||
-                     p->audio->ch_layout.nb_channels > 2)) {
-        video_error("unsupported audio rate or channel count");
-        return;
-    }
-    p->frame = av_frame_alloc();
-    p->audio_frame = av_frame_alloc();
-    if (!p->frame || !p->audio_frame) {
-        video_error("cannot allocate decoded frames");
-        return;
-    }
     uint32_t rec = heap_alloc(BINK_RECORD_BYTES, true, 16);
     if (!rec) {
         video_error("cannot allocate video record");
@@ -427,7 +424,6 @@ void BinkOpen(X86 *c) {
     // binkw32 sets this when the open found audio tracks (0x300130d1); the
     // guest uses it to pick its frame-skip path.
     wr32(rec + 0x2a0, p->audio ? 1u : 0u);
-    p->count = (uint32_t)count;
     p->t0 = host_millis();
     write_frame_count(rec, *p);
     LOGW("bink: open \"%s\" -> %dx%d, %u frames, %d/%d fps, record %08x", guest.c_str(),
@@ -492,7 +488,7 @@ void service_audio(uint32_t rec, BinkPlayer &p) {
             p.pending_pos += (uint32_t)taken / 2;
         }
     }
-    if (p.failed) {
+    if (p.failed && rec) {
         p.displayed = p.count;
         write_frame_count(rec, p);
     }
@@ -500,6 +496,54 @@ void service_audio(uint32_t rec, BinkPlayer &p) {
 
 // Decode exactly one visible frame. Audio prefetch may already have retained
 // its compressed packet, but never changes the guest frame counter.
+bool decode_frame(BinkPlayer &p, uint32_t rec) {
+    p.have_frame = false;
+    uint32_t decode_start = host_millis();
+    for (;;) {
+        int rc = avcodec_receive_frame(p.video, p.frame);
+        if (rc >= 0) {
+            if (p.frame->format != AV_PIX_FMT_YUV420P) {
+                p.failed = !video_error("unsupported video pixel format (expected YUV420P)");
+                break;
+            }
+            if (p.frame->width != p.video->width || p.frame->height != p.video->height) {
+                p.failed = !video_error("video dimensions changed during playback");
+                break;
+            }
+            p.have_frame = true;
+            p.video_ms += host_millis() - decode_start;
+            service_audio(rec, p);
+            return true;
+        }
+        if (rc != AVERROR(EAGAIN)) {
+            p.failed = !decoder_error("receive video frame", rc);
+            break;
+        }
+        while (p.video_packets.empty() && !p.eof && !p.failed)
+            p.failed = !read_packet(p);
+        if (p.failed)
+            break;
+        AVPacket *packet = nullptr;
+        if (!p.video_packets.empty()) {
+            packet = p.video_packets.front();
+            p.video_packets.pop_front();
+        } else if (p.flushed) {
+            p.failed = !video_error("video ended before its frame count");
+            break;
+        } else {
+            p.flushed = true;
+        }
+        rc = avcodec_send_packet(p.video, packet);
+        av_packet_free(&packet);
+        if (rc < 0) {
+            p.failed = !decoder_error("send video packet", rc);
+            break;
+        }
+    }
+    p.video_ms += host_millis() - decode_start;
+    return false;
+}
+
 void BinkDoFrame(X86 *c) {
     set_eax(c, 0);
     uint32_t rec = arg(c, 0);
@@ -513,51 +557,9 @@ void BinkDoFrame(X86 *c) {
         write_frame_count(rec, *p);
         return;
     }
-    p->have_frame = false;
-    uint32_t decode_start = host_millis();
-    for (;;) {
-        int rc = avcodec_receive_frame(p->video, p->frame);
-        if (rc >= 0) {
-            if (p->frame->format != AV_PIX_FMT_YUV420P) {
-                p->failed = !video_error("unsupported video pixel format (expected YUV420P)");
-                break;
-            }
-            if (p->frame->width != p->video->width || p->frame->height != p->video->height) {
-                p->failed = !video_error("video dimensions changed during playback");
-                break;
-            }
-            p->have_frame = true;
-            p->video_ms += host_millis() - decode_start;
-            service_audio(rec, *p);
-            return;
-        }
-        if (rc != AVERROR(EAGAIN)) {
-            p->failed = !decoder_error("receive video frame", rc);
-            break;
-        }
-        while (p->video_packets.empty() && !p->eof && !p->failed)
-            p->failed = !read_packet(*p);
-        if (p->failed)
-            break;
-        AVPacket *packet = nullptr;
-        if (!p->video_packets.empty()) {
-            packet = p->video_packets.front();
-            p->video_packets.pop_front();
-        } else if (p->flushed) {
-            p->failed = !video_error("video ended before its frame count");
-            break;
-        } else {
-            p->flushed = true;
-        }
-        rc = avcodec_send_packet(p->video, packet);
-        av_packet_free(&packet);
-        if (rc < 0) {
-            p->failed = !decoder_error("send video packet", rc);
-            break;
-        }
-    }
+    if (decode_frame(*p, rec))
+        return;
     // Let a guest leave its playback loop after a fatal decoder error.
-    p->video_ms += host_millis() - decode_start;
     p->displayed = p->count;
     write_frame_count(rec, *p);
 }
@@ -1060,6 +1062,60 @@ void bink_reset() {
     g_io_size = 0;
     g_error_string = 0;
     g_error[0] = 0;
+}
+
+// A standalone player program the game runs (binkplay.exe): the movie plays
+// in the game window, scaled to fit, until it ends or a key or click skips it.
+extern "C" bool bink_play_movie(const char *guest_path) {
+#ifdef RECOMP_HAVE_FFMPEG
+    std::string path = win32_host_path_op(guest_path, WIN32_FILE_READ);
+    if (path.empty())
+        return video_error("cannot resolve movie filename");
+    BinkPlayer p;
+    if (!open_file_window(p, path, 0, 0) || !prepare_streams(p))
+        return false;
+    const int w = p.video->width, h = p.video->height;
+    LOGW("bink: playing \"%s\" (%dx%d, %u frames)", guest_path, w, h, p.count);
+    static const int skip_keys[] = {0x01, 0x02, 0x0d, 0x1b, 0x20};
+    auto skipped = [] {
+        return host_close_requested() ||
+               std::any_of(std::begin(skip_keys), std::end(skip_keys), host_key_down);
+    };
+    std::vector<uint32_t> argb((size_t)w * h);
+    p.t0 = host_millis();
+    uint32_t n = 0;
+    for (; n < p.count && !skipped() && decode_frame(p, 0); ++n) {
+        for (int row = 0; row < h; ++row) {
+            uint32_t *dest = argb.data() + (size_t)row * w;
+            video_frame_convert_row(reinterpret_cast<uint8_t *>(dest),
+                                    p.frame->data[0] + (ptrdiff_t)row * p.frame->linesize[0],
+                                    p.frame->data[1] + (ptrdiff_t)(row / 2) * p.frame->linesize[1],
+                                    p.frame->data[2] + (ptrdiff_t)(row / 2) * p.frame->linesize[2],
+                                    (uint32_t)w, VIDEO_XRGB8888);
+            for (int x = 0; x < w; ++x)
+                dest[x] |= 0xff000000u;
+        }
+        host_display_present_window(argb.data(), w, h);
+        int64_t due = av_rescale((int64_t)(n + 1) * 1000, p.fps.den, p.fps.num);
+        for (int64_t left; !skipped() && (left = due - (int64_t)(host_millis() - p.t0)) > 0;) {
+            guest_sleep_ms((uint32_t)std::min<int64_t>(left, 5));
+            service_audio(0, p);
+        }
+    }
+    LOGW("bink: \"%s\" %s at frame %u of %u", guest_path,
+         p.failed      ? "failed"
+         : n < p.count ? "skipped"
+                       : "finished",
+         n, p.count);
+    while (!skipped() && p.audio_started && host_audio_queued_bytes(p.channel) > 0)
+        guest_sleep_ms(5);
+    while (std::any_of(std::begin(skip_keys), std::end(skip_keys), host_key_down))
+        guest_sleep_ms(5);
+    return true;
+#else
+    (void)guest_path;
+    return false;
+#endif
 }
 
 void bink_register() {

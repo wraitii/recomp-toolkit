@@ -442,6 +442,20 @@ impl DeviceState {
         Ok(())
     }
 
+    /// `IDirect3DDevice8::GetTransform`, for the states `set_transform` accepts.
+    pub fn transform(&self, kind: u32) -> Result<Mat4, RenderError> {
+        match kind {
+            256 => Ok(self.world),
+            2 => Ok(self.view),
+            3 => Ok(self.projection),
+            16..=23 => Ok(self.texture_transforms[(kind - 16) as usize]),
+            other => Err(RenderError::new(
+                "d3d8::state::transform",
+                format!("transform state {other} is not world/view/projection or TEXTURE0-7"),
+            )),
+        }
+    }
+
     /// `IDirect3DDevice8::SetMaterial`. The full record is stored verbatim.
     pub fn set_material(&mut self, material: Material) {
         self.material = material;
@@ -608,6 +622,70 @@ impl DeviceState {
         Ok(())
     }
 
+    /// What `GetRenderState` reports: the value `set_render_state` stored, or
+    /// D3D8's documented default for a state never set.
+    pub fn render_state(&self, state: u32) -> Result<u32, RenderError> {
+        use D3DRENDERSTATETYPE as Rs;
+        let s = &self.states;
+        let b = u32::from;
+        Ok(match Rs::from_raw(state)? {
+            Rs::ZEnable => s.z_enable.raw(),
+            Rs::FillMode => s.fill_mode.raw(),
+            Rs::ShadeMode => s.shade_mode.raw(),
+            Rs::ZWriteEnable => b(s.z_write_enable),
+            Rs::AlphaTestEnable => b(s.alpha_test_enable),
+            Rs::SrcBlend => s.src_blend.raw(),
+            Rs::DestBlend => s.dest_blend.raw(),
+            Rs::CullMode => s.cull_mode.raw(),
+            Rs::ZFunc => s.z_func.raw(),
+            Rs::ZBias => s.z_bias,
+            Rs::ColorWriteEnable => s.color_write_mask,
+            Rs::PointSize => s.point_size,
+            Rs::PointSizeMin => s.point_size_min,
+            Rs::PointSizeMax => s.point_size_max,
+            Rs::PointSpriteEnable => b(s.point_sprite_enable),
+            Rs::PointScaleEnable => b(s.point_scale_enable),
+            Rs::PointScaleA => s.point_scale_a,
+            Rs::PointScaleB => s.point_scale_b,
+            Rs::PointScaleC => s.point_scale_c,
+            Rs::AlphaRef => s.alpha_ref,
+            Rs::AlphaFunc => s.alpha_func.raw(),
+            Rs::DitherEnable => b(s.dither_enable),
+            Rs::AlphaBlendEnable => b(s.alpha_blend_enable),
+            Rs::FogEnable => b(s.fog_enable),
+            Rs::SpecularEnable => b(s.specular_enable),
+            Rs::FogColor => s.fog_color,
+            Rs::FogTableMode => s.fog_table_mode,
+            Rs::FogVertexMode => s.fog_vertex_mode,
+            Rs::FogStart => s.fog_start,
+            Rs::FogEnd => s.fog_end,
+            Rs::FogDensity => s.fog_density,
+            Rs::TextureFactor => s.texture_factor,
+            Rs::RangeFogEnable => b(s.range_fog_enable),
+            Rs::StencilEnable => b(s.stencil_enable),
+            Rs::Clipping => b(s.clipping),
+            Rs::Lighting => b(s.lighting),
+            Rs::Ambient => s.ambient,
+            Rs::ColorVertex => b(s.color_vertex),
+            Rs::LocalViewer => b(s.local_viewer),
+            Rs::NormalizeNormals => b(s.normalize_normals),
+            Rs::DiffuseMaterialSource => s.diffuse_material_source.raw(),
+            Rs::SpecularMaterialSource => s.specular_material_source.raw(),
+            Rs::AmbientMaterialSource => s.ambient_material_source.raw(),
+            Rs::EmissiveMaterialSource => s.emissive_material_source.raw(),
+            Rs::BlendOp => s.blend_op.raw(),
+            _ => s.other.get(&state).copied().unwrap_or(match state {
+                16 | 53 | 54 | 55 | 161 => 1,
+                56 => 8,
+                58 | 59 | 162 => 0xffff_ffff,
+                164 => 1.0f32.to_bits(),
+                172 => 3,
+                173 => 1,
+                _ => 0,
+            }),
+        })
+    }
+
     /// Apply one `D3DTSS_*` state to a texture stage.
     ///
     /// Validates the stage index and the state id; the raw value is stored
@@ -685,6 +763,25 @@ impl DeviceState {
         self.texture_stages
             .get(stage as usize)
             .and_then(|states| states.get(&state).copied())
+    }
+
+    /// What `GetTextureStageState` reports: the stored value, else D3D8's default.
+    pub fn texture_stage_state_or_default(&self, stage: u32, state: u32) -> Result<u32, RenderError> {
+        if stage as usize >= MAX_TEXTURE_STAGES {
+            return Err(RenderError::new(
+                "d3d8::state::texture_stage_state_or_default",
+                format!("stage {stage} is beyond D3D8's {MAX_TEXTURE_STAGES} texture stages"),
+            ));
+        }
+        D3DTEXTURESTAGESTATETYPE::from_raw(state)?;
+        Ok(self.texture_stage_state(stage, state).unwrap_or(match state {
+            1 => if stage == 0 { 4 } else { 1 },
+            4 => if stage == 0 { 2 } else { 1 },
+            2 | 5 => 2,
+            11 => stage,
+            3 | 6 | 13 | 14 | 16 | 17 | 21 | 25 | 26 | 27 | 28 => 1,
+            _ => 0,
+        }))
     }
 
     /// The raw value of an unmodelled render state, or `None` when never set.
@@ -1099,18 +1196,13 @@ impl DeviceState {
         self.states.specular_enable
     }
 
-    /// True when the viewport is exactly the whole render target, so the
-    /// viewport bound *is* the target bound. Only then is `D3DRS_CLIPPING=FALSE`
-    /// unobservable on the host (see the divergence at the clipping check).
-    fn viewport_covers_target(&self) -> bool {
-        self.viewport.x == 0
-            && self.viewport.y == 0
-            && self.viewport.width == self.target_width
-            && self.viewport.height == self.target_height
-    }
-
     pub fn z_enable(&self) -> bool {
         self.states.z_enable != D3DZBUFFERTYPE::False
+    }
+
+    /// `D3DRS_CLIPPING`.
+    pub fn clipping(&self) -> bool {
+        self.states.clipping
     }
 
     /// `D3DRS_ZWRITEENABLE`.
@@ -1336,14 +1428,8 @@ impl DeviceState {
                     "D3DRS_LIGHTING must be FALSE (material/light state is stored but not applied)",
                 ));
             }
-            // With lighting off, D3D8 takes the vertex color from the material
-            // (instead of the vertex) when COLORVERTEX is disabled. The unlit
-            // shader only implements the per-vertex source, so refuse the other.
-            if !s.color_vertex && !normals {
-                return Err(unsupported(
-                    "D3DRS_COLORVERTEX must be TRUE (material-supplied vertex color is not implemented)",
-                ));
-            }
+            // D3DRS_COLORVERTEX and the material sources only feed the lighting
+            // engine; with lighting off the vertex diffuse is used as is.
         }
         // Ordinary depth testing/writing is honoured by the draw pipeline (the
         // device must own a depth attachment; the draw checks that separately).
@@ -1362,16 +1448,10 @@ impl DeviceState {
                     "D3DRS_RANGEFOGENABLE must be FALSE with table fog (range-based table fog is not implemented)",
                 ));
             }
-            if s.alpha_blend_enable {
-                match s.dest_blend {
-                    D3DBLEND::Zero | D3DBLEND::InvSrcAlpha | D3DBLEND::One => {}
-                    other => {
-                        return Err(unsupported(&format!(
-                            "fog with D3DRS_DESTBLEND={other:?} needs the D3D8 fog-colour adjustment, which is not implemented (only ZERO, INVSRCALPHA and ONE are)"
-                        )));
-                    }
-                }
-            }
+            // Fixed-function fog moves the source colour toward
+            // D3DRS_FOGCOLOR before alpha blending, whatever the blend
+            // factors, so every destination factor is honoured as is; the
+            // device substitutes black for additive ONE (`fog_uniform`).
         }
         if s.alpha_test_enable && s.alpha_ref > 0xff {
             // D3DRS_ALPHAREF is an 8-bit reference; the shader compares it
@@ -1394,23 +1474,17 @@ impl DeviceState {
         if s.stencil_enable {
             return Err(unsupported("D3DRS_STENCILENABLE must be FALSE"));
         }
-        // DIVERGENCE(original): D3DRS_CLIPPING=FALSE disables clipping to the
-        // viewport. The host rasterizer (wgpu) always clips to the viewport and
-        // scissor, so the only case where accepting the state is provably
-        // unobservable is a pre-transformed (XYZRHW) draw through a viewport
-        // that covers the whole render target: there the viewport bound is the
-        // render target itself, so "no viewport clipping" and "clip to the full
-        // target" produce the same pixels. For an untransformed FVF the shader
-        // emits clip-space (not screen-space) coordinates whose viewport mapping
-        // is the intended clip, and for a sub-target viewport the original would
-        // allow geometry outside the viewport to rasterize inside the target;
-        // neither is implementable here, so both stay named refusals. Do not
-        // widen this beyond that combination.
-        if !s.clipping && !(pre_transformed && self.viewport_covers_target()) {
+        // D3DRS_CLIPPING=FALSE disables clipping to the viewport. A
+        // pre-transformed (XYZRHW) draw then rasterizes at its own screen
+        // pixels anywhere in the render target, which the draw reproduces by
+        // rasterizing through the whole target (see `unclipped` in the device).
+        // For an untransformed FVF the shader emits clip-space coordinates whose
+        // viewport mapping is the intended clip, so that combination stays a
+        // named refusal.
+        if !s.clipping && !pre_transformed {
             return Err(unsupported(&format!(
-                "D3DRS_CLIPPING must be TRUE unless the draw is pre-transformed (XYZRHW) through a \
-                 full-target viewport; got pre_transformed={pre_transformed}, viewport=({}, {} {}x{}) \
-                 on a {}x{} target",
+                "D3DRS_CLIPPING must be TRUE unless the draw is pre-transformed (XYZRHW); \
+                 got viewport=({}, {} {}x{}) on a {}x{} target",
                 self.viewport.x,
                 self.viewport.y,
                 self.viewport.width,
@@ -1648,13 +1722,11 @@ mod tests {
     }
 
     #[test]
-    fn clipping_false_is_accepted_only_for_pre_transformed_full_viewport() {
+    fn clipping_false_is_accepted_only_for_pre_transformed_draws() {
         let mut state = DeviceState::new(64, 64);
         configure_probe_states(&mut state);
         state.set_render_state(136, 0).unwrap(); // D3DRS_CLIPPING = FALSE
 
-        // Accepted: an XYZRHW draw through the full target, where the viewport
-        // bound is the target bound, so wgpu's always-on clipping is exact.
         state.validate_draw(0x01C4).unwrap();
         state.validate_draw(0x0144).unwrap();
 
@@ -1662,10 +1734,9 @@ mod tests {
         // viewport as the clip bound.
         let err = state.validate_draw(0x0142).unwrap_err();
         assert!(err.cause.contains("D3DRS_CLIPPING"), "{}", err.cause);
-        assert!(err.cause.contains("pre_transformed=false"), "{}", err.cause);
 
-        // Refused: XYZRHW through a sub-target viewport, where the original
-        // would let geometry outside the viewport rasterize inside the target.
+        // Accepted: XYZRHW through a sub-target viewport, which the device
+        // rasterizes through the whole target.
         let mut sub = DeviceState::new(64, 64);
         configure_probe_states(&mut sub);
         sub.set_render_state(136, 0).unwrap();
@@ -1677,10 +1748,7 @@ mod tests {
             min_z: 0.0,
             max_z: 1.0,
         };
-        let err = sub.validate_draw(0x01C4).unwrap_err();
-        assert!(err.cause.contains("pre_transformed=true"), "{}", err.cause);
-        assert!(err.cause.contains("(4, 4 32x32)"), "{}", err.cause);
-        assert!(err.cause.contains("64x64 target"), "{}", err.cause);
+        sub.validate_draw(0x01C4).unwrap();
     }
 
     #[test]
@@ -1788,12 +1856,11 @@ mod tests {
     }
 
     #[test]
-    fn color_vertex_off_is_refused_without_lighting() {
+    fn color_vertex_off_is_accepted_without_lighting() {
         let mut state = DeviceState::new(64, 64);
         configure_probe_states(&mut state);
         state.set_render_state(141, 0).unwrap(); // D3DRS_COLORVERTEX
-        let err = state.validate_unlit().unwrap_err();
-        assert!(err.cause.contains("COLORVERTEX"), "{}", err.cause);
+        state.validate_unlit().unwrap();
     }
 
     #[test]
@@ -2399,7 +2466,7 @@ mod tests {
     }
 
     #[test]
-    fn fog_with_unsupported_blend_fails_by_name() {
+    fn fog_is_accepted_with_every_blend() {
         let mut state = DeviceState::new(64, 64);
         configure_probe_states(&mut state);
         state.set_render_state(28, 1).unwrap(); // FOGENABLE
@@ -2413,8 +2480,14 @@ mod tests {
         state
             .set_render_state(20, D3DBLEND::DestColor.raw())
             .unwrap(); // DESTBLEND
-        let err = state.validate_unlit().unwrap_err();
-        assert!(err.cause.contains("DESTBLEND"), "{}", err.cause);
+        state.validate_unlit().unwrap();
+
+        // Multiplicative ZERO/SRCCOLOR (lightmap and shadow passes).
+        state.set_render_state(19, D3DBLEND::Zero.raw()).unwrap();
+        state
+            .set_render_state(20, D3DBLEND::SrcColor.raw())
+            .unwrap();
+        state.validate_unlit().unwrap();
 
         // The standard INVSRCALPHA destination is accepted.
         state

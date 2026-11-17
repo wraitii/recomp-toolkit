@@ -2113,7 +2113,20 @@ impl Device {
             self.stage_textures[0].as_ref(),
             self.stage_textures[1].as_ref(),
         );
-        let v = &self.state.viewport;
+        // Screen-space vertices with D3DRS_CLIPPING off are not confined to the
+        // viewport: they rasterize at their own pixels anywhere in the target.
+        let unclipped = crate::d3d8::state::Viewport {
+            x: 0,
+            y: 0,
+            width: self.target.width,
+            height: self.target.height,
+            ..self.state.viewport
+        };
+        let v = if layout.pre_transformed && !self.state.clipping() {
+            &unclipped
+        } else {
+            &self.state.viewport
+        };
         if v.width == 0
             || v.height == 0
             || v.x
@@ -2470,6 +2483,8 @@ impl Device {
                     entry_point: Some(if layout.pre_transformed {
                         if textured && fvf == 0x44 {
                             "vs_rhw_color_main"
+                        } else if !layout.attributes.iter().any(|a| a.shader_location == 1) {
+                            "vs_rhw_white_main"
                         } else if layout.attributes.iter().any(|a| a.shader_location == 4) {
                             "vs_rhw_main"
                         } else {

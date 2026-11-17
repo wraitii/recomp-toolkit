@@ -1,0 +1,70 @@
+[game]
+id = "global-ops"
+name = "Global Operations"
+app_name = "GlobalOpsRecomp"
+bundle_id = "dev.recompkit.globalops"
+executable = "Globalops.exe"
+sha256 = "c95c4a6feb2cda2afbb20a5629bf527438b11971946d29e9a5b140c7df5f64cb"
+image_base = 0x003f0000
+guest_size = 0x12000000
+host_arena_base = 0
+entry_point = 0x00503213
+guest_root = 'C:\Global Operations'
+
+[setup]
+supported_version = "Community Update 4.0"
+source_notes = "Install Global Operations from disc, then apply the unofficial 4.0 update (glopsus4_0.msi) and select the game folder. The Toolkit does not apply patches."
+required_dirs = ["globalops"]
+
+[environment]
+set = { LT_ERROR = "LT_MISSINGCLASS" }
+
+[translate]
+code_map = "metadata"
+discover_exclude = [[0x003f1200, 0x00401000]]
+# _chkstk variant that preserves EDX rather than ECX, so its bytes are not detected.
+stack_probes = [0x004b4a50]
+native = { header = "native/globalops_native.h", sources = ["native/startup.cpp", "native/display.cpp", "native/stack_probe.cpp", "native/voice.cpp"] }
+
+[render]
+d3d8_wgpu = true
+
+[media]
+bink_players = ["binkplay.exe"]
+
+[network]
+sockets = true
+
+[input]
+capture_hidden_cursor_only = true
+
+[controls]
+mobile_control = "mobile-only"
+
+[modules.aux.cshell]
+name = "cshell.dll"
+original_path = "globalops/cshell.dll"
+sha256 = "f5341c625bbb6266bbd6c628cef9862b148f5d84fa9adb02f35bdedca013ba16"
+base = 0x10000000
+size = 0x0013e000
+
+[modules.aux.object]
+name = "object.lto"
+original_path = "globalops/object.lto"
+sha256 = "073aca7da30149c3c57fa416e1330b04a1226c877484431bc6b076696c1425a1"
+base = 0x10200000
+size = 0x000f5000
+
+[modules.aux.cres]
+name = "cres.dll"
+aliases = ["sres.dll"]
+original_path = "globalops/CRes.dll"
+sha256 = "f079ae7a130af3080cfd5f328fea19fdd70e73490e87ac1abea4f74609221d6c"
+base = 0x10300000
+size = 0x0002c000
+
+[modules.aux.ltmsg]
+name = "ltmsg.dll"
+sha256 = "94d0b839fb97e41cb5a22996267a7519e87372219fec9e01ed3e9adc30a698f4"
+base = 0x10400000
+size = 0x00006000

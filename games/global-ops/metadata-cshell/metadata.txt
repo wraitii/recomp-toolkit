@@ -1,0 +1,9 @@
+format=recomp-code-map-v3
+status=complete
+program=cshell.dll
+executable_sha256=f5341c625bbb6266bbd6c628cef9862b148f5d84fa9adb02f35bdedca013ba16
+language=x86:LE:32:default
+image_base=10000000
+functions=3309
+instructions=175418
+instruction_bytes=553068

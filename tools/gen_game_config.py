@@ -64,6 +64,8 @@ def render_header(cfg):
     lines.append("#define RECOMP_GAME_DIR %s" % c_string(Path(cfg["dir"]).resolve().as_posix()))
     lines.append("#define RECOMP_KIT_DIR %s" % c_string(Path(__file__).resolve().parents[1].as_posix()))
     lines.append("#define RECOMP_ENVIRONMENT_PASSTHROUGH %s" % c_string_list(cfg["environment"]["passthrough"]))
+    lines.append("#define RECOMP_ENVIRONMENT_DEFAULTS %s" % c_string_list(
+        "%s=%s" % item for item in cfg["environment"]["set"].items()))
     lines.append("#define RECOMP_FONT_FILES %s" % c_string_list(cfg["fonts"]["files"]))
     registry = ["{%s, %s, %s, %s}" % (
         c_string(key), c_string(name), c_string(value) if isinstance(value, str) else "0",
@@ -84,11 +86,15 @@ def render_header(cfg):
     lines.append("#define RECOMP_GUEST_SIZE %s" % c_hex(game["guest_size"]))
     lines.append("#define RECOMP_STRICT_IMPORTS %d" % int(game["strict_imports"]))
     lines.append("#define RECOMP_INPUT_RELATIVE_MOUSE_CAPTURE %d" % int(cfg["input"]["relative_mouse_capture"]))
+    lines.append("#define RECOMP_INPUT_CAPTURE_HIDDEN_CURSOR_ONLY %d"
+                 % int(cfg["input"]["capture_hidden_cursor_only"]))
+    lines.append("#define RECOMP_NETWORK_SOCKETS %d" % int(cfg["network"]["sockets"]))
     input_config = cfg["input"]
     lines.append("#define RECOMP_INPUT_KEYBOARD_NAMES %d" % (input_config["keyboard_names"] == "us"))
     lines.append("#define RECOMP_INPUT_MOUSE_SENSITIVITY %d" % input_config["mouse_sensitivity"])
     lines.append("#define RECOMP_INPUT_MOUSE_ACCELERATION %d" % int(input_config["mouse_acceleration"]))
     lines.append("#define RECOMP_CD_AUDIO_TRACKS %s" % c_string_list(cfg.get("media", {}).get("cd_tracks", [])))
+    lines.append("#define RECOMP_BINK_PLAYERS %s" % c_string_list(cfg["media"]["bink_players"]))
     lines.append("#define RECOMP_AUX_MODULE_COUNT %d" % len(cfg["aux_modules"]))
     lines.append("#define RECOMP_AUX_MODULES {%s}" % ", ".join(
         "{%s, %s, %s, %s, %s, %s}" % (c_string(m["name"]), c_string(m["path"].as_posix()),

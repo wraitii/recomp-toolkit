@@ -171,6 +171,9 @@ void host_set_key_state(int vk, bool down) {
     if (vk >= 0 && vk < 256)
         g_key_state[vk] = down ? 0x80 : 0x00;
 }
+bool host_key_down(int vk) {
+    return vk >= 0 && vk < 256 && (g_key_state[vk] & 0x80);
+}
 void host_set_cursor_pos(int32_t x, int32_t y) {
     g_cursor_x = x;
     g_cursor_y = y;

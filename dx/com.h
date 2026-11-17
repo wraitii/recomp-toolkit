@@ -444,14 +444,19 @@ struct ComObj {
     bool acquired = false;
     uint32_t di_coop = 0;
     uint32_t data_format_size = 0;
-    uint32_t buffer_size = 0;  // DIPROP_BUFFERSIZE
-    uint32_t notify_event = 0; // SetEventNotification, 0 when none
+    bool data_format_set = false; // a SetDataFormat succeeded, possibly with no objects
+    uint32_t buffer_size = 0;     // DIPROP_BUFFERSIZE
+    uint32_t notify_event = 0;    // SetEventNotification, 0 when none
     uint32_t axis_mode_absolute = 0;
     uint8_t last_keys[256] = {0};
     uint8_t last_buttons[8] = {0};
     int32_t last_x = 0, last_y = 0, last_z = 0;
     uint32_t sequence = 0;
     std::vector<uint32_t> events; // packed dwOfs/dwData pairs
+    // Keyboard/mouse with an application-defined data format: the format
+    // offset of each native offset (scan code, or DIMOUSESTATE2 offset), -1
+    // when the format omits the object. Empty for the standard layouts.
+    std::vector<int32_t> di_format_ofs;
     // Joystick only. Ranges are per DIJOYSTATE axis slot (lX..lRz). An empty
     // format means DIJOYSTATE or DIJOYSTATE2, by data_format_size.
     JoyAxisRange joy_ranges[6];

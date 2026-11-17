@@ -562,26 +562,120 @@ void k_GlobalUnlock(X86 *c) {
 }
 // System messages without inserts. The buffer contains guest addresses and is
 // owned by the same allocator as LocalAlloc/LocalFree.
+static bool system_message(X86 *c, std::string &message);
+
+// Expands FormatMessage escapes and %1..%99 inserts, each optionally carrying a
+// !printf! specification (default !s!). False for a specification this does not
+// model: wide or 64-bit arguments, '*' widths and 'h' sizes.
+static bool format_message_inserts(const std::string &tmpl, uint32_t args, bool array,
+                                   std::string &out) {
+    for (size_t i = 0; i < tmpl.size(); i++) {
+        char ch = tmpl[i];
+        if (ch != '%' || i + 1 == tmpl.size()) {
+            out += ch;
+            continue;
+        }
+        char next = tmpl[++i];
+        if (next == '0')
+            return true;
+        if (next == 'n') {
+            out += "\r\n";
+            continue;
+        }
+        if (next < '1' || next > '9') {
+            out += next;
+            continue;
+        }
+        uint32_t index = (uint32_t)(next - '0');
+        if (i + 1 < tmpl.size() && tmpl[i + 1] >= '0' && tmpl[i + 1] <= '9')
+            index = index * 10 + (uint32_t)(tmpl[++i] - '0');
+        std::string spec = "s";
+        if (i + 1 < tmpl.size() && tmpl[i + 1] == '!') {
+            size_t end = tmpl.find('!', i + 2);
+            if (end == std::string::npos)
+                return false;
+            spec = tmpl.substr(i + 2, end - i - 2);
+            i = end;
+        }
+        spec.erase(std::remove(spec.begin(), spec.end(), 'l'), spec.end());
+        if (spec.empty() || spec.find_first_of("*hIwS") != std::string::npos)
+            return false;
+        if (!args)
+            return false;
+        uint32_t list = array ? args : rd32(args);
+        uint32_t value = rd32(list + 4 * (index - 1));
+        char conversion = spec.back();
+        std::string fmt = "%" + spec;
+        char buffer[512];
+        if (conversion == 's')
+            snprintf(buffer, sizeof buffer, fmt.c_str(), value ? gm_str(value).c_str() : "(null)");
+        else if (std::strchr("dicuxXo", conversion))
+            snprintf(buffer, sizeof buffer, fmt.c_str(), value);
+        else
+            return false;
+        out += buffer;
+    }
+    return true;
+}
+
 void k_FormatMessageA(X86 *c) {
     uint32_t flags = arg(c, 0), out = arg(c, 4), cap = arg(c, 5);
-    // Resource tables, source templates, insert expansion and width formatting
-    // need their own implementation; keep those gaps explicitly fatal.
-    if (!(flags & 0x1000) || (flags & ~0x1300u)) {
+    const uint32_t ALLOCATE = 0x100, IGNORE_INSERTS = 0x200, FROM_STRING = 0x400,
+                   FROM_SYSTEM = 0x1000, ARGUMENT_ARRAY = 0x2000;
+    // Module message tables and line-width formatting need their own
+    // implementation; keep those gaps explicitly fatal.
+    if (!(flags & (FROM_STRING | FROM_SYSTEM)) || (flags & FROM_STRING && flags & FROM_SYSTEM) ||
+        (flags & ~(ALLOCATE | IGNORE_INSERTS | FROM_STRING | FROM_SYSTEM | ARGUMENT_ARRAY))) {
         imports_unsupported(c);
         return;
     }
-    if (!out || !gm_valid(out, (flags & 0x100) ? 4 : 1)) {
+    if (!out || !gm_valid(out, (flags & ALLOCATE) ? 4 : 1)) {
         set_last_error(87);
         set_eax(c, 0);
         return;
     }
+    std::string message;
+    if (flags & FROM_STRING) {
+        message = gm_str(arg(c, 1));
+    } else if (!system_message(c, message)) {
+        return;
+    }
+    std::string expanded;
+    if (flags & IGNORE_INSERTS) {
+        expanded = message;
+    } else if (!format_message_inserts(message, arg(c, 6), flags & ARGUMENT_ARRAY, expanded)) {
+        LOGW("FormatMessageA: unsupported insert in \"%s\"", message.c_str());
+        imports_unsupported(c);
+        return;
+    }
+    const char *text = expanded.c_str();
+    uint32_t count = (uint32_t)expanded.size(), need = count + 1;
+    if (flags & ALLOCATE) {
+        uint32_t buffer = heap_alloc(std::max(cap, need), true);
+        if (!buffer) {
+            set_last_error(8);
+            set_eax(c, 0);
+            return;
+        }
+        wr32(out, buffer);
+        out = buffer;
+    } else if (cap < need || !gm_valid(out, need)) {
+        set_last_error(122);
+        set_eax(c, 0);
+        return;
+    }
+    memcpy(g_mem + out, text, need);
+    set_eax(c, count);
+}
+
+static bool system_message(X86 *c, std::string &message) {
     uint32_t language = arg(c, 3);
     // DIVERGENCE(original): the portable system-message catalog is English.
     // Neutral/default language requests resolve to this catalog.
     if (language != 0 && language != 0x400 && language != 0x409) {
         set_last_error(1815); // ERROR_RESOURCE_LANG_NOT_FOUND
         set_eax(c, 0);
-        return;
+        return false;
     }
     const char *text = nullptr;
     switch (arg(c, 2)) {
@@ -613,25 +707,10 @@ void k_FormatMessageA(X86 *c) {
         // DIVERGENCE(original): only the catalog above is currently available.
         set_last_error(317); // ERROR_MR_MID_NOT_FOUND
         set_eax(c, 0);
-        return;
+        return false;
     }
-    uint32_t count = (uint32_t)strlen(text), need = count + 1;
-    if (flags & 0x100) { // FORMAT_MESSAGE_ALLOCATE_BUFFER
-        uint32_t buffer = heap_alloc(std::max(cap, need), true);
-        if (!buffer) {
-            set_last_error(8);
-            set_eax(c, 0);
-            return;
-        }
-        wr32(out, buffer);
-        out = buffer;
-    } else if (cap < need || !gm_valid(out, need)) {
-        set_last_error(122);
-        set_eax(c, 0);
-        return;
-    }
-    memcpy(g_mem + out, text, need);
-    set_eax(c, count);
+    message = text;
+    return true;
 }
 
 void k_LocalAlloc(X86 *c) {
@@ -1416,6 +1495,7 @@ void win32_reset_command_line_for_test() {
     kernel32_wide_reset_command_line();
     g_cmdline_addr = 0;
 }
+uint64_t system_filetime();
 namespace {
 
 // The environment block is a run of NUL-terminated strings ended by an extra
@@ -1423,6 +1503,9 @@ namespace {
 static const std::vector<std::string> &guest_environment() {
     static const std::vector<std::string> entries = [] {
         std::vector<std::string> result = {"PATH=" RECOMP_GUEST_ROOT, "windir=C:\\WINDOWS"};
+        static const char *const defaults[] = RECOMP_ENVIRONMENT_DEFAULTS;
+        for (const char *const *entry = defaults; *entry; ++entry)
+            result.push_back(*entry);
         static const char *const names[] = RECOMP_ENVIRONMENT_PASSTHROUGH;
         for (const char *const *name = names; *name; ++name) {
             const char *value = os_getenv(*name);
@@ -1695,6 +1778,18 @@ void k_GetDiskFreeSpaceA(X86 *c) {
     disk_free_space(c);
 }
 
+void k_GetWindowsDirectoryA(X86 *c) {
+    static const char dir[] = "C:\\Windows";
+    uint32_t buf = arg(c, 0), size = arg(c, 1);
+    uint32_t len = sizeof dir - 1;
+    if (!buf || size <= len || !gm_valid(buf, len + 1)) {
+        set_eax(c, len + 1);
+        return;
+    }
+    memcpy(g_mem + buf, dir, len + 1);
+    set_eax(c, len);
+}
+
 void k_GetSystemDirectoryA(X86 *c) {
     static const char dir[] = "C:\\Windows\\System32";
     uint32_t buf = arg(c, 0), size = arg(c, 1);
@@ -1808,6 +1903,30 @@ void k_GetTickCount(X86 *c) {
 // of my time slice" and only yields.
 void k_Sleep(X86 *c) {
     sched_sleep_ms(arg(c, 0));
+    set_eax(c, 0);
+}
+
+// (DesiredTime, SetResolution, &ActualTime) in 100 ns units. The host clock
+// already resolves a millisecond, which is the finest the sleeps below honour.
+void n_ZwSetTimerResolution(X86 *c) {
+    uint32_t actual = arg(c, 2);
+    if (actual && gm_valid(actual, 4))
+        wr32(actual, 10000);
+    set_eax(c, 0);
+}
+
+// (Alertable, &Interval) in 100 ns units: negative is relative, positive an
+// absolute FILETIME, so a deadline already past returns at once. The wait is
+// truncated to whole milliseconds, so a sub-millisecond wait only yields.
+void n_NtDelayExecution(X86 *c) {
+    uint32_t p = arg(c, 1);
+    if (!p || !gm_valid(p, 8)) {
+        set_eax(c, 0xc0000005u);
+        return;
+    }
+    int64_t interval = (int64_t)((uint64_t)rd32(p + 4) << 32 | rd32(p));
+    int64_t wait = interval < 0 ? -interval : interval - (int64_t)system_filetime();
+    sched_sleep_ms((uint32_t)std::clamp<int64_t>(wait / 10000, 0, 0xfffffffe));
     set_eax(c, 0);
 }
 
@@ -2818,6 +2937,15 @@ void timer_fire(HObj *o) {
         o->timer_armed = false;
     }
 }
+// A child without a host process is a helper program the runtime ran to
+// completion in process; it exited with code 0.
+static int child_poll(HObj *o, bool thread, uint32_t *code) {
+    if (!o->child) {
+        *code = 0;
+        return 1;
+    }
+    return os_child_poll(o->child.get(), thread, code);
+}
 
 bool object_available(uint32_t h, uint32_t tid) {
     HObj *o = handle_any(h);
@@ -2849,7 +2977,7 @@ bool object_available(uint32_t h, uint32_t tid) {
     case H_CHILD_PROCESS:
     case H_CHILD_THREAD: {
         uint32_t code;
-        int result = os_child_poll(o->child.get(), o->kind == H_CHILD_THREAD, &code);
+        int result = child_poll(o, o->kind == H_CHILD_THREAD, &code);
         if (result < 0) {
             LOGW("WaitForSingleObject/WaitForMultipleObjects: child %s status %s",
                  o->kind == H_CHILD_THREAD ? "primary thread" : "process",
@@ -3985,7 +4113,7 @@ void k_GetExitCodeThread(X86 *c) {
             set_eax(c, 0);
             return;
         }
-        int result = os_child_poll(child->child.get(), 1, &code);
+        int result = child_poll(child, 1, &code);
         if (result == OS_CHILD_THREAD_UNSUPPORTED) {
             LOGW("GetExitCodeThread: child primary-thread status is unsupported on this platform");
             abort();
@@ -5038,10 +5166,9 @@ void set_current_directory_named(X86 *c, const std::string &want) {
     set_eax(c, 1);
 }
 
-void create_file_named(X86 *c, const std::string &name) {
+static uint32_t open_file(const std::string &name, uint32_t access, uint32_t disp, uint32_t attrs) {
     if (recomp_env("TRACE_FILES"))
         LOGW("file: open \"%s\" -> \"%s\"", name.c_str(), win32_host_path(name).c_str());
-    uint32_t access = arg(c, 1), disp = arg(c, 4);
     bool want_write = (access & 0x40000000u) != 0; // GENERIC_WRITE
     bool create = (disp == 1 || disp == 2 || disp == 4 || disp == 5);
     // A create or a truncation is a write from the start. Writing to an
@@ -5055,8 +5182,7 @@ void create_file_named(X86 *c, const std::string &name) {
     if (host.empty()) {
         set_last_error(ERROR_FILE_NOT_FOUND_);
         LOGV("CreateFileA(%s): not found", name.c_str());
-        set_eax(c, INVALID_HANDLE_VALUE_);
-        return;
+        return INVALID_HANDLE_VALUE_;
     }
     int flags = want_write ? (access & 0x80000000u ? OS_O_RDWR : OS_O_WRONLY) : OS_O_RDONLY;
     int wanted = flags;
@@ -5083,25 +5209,23 @@ void create_file_named(X86 *c, const std::string &name) {
         if (recomp_env("TRACE_FILES"))
             LOGW("file: open FAILED \"%s\" host=\"%s\"", name.c_str(), host.c_str());
         set_last_error(ERROR_FILE_NOT_FOUND_);
-        set_eax(c, INVALID_HANDLE_VALUE_);
-        return;
+        return INVALID_HANDLE_VALUE_;
     }
     // POSIX open(O_RDONLY) accepts directories. Win32 requires an explicit
     // backup-semantics OPEN_EXISTING request; otherwise the guest must see
     // failure here, before it treats a directory handle as a packfile.
     OsStat st{};
-    if (os_fd_stat(fd, &st) != 0 || (st.is_dir && (disp != 3 || !(arg(c, 5) & 0x02000000u)))) {
+    if (os_fd_stat(fd, &st) != 0 || (st.is_dir && (disp != 3 || !(attrs & 0x02000000u)))) {
         os_fd_close(fd);
         set_last_error(ERROR_ACCESS_DENIED_);
-        set_eax(c, INVALID_HANDLE_VALUE_);
-        return;
+        return INVALID_HANDLE_VALUE_;
     }
     if (create)
         win32_invalidate_dir_cache();
     uint32_t h = handle_new(H_FILE);
     handles()[h].fd = fd;
     handles()[h].path = host;
-    handles()[h].overlapped = (arg(c, 5) & 0x40000000u) != 0;
+    handles()[h].overlapped = (attrs & 0x40000000u) != 0;
     if (deferred) {
         handles()[h].write_pending = true;
         handles()[h].write_flags = wanted;
@@ -5110,7 +5234,45 @@ void create_file_named(X86 *c, const std::string &name) {
     set_last_error(ERROR_SUCCESS_);
     LOGV("CreateFileA(%s) -> %s handle %08x%s", name.c_str(), host.c_str(), h,
          deferred ? " (write tier at the first write)" : "");
+    return h;
+}
+
+void create_file_named(X86 *c, const std::string &name) {
+    set_eax(c, open_file(name, arg(c, 1), arg(c, 4), arg(c, 5)));
+}
+
+// OpenFile is the Win16-era API: an OFSTRUCT receives the path and error code,
+// and OF_EXIST opens the file only to close it again.
+void k_OpenFile(X86 *c) {
+    const std::string name = gm_str(arg(c, 0));
+    uint32_t ofs = arg(c, 1), style = arg(c, 2);
+    const uint32_t OF_CREATE = 0x1000, OF_EXIST = 0x4000;
+    if (style & ~(3u | 0x70u | OF_CREATE | OF_EXIST)) {
+        LOGW("OpenFile(%s): style %04x is unsupported", name.c_str(), style);
+        fflush(stderr);
+        abort();
+    }
+    static const uint32_t access[] = {0x80000000u, 0x40000000u, 0xc0000000u, 0x80000000u};
+    uint32_t h = open_file(name, access[style & 3], style & OF_CREATE ? 2 : 3, 0);
+    if (ofs && gm_valid(ofs, 136)) {
+        wr8(ofs, 136);
+        wr8(ofs + 1, 1);
+        wr16(ofs + 2, h == INVALID_HANDLE_VALUE_ ? (uint16_t)ERROR_FILE_NOT_FOUND_ : 0);
+        size_t n = std::min<size_t>(name.size(), 127);
+        for (size_t i = 0; i < n; i++)
+            wr8(ofs + 8 + (uint32_t)i, (uint8_t)name[i]);
+        wr8(ofs + 8 + (uint32_t)n, 0);
+    }
+    if (h != INVALID_HANDLE_VALUE_ && (style & OF_EXIST)) {
+        os_fd_close(handles()[h].fd);
+        handles().erase(h);
+    }
     set_eax(c, h);
+}
+
+void k__lclose(X86 *c) {
+    k_CloseHandle(c);
+    set_eax(c, c->r[R_EAX] ? 0 : 0xffffffffu);
 }
 
 void get_file_attributes_named(X86 *c, const std::string &name) {
@@ -5548,6 +5710,53 @@ void open_mutex_named(X86 *c, const std::string &name) {
     set_eax(c, 0);
 }
 
+extern "C" __attribute__((weak)) bool bink_play_movie(const char *) {
+    return false;
+}
+
+// A Bink player program the game names in [media] bink_players. Its
+// arguments are movies, ".bik" implied, and switches, which are not modeled;
+// the movies play in the game window before the call returns a child that has
+// already exited.
+static bool run_bink_player(X86 *c, const std::string &executable, const std::string &args,
+                            uint32_t info) {
+    std::string name = lower(executable.substr(executable.find_last_of("\\/") + 1));
+    static const char *const players[] = RECOMP_BINK_PLAYERS;
+    bool listed = false;
+    for (const char *const *p = players; *p; ++p)
+        listed |= name == lower(*p);
+    if (!listed)
+        return false;
+    bool played = false;
+    for (size_t at = 0; (at = args.find_first_not_of(" \t", at)) != std::string::npos;) {
+        bool quoted = args[at] == '"';
+        size_t end = quoted ? args.find('"', at + 1) : args.find_first_of(" \t", at);
+        std::string movie =
+            args.substr(at + quoted, (end == std::string::npos ? args.size() : end) - at - quoted);
+        at = end == std::string::npos ? args.size() : end + quoted;
+        if (movie.empty() || movie[0] == '/' || movie[0] == '-')
+            continue;
+        if (movie.find('.', movie.find_last_of("\\/") + 1) == std::string::npos)
+            movie += ".bik";
+        if (bink_play_movie(movie.c_str()))
+            played = true;
+        else
+            LOGW("CreateProcessA: %s could not play \"%s\"", executable.c_str(), movie.c_str());
+    }
+    if (!played) {
+        set_last_error(ERROR_FILE_NOT_FOUND_);
+        set_eax(c, 0);
+        return true;
+    }
+    uint32_t process = handle_new(H_CHILD_PROCESS), thread = handle_new(H_CHILD_THREAD);
+    wr32(info, process);
+    wr32(info + 4, thread);
+    wr32(info + 8, 0);
+    wr32(info + 12, 0);
+    set_eax(c, 1);
+    return true;
+}
+
 void k_CreateProcessA(X86 *c) {
     uint32_t startup = arg(c, 8), info = arg(c, 9);
     if (!startup || !gm_valid(startup, 68) || rd32(startup) != 68 || !info || !gm_valid(info, 16) ||
@@ -5605,6 +5814,13 @@ void k_CreateProcessA(X86 *c) {
     }
     if (arg(c, 0))
         executable = gm_str(arg(c, 0));
+    std::string child_args = line.substr(end);
+    if (arg(c, 0)) {
+        size_t skip = line[0] == '"' ? line.find('"', 1) : line.find_first_of(" \t");
+        child_args = skip == std::string::npos ? "" : line.substr(skip + (line[0] == '"'));
+    }
+    if (run_bink_player(c, executable, child_args, info))
+        return;
     if (lower(full_path_named(executable)) != lower(module_file_name(0))) {
         LOGW("CreateProcessA: executable is not the translated image: %s", executable.c_str());
         set_last_error(193);
@@ -5650,7 +5866,7 @@ void k_GetExitCodeProcess(X86 *c) {
         set_eax(c, 0);
         return;
     }
-    if (process && os_child_poll(process->child.get(), 0, &code) < 0) {
+    if (process && child_poll(process, 0, &code) < 0) {
         set_last_error(ERROR_ACCESS_DENIED_);
         set_eax(c, 0);
         return;
@@ -5875,6 +6091,8 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "UnmapViewOfFile", 1, k_UnmapViewOfFile},
     // files
     {"KERNEL32.dll", "CreateFileA", 7, k_CreateFileA},
+    {"KERNEL32.dll", "OpenFile", 3, k_OpenFile},
+    {"KERNEL32.dll", "_lclose", 1, k__lclose},
     {"KERNEL32.dll", "ReadFile", 5, k_ReadFile},
     {"KERNEL32.dll", "WriteFile", 5, k_WriteFile},
     {"KERNEL32.dll", "SetFilePointer", 4, k_SetFilePointer},
@@ -5902,6 +6120,7 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "GetVolumeInformationA", 8, k_GetVolumeInformationA},
     {"KERNEL32.dll", "GetDiskFreeSpaceA", 5, k_GetDiskFreeSpaceA},
     {"KERNEL32.dll", "GetSystemDirectoryA", 2, k_GetSystemDirectoryA},
+    {"KERNEL32.dll", "GetWindowsDirectoryA", 2, k_GetWindowsDirectoryA},
     {"KERNEL32.dll", "GetTempPathA", 2, k_GetTempPathA},
     {"KERNEL32.dll", "GetTempPathW", 2, k_GetTempPathW},
     {"KERNEL32.dll", "GetThreadContext", 2, k_GetThreadContext},
@@ -5957,6 +6176,8 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "QueryPerformanceCounter", 1, k_QueryPerformanceCounter},
     {"KERNEL32.dll", "QueryPerformanceFrequency", 1, k_QueryPerformanceFrequency},
     {"KERNEL32.dll", "Sleep", 1, k_Sleep},
+    {"ntdll.dll", "ZwSetTimerResolution", 3, n_ZwSetTimerResolution},
+    {"ntdll.dll", "NtDelayExecution", 2, n_NtDelayExecution},
     {"KERNEL32.dll", "GetLocalTime", 1, k_GetLocalTime},
     {"KERNEL32.dll", "GetSystemTime", 1, k_GetSystemTime},
     // Restored with the merge: these were on the branch this game was ported

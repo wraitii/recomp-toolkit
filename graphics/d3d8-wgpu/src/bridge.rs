@@ -1617,6 +1617,8 @@ pub mod ffi {
             state: u32,
             value: u32,
         ) -> Status;
+        fn get_texture_stage_state(device: &Device, stage: u32, state: u32) -> ValueResult;
+        fn get_render_state(device: &Device, state: u32) -> ValueResult;
         fn set_texture(
             device: &mut Device,
             stage: u32,
@@ -1649,6 +1651,7 @@ pub mod ffi {
         ) -> Status;
         fn release_texture(device: &mut Device, texture_id: u32);
         fn set_transform(device: &mut Device, kind: u32, values: &[f32]) -> Status;
+        fn get_transform(device: &Device, kind: u32, out: &mut [f32]) -> Status;
         fn set_viewport(device: &mut Device, viewport: &Viewport) -> Status;
         fn get_viewport(device: &Device) -> ViewportResult;
         fn set_material(device: &mut Device, material: &Material) -> Status;
@@ -1894,7 +1897,8 @@ pub mod ffi {
 use crate::backend::native_present::{present_lease_ready, release_present_lease};
 use crate::bridge_render::{
     adapter_info, begin_scene, clear, draw_indexed_primitive, draw_primitive, end_scene, get_light,
-    get_light_enable, get_material, get_viewport, light_enable, present, present_handoff,
+    get_light_enable, get_material, get_render_state, get_texture_stage_state, get_transform,
+    get_viewport, light_enable, present, present_handoff,
     process_vertices, read_pixels, read_pixels_len, read_texture, release_texture, scene_boundary,
     set_light, set_material, set_render_state, set_render_target, set_texture,
     set_texture_stage_state, set_transform, set_viewport, write_pixels,

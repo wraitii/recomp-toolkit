@@ -357,7 +357,115 @@ uint32_t keyboard_enum_objects(X86 *c, ComObj *d, uint32_t cb, uint32_t ref, uin
     return DI_OK;
 }
 
-// EnumObjects(callback, ref, dwFlags). The mouse keeps the old silent success.
+// A keyboard or mouse object as DirectInput describes it. The mouse numbers its
+// instances across types, X/Y/wheel 0..2 and the buttons from 3, as Windows does.
+struct InputObject {
+    uint32_t guid_data1, ofs, type;
+    std::string name;
+};
+
+const uint32_t GUID_XAXIS_DATA1 = 0xA36D02E0, GUID_YAXIS_DATA1 = 0xA36D02E1,
+               GUID_ZAXIS_DATA1 = 0xA36D02E2, GUID_BUTTON_DATA1 = 0xA36D02F0,
+               GUID_KEY_DATA1 = 0x55728220;
+
+std::vector<InputObject> input_objects(const ComObj *d) {
+    std::vector<InputObject> v;
+    if (d->dev_type == DIDEVTYPE_KEYBOARD) {
+        for (uint32_t dik = 1; dik < 256; ++dik) {
+            std::string name = guest_key_name(dik);
+            if (!name.empty())
+                v.push_back({GUID_KEY_DATA1, dik, DIDFT_PSHBUTTON | (dik << 8), name});
+        }
+        return v;
+    }
+    v.push_back({GUID_XAXIS_DATA1, DIMOFS_X, DIDFT_RELAXIS | (0u << 8), "X-axis"});
+    v.push_back({GUID_YAXIS_DATA1, DIMOFS_Y, DIDFT_RELAXIS | (1u << 8), "Y-axis"});
+    v.push_back({GUID_ZAXIS_DATA1, DIMOFS_Z, DIDFT_RELAXIS | (2u << 8), "Wheel"});
+    for (uint32_t b = 0; b < 8; ++b)
+        v.push_back({GUID_BUTTON_DATA1, DIMOFS_BUTTON0 + b, DIDFT_PSHBUTTON | ((3 + b) << 8),
+                     "Button " + std::to_string(b)});
+    return v;
+}
+
+uint32_t mouse_enum_objects(X86 *c, ComObj *d, uint32_t cb, uint32_t ref, uint32_t flags) {
+    if (!cb)
+        return DIERR_INVALIDPARAM;
+    uint32_t bits = flags & DIDFT_TYPEMASK;
+    if (flags & 0x1F000000u)
+        return DI_OK;
+    uint32_t size = d->di_wide ? DIDEVICEOBJECTINSTANCEW_SIZE : DIDEVICEOBJECTINSTANCEA_SIZE;
+    for (const InputObject &o : input_objects(d)) {
+        if (bits && !(o.type & bits))
+            continue;
+        uint32_t a = di_scratch(size);
+        if (!a)
+            return E_OUTOFMEMORY;
+        gm_zero(a, size);
+        wr32(a, size);
+        const uint8_t guid[16] =
+            IID_BYTES(o.guid_data1, 0xC9F3, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+        memcpy(gm_ptr(a + DIDOI_OFF_guidType), guid, 16);
+        wr32(a + DIDOI_OFF_dwOfs, o.ofs);
+        wr32(a + DIDOI_OFF_dwType, o.type);
+        if (d->di_wide)
+            di_put_wide(a + DIDOI_OFF_tszName, o.name.c_str(), DIDOI_NAME_CHARS);
+        else
+            gm_put_str(a + DIDOI_OFF_tszName, o.name.c_str(), DIDOI_NAME_CHARS);
+        if (guest_call(c, cb, a, ref) != 1 /* DIENUM_CONTINUE */)
+            break;
+    }
+    return DI_OK;
+}
+
+// Map an application-defined DIDATAFORMAT onto the device's objects: each
+// DIOBJECTDATAFORMAT names an object by GUID, type and instance (or any
+// instance) and places it at its own offset. False for a required object the
+// device lacks.
+bool map_data_format(ComObj *d, uint32_t df) {
+    uint32_t count = rd32(df + DIDF_OFF_dwNumObjs), rgodf = rd32(df + DIDF_OFF_rgodf);
+    if (count > 1024 || (count && (!rgodf || !gm_fits_n(rgodf, count, DIOBJECTDATAFORMAT_SIZE))))
+        return false;
+    std::vector<InputObject> objs = input_objects(d);
+    std::vector<bool> used(objs.size(), false);
+    std::vector<int32_t> map(256, -1);
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t rec = rgodf + i * DIOBJECTDATAFORMAT_SIZE;
+        uint32_t pguid = rd32(rec + DIODF_OFF_pguid), ofs = rd32(rec + DIODF_OFF_dwOfs);
+        uint32_t type = rd32(rec + DIODF_OFF_dwType);
+        uint32_t instance = (type & DIDFT_ANYINSTANCE) >> 8;
+        bool any = (type & DIDFT_ANYINSTANCE) == DIDFT_ANYINSTANCE;
+        uint32_t want_guid = pguid && gm_valid(pguid, 4) ? rd32(pguid) : 0;
+        int found = -1;
+        for (size_t k = 0; k < objs.size() && found < 0; ++k) {
+            const InputObject &o = objs[k];
+            if (used[k] || !(o.type & type & DIDFT_TYPEMASK))
+                continue;
+            if (want_guid && want_guid != o.guid_data1)
+                continue;
+            if (!any && instance != ((o.type >> 8) & 0xFFFF))
+                continue;
+            found = (int)k;
+        }
+        if (found < 0) {
+            if (type & DIDFT_OPTIONAL)
+                continue;
+            log_once("dinput.format.obj",
+                     "dinput: data format names an object (type %08x) the device lacks", type);
+            return false;
+        }
+        used[(size_t)found] = true;
+        map[objs[(size_t)found].ofs] = (int32_t)ofs;
+    }
+    d->di_format_ofs = std::move(map);
+    return true;
+}
+
+bool native_axis(const ComObj *d, uint32_t ofs) {
+    return d->dev_type != DIDEVTYPE_KEYBOARD &&
+           (ofs == DIMOFS_X || ofs == DIMOFS_Y || ofs == DIMOFS_Z);
+}
+
+// EnumObjects(callback, ref, dwFlags).
 void Device_EnumObjects(X86 *c) {
     ComObj *d = this_device(c);
     if (d && is_joystick(d)) {
@@ -368,9 +476,7 @@ void Device_EnumObjects(X86 *c) {
         com_ret(c, keyboard_enum_objects(c, d, arg(c, 1), arg(c, 2), arg(c, 3)));
         return;
     }
-    log_once("dx.Device_EnumObjects",
-             "dx: Device_EnumObjects on the mouse is not implemented; returning DI_OK");
-    com_ret(c, DI_OK);
+    com_ret(c, d ? mouse_enum_objects(c, d, arg(c, 1), arg(c, 2), arg(c, 3)) : DIERR_INVALIDPARAM);
 }
 
 void Device_GetProperty(X86 *c) {
@@ -469,7 +575,7 @@ void Device_Acquire(X86 *c) {
         com_ret(c, DIERR_INVALIDPARAM);
         return;
     }
-    if (!d->data_format_size) {
+    if (!d->data_format_size && !d->data_format_set) {
         com_ret(c, DIERR_NOTINITIALIZED);
         return;
     }
@@ -528,6 +634,34 @@ void Device_GetDeviceState(X86 *c) {
     // consumes are cleared by the host, so a second read here would report
     // zero motion and lose this frame's movement.
     poll_device(d);
+
+    if (!d->di_format_ofs.empty()) {
+        if (size != d->data_format_size) {
+            com_ret(c, DIERR_INVALIDPARAM);
+            return;
+        }
+        gm_zero(out, size);
+        for (uint32_t native = 0; native < 256; ++native) {
+            int32_t at = d->di_format_ofs[native];
+            if (at < 0)
+                continue;
+            if (native_axis(d, native)) {
+                int32_t v = native == DIMOFS_X   ? d->last_x
+                            : native == DIMOFS_Y ? d->last_y
+                                                 : d->last_z;
+                if ((uint64_t)at + 4 <= size)
+                    wr32(out + (uint32_t)at, (uint32_t)v);
+            } else if ((uint32_t)at < size) {
+                wr8(out + (uint32_t)at, d->dev_type == DIDEVTYPE_KEYBOARD
+                                            ? d->last_keys[native]
+                                            : d->last_buttons[native - DIMOFS_BUTTON0]);
+            }
+        }
+        if (d->dev_type != DIDEVTYPE_KEYBOARD)
+            d->last_x = d->last_y = d->last_z = 0;
+        com_ret(c, DI_OK);
+        return;
+    }
 
     if (d->dev_type == DIDEVTYPE_KEYBOARD) {
         // The keyboard format is one byte per DIK_ scan code.
@@ -605,6 +739,15 @@ void Device_GetDeviceData(X86 *c) {
     }
 
     poll_device(d);
+    // An application-defined format reports only its own objects, at its own
+    // offsets: drop the rest before counting.
+    if (!d->di_format_ofs.empty()) {
+        std::vector<uint32_t> kept;
+        for (uint32_t e : d->events)
+            if (d->di_format_ofs[event_ofs(e)] >= 0)
+                kept.push_back(e);
+        d->events.swap(kept);
+    }
     uint32_t want = rd32(inout);
     // DIGDD_PEEK = 1: report without consuming.
     bool peek = (flags & 1u) != 0;
@@ -621,13 +764,12 @@ void Device_GetDeviceData(X86 *c) {
             uint32_t a = out + i * objsize;
             if (objsize >= DIDEVICEOBJECTDATA_DX8_SIZE)
                 wr32(a + DIDOD_OFF_uAppData, 0);
-            wr32(a + DIDOD_OFF_dwOfs, event_ofs(e));
+            uint32_t ofs = event_ofs(e);
+            wr32(a + DIDOD_OFF_dwOfs,
+                 d->di_format_ofs.empty() ? ofs : (uint32_t)d->di_format_ofs[ofs]);
             // dwData is a full dword; a signed axis delta was packed into 24
             // bits, so sign-extend it back.
-            uint32_t ofs = event_ofs(e);
-            uint32_t data = (ofs == DIMOFS_X || ofs == DIMOFS_Y || ofs == DIMOFS_Z)
-                                ? (uint32_t)event_data_signed(e)
-                                : event_data(e);
+            uint32_t data = native_axis(d, ofs) ? (uint32_t)event_data_signed(e) : event_data(e);
             wr32(a + DIDOD_OFF_dwData, data);
             wr32(a + DIDOD_OFF_dwTimeStamp, now);
             wr32(a + DIDOD_OFF_dwSequence, ++d->sequence);
@@ -660,12 +802,26 @@ void Device_SetDataFormat(X86 *c) {
         return;
     }
     // DIDATAFORMAT: dwSize, dwObjSize, dwFlags, dwDataSize, dwNumObjs, rgodf.
+    // A format with no objects is valid: it claims the device without
+    // reporting any of it, and the device can be acquired.
     uint32_t data_size = rd32(df + 12);
-    if (!data_size) {
+    if (!data_size && rd32(df + 16)) {
+        com_ret(c, DIERR_INVALIDPARAM);
+        return;
+    }
+    // c_dfDIKeyboard, c_dfDIMouse and c_dfDIMouse2 keep the native layout.
+    uint32_t objects = rd32(df + DIDF_OFF_dwNumObjs);
+    bool standard = d->dev_type == DIDEVTYPE_KEYBOARD
+                        ? data_size == 256 && objects == 256
+                        : (data_size == DIMOUSESTATE_SIZE && objects == 7) ||
+                              (data_size == DIMOUSESTATE2_SIZE && objects == 11);
+    d->di_format_ofs.clear();
+    if (!standard && !map_data_format(d, df)) {
         com_ret(c, DIERR_INVALIDPARAM);
         return;
     }
     d->data_format_size = data_size;
+    d->data_format_set = true;
     LOGV("dinput: data format of %u bytes on device type %u", data_size, d->dev_type);
     com_ret(c, DI_OK);
 }

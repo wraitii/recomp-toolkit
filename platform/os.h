@@ -199,6 +199,51 @@ int os_hostname(char *buf, size_t cap);
 // stores it). IPv4 only: the guest's gethostbyname result describes AF_INET.
 // 0 when it resolved, -1 when it did not.
 int os_resolve_ipv4(const char *name, unsigned char addr[4]);
+// The IPv4 address this machine reaches other hosts from, which Windows also
+// gives for its own host name; macOS resolves that name to loopback. 0 or -1.
+int os_primary_ipv4(unsigned char addr[4]);
+
+// IPv4 sockets for the winsock shims. Addresses and ports are in network order,
+// as a guest sockaddr_in holds them. Every socket is non-blocking; a caller
+// that must block waits in os_socket_poll. A failing call returns -1 and
+// os_socket_error() names the cause as the Winsock error code (WSAE*).
+typedef intptr_t OsSocket;
+#define OS_SOCKET_INVALID ((OsSocket) - 1)
+enum OsSocketOption {
+    OS_SOCKOPT_BROADCAST,
+    OS_SOCKOPT_REUSEADDR,
+    OS_SOCKOPT_KEEPALIVE,
+    OS_SOCKOPT_RCVBUF,
+    OS_SOCKOPT_SNDBUF,
+    OS_SOCKOPT_NODELAY,
+    OS_SOCKOPT_LINGER, // seconds, or -1 for off
+    OS_SOCKOPT_ERROR,  // read only: the pending WSAE* code, which reading clears
+    OS_SOCKOPT_TYPE,   // read only: 1 stream, 2 datagram
+};
+enum { OS_POLL_READ = 1, OS_POLL_WRITE = 2, OS_POLL_ERROR = 4 };
+OsSocket os_socket_open(int stream);
+int os_socket_close(OsSocket s);
+int os_socket_bind(OsSocket s, uint32_t addr, uint16_t port);
+int os_socket_connect(OsSocket s, uint32_t addr, uint16_t port);
+int os_socket_listen(OsSocket s, int backlog);
+OsSocket os_socket_accept(OsSocket s, uint32_t *addr, uint16_t *port);
+int os_socket_shutdown(OsSocket s, int how); // 0 receive, 1 send, 2 both
+// `to` NULL sends on the connected peer. Returns the byte count.
+int os_socket_send(OsSocket s, const void *buf, size_t len, int flags, const uint32_t *to_addr,
+                   uint16_t to_port);
+// Returns the byte count. A datagram longer than `len` fills the buffer and
+// fails with WSAEMSGSIZE, as on Windows.
+int os_socket_recv(OsSocket s, void *buf, size_t len, int flags, uint32_t *from_addr,
+                   uint16_t *from_port);
+int os_socket_set_option(OsSocket s, enum OsSocketOption option, int value);
+int os_socket_get_option(OsSocket s, enum OsSocketOption option, int *value);
+int os_socket_name(OsSocket s, int peer, uint32_t *addr, uint16_t *port);
+int os_socket_readable_bytes(OsSocket s, uint32_t *bytes);
+// Waits up to `timeout_ms` (-1 forever) for any of `want[i]` (OS_POLL_*) on
+// `s[i]`; `got[i]` receives what is ready. Returns the number of sockets with
+// anything ready.
+int os_socket_poll(const OsSocket *s, const int *want, int *got, int count, int timeout_ms);
+int os_socket_error(void);
 
 // ---------------------------------------------------------------------------
 // Environment. Values are copied; 0 or -1.

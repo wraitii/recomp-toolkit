@@ -115,6 +115,8 @@ struct Sample {
     bool cone_enabled = false;
     float min_d = 1.0f, max_d = 1.0e9f;
     uint32_t rate = 0;
+    float obstruction = 0.0f, occlusion = 0.0f;
+    uint32_t user[8] = {};
 };
 std::vector<Sample> g_samples(64);
 std::mutex g_stream_mutex;
@@ -385,6 +387,59 @@ void ail_free(X86 *c, uint32_t ptr) {
 
 void ail_mem_alloc_lock(X86 *c) {
     set_eax(c, ail_alloc(c, arg(c, 0)));
+}
+
+// DIVERGENCE(original): the kit exposes no audio input device, so
+// AIL_open_input fails as Miles does without one and voice capture never starts.
+void ail_open_input(X86 *c) {
+    log_once("mss32.input", "mss32: AIL_open_input: no audio input device is available");
+    set_eax(c, 0);
+}
+
+void ail_ms_count(X86 *c) {
+    set_eax(c, host_millis());
+}
+
+// The shim reports failures through return values only, so the last error is
+// always the empty string Miles returns before any failure.
+void ail_last_error(X86 *c) {
+    static uint32_t text = 0;
+    if (!text)
+        text = heap_alloc(4, true);
+    set_eax(c, text);
+}
+
+void ail_file_size(X86 *c) {
+    std::string path = win32_host_path_op(gm_str(arg(c, 0)), WIN32_FILE_READ);
+    OsStat st{};
+    bool ok =
+        !path.empty() && os_stat(path.c_str(), &st) == 0 && st.is_regular && st.size <= INT32_MAX;
+    set_eax(c, ok ? (uint32_t)st.size : 0xffffffffu);
+}
+
+// AILFILETYPE_*: 0 unknown, 1 PCM WAV, 2 IMA ADPCM WAV, 3 other WAV, 4 VOC,
+// 5 MIDI, 6 XMIDI, 13 MPEG layer 3, 14 WAV that needs an ASI codec.
+void ail_file_type(X86 *c) {
+    uint32_t data = arg(c, 0), size = arg(c, 1);
+    set_eax(c, 0);
+    if (!data || size < 4 || !gm_valid(data, size))
+        return;
+    const uint8_t *p = g_mem + data;
+    WavImage wav{};
+    if (size >= 12 && !memcmp(p, "RIFF", 4) && !memcmp(p + 8, "WAVE", 4)) {
+        uint32_t type = 3;
+        if (riff_parse_wave_host(p, size, &wav))
+            type = wav.format == 1 ? 1 : wav.format == 0x11 ? 2 : wav.format == 0x55 ? 14 : 3;
+        set_eax(c, type);
+    } else if (size >= 19 && !memcmp(p, "Creative Voice File", 19)) {
+        set_eax(c, 4);
+    } else if (!memcmp(p, "MThd", 4)) {
+        set_eax(c, 5);
+    } else if (size >= 12 && !memcmp(p, "FORM", 4) && !memcmp(p + 8, "XDIR", 4)) {
+        set_eax(c, 6);
+    } else if (!memcmp(p, "ID3", 3) || (p[0] == 0xff && (p[1] & 0xe6) == 0xe2)) {
+        set_eax(c, 13);
+    }
 }
 
 void ail_file_read(X86 *c) {
@@ -919,6 +974,58 @@ void ail_set_sample_pan(X86 *c) {
         int32_t p = std::clamp((int32_t)arg(c, 1), 0, 127);
         s->pan01 = p <= 64 ? p / 128.0f : 0.5f + (p - 64) / 126.0f;
         sample_apply_mix(*s);
+    }
+    set_eax(c, 0);
+}
+void ail_sample_volume(X86 *c) {
+    Sample *s = sample_for(arg(c, 0));
+    set_eax(c, s ? (uint32_t)std::lround(s->volume01 * 127.0f) : 0);
+}
+void ail_sample_pan(X86 *c) {
+    Sample *s = sample_for(arg(c, 0));
+    float p = s ? s->pan01 : 0.5f;
+    set_eax(c, (uint32_t)std::lround(p <= 0.5f ? p * 128.0f : 64.0f + (p - 0.5f) * 126.0f));
+}
+void ail_digital_master_volume(X86 *c) {
+    auto it = g_drivers.find(arg(c, 0));
+    set_eax(c, it != g_drivers.end() ? (uint32_t)it->second.master : 0);
+}
+
+// AIL_set_sample_type(HSAMPLE, format, flags) describes raw PCM that
+// AIL_set_sample_address then points at: DIG_F_MONO_8, MONO_16, STEREO_8 or
+// STEREO_16, unsigned when 8-bit. ADPCM and the sign/order flags are not modelled.
+void ail_set_sample_type(X86 *c) {
+    Sample *s = sample_for(arg(c, 0));
+    uint32_t format = arg(c, 1), flags = arg(c, 2);
+    if (s && (format > 3 || flags)) {
+        LOGW("mss32: AIL_set_sample_type format %u flags %u is unsupported", format, flags);
+        imports_unsupported(c);
+        return;
+    }
+    if (s) {
+        sample_stop(*s);
+        s->decoded.clear();
+        s->wave.channels = format & 2 ? 2 : 1;
+        s->wave.bits = format & 1 ? 16 : 8;
+        if (!s->wave.rate)
+            s->wave.rate = 11025;
+    }
+    set_eax(c, 0);
+}
+void ail_set_sample_address(X86 *c) {
+    Sample *s = sample_for(arg(c, 0));
+    uint32_t start = arg(c, 1), bytes = arg(c, 2);
+    if (s) {
+        sample_stop(*s);
+        s->decoded.clear();
+        bool ok = start && bytes && gm_valid(start, bytes);
+        s->wave.pcm = ok ? start : 0;
+        s->wave.pcm_bytes = ok ? bytes : 0;
+        if (!s->wave.bits) {
+            s->wave.bits = 8;
+            s->wave.channels = 1;
+            s->wave.rate = 11025;
+        }
     }
     set_eax(c, 0);
 }
@@ -1609,6 +1716,20 @@ void ail_enumerate_3D_providers(X86 *c) {
     set_eax(c, 1);
 }
 
+// AIL_3D_provider_attribute(HPROVIDER, name, void *value). The software provider
+// voices 3D samples from the shared pool, leaving half of it for 2D sounds; it
+// has no EAX attributes, so those leave the value untouched as Miles does.
+void ail_3D_provider_attribute(X86 *c) {
+    uint32_t out = arg(c, 2);
+    std::string name = arg(c, 1) ? gm_str(arg(c, 1)) : std::string();
+    if (name == "Maximum supported samples" && out && gm_valid(out, 4))
+        wr32(out, (uint32_t)g_samples.size() / 2);
+    else
+        log_once("mss32.3dattr", "mss32: AIL_3D_provider_attribute(%s) is not a provider attribute",
+                 name.c_str());
+    set_eax(c, 0);
+}
+
 // AIL_open_3D_provider returns zero on success; anything else is a Miles error
 // code the engine reads as "provider unavailable". The one software provider
 // always opens.
@@ -1678,9 +1799,12 @@ void ail_set_3D_sample_loop_count(X86 *c) {
     set_eax(c, 0);
 }
 
+// Miles 6 takes an S32 volume 0..127, Miles 7 an F32 0..1. As float bits, every
+// value up to 127 is a denormal no Miles 7 caller passes, so the two agree.
 void ail_set_3D_sample_volume(X86 *c) {
     if (Sample *s = sample_for(arg(c, 0))) {
-        s->volume01 = std::clamp(bits_to_float(arg(c, 1)), 0.0f, 1.0f);
+        uint32_t v = arg(c, 1);
+        s->volume01 = v <= 127 ? v / 127.0f : std::clamp(bits_to_float(v), 0.0f, 1.0f);
         sample_apply_mix(*s);
     }
     set_eax(c, 0);
@@ -1717,7 +1841,75 @@ void ail_set_3D_sample_effects_level(X86 *c) {
 }
 void ail_set_3D_sample_occlusion(X86 *c) {
     log_once("mss32.3doccl", "mss32: 3D sample occlusion is set but is not applied to the mix");
+    if (Sample *s = sample_for(arg(c, 0)))
+        s->occlusion = bits_to_float(arg(c, 1));
     set_eax(c, 0);
+}
+void ail_set_3D_sample_obstruction(X86 *c) {
+    log_once("mss32.3dobst", "mss32: 3D sample obstruction is set but is not applied to the mix");
+    if (Sample *s = sample_for(arg(c, 0)))
+        s->obstruction = bits_to_float(arg(c, 1));
+    set_eax(c, 0);
+}
+void ail_3D_sample_occlusion(X86 *c) {
+    Sample *s = sample_for(arg(c, 0));
+    fpush(c, s ? s->occlusion : 0.0);
+}
+void ail_3D_sample_obstruction(X86 *c) {
+    Sample *s = sample_for(arg(c, 0));
+    fpush(c, s ? s->obstruction : 0.0);
+}
+void ail_3D_sample_playback_rate(X86 *c) {
+    Sample *s = sample_for(arg(c, 0));
+    set_eax(c, !s ? 0 : s->rate ? s->rate : s->wave.rate);
+}
+
+void put_floats(X86 *c, int first, const float *values, int count) {
+    for (int i = 0; i < count; ++i)
+        if (uint32_t p = arg(c, first + i); p && gm_valid(p, 4))
+            wr32(p, float_to_bits(values[i]));
+}
+
+// AIL_3D_position/orientation/velocity(H3DPOBJECT, F32 *...) read back what
+// the setters stored, for the listener or a 3D sample.
+void ail_3D_position(X86 *c) {
+    if (arg(c, 0) == kListener3DHandle)
+        put_floats(c, 1, g_listener_pos3d, 3);
+    else if (Sample *s = sample_for(arg(c, 0)))
+        put_floats(c, 1, s->pos3d, 3);
+    set_eax(c, 0);
+}
+void ail_3D_orientation(X86 *c) {
+    if (arg(c, 0) == kListener3DHandle) {
+        put_floats(c, 1, g_listener_front3d, 3);
+        put_floats(c, 4, g_listener_top3d, 3);
+    } else if (Sample *s = sample_for(arg(c, 0))) {
+        put_floats(c, 1, s->front3d, 3);
+        put_floats(c, 4, s->up3d, 3);
+    }
+    set_eax(c, 0);
+}
+void ail_3D_velocity(X86 *c) {
+    if (Sample *s = sample_for(arg(c, 0)))
+        put_floats(c, 1, s->vel3d, 3);
+    set_eax(c, 0);
+}
+void ail_set_3D_velocity_vector(X86 *c) {
+    if (Sample *s = sample_for(arg(c, 0)))
+        for (int i = 0; i < 3; ++i)
+            s->vel3d[i] = bits_to_float(arg(c, 1 + i));
+    set_eax(c, 0);
+}
+
+// Miles keeps eight user words on every sample handle, 2D or 3D.
+void ail_set_sample_user_data(X86 *c) {
+    if (Sample *s = sample_for(arg(c, 0)); s && arg(c, 1) < 8)
+        s->user[arg(c, 1)] = arg(c, 2);
+    set_eax(c, 0);
+}
+void ail_sample_user_data(X86 *c) {
+    Sample *s = sample_for(arg(c, 0));
+    set_eax(c, s && arg(c, 1) < 8 ? s->user[arg(c, 1)] : 0);
 }
 
 void ail_set_3D_position(X86 *c) {
@@ -2050,6 +2242,30 @@ const ImportShim g_mss32_shims[] = {
     AIL(mem_free_lock, 4, ail_mem_free_lock),
     AIL(mem_alloc_lock, 4, ail_mem_alloc_lock),
     AIL(file_read, 8, ail_file_read),
+    AIL(file_size, 4, ail_file_size),
+    AIL(ms_count, 0, ail_ms_count),
+    AIL(open_input, 4, ail_open_input),
+    AIL(close_input, 4, ret0),
+    AIL(set_input_state, 8, ret0),
+    AIL(sample_volume, 4, ail_sample_volume),
+    AIL(sample_pan, 4, ail_sample_pan),
+    AIL(digital_master_volume, 4, ail_digital_master_volume),
+    AIL(set_sample_type, 12, ail_set_sample_type),
+    AIL(set_sample_address, 12, ail_set_sample_address),
+    AIL(set_sample_user_data, 12, ail_set_sample_user_data),
+    AIL(sample_user_data, 8, ail_sample_user_data),
+    AIL(set_3D_user_data, 12, ail_set_sample_user_data),
+    AIL(3D_user_data, 8, ail_sample_user_data),
+    AIL(set_3D_sample_obstruction, 8, ail_set_3D_sample_obstruction),
+    AIL(3D_sample_obstruction, 4, ail_3D_sample_obstruction),
+    AIL(3D_sample_occlusion, 4, ail_3D_sample_occlusion),
+    AIL(3D_sample_playback_rate, 4, ail_3D_sample_playback_rate),
+    AIL(3D_position, 16, ail_3D_position),
+    AIL(3D_orientation, 28, ail_3D_orientation),
+    AIL(3D_velocity, 16, ail_3D_velocity),
+    AIL(set_3D_velocity_vector, 16, ail_set_3D_velocity_vector),
+    AIL(last_error, 0, ail_last_error),
+    AIL(file_type, 8, ail_file_type),
     AIL(WAV_info, 8, ail_wav_info),
     AIL(allocate_sample_handle, 4, ail_allocate_sample_handle),
     AIL(release_sample_handle, 4, ail_release_sample_handle),
@@ -2093,7 +2309,7 @@ const ImportShim g_mss32_shims[] = {
     AIL(3D_room_type, 4, ail_3D_room_type),
     AIL(set_3D_distance_factor, 8, ail_set_3D_distance_factor),
     AIL(set_3D_provider_preference, 12, ret0),
-    AIL(3D_provider_attribute, 12, ret0),
+    AIL(3D_provider_attribute, 12, ail_3D_provider_attribute),
     AIL(allocate_3D_sample_handle, 4, ail_allocate_3D_sample_handle),
     AIL(release_3D_sample_handle, 4, ail_release_3D_sample_handle),
     AIL(set_3D_sample_file, 8, ail_set_3D_sample_file),

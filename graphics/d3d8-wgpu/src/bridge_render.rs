@@ -180,6 +180,36 @@ pub(crate) fn set_texture_stage_state(
         .map_or_else(status_from_error, |_| status(StatusCode::Ok, ""))
 }
 
+pub(crate) fn get_render_state(device: &Device, state: u32) -> crate::bridge::ValueResult {
+    match device.state().render_state(state) {
+        Ok(value) => crate::bridge::ValueResult {
+            status: status(StatusCode::Ok, ""),
+            value,
+        },
+        Err(error) => crate::bridge::ValueResult {
+            status: status_from_error(error),
+            value: 0,
+        },
+    }
+}
+
+pub(crate) fn get_texture_stage_state(
+    device: &Device,
+    stage: u32,
+    state: u32,
+) -> crate::bridge::ValueResult {
+    match device.state().texture_stage_state_or_default(stage, state) {
+        Ok(value) => crate::bridge::ValueResult {
+            status: status(StatusCode::Ok, ""),
+            value,
+        },
+        Err(error) => crate::bridge::ValueResult {
+            status: status_from_error(error),
+            value: 0,
+        },
+    }
+}
+
 pub(crate) fn set_texture(
     device: &mut Device,
     stage: u32,
@@ -300,6 +330,24 @@ pub(crate) fn set_transform(device: &mut Device, kind: u32, values: &[f32]) -> S
         .state_mut()
         .set_transform(kind, Mat4 { rows })
         .map_or_else(status_from_error, |_| status(StatusCode::Ok, ""))
+}
+
+pub(crate) fn get_transform(device: &Device, kind: u32, out: &mut [f32]) -> Status {
+    if out.len() != 16 {
+        return status(
+            StatusCode::InvalidArgument,
+            "get_transform: expected 16 floats",
+        );
+    }
+    match device.state().transform(kind) {
+        Ok(matrix) => {
+            for (index, value) in out.iter_mut().enumerate() {
+                *value = matrix.rows[index / 4][index % 4];
+            }
+            status(StatusCode::Ok, "")
+        }
+        Err(error) => status_from_error(error),
+    }
 }
 
 pub(crate) fn set_viewport(device: &mut Device, viewport: &Viewport) -> Status {

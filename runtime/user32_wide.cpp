@@ -685,6 +685,7 @@ const ImportShim shims[] = {
     W("DefFrameProcW", 5, def_frame),
     W("DefMDIChildProcW", 4, def_w),
     W("CallWindowProcW", 5, call_proc),
+    W("CallWindowProcA", 5, call_proc),
     W("PeekMessageW", 5, peek_message),
     W("DispatchMessageW", 1, dispatch_message),
     W("SendMessageW", 4, send_w),
