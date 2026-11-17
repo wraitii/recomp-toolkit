@@ -1617,6 +1617,8 @@ pub mod ffi {
             state: u32,
             value: u32,
         ) -> Status;
+        fn get_texture_stage_state(device: &Device, stage: u32, state: u32) -> ValueResult;
+        fn get_render_state(device: &Device, state: u32) -> ValueResult;
         fn set_texture(
             device: &mut Device,
             stage: u32,
@@ -1649,6 +1651,7 @@ pub mod ffi {
         ) -> Status;
         fn release_texture(device: &mut Device, texture_id: u32);
         fn set_transform(device: &mut Device, kind: u32, values: &[f32]) -> Status;
+        fn get_transform(device: &Device, kind: u32, out: &mut [f32]) -> Status;
         fn set_viewport(device: &mut Device, viewport: &Viewport) -> Status;
         fn get_viewport(device: &Device) -> ViewportResult;
         fn set_material(device: &mut Device, material: &Material) -> Status;
@@ -1894,10 +1897,11 @@ pub mod ffi {
 use crate::backend::native_present::{present_lease_ready, release_present_lease};
 use crate::bridge_render::{
     adapter_info, begin_scene, clear, draw_indexed_primitive, draw_primitive, end_scene, get_light,
-    get_light_enable, get_material, get_viewport, light_enable, present, present_handoff,
-    process_vertices, read_pixels, read_pixels_len, read_texture, release_texture, scene_boundary,
-    set_light, set_material, set_render_state, set_render_target, set_texture,
-    set_texture_stage_state, set_transform, set_viewport, write_pixels,
+    get_light_enable, get_material, get_render_state, get_texture_stage_state, get_transform,
+    get_viewport, light_enable, present, present_handoff, process_vertices, read_pixels,
+    read_pixels_len, read_texture, release_texture, scene_boundary, set_light, set_material,
+    set_render_state, set_render_target, set_texture, set_texture_stage_state, set_transform,
+    set_viewport, write_pixels,
 };
 use crate::d3d8::{
     resource::{D3d8LevelLayout, format_bytes as cpu_format_bytes, level_layout},
@@ -1917,8 +1921,8 @@ use crate::d3d9::d3dx_effect::{
     d3dx_effect_release, d3dx_effect_saved_bindings, d3dx_effect_set, d3dx_effect_set_raw,
     d3dx_effect_set_state_manager, d3dx_effect_set_technique, d3dx_effect_set_texture,
     d3dx_effect_shutdown, d3dx_effect_technique_desc, d3dx_effect_texture,
-    d3dx_effect_texture_ref_counts, d3dx_effect_texture_refs,
-    d3dx_effect_validate_technique, new_d3dx_effect, new_d3dx_effect_pool,
+    d3dx_effect_texture_ref_counts, d3dx_effect_texture_refs, d3dx_effect_validate_technique,
+    new_d3dx_effect, new_d3dx_effect_pool,
 };
 use crate::d3d9::{
     D3d9Device, D3d9Resource, D3dxSurfaceData, d3d9_abort_reset, d3d9_adapter_caps,
@@ -1943,20 +1947,19 @@ use crate::d3d9::{
     d3d9_get_texture_stage_state, d3d9_get_transform, d3d9_get_vertex_declaration,
     d3d9_get_viewport, d3d9_level_bytes, d3d9_level_lock_commit, d3d9_level_lock_prepare,
     d3d9_level_unlock, d3d9_lod, d3d9_multiply_transform, d3d9_note_binding_refresh,
-    d3d9_number_of_swap_chains, d3d9_preload,
-    d3d9_prepare_resource_reset, d3d9_present, d3d9_present_handoff, d3d9_present_readback,
-    d3d9_priority, d3d9_readback_level, d3d9_register_resource, d3d9_registered_resource_ids,
-    d3d9_reset, d3d9_reset_ready, d3d9_resource_type, d3d9_set_autogen_filter, d3d9_set_clip_plane,
-    d3d9_set_fvf_binding, d3d9_set_indices, d3d9_set_light, d3d9_set_light_enable, d3d9_set_lod,
-    d3d9_set_material, d3d9_set_priority, d3d9_set_private_data, d3d9_set_render_state,
-    d3d9_set_sampler_state, d3d9_set_scissor, d3d9_set_shader, d3d9_set_shader_constants_b,
-    d3d9_set_shader_constants_f, d3d9_set_shader_constants_i, d3d9_set_stream_freq,
-    d3d9_set_stream_source, d3d9_set_texture, d3d9_set_texture_stage_state, d3d9_set_transform,
-    d3d9_set_vertex_declaration, d3d9_set_viewport, d3d9_shader_function, d3d9_shader_size,
-    d3d9_state_block_bindings, d3d9_surface_descriptor, d3d9_test_cooperative_level,
-    d3d9_texture_descriptor, d3d9_texture_level_descriptor, d3d9_texture_volume_descriptor,
-    d3d9_unregister_resource, d3d9_upload_buffer, d3d9_upload_level, new_d3d9_device,
-    new_d3d9_resource,
+    d3d9_number_of_swap_chains, d3d9_preload, d3d9_prepare_resource_reset, d3d9_present,
+    d3d9_present_handoff, d3d9_present_readback, d3d9_priority, d3d9_readback_level,
+    d3d9_register_resource, d3d9_registered_resource_ids, d3d9_reset, d3d9_reset_ready,
+    d3d9_resource_type, d3d9_set_autogen_filter, d3d9_set_clip_plane, d3d9_set_fvf_binding,
+    d3d9_set_indices, d3d9_set_light, d3d9_set_light_enable, d3d9_set_lod, d3d9_set_material,
+    d3d9_set_priority, d3d9_set_private_data, d3d9_set_render_state, d3d9_set_sampler_state,
+    d3d9_set_scissor, d3d9_set_shader, d3d9_set_shader_constants_b, d3d9_set_shader_constants_f,
+    d3d9_set_shader_constants_i, d3d9_set_stream_freq, d3d9_set_stream_source, d3d9_set_texture,
+    d3d9_set_texture_stage_state, d3d9_set_transform, d3d9_set_vertex_declaration,
+    d3d9_set_viewport, d3d9_shader_function, d3d9_shader_size, d3d9_state_block_bindings,
+    d3d9_surface_descriptor, d3d9_test_cooperative_level, d3d9_texture_descriptor,
+    d3d9_texture_level_descriptor, d3d9_texture_volume_descriptor, d3d9_unregister_resource,
+    d3d9_upload_buffer, d3d9_upload_level, new_d3d9_device, new_d3d9_resource,
 };
 use crate::d3d9::{
     D3dxConstantTable, d3dx_constant_table_apply, d3dx_constant_table_constant,
@@ -1993,34 +1996,32 @@ pub use ffi::{
     AdapterInfo, AdapterInfoResult, ApplyStateBlockResult, BindingResult, ConstantRead,
     D3d7RenderStateTranslation, D3d7TextureStageTranslation, D3d7TransformTranslation,
     D3d7TranslationKind, D3d9AdapterIdentifierResult, D3d9BindingSnapshot, D3d9Bindings,
-    D3d9BindingsResult,
-    D3d9BlockBindingsResult, D3d9BufferKind, D3d9BufferRequest, D3d9BufferUnlockResult,
-    D3d9CapsResult, D3d9CheckDepthStencilRequest, D3d9CheckDeviceFormatRequest,
-    D3d9CheckDeviceTypeRequest, D3d9CheckFormatConversionRequest, D3d9CheckMultiSampleRequest,
-    D3d9CreateResult, D3d9CreationParameters, D3d9CreationParametersResult, D3d9DeclarationResult,
-    D3d9DeviceRequest, D3d9DisplayMode, D3d9DisplayModeRequest, D3d9DisplayModeResult,
-    D3d9FrameResult, D3d9GuestBufferCreateResult, D3d9GuestRectRequest, D3d9GuestRectRequestResult,
-    D3d9GuestSurfaceCreateResult, D3d9GuestTextureCreateResult, D3d9LevelDescriptor,
-    D3d9LevelDescriptorResult, D3d9LevelLockRequest, D3d9LevelLockResult, D3d9LightResult,
-    D3d9LockBox, D3d9LockRect, D3d9PresentParams, D3d9PrivateDataResult, D3d9Rect,
-    D3d9ResetRequest, D3d9ResetResult, D3d9ScissorResult, D3d9StreamResult, D3d9SurfaceDescriptor,
-    D3d9SurfaceDescriptorResult, D3d9SurfaceRequest, D3d9TextureCreateResult,
-    D3d9TextureDescriptor, D3d9TextureDescriptorResult, D3d9TextureKind, D3d9TextureRequest,
-    D3d9VertexElement, D3dxBytesResult, D3dxConstantDesc, D3dxConstantDescResult,
-    D3dxConstantTableDesc, D3dxConstantTableResult, D3dxCreateRequest, D3dxCreateResult,
-    D3dxEffectCommand, D3dxEffectCommandKind, D3dxEffectCreateResult, D3dxEffectDesc,
-    D3dxEffectDescResult, D3dxEffectParamDesc, D3dxEffectParamDescResult, D3dxEffectPassDesc,
-    D3dxEffectPassDescResult, D3dxEffectRunResult, D3dxEffectShadersResult,
-    D3dxEffectTechniqueDesc, D3dxEffectTechniqueDescResult, D3dxImageInfo, D3dxImageInfoResult,
+    D3d9BindingsResult, D3d9BlockBindingsResult, D3d9BufferKind, D3d9BufferRequest,
+    D3d9BufferUnlockResult, D3d9CapsResult, D3d9CheckDepthStencilRequest,
+    D3d9CheckDeviceFormatRequest, D3d9CheckDeviceTypeRequest, D3d9CheckFormatConversionRequest,
+    D3d9CheckMultiSampleRequest, D3d9CreateResult, D3d9CreationParameters,
+    D3d9CreationParametersResult, D3d9DeclarationResult, D3d9DeviceRequest, D3d9DisplayMode,
+    D3d9DisplayModeRequest, D3d9DisplayModeResult, D3d9FrameResult, D3d9GuestBufferCreateResult,
+    D3d9GuestRectRequest, D3d9GuestRectRequestResult, D3d9GuestSurfaceCreateResult,
+    D3d9GuestTextureCreateResult, D3d9LevelDescriptor, D3d9LevelDescriptorResult,
+    D3d9LevelLockRequest, D3d9LevelLockResult, D3d9LightResult, D3d9LockBox, D3d9LockRect,
+    D3d9PresentParams, D3d9PrivateDataResult, D3d9Rect, D3d9ResetRequest, D3d9ResetResult,
+    D3d9ScissorResult, D3d9StreamResult, D3d9SurfaceDescriptor, D3d9SurfaceDescriptorResult,
+    D3d9SurfaceRequest, D3d9TextureCreateResult, D3d9TextureDescriptor,
+    D3d9TextureDescriptorResult, D3d9TextureKind, D3d9TextureRequest, D3d9VertexElement,
+    D3dxBytesResult, D3dxConstantDesc, D3dxConstantDescResult, D3dxConstantTableDesc,
+    D3dxConstantTableResult, D3dxCreateRequest, D3dxCreateResult, D3dxEffectCommand,
+    D3dxEffectCommandKind, D3dxEffectCreateResult, D3dxEffectDesc, D3dxEffectDescResult,
+    D3dxEffectParamDesc, D3dxEffectParamDescResult, D3dxEffectPassDesc, D3dxEffectPassDescResult,
+    D3dxEffectRunResult, D3dxEffectShadersResult, D3dxEffectTechniqueDesc,
+    D3dxEffectTechniqueDescResult, D3dxEffectTextureSetResult, D3dxImageInfo, D3dxImageInfoResult,
     D3dxMatrixInverseResult, D3dxMatrixResult, D3dxProfilesResult, D3dxSemantic,
-    D3dxSemanticsResult, D3dxSurfaceReadResult, D3dxEffectTextureSetResult,
-    D3dxTextureRefCounts, DeviceInfo,
-    DeviceInfoResult, FloatValuesResult, FrameHandoff, FrameHandoffResult, HandleResult,
-    LevelLayout, LevelLayoutResult, Light, LightResult, Material, MaterialResult, PresentParams,
-    Rect, ResourceConfigurationResult, ResourceGenerationResult, ResourceInfo, ResourceLevel,
-    ResourceLevelResult, ShaderHandleResult,
-    StateBlockError, Status, StatusCode, TextureBindings, TextureLevel, TextureSetResult,
-    ValueResult, ValuesResult, Viewport, ViewportResult,
+    D3dxSemanticsResult, D3dxSurfaceReadResult, D3dxTextureRefCounts, DeviceInfo, DeviceInfoResult,
+    FloatValuesResult, FrameHandoff, FrameHandoffResult, HandleResult, LevelLayout,
+    LevelLayoutResult, Light, LightResult, Material, MaterialResult, PresentParams, Rect,
+    ResourceConfigurationResult, ResourceGenerationResult, ResourceInfo, ResourceLevel,
+    ResourceLevelResult, ShaderHandleResult, StateBlockError, Status, StatusCode, TextureBindings,
+    TextureLevel, TextureSetResult, ValueResult, ValuesResult, Viewport, ViewportResult,
 };
 
 pub struct Device {

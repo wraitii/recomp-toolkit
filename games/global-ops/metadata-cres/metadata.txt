@@ -1,0 +1,9 @@
+format=recomp-code-map-v3
+status=complete
+program=cres.dll
+executable_sha256=f079ae7a130af3080cfd5f328fea19fdd70e73490e87ac1abea4f74609221d6c
+language=x86:LE:32:default
+image_base=10300000
+functions=93
+instructions=5336
+instruction_bytes=14832

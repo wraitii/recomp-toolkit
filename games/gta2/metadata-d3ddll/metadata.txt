@@ -1,0 +1,9 @@
+format=recomp-code-map-v3
+status=complete
+program=d3ddll.dll
+executable_sha256=c2567d616617039caa2dd609568aaa51c9dbaa6f994a2d241df7e68b7a815666
+language=x86:LE:32:default
+image_base=10000000
+functions=197
+instructions=14611
+instruction_bytes=43804

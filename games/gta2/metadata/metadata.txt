@@ -1,0 +1,9 @@
+format=recomp-code-map-v3
+status=complete
+program=gta2.exe
+executable_sha256=420af867036b1a66ef94c54b8db2e7e654da359031987c6602bcfa74972e089f
+language=x86:LE:32:default
+image_base=00400000
+functions=4663
+instructions=245192
+instruction_bytes=777493

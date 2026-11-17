@@ -32,6 +32,17 @@ struct WavSource {
     uint64_t position_frames() const {
         return position_;
     }
+    // PCM frames from the data size; IMA ADPCM from its fact chunk, or the
+    // frames its whole blocks decode to when there is none.
+    uint64_t total_frames() const {
+        if (format_ == 1)
+            return bits_ && channels_ ? data_bytes_ / (channels_ * (bits_ / 8u)) : 0;
+        if (fact_frames_)
+            return fact_frames_;
+        return block_ && channels_
+                   ? (uint64_t)(data_bytes_ / block_) * ((block_ / channels_ - 4) * 2 + 1)
+                   : 0;
+    }
 
   private:
     bool decode_pcm(std::vector<int16_t> &out);

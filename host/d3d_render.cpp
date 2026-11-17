@@ -1838,7 +1838,8 @@ void D3DRenderer::Impl::sealFrame(uint64_t f) {
     }
     flush();
     saveSlot();
-    if (host_present_running() && !frame_dropped_) {
+    // Classic frames are presented from the guest surface the CPU path stages.
+    if (host_present_running() && !frame_dropped_ && !mods_display_classic()) {
         for (auto &slot : slots_)
             if (slot.frame == f && slot.presentTarget.world) {
                 CompositorInput in{};

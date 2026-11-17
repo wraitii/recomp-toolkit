@@ -3,6 +3,7 @@
 #include "os.h"
 
 #include <string>
+#include <vector>
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -27,6 +28,10 @@
 #include <sys/file.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <sys/uio.h>
 #include <sys/socket.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
@@ -890,6 +895,352 @@ int os_resolve_ipv4(const char *name, unsigned char addr[4]) {
     memcpy(addr, &((struct sockaddr_in *)res->ai_addr)->sin_addr, 4);
     freeaddrinfo(res);
     return 0;
+}
+
+static thread_local int t_socket_error = 0;
+
+static int socket_wsa_error(int err) {
+    switch (err) {
+    case EWOULDBLOCK:
+        return 10035;
+    case EINPROGRESS:
+        return 10036;
+    case EALREADY:
+        return 10037;
+    case ENOTSOCK:
+    case EBADF:
+        return 10038;
+    case EDESTADDRREQ:
+        return 10039;
+    case EMSGSIZE:
+        return 10040;
+    case ENOPROTOOPT:
+        return 10042;
+    case EPROTONOSUPPORT:
+        return 10043;
+    case EOPNOTSUPP:
+        return 10045;
+    case EAFNOSUPPORT:
+        return 10047;
+    case EADDRINUSE:
+        return 10048;
+    case EADDRNOTAVAIL:
+        return 10049;
+    case ENETDOWN:
+        return 10050;
+    case ENETUNREACH:
+        return 10051;
+    case ECONNABORTED:
+        return 10053;
+    case ECONNRESET:
+    case EPIPE:
+        return 10054;
+    case ENOBUFS:
+    case ENOMEM:
+        return 10055;
+    case EISCONN:
+        return 10056;
+    case ENOTCONN:
+        return 10057;
+    case ESHUTDOWN:
+        return 10058;
+    case ETIMEDOUT:
+        return 10060;
+    case ECONNREFUSED:
+        return 10061;
+    case EHOSTDOWN:
+        return 10064;
+    case EHOSTUNREACH:
+        return 10065;
+    case EACCES:
+        return 10013;
+    case EFAULT:
+        return 10014;
+    case EMFILE:
+    case ENFILE:
+        return 10024;
+    default:
+        return 10022;
+    }
+}
+
+static int socket_failed() {
+    t_socket_error = socket_wsa_error(errno);
+    return -1;
+}
+
+static struct sockaddr_in socket_address(uint32_t addr, uint16_t port) {
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+#ifdef __APPLE__
+    sa.sin_len = sizeof sa;
+#endif
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = addr;
+    sa.sin_port = port;
+    return sa;
+}
+
+static void socket_address_out(const struct sockaddr_in &sa, uint32_t *addr, uint16_t *port) {
+    if (addr)
+        *addr = sa.sin_addr.s_addr;
+    if (port)
+        *port = sa.sin_port;
+}
+
+static int socket_prepare(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0 ||
+        fcntl(fd, F_SETFD, FD_CLOEXEC) != 0)
+        return -1;
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+    return 0;
+}
+
+OsSocket os_socket_open(int stream) {
+    int fd = socket(AF_INET, stream ? SOCK_STREAM : SOCK_DGRAM, stream ? IPPROTO_TCP : IPPROTO_UDP);
+    if (fd < 0)
+        return socket_failed();
+    if (socket_prepare(fd) != 0) {
+        socket_failed();
+        close(fd);
+        return OS_SOCKET_INVALID;
+    }
+    return fd;
+}
+
+int os_socket_close(OsSocket s) {
+    return close((int)s) == 0 ? 0 : socket_failed();
+}
+
+int os_socket_bind(OsSocket s, uint32_t addr, uint16_t port) {
+    struct sockaddr_in sa = socket_address(addr, port);
+    return bind((int)s, (struct sockaddr *)&sa, sizeof sa) == 0 ? 0 : socket_failed();
+}
+
+int os_socket_connect(OsSocket s, uint32_t addr, uint16_t port) {
+    struct sockaddr_in sa = socket_address(addr, port);
+    if (connect((int)s, (struct sockaddr *)&sa, sizeof sa) == 0)
+        return 0;
+    if (errno == EINPROGRESS) {
+        t_socket_error = 10035;
+        return -1;
+    }
+    return socket_failed();
+}
+
+int os_socket_listen(OsSocket s, int backlog) {
+    return listen((int)s, backlog) == 0 ? 0 : socket_failed();
+}
+
+OsSocket os_socket_accept(OsSocket s, uint32_t *addr, uint16_t *port) {
+    struct sockaddr_in sa;
+    socklen_t len = sizeof sa;
+    int fd = accept((int)s, (struct sockaddr *)&sa, &len);
+    if (fd < 0)
+        return socket_failed();
+    if (socket_prepare(fd) != 0) {
+        socket_failed();
+        close(fd);
+        return OS_SOCKET_INVALID;
+    }
+    socket_address_out(sa, addr, port);
+    return fd;
+}
+
+int os_socket_shutdown(OsSocket s, int how) {
+    int h = how == 0 ? SHUT_RD : how == 1 ? SHUT_WR : SHUT_RDWR;
+    return shutdown((int)s, h) == 0 ? 0 : socket_failed();
+}
+
+static int socket_flags(int flags) {
+    return (flags & 1 ? MSG_OOB : 0) | (flags & 2 ? MSG_PEEK : 0) | (flags & 4 ? MSG_DONTROUTE : 0);
+}
+
+int os_socket_send(OsSocket s, const void *buf, size_t len, int flags, const uint32_t *to_addr,
+                   uint16_t to_port) {
+    ssize_t n;
+    int f = socket_flags(flags);
+#ifdef MSG_NOSIGNAL
+    f |= MSG_NOSIGNAL;
+#endif
+    if (to_addr) {
+        struct sockaddr_in sa = socket_address(*to_addr, to_port);
+        n = sendto((int)s, buf, len, f, (struct sockaddr *)&sa, sizeof sa);
+    } else {
+        n = send((int)s, buf, len, f);
+    }
+    return n < 0 ? socket_failed() : (int)n;
+}
+
+int os_socket_recv(OsSocket s, void *buf, size_t len, int flags, uint32_t *from_addr,
+                   uint16_t *from_port) {
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    struct iovec iov = {buf, len};
+    struct msghdr msg;
+    memset(&msg, 0, sizeof msg);
+    msg.msg_name = &sa;
+    msg.msg_namelen = sizeof sa;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    ssize_t n = recvmsg((int)s, &msg, socket_flags(flags));
+    if (n < 0)
+        return socket_failed();
+    socket_address_out(sa, from_addr, from_port);
+    if (msg.msg_flags & MSG_TRUNC) {
+        t_socket_error = 10040;
+        return -1;
+    }
+    return (int)n;
+}
+
+static bool socket_option_name(enum OsSocketOption option, int *level, int *name) {
+    *level = SOL_SOCKET;
+    switch (option) {
+    case OS_SOCKOPT_BROADCAST:
+        *name = SO_BROADCAST;
+        return true;
+    case OS_SOCKOPT_REUSEADDR:
+        *name = SO_REUSEADDR;
+        return true;
+    case OS_SOCKOPT_KEEPALIVE:
+        *name = SO_KEEPALIVE;
+        return true;
+    case OS_SOCKOPT_RCVBUF:
+        *name = SO_RCVBUF;
+        return true;
+    case OS_SOCKOPT_SNDBUF:
+        *name = SO_SNDBUF;
+        return true;
+    case OS_SOCKOPT_ERROR:
+        *name = SO_ERROR;
+        return true;
+    case OS_SOCKOPT_TYPE:
+        *name = SO_TYPE;
+        return true;
+    case OS_SOCKOPT_NODELAY:
+        *level = IPPROTO_TCP;
+        *name = TCP_NODELAY;
+        return true;
+    default:
+        return false;
+    }
+}
+
+int os_socket_set_option(OsSocket s, enum OsSocketOption option, int value) {
+    if (option == OS_SOCKOPT_LINGER) {
+        struct linger l = {value >= 0, value >= 0 ? value : 0};
+        return setsockopt((int)s, SOL_SOCKET, SO_LINGER, &l, sizeof l) == 0 ? 0 : socket_failed();
+    }
+    int level, name;
+    if (!socket_option_name(option, &level, &name) || option == OS_SOCKOPT_ERROR ||
+        option == OS_SOCKOPT_TYPE) {
+        t_socket_error = 10042;
+        return -1;
+    }
+    return setsockopt((int)s, level, name, &value, sizeof value) == 0 ? 0 : socket_failed();
+}
+
+int os_socket_get_option(OsSocket s, enum OsSocketOption option, int *value) {
+    if (option == OS_SOCKOPT_LINGER) {
+        struct linger l;
+        socklen_t len = sizeof l;
+        if (getsockopt((int)s, SOL_SOCKET, SO_LINGER, &l, &len) != 0)
+            return socket_failed();
+        *value = l.l_onoff ? l.l_linger : -1;
+        return 0;
+    }
+    int level, name;
+    if (!socket_option_name(option, &level, &name)) {
+        t_socket_error = 10042;
+        return -1;
+    }
+    socklen_t len = sizeof *value;
+    if (getsockopt((int)s, level, name, value, &len) != 0)
+        return socket_failed();
+    if (option == OS_SOCKOPT_ERROR && *value)
+        *value = socket_wsa_error(*value);
+    if (option == OS_SOCKOPT_TYPE)
+        *value = *value == SOCK_STREAM ? 1 : 2;
+    return 0;
+}
+
+int os_socket_name(OsSocket s, int peer, uint32_t *addr, uint16_t *port) {
+    struct sockaddr_in sa;
+    socklen_t len = sizeof sa;
+    int r = peer ? getpeername((int)s, (struct sockaddr *)&sa, &len)
+                 : getsockname((int)s, (struct sockaddr *)&sa, &len);
+    if (r != 0)
+        return socket_failed();
+    socket_address_out(sa, addr, port);
+    return 0;
+}
+
+int os_socket_readable_bytes(OsSocket s, uint32_t *bytes) {
+    int n = 0;
+    if (ioctl((int)s, FIONREAD, &n) != 0)
+        return socket_failed();
+    *bytes = (uint32_t)n;
+    return 0;
+}
+
+int os_socket_poll(const OsSocket *s, const int *want, int *got, int count, int timeout_ms) {
+    std::vector<struct pollfd> fds((size_t)count);
+    for (int i = 0; i < count; ++i) {
+        fds[i].fd = (int)s[i];
+        fds[i].events = (short)((want[i] & OS_POLL_READ ? POLLIN : 0) |
+                                (want[i] & OS_POLL_WRITE ? POLLOUT : 0) |
+                                (want[i] & OS_POLL_ERROR ? POLLPRI : 0));
+        fds[i].revents = 0;
+    }
+    int r;
+    do {
+        r = poll(fds.data(), (nfds_t)count, timeout_ms);
+    } while (r < 0 && errno == EINTR);
+    if (r < 0)
+        return socket_failed();
+    int ready = 0;
+    for (int i = 0; i < count; ++i) {
+        short ev = fds[i].revents;
+        if (ev & POLLNVAL) {
+            t_socket_error = 10038;
+            return -1;
+        }
+        int g = 0;
+        if (ev & (POLLIN | POLLHUP | POLLERR))
+            g |= OS_POLL_READ;
+        if (ev & (POLLOUT | POLLERR | POLLHUP))
+            g |= OS_POLL_WRITE;
+        if (ev & (POLLPRI | POLLERR))
+            g |= OS_POLL_ERROR;
+        got[i] = g & want[i];
+        ready += got[i] != 0;
+    }
+    return ready;
+}
+
+int os_primary_ipv4(unsigned char addr[4]) {
+    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0)
+        return -1;
+    struct sockaddr_in sa = socket_address(htonl(0x08080808u), htons(53));
+    socklen_t len = sizeof sa;
+    int r = connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0 &&
+                    getsockname(fd, (struct sockaddr *)&sa, &len) == 0 && sa.sin_addr.s_addr != 0
+                ? 0
+                : -1;
+    close(fd);
+    if (r == 0)
+        memcpy(addr, &sa.sin_addr, 4);
+    return r;
+}
+
+int os_socket_error(void) {
+    return t_socket_error;
 }
 
 const char *os_getenv(const char *name) {

@@ -487,6 +487,11 @@ def load(game_dir, build_root=None):
         raise ValueError("%s: [environment] passthrough must be a list of environment variable names" % source)
     if len({name.upper() for name in passthrough}) != len(passthrough):
         raise ValueError("%s: [environment] passthrough contains duplicate names" % source)
+    preset = environment.setdefault("set", {})
+    if not isinstance(preset, dict) or any(
+            not name or any(ch in name for ch in "=\0\r\n") or not isinstance(value, str) or "\0" in value
+            for name, value in preset.items()):
+        raise ValueError("%s: [environment] set must map variable names to strings" % source)
     translate = cfg.setdefault("translate", {})
     if "engine" in translate:
         raise ValueError("%s: [translate] engine is no longer supported; Rust is the translator" % source)
@@ -636,12 +641,21 @@ def load(game_dir, build_root=None):
     callers = translate.setdefault("state_contract_callers", [])
     if not isinstance(callers, list) or not all(type(v) is int and 0 <= v <= 0xffffffff for v in callers):
         raise ValueError("%s: [translate] state_contract_callers must be a list of 32-bit addresses" % source)
+    exclude = translate.setdefault("discover_exclude", [])
+    if not isinstance(exclude, list) or not all(
+            isinstance(r, list) and len(r) == 2 and all(type(v) is int and 0 <= v <= 0xffffffff for v in r)
+            and r[0] < r[1] for r in exclude):
+        raise ValueError("%s: [translate] discover_exclude must be a list of [start, end) address pairs" % source)
     alts = translate.setdefault("alternate_entries", [])
     if not isinstance(alts, list) or not all(type(v) is int for v in alts):
         raise ValueError("%s: [translate] alternate_entries must be a list of addresses" % source)
     tracks = cfg.setdefault("media", {}).setdefault("cd_tracks", [])
     if not isinstance(tracks, list) or not all(isinstance(v, str) for v in tracks):
         raise ValueError("%s: [media] cd_tracks must be a list of strings" % source)
+    players = cfg["media"].setdefault("bink_players", [])
+    if not isinstance(players, list) or not all(isinstance(v, str) and v and "\\" not in v and "/" not in v
+                                                for v in players):
+        raise ValueError("%s: [media] bink_players must be a list of executable file names" % source)
     if not isinstance(cfg.setdefault("audio", {}).setdefault("midi", True), bool):
         raise ValueError("%s: [audio] midi must be a boolean" % source)
     cfg.setdefault("hooks", {})
@@ -652,12 +666,18 @@ def load(game_dir, build_root=None):
         raise ValueError("%s: [fonts] files must be a list of nonempty paths" % source)
     if not isinstance(render.setdefault("d3d8_wgpu", False), bool):
         raise ValueError("%s: [render] d3d8_wgpu must be a boolean" % source)
+    if not isinstance(render.setdefault("classic", False), bool):
+        raise ValueError("%s: [render] classic must be a boolean" % source)
     if "d3d9_wgpu" in render:
         raise ValueError("%s: [render] d3d9_wgpu was removed; the Rust D3D9 renderer is always used" % source)
+    if not isinstance(cfg.setdefault("network", {}).setdefault("sockets", False), bool):
+        raise ValueError("%s: [network] sockets must be a boolean" % source)
     input_config = cfg.setdefault("input", {})
     relative_capture = input_config.setdefault("relative_mouse_capture", True)
     if not isinstance(relative_capture, bool):
         raise ValueError("%s: [input] relative_mouse_capture must be a boolean" % source)
+    if not isinstance(input_config.setdefault("capture_hidden_cursor_only", False), bool):
+        raise ValueError("%s: [input] capture_hidden_cursor_only must be a boolean" % source)
     keyboard_names = input_config.setdefault("keyboard_names", "system")
     if keyboard_names not in ("system", "us"):
         raise ValueError('%s: [input] keyboard_names must be "system" or "us", not %r'

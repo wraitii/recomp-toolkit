@@ -368,6 +368,7 @@ void host_set_client_size(uint32_t hwnd, int32_t w, int32_t h);
 // Host input is in client pixels; GetCursorPos/MSG.pt are screen pixels.
 void host_set_client_cursor_pos(uint32_t hwnd, int32_t x, int32_t y);
 void host_set_key_state(int vk, bool down); // feeds GetAsyncKeyState
+bool host_key_down(int vk);
 void host_set_cursor_pos(int32_t x, int32_t y);
 // Installs the host's event-loop pump. GetMessageA calls it each time round
 // its wait, and the contract is deliberately narrow:

@@ -558,6 +558,9 @@ void key_name(X86 *c) {
 void layout_name(X86 *c) {
     set_eax(c, put_text(arg(c, 0), 9, "00000409", true) == 8);
 }
+void layout_name_a(X86 *c) {
+    set_eax(c, put_text(arg(c, 0), 9, "00000409", false) == 8);
+}
 void load_layout(X86 *c) {
     set_eax(c, 0x04090409);
 }
@@ -685,6 +688,7 @@ const ImportShim shims[] = {
     W("DefFrameProcW", 5, def_frame),
     W("DefMDIChildProcW", 4, def_w),
     W("CallWindowProcW", 5, call_proc),
+    W("CallWindowProcA", 5, call_proc),
     W("PeekMessageW", 5, peek_message),
     W("DispatchMessageW", 1, dispatch_message),
     W("SendMessageW", 4, send_w),
@@ -718,6 +722,7 @@ const ImportShim shims[] = {
     W("MapVirtualKeyW", 2, map_key),
     W("GetKeyNameTextW", 3, key_name),
     W("GetKeyboardLayoutNameW", 1, layout_name),
+    W("GetKeyboardLayoutNameA", 1, layout_name_a),
     W("LoadKeyboardLayoutW", 2, load_layout),
     W("SystemParametersInfoW", 4, spi_w),
     W("EnumDisplaySettingsW", 3, enum_settings_w),

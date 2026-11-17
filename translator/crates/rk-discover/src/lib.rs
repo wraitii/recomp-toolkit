@@ -228,7 +228,7 @@ pub fn discover(
         });
     }
     let check = FlowCache::default();
-    let mut suppressions = Vec::new();
+    let mut suppressions = settings.discover_exclude.clone();
     let mut rejections = Vec::new();
     let mut functions = BTreeMap::new();
     let mut entries = BTreeMap::new();

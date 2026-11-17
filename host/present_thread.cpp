@@ -456,9 +456,10 @@ struct Service : std::enable_shared_from_this<Service> {
         f->input.classic = mods_display_classic() != 0;
         f->input.narrow = mods_display_wide() == 0;
         mods_display_transition(epoch, cls);
-        // CPU-only Classic classes use the entire guest surface, including
-        // menu backgrounds that Enhanced extracts as individual UI records.
-        if (f->input.classic && cls != HOST_SCREEN_GAMEPLAY && f->staged_pixels) {
+        // Classic presents the entire guest surface, including menu
+        // backgrounds that Enhanced extracts as individual UI records and
+        // blits a Direct3D game draws around its scene.
+        if (f->input.classic && f->staged_pixels) {
             f->input.legacy = true;
             f->input.legacy_frame = f->target->pixels;
             f->input.guest_w = guest_w;
@@ -494,6 +495,12 @@ struct Service : std::enable_shared_from_this<Service> {
             f->input.guest_h = guest_h;
         }
         f->input.ui = &f->ui;
+        // Classic shows the guest surface. A frame sealed without one (a
+        // second Flip with nothing drawn) has no picture; the last one stays.
+        if (f->input.classic && !f->staged_pixels && !fake) {
+            drop(f);
+            return;
+        }
         if (!f->target->scene.w || (!fake && !f->supplied && !f->target->pixels)) {
             drop(f);
             return;

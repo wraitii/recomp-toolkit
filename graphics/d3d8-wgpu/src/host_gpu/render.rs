@@ -261,12 +261,16 @@ fn variant(
                     operation: wgpu::BlendOperation::Add,
                 },
             });
+            // Only the colour target blends. A second target is the raster
+            // coverage mask, which records that a fragment landed whatever the
+            // colour blend does with it.
             let targets: Vec<_> = f.state.color_format[..f.state.color_count as usize]
                 .iter()
-                .map(|v| {
+                .enumerate()
+                .map(|(i, v)| {
                     Some(wgpu::ColorTargetState {
                         format: format(*v).expect("host GPU target format"),
-                        blend,
+                        blend: if i == 0 { blend } else { None },
                         write_mask: if f.state.write_color != 0 {
                             wgpu::ColorWrites::ALL
                         } else {

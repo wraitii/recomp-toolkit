@@ -670,6 +670,8 @@ const SUPPORTED: &[&str] = &[
     "ARPL",
     "PUSHAD",
     "POPAD",
+    "PUSHAW",
+    "POPAW",
     "LOOP",
     "LOOPE",
     "LOOPNE",

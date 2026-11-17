@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <string>
+#include <vector>
 
 // MinGW's headers predate these RegGetValue flags.
 #ifndef RRF_SUBKEY_WOW6464KEY
@@ -814,18 +815,17 @@ int os_hostname(char *buf, size_t cap) {
     return 0;
 }
 
-int os_resolve_ipv4(const char *name, unsigned char addr[4]) {
-    if (!name || !*name)
-        return -1;
-    // getaddrinfo needs Winsock; the process has no other user of it yet, so
-    // the platform initializes it once. 2.2 is what the guest asks for too.
-    static bool started = false;
-    if (!started) {
+static bool winsock_started() {
+    static const bool started = [] {
         WSADATA wsa;
-        if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
-            return -1;
-        started = true;
-    }
+        return WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+    }();
+    return started;
+}
+
+int os_resolve_ipv4(const char *name, unsigned char addr[4]) {
+    if (!name || !*name || !winsock_started())
+        return -1;
     struct addrinfo hints;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_INET; // IPv4 only: the guest's hostent is AF_INET
@@ -835,6 +835,248 @@ int os_resolve_ipv4(const char *name, unsigned char addr[4]) {
     memcpy(addr, &((struct sockaddr_in *)res->ai_addr)->sin_addr, 4);
     freeaddrinfo(res);
     return 0;
+}
+
+static thread_local int t_socket_error = 0;
+
+static int socket_failed() {
+    t_socket_error = WSAGetLastError();
+    return -1;
+}
+
+static sockaddr_in socket_address(uint32_t addr, uint16_t port) {
+    sockaddr_in sa = {};
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = addr;
+    sa.sin_port = port;
+    return sa;
+}
+
+static void socket_address_out(const sockaddr_in &sa, uint32_t *addr, uint16_t *port) {
+    if (addr)
+        *addr = sa.sin_addr.s_addr;
+    if (port)
+        *port = sa.sin_port;
+}
+
+static OsSocket socket_prepare(SOCKET s) {
+    u_long one = 1;
+    if (ioctlsocket(s, FIONBIO, &one) != 0) {
+        socket_failed();
+        closesocket(s);
+        return OS_SOCKET_INVALID;
+    }
+    return (OsSocket)s;
+}
+
+OsSocket os_socket_open(int stream) {
+    if (!winsock_started()) {
+        t_socket_error = WSASYSNOTREADY;
+        return OS_SOCKET_INVALID;
+    }
+    SOCKET s =
+        socket(AF_INET, stream ? SOCK_STREAM : SOCK_DGRAM, stream ? IPPROTO_TCP : IPPROTO_UDP);
+    if (s == INVALID_SOCKET)
+        return socket_failed();
+    return socket_prepare(s);
+}
+
+int os_socket_close(OsSocket s) {
+    return closesocket((SOCKET)s) == 0 ? 0 : socket_failed();
+}
+
+int os_socket_bind(OsSocket s, uint32_t addr, uint16_t port) {
+    sockaddr_in sa = socket_address(addr, port);
+    return bind((SOCKET)s, (sockaddr *)&sa, sizeof sa) == 0 ? 0 : socket_failed();
+}
+
+int os_socket_connect(OsSocket s, uint32_t addr, uint16_t port) {
+    sockaddr_in sa = socket_address(addr, port);
+    return connect((SOCKET)s, (sockaddr *)&sa, sizeof sa) == 0 ? 0 : socket_failed();
+}
+
+int os_socket_listen(OsSocket s, int backlog) {
+    return listen((SOCKET)s, backlog) == 0 ? 0 : socket_failed();
+}
+
+OsSocket os_socket_accept(OsSocket s, uint32_t *addr, uint16_t *port) {
+    sockaddr_in sa = {};
+    int len = sizeof sa;
+    SOCKET a = accept((SOCKET)s, (sockaddr *)&sa, &len);
+    if (a == INVALID_SOCKET)
+        return socket_failed();
+    socket_address_out(sa, addr, port);
+    return socket_prepare(a);
+}
+
+int os_socket_shutdown(OsSocket s, int how) {
+    return shutdown((SOCKET)s, how) == 0 ? 0 : socket_failed();
+}
+
+int os_socket_send(OsSocket s, const void *buf, size_t len, int flags, const uint32_t *to_addr,
+                   uint16_t to_port) {
+    int n;
+    if (to_addr) {
+        sockaddr_in sa = socket_address(*to_addr, to_port);
+        n = sendto((SOCKET)s, (const char *)buf, (int)len, flags, (sockaddr *)&sa, sizeof sa);
+    } else {
+        n = send((SOCKET)s, (const char *)buf, (int)len, flags);
+    }
+    return n == SOCKET_ERROR ? socket_failed() : n;
+}
+
+int os_socket_recv(OsSocket s, void *buf, size_t len, int flags, uint32_t *from_addr,
+                   uint16_t *from_port) {
+    sockaddr_in sa = {};
+    int sa_len = sizeof sa;
+    int n = recvfrom((SOCKET)s, (char *)buf, (int)len, flags, (sockaddr *)&sa, &sa_len);
+    socket_address_out(sa, from_addr, from_port);
+    return n == SOCKET_ERROR ? socket_failed() : n;
+}
+
+static bool socket_option_name(OsSocketOption option, int *level, int *name) {
+    *level = SOL_SOCKET;
+    switch (option) {
+    case OS_SOCKOPT_BROADCAST:
+        *name = SO_BROADCAST;
+        return true;
+    case OS_SOCKOPT_REUSEADDR:
+        *name = SO_REUSEADDR;
+        return true;
+    case OS_SOCKOPT_KEEPALIVE:
+        *name = SO_KEEPALIVE;
+        return true;
+    case OS_SOCKOPT_RCVBUF:
+        *name = SO_RCVBUF;
+        return true;
+    case OS_SOCKOPT_SNDBUF:
+        *name = SO_SNDBUF;
+        return true;
+    case OS_SOCKOPT_ERROR:
+        *name = SO_ERROR;
+        return true;
+    case OS_SOCKOPT_TYPE:
+        *name = SO_TYPE;
+        return true;
+    case OS_SOCKOPT_NODELAY:
+        *level = IPPROTO_TCP;
+        *name = TCP_NODELAY;
+        return true;
+    default:
+        return false;
+    }
+}
+
+int os_socket_set_option(OsSocket s, OsSocketOption option, int value) {
+    if (option == OS_SOCKOPT_LINGER) {
+        linger l = {(u_short)(value >= 0), (u_short)(value >= 0 ? value : 0)};
+        return setsockopt((SOCKET)s, SOL_SOCKET, SO_LINGER, (const char *)&l, sizeof l) == 0
+                   ? 0
+                   : socket_failed();
+    }
+    int level, name;
+    if (!socket_option_name(option, &level, &name) || option == OS_SOCKOPT_ERROR ||
+        option == OS_SOCKOPT_TYPE) {
+        t_socket_error = WSAENOPROTOOPT;
+        return -1;
+    }
+    return setsockopt((SOCKET)s, level, name, (const char *)&value, sizeof value) == 0
+               ? 0
+               : socket_failed();
+}
+
+int os_socket_get_option(OsSocket s, OsSocketOption option, int *value) {
+    if (option == OS_SOCKOPT_LINGER) {
+        linger l = {};
+        int len = sizeof l;
+        if (getsockopt((SOCKET)s, SOL_SOCKET, SO_LINGER, (char *)&l, &len) != 0)
+            return socket_failed();
+        *value = l.l_onoff ? l.l_linger : -1;
+        return 0;
+    }
+    int level, name;
+    if (!socket_option_name(option, &level, &name)) {
+        t_socket_error = WSAENOPROTOOPT;
+        return -1;
+    }
+    int len = sizeof *value;
+    if (getsockopt((SOCKET)s, level, name, (char *)value, &len) != 0)
+        return socket_failed();
+    if (option == OS_SOCKOPT_TYPE)
+        *value = *value == SOCK_STREAM ? 1 : 2;
+    return 0;
+}
+
+int os_socket_name(OsSocket s, int peer, uint32_t *addr, uint16_t *port) {
+    sockaddr_in sa = {};
+    int len = sizeof sa;
+    int r = peer ? getpeername((SOCKET)s, (sockaddr *)&sa, &len)
+                 : getsockname((SOCKET)s, (sockaddr *)&sa, &len);
+    if (r != 0)
+        return socket_failed();
+    socket_address_out(sa, addr, port);
+    return 0;
+}
+
+int os_socket_readable_bytes(OsSocket s, uint32_t *bytes) {
+    u_long n = 0;
+    if (ioctlsocket((SOCKET)s, FIONREAD, &n) != 0)
+        return socket_failed();
+    *bytes = (uint32_t)n;
+    return 0;
+}
+
+int os_socket_poll(const OsSocket *s, const int *want, int *got, int count, int timeout_ms) {
+    std::vector<WSAPOLLFD> fds((size_t)count);
+    for (int i = 0; i < count; ++i) {
+        fds[i].fd = (SOCKET)s[i];
+        fds[i].events = (SHORT)((want[i] & OS_POLL_READ ? POLLRDNORM : 0) |
+                                (want[i] & OS_POLL_WRITE ? POLLWRNORM : 0) |
+                                (want[i] & OS_POLL_ERROR ? POLLRDBAND : 0));
+        fds[i].revents = 0;
+    }
+    if (WSAPoll(fds.data(), (ULONG)count, timeout_ms) == SOCKET_ERROR)
+        return socket_failed();
+    int ready = 0;
+    for (int i = 0; i < count; ++i) {
+        SHORT ev = fds[i].revents;
+        if (ev & POLLNVAL) {
+            t_socket_error = WSAENOTSOCK;
+            return -1;
+        }
+        int g = 0;
+        if (ev & (POLLRDNORM | POLLHUP | POLLERR))
+            g |= OS_POLL_READ;
+        if (ev & (POLLWRNORM | POLLERR | POLLHUP))
+            g |= OS_POLL_WRITE;
+        if (ev & (POLLRDBAND | POLLERR))
+            g |= OS_POLL_ERROR;
+        got[i] = g & want[i];
+        ready += got[i] != 0;
+    }
+    return ready;
+}
+
+int os_primary_ipv4(unsigned char addr[4]) {
+    if (!winsock_started())
+        return -1;
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET)
+        return -1;
+    sockaddr_in sa = socket_address(htonl(0x08080808u), htons(53));
+    int len = sizeof sa;
+    int r = connect(s, (sockaddr *)&sa, sizeof sa) == 0 &&
+                    getsockname(s, (sockaddr *)&sa, &len) == 0 && sa.sin_addr.s_addr != 0
+                ? 0
+                : -1;
+    closesocket(s);
+    if (r == 0)
+        memcpy(addr, &sa.sin_addr, 4);
+    return r;
+}
+
+int os_socket_error(void) {
+    return t_socket_error;
 }
 
 const char *os_getenv(const char *name) {

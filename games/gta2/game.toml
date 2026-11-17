@@ -1,0 +1,54 @@
+[game]
+id = "gta2"
+name = "Grand Theft Auto 2"
+app_name = "GTA2Recomp"
+bundle_id = "dev.recompkit.gta2"
+executable = "gta2.exe"
+sha256 = "420af867036b1a66ef94c54b8db2e7e654da359031987c6602bcfa74972e089f"
+image_base = 0x00400000
+guest_size = 0x12000000
+host_arena_base = 0
+entry_point = 0x004d84f9
+guest_root = 'C:\GTA2'
+
+[setup]
+supported_version = "Rockstar Classics freeware release (2004)"
+source_notes = "Install GTA2 from Rockstar's free GTA2INSTALLER.ZIP and select the game folder."
+required_dirs = ["data"]
+
+[translate]
+code_map = "metadata"
+native = { header = "native/gta2_native.h", sources = ["native/dxversion.cpp", "native/manager.cpp"] }
+
+[render]
+d3d8_wgpu = true
+# A 640x480 game: present frames as rendered rather than with a world layer
+# rendered at window resolution.
+classic = true
+
+# What GTA2 Manager writes on first run: the Direct3D renderer on the
+# DirectDraw video driver, in a window.
+[registry.'HKEY_LOCAL_MACHINE\SOFTWARE\DMA Design Ltd\GTA2\Screen']
+rendername = "d3ddll.dll"
+videoname = "dmavideo.dll"
+start_mode = 0
+window_width = 640
+window_height = 480
+full_width = 640
+full_height = 480
+
+[controls]
+mobile_control = "mobile-only"
+
+[modules.aux.d3ddll]
+name = "d3ddll.dll"
+sha256 = "c2567d616617039caa2dd609568aaa51c9dbaa6f994a2d241df7e68b7a815666"
+base = 0x10000000
+size = 0x0004d000
+
+[modules.aux.dmavideo]
+name = "dmavideo.dll"
+original_path = "Dmavideo.dll"
+sha256 = "f5eb2e2f8904d47bba0c095bcdc6764a53e186c3297338898c57e907c395ce1d"
+base = 0x10100000
+size = 0x00013000

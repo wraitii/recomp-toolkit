@@ -1,0 +1,9 @@
+format=recomp-code-map-v3
+status=complete
+program=dmavideo.dll
+executable_sha256=f5eb2e2f8904d47bba0c095bcdc6764a53e186c3297338898c57e907c395ce1d
+language=x86:LE:32:default
+image_base=10100000
+functions=145
+instructions=9760
+instruction_bytes=28235

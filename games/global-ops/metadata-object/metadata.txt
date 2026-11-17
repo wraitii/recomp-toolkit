@@ -1,0 +1,9 @@
+format=recomp-code-map-v3
+status=complete
+program=object.lto
+executable_sha256=073aca7da30149c3c57fa416e1330b04a1226c877484431bc6b076696c1425a1
+language=x86:LE:32:default
+image_base=10200000
+functions=1799
+instructions=130818
+instruction_bytes=412887

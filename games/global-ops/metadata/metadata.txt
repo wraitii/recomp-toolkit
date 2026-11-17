@@ -1,0 +1,9 @@
+format=recomp-code-map-v3
+status=complete
+program=Globalops.exe
+executable_sha256=c95c4a6feb2cda2afbb20a5629bf527438b11971946d29e9a5b140c7df5f64cb
+language=x86:LE:32:default
+image_base=003f0000
+functions=3481
+instructions=262158
+instruction_bytes=814625

@@ -116,8 +116,10 @@ extern "C" void mods_display_transition(uint64_t next, int cls) {
     (void)next;
     (void)cls;
 }
+// A game whose frames are presented as rendered, scaled to the window, with no
+// separately rendered world layer.
 extern "C" int mods_display_classic() {
-    return 0;
+    return RECOMP_RENDER_CLASSIC;
 }
 extern "C" int mods_display_scale() {
     return 0;

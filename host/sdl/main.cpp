@@ -632,6 +632,11 @@ bool pointer_capture_wanted() {
     // DirectInput mouse. Ordinary launcher/settings windows keep the OS cursor.
     if (!ddraw_gdi_primary_active() && !dinput_host_mouse_acquired())
         return false;
+    // A non-exclusive DirectInput mouse leaves the Windows cursor free; with
+    // [input] capture_hidden_cursor_only, capture waits until the guest hides it.
+    if (RECOMP_INPUT_CAPTURE_HIDDEN_CURSOR_ONLY && !ddraw_gdi_primary_active() &&
+        !dinput_host_mouse_exclusive() && g_guest_cursor_visible)
+        return false;
     if (!g_focused || !g_window || !window_focused() || g_capture_release_held)
         return false;
     if (window_minimized_or_hidden())

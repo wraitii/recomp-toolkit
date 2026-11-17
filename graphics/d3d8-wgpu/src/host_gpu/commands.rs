@@ -94,6 +94,20 @@ pub unsafe extern "C" fn host_gpu_blit(
         }
         let a = a.texture.clone();
         let b = b.texture.clone();
+        // wgpu refuses a copy within one texture, while a same-surface Blt
+        // reads the whole source before writing; stage it through a copy.
+        let staged = (src == dst).then(|| {
+            g.context.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("host-blit-stage"),
+                size: extent(r).unwrap(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: a.format(),
+                usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        });
         let Some(c) = s.commands.get_mut(&cb) else {
             report("blit command");
             return;
@@ -103,29 +117,29 @@ pub unsafe extern "C" fn host_gpu_blit(
             report("blit committed");
             return;
         };
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &a,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: r.x as u32,
-                    y: r.y as u32,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
+        let at = |texture, x: i32, y: i32| wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: x as u32,
+                y: y as u32,
+                z: 0,
             },
-            wgpu::TexelCopyTextureInfo {
-                texture: &b,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: x as u32,
-                    y: y as u32,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            extent(r).unwrap(),
-        );
+            aspect: wgpu::TextureAspect::All,
+        };
+        match &staged {
+            Some(stage) => {
+                encoder.copy_texture_to_texture(
+                    at(&a, r.x, r.y),
+                    at(stage, 0, 0),
+                    extent(r).unwrap(),
+                );
+                encoder.copy_texture_to_texture(at(stage, 0, 0), at(&b, x, y), extent(r).unwrap());
+            }
+            None => {
+                encoder.copy_texture_to_texture(at(&a, r.x, r.y), at(&b, x, y), extent(r).unwrap())
+            }
+        }
     })
 }
 #[unsafe(no_mangle)]

@@ -1,0 +1,9 @@
+format=recomp-code-map-v3
+status=complete
+program=ltmsg.dll
+executable_sha256=94d0b839fb97e41cb5a22996267a7519e87372219fec9e01ed3e9adc30a698f4
+language=x86:LE:32:default
+image_base=10400000
+functions=4
+instructions=137
+instruction_bytes=366

@@ -3118,12 +3118,20 @@ const ImportShim g_msvcr90_shims[] = {
     {"MSVCR90.dll", "iswctype", ARGC_CDECL, crt_iswctype},
 };
 
+const ImportShim g_msvcrt_shims[] = {
+    {"msvcrt.dll", "malloc", ARGC_CDECL, crt_malloc},
+    {"msvcrt.dll", "free", ARGC_CDECL, crt_free},
+    {"msvcrt.dll", "_initterm", ARGC_CDECL, crt_initterm},
+};
+
 } // namespace
 
 void msvcr90_register() {
     imports_register_data("MSVCR90.dll", "_acmdln", 4);
     imports_register(g_msvcr90_shims, sizeof g_msvcr90_shims / sizeof g_msvcr90_shims[0]);
     imports_register_strict("MSVCR90.dll");
+    imports_register(g_msvcrt_shims, sizeof g_msvcrt_shims / sizeof g_msvcrt_shims[0]);
+    imports_register_data("msvcrt.dll", "_adjust_fdiv", 4);
 }
 
 void msvcr71_register() {

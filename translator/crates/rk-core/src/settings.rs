@@ -87,6 +87,7 @@ pub struct Translate {
     pub alternate_entries: Vec<Addr>,
     pub entry_points: Vec<Addr>,
     pub discover: Option<bool>,
+    pub discover_exclude: Vec<[Addr; 2]>,
     pub native: Native,
 }
 
@@ -335,6 +336,7 @@ pub struct Settings {
     pub direct_variants: bool,
     pub direct_arguments: BTreeMap<Addr, DirectArguments>,
     pub discover: bool,
+    pub discover_exclude: Vec<(Addr, Addr)>,
     pub dispatch: Option<Dispatch>,
     pub fault_state: FaultState,
     pub msvc_x87_convention: bool,
@@ -565,6 +567,7 @@ impl Settings {
             direct_variants: t.direct_variants && main,
             direct_arguments,
             discover: t.discover.unwrap_or(true),
+            discover_exclude: t.discover_exclude.iter().map(|&[start, end]| (start, end)).collect(),
             fault_state: t.fault_state,
             msvc_x87_convention: t.msvc_x87_convention,
             x87_cw_clone: t.x87_cw_clone,

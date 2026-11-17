@@ -1148,7 +1148,7 @@ void a_RegDeleteKeyA(X86 *c) {
 void a_RegDeleteKeyW(X86 *c) {
     reg_delete_key(c, key_path(arg(c, 0), gm_wstr(arg(c, 1))));
 }
-void a_RegDeleteValueW(X86 *c) {
+static void reg_delete_value(X86 *c, const std::string &name) {
     std::string path = key_path(arg(c, 0), "");
     if (path.empty()) {
         set_eax(c, 6);
@@ -1159,12 +1159,18 @@ void a_RegDeleteValueW(X86 *c) {
         return;
     }
     auto it = regstore().find(path);
-    if (it == regstore().end() || !it->second.erase(gm_wstr(arg(c, 1)))) {
+    if (it == regstore().end() || !it->second.erase(name)) {
         set_eax(c, 2);
         return;
     }
     g_registry_dirty = true;
     set_eax(c, 0);
+}
+void a_RegDeleteValueW(X86 *c) {
+    reg_delete_value(c, arg(c, 1) ? gm_wstr(arg(c, 1)) : std::string());
+}
+void a_RegDeleteValueA(X86 *c) {
+    reg_delete_value(c, arg(c, 1) ? gm_str(arg(c, 1), 512) : std::string());
 }
 void a_RegFlushKey(X86 *c) {
     if (key_path(arg(c, 0), "").empty()) {
@@ -1453,7 +1459,7 @@ void i_ImmDisableTextFrameService(X86 *c) {
 // later task; host-name lookup is what games probe at startup to discover the
 // local machine's own address.
 // -------------------------------------------------------------------------
-static int g_wsa_last_error = 0;
+static thread_local int g_wsa_last_error = 0;
 static constexpr int WSAEFAULT_ = 10014;
 static constexpr int WSAHOST_NOT_FOUND_ = 11001;
 
@@ -1472,8 +1478,8 @@ void w_WSAStartup(X86 *c) {
         wr16(pdata + 2, 0x0202);
         gm_put_str(pdata + 4, "pop-metal recomp sockets", 257);
         gm_put_str(pdata + 4 + 257, "Running", 129);
-        wr16(pdata + 4 + 257 + 129, 32);       // iMaxSockets
-        wr16(pdata + 4 + 257 + 129 + 2, 1024); // iMaxUdpDg
+        wr16(pdata + 4 + 257 + 129, RECOMP_NETWORK_SOCKETS ? 32767 : 32);
+        wr16(pdata + 4 + 257 + 129 + 2, RECOMP_NETWORK_SOCKETS ? 65467 : 1024); // iMaxUdpDg
     }
     set_eax(c, 0);
 }
@@ -1521,7 +1527,11 @@ void w_gethostbyname(X86 *c) {
     uint32_t namep = arg(c, 0);
     std::string name = namep ? gm_str(namep, 256) : std::string();
     unsigned char addr[4];
-    if (!name.empty() && os_resolve_ipv4(name.c_str(), addr) == 0) {
+    char host[256];
+    bool own = RECOMP_NETWORK_SOCKETS && os_hostname(host, sizeof host) == 0 &&
+               os_strcasecmp(host, name.c_str()) == 0;
+    if (!name.empty() &&
+        ((own && os_primary_ipv4(addr) == 0) || os_resolve_ipv4(name.c_str(), addr) == 0)) {
         if (!gethost_cache_live()) {
             GethostCache fresh;
             fresh.hostent = heap_alloc(16, true);
@@ -1568,78 +1578,584 @@ void w_inet_ntoa(X86 *c) {
 }
 
 // -------------------------------------------------------------------------
-// Winsock with no host network. Black & White does not need the internet, so
-// every call that would open or use a socket fails the way the real stack
-// fails with no network adapter, and name lookups behave as an offline
-// machine: gethostname reports the local name, localhost resolves, every other
-// name is WSAHOST_NOT_FOUND. The byte-order and address-parsing calls need no
-// network and are the real thing. This layer is a deferred fidelity gap for
-// the networking task, not a silent stub; each distinct failing call is logged
-// once. A call whose offline behavior cannot be justified stays a loud abort
-// (see the WSA* event/overlapped entries that map to imports_unsupported).
+// Winsock sockets. A game that sets [network] sockets gets IPv4 TCP and UDP on
+// host sockets; every other game runs as a machine with no network adapter, so
+// each call that would open or use a socket fails the way that stack fails and
+// is logged once. Host sockets are always non-blocking: a blocking guest call
+// waits for readiness in short slices with the scheduler baton released.
 // -------------------------------------------------------------------------
+static constexpr int WSAEINTR_ = 10004;
+static constexpr int WSAEINVAL_ = 10022;
+static constexpr int WSAEWOULDBLOCK_ = 10035;
+static constexpr int WSAENOTSOCK_ = 10038;
+static constexpr int WSAENOPROTOOPT_ = 10042;
+static constexpr int WSAESOCKTNOSUPPORT_ = 10044;
+static constexpr int WSAEAFNOSUPPORT_ = 10047;
 static constexpr int WSAENETDOWN_ = 10050;
 static constexpr int WSAENETUNREACH_ = 10051;
-static constexpr int WSAENOTSOCK_ = 10038;
+static constexpr int WSAETIMEDOUT_ = 10060;
+
+static void wsa_fail(X86 *c, int error) {
+    g_wsa_last_error = error;
+    set_eax(c, (uint32_t)-1);
+}
 
 // SOCKET_ERROR and INVALID_SOCKET are both all-ones, and the byte-count and
 // WSAOVERLAPPED* out-parameters are left untouched: a failing call has no
 // result to report.
 static void wsa_call_failed(X86 *c, const char *fn, int error) {
     log_once(fn, "WS2_32/WSOCK32!%s: no network host; SOCKET_ERROR, WSAGetLastError=%d", fn, error);
-    g_wsa_last_error = error;
-    set_eax(c, (uint32_t)-1);
+    wsa_fail(c, error);
 }
+
+static bool sockets_offline(X86 *c, const char *fn, int error) {
+    if (RECOMP_NETWORK_SOCKETS)
+        return false;
+    wsa_call_failed(c, fn, error);
+    return true;
+}
+
+struct GuestSocket {
+    OsSocket host = OS_SOCKET_INVALID;
+    bool nonblocking = false;
+    bool connecting = false;
+    int pending_error = 0;
+    uint32_t recv_timeout_ms = 0;
+    uint32_t send_timeout_ms = 0;
+};
+static std::map<uint32_t, GuestSocket> g_sockets;
+static uint32_t g_next_socket = 0x100;
+
+static GuestSocket *guest_socket(X86 *c, uint32_t handle) {
+    auto it = g_sockets.find(handle);
+    if (it != g_sockets.end())
+        return &it->second;
+    wsa_fail(c, WSAENOTSOCK_);
+    return nullptr;
+}
+
+static uint32_t socket_register(OsSocket host, bool nonblocking) {
+    while (g_sockets.count(g_next_socket) || !g_next_socket)
+        g_next_socket += 4;
+    uint32_t handle = g_next_socket;
+    g_next_socket += 4;
+    GuestSocket &gs = g_sockets[handle];
+    gs.host = host;
+    gs.nonblocking = nonblocking;
+    return handle;
+}
+
+// sockaddr_in: family, port and address, both in network order.
+static bool sockaddr_read(X86 *c, uint32_t name, uint32_t len, uint32_t *addr, uint16_t *port) {
+    if (!name || (int32_t)len < 16 || !gm_valid(name, 16)) {
+        wsa_fail(c, WSAEFAULT_);
+        return false;
+    }
+    if (rd16(name) != 2) {
+        wsa_fail(c, WSAEAFNOSUPPORT_);
+        return false;
+    }
+    *port = rd16(name + 2);
+    *addr = rd32(name + 4);
+    return true;
+}
+
+static bool sockaddr_write(X86 *c, uint32_t name, uint32_t lenp, uint32_t addr, uint16_t port) {
+    if (!name)
+        return true;
+    if (!lenp || !gm_valid(lenp, 4) || (int32_t)rd32(lenp) < 16 || !gm_valid(name, 16)) {
+        wsa_fail(c, WSAEFAULT_);
+        return false;
+    }
+    memset(gm_ptr(name), 0, 16);
+    wr16(name, 2);
+    wr16(name + 2, port);
+    wr32(name + 4, addr);
+    wr32(lenp, 16);
+    return true;
+}
+
+// Polls with the baton released, in slices short enough that a socket closed
+// by another guest thread meanwhile is noticed by the caller's next lookup.
+// timeout_ms < 0 waits for one slice. Returns the ready count, or -1.
+static int socket_wait(const std::vector<OsSocket> &host, const std::vector<int> &want,
+                       std::vector<int> &got, int timeout_ms) {
+    got.assign(host.size(), 0);
+    int ready = os_socket_poll(host.data(), want.data(), got.data(), (int)host.size(), 0);
+    if (ready != 0 || timeout_ms == 0)
+        return ready;
+    const bool began = sched_host_modal_begin();
+    ready = os_socket_poll(host.data(), want.data(), got.data(), (int)host.size(),
+                           timeout_ms < 0 ? 20 : std::min(timeout_ms, 20));
+    sched_host_modal_end(began);
+    return ready;
+}
+
+// Runs `op` until it stops reporting WSAEWOULDBLOCK on a blocking socket,
+// waiting for `want` between tries. Returns op's result with the error set.
+template <class Op>
+static int socket_blocking(X86 *c, uint32_t handle, int want, uint32_t timeout_ms, Op op) {
+    const uint64_t start = os_monotonic_ns();
+    for (;;) {
+        GuestSocket *gs = guest_socket(c, handle);
+        if (!gs)
+            return -1;
+        int r = op(*gs);
+        if (r >= 0 || os_socket_error() != WSAEWOULDBLOCK_ || gs->nonblocking) {
+            if (r < 0)
+                g_wsa_last_error = os_socket_error();
+            return r;
+        }
+        if (timeout_ms && (os_monotonic_ns() - start) / 1000000 >= timeout_ms) {
+            g_wsa_last_error = WSAETIMEDOUT_;
+            return -1;
+        }
+        std::vector<int> got;
+        if (socket_wait({gs->host}, {want}, got, -1) < 0) {
+            g_wsa_last_error = os_socket_error();
+            return -1;
+        }
+    }
+}
+
 void w_socket(X86 *c) {
-    wsa_call_failed(c, "socket", WSAENETDOWN_);
+    if (sockets_offline(c, "socket", WSAENETDOWN_))
+        return;
+    uint32_t af = arg(c, 0), type = arg(c, 1), protocol = arg(c, 2);
+    if (af != 2) {
+        wsa_fail(c, WSAEAFNOSUPPORT_);
+        return;
+    }
+    if ((type != 1 && type != 2) || (protocol && protocol != (type == 1 ? 6u : 17u))) {
+        log_once("socket.type", "WSOCK32!socket: type %u protocol %u unsupported", type, protocol);
+        wsa_fail(c, WSAESOCKTNOSUPPORT_);
+        return;
+    }
+    OsSocket host = os_socket_open(type == 1);
+    if (host == OS_SOCKET_INVALID) {
+        wsa_fail(c, os_socket_error());
+        return;
+    }
+    set_eax(c, socket_register(host, false));
 }
+
 void w_bind(X86 *c) {
-    wsa_call_failed(c, "bind", WSAENETDOWN_);
+    if (sockets_offline(c, "bind", WSAENETDOWN_))
+        return;
+    GuestSocket *gs = guest_socket(c, arg(c, 0));
+    uint32_t addr;
+    uint16_t port;
+    if (!gs || !sockaddr_read(c, arg(c, 1), arg(c, 2), &addr, &port))
+        return;
+    if (os_socket_bind(gs->host, addr, port) != 0)
+        return wsa_fail(c, os_socket_error());
+    set_eax(c, 0);
 }
+
 void w_connect(X86 *c) {
-    wsa_call_failed(c, "connect", WSAENETUNREACH_);
+    if (sockets_offline(c, "connect", WSAENETUNREACH_))
+        return;
+    uint32_t handle = arg(c, 0);
+    GuestSocket *gs = guest_socket(c, handle);
+    uint32_t addr;
+    uint16_t port;
+    if (!gs || !sockaddr_read(c, arg(c, 1), arg(c, 2), &addr, &port))
+        return;
+    if (os_socket_connect(gs->host, addr, port) == 0)
+        return set_eax(c, 0);
+    if (os_socket_error() != WSAEWOULDBLOCK_)
+        return wsa_fail(c, os_socket_error());
+    gs->connecting = true;
+    if (gs->nonblocking)
+        return wsa_fail(c, WSAEWOULDBLOCK_);
+    for (;;) {
+        std::vector<int> got;
+        if (socket_wait({gs->host}, {OS_POLL_WRITE | OS_POLL_ERROR}, got, -1) < 0)
+            return wsa_fail(c, os_socket_error());
+        if (!(gs = guest_socket(c, handle)))
+            return;
+        if (got[0])
+            break;
+    }
+    gs->connecting = false;
+    int error = 0;
+    if (os_socket_get_option(gs->host, OS_SOCKOPT_ERROR, &error) != 0)
+        return wsa_fail(c, os_socket_error());
+    if (error)
+        return wsa_fail(c, error);
+    set_eax(c, 0);
 }
+
 void w_listen(X86 *c) {
-    wsa_call_failed(c, "listen", WSAENETDOWN_);
+    if (sockets_offline(c, "listen", WSAENETDOWN_))
+        return;
+    GuestSocket *gs = guest_socket(c, arg(c, 0));
+    if (!gs)
+        return;
+    int backlog = std::clamp((int32_t)arg(c, 1), 1, 128);
+    if (os_socket_listen(gs->host, backlog) != 0)
+        return wsa_fail(c, os_socket_error());
+    set_eax(c, 0);
 }
+
 void w_accept(X86 *c) {
-    wsa_call_failed(c, "accept", WSAENETDOWN_);
+    if (sockets_offline(c, "accept", WSAENETDOWN_))
+        return;
+    uint32_t handle = arg(c, 0), name = arg(c, 1), lenp = arg(c, 2);
+    uint32_t addr = 0;
+    uint16_t port = 0;
+    OsSocket accepted = OS_SOCKET_INVALID;
+    bool nonblocking = false;
+    if (socket_blocking(c, handle, OS_POLL_READ, 0, [&](GuestSocket &gs) {
+            nonblocking = gs.nonblocking;
+            accepted = os_socket_accept(gs.host, &addr, &port);
+            return accepted == OS_SOCKET_INVALID ? -1 : 0;
+        }) < 0)
+        return set_eax(c, (uint32_t)-1);
+    uint32_t result = socket_register(accepted, nonblocking);
+    if (!sockaddr_write(c, name, lenp, addr, port)) {
+        os_socket_close(accepted);
+        g_sockets.erase(result);
+        return;
+    }
+    set_eax(c, result);
 }
+
+static void socket_transfer(X86 *c, bool sending, bool addressed) {
+    uint32_t handle = arg(c, 0), buf = arg(c, 1), len = arg(c, 2);
+    int flags = (int)arg(c, 3);
+    uint32_t name = addressed ? arg(c, 4) : 0, namelen = addressed ? arg(c, 5) : 0;
+    if (len && (!buf || !gm_valid(buf, len)))
+        return wsa_fail(c, WSAEFAULT_);
+    uint32_t to_addr = 0;
+    uint16_t to_port = 0;
+    if (sending && name && !sockaddr_read(c, name, namelen, &to_addr, &to_port))
+        return;
+    uint32_t from_addr = 0;
+    uint16_t from_port = 0;
+    GuestSocket *gs = guest_socket(c, handle);
+    if (!gs)
+        return;
+    int r = socket_blocking(
+        c, handle, sending ? OS_POLL_WRITE : OS_POLL_READ,
+        sending ? gs->send_timeout_ms : gs->recv_timeout_ms, [&](GuestSocket &s) {
+            void *p = len ? gm_ptr(buf) : nullptr;
+            return sending
+                       ? os_socket_send(s.host, p, len, flags, name ? &to_addr : nullptr, to_port)
+                       : os_socket_recv(s.host, p, len, flags, &from_addr, &from_port);
+        });
+    if (r < 0)
+        return set_eax(c, (uint32_t)-1);
+    if (!sending && name && !sockaddr_write(c, name, namelen, from_addr, from_port))
+        return;
+    set_eax(c, (uint32_t)r);
+}
+
 void w_send(X86 *c) {
-    wsa_call_failed(c, "send", WSAENETDOWN_);
+    if (!sockets_offline(c, "send", WSAENETDOWN_))
+        socket_transfer(c, true, false);
 }
 void w_recv(X86 *c) {
-    wsa_call_failed(c, "recv", WSAENETDOWN_);
+    if (!sockets_offline(c, "recv", WSAENETDOWN_))
+        socket_transfer(c, false, false);
 }
 void w_sendto(X86 *c) {
-    wsa_call_failed(c, "sendto", WSAENETDOWN_);
+    if (!sockets_offline(c, "sendto", WSAENETDOWN_))
+        socket_transfer(c, true, true);
 }
 void w_recvfrom(X86 *c) {
-    wsa_call_failed(c, "recvfrom", WSAENETDOWN_);
+    if (!sockets_offline(c, "recvfrom", WSAENETDOWN_))
+        socket_transfer(c, false, true);
 }
+
+// A connect in progress finishes as writable or, when it failed, in the
+// exception set with the error kept for SO_ERROR, as Winsock reports it.
+static int socket_ready(GuestSocket &gs, int got) {
+    if (!gs.connecting || !(got & (OS_POLL_WRITE | OS_POLL_ERROR)))
+        return got;
+    int error = 0;
+    if (os_socket_get_option(gs.host, OS_SOCKOPT_ERROR, &error) != 0)
+        error = os_socket_error();
+    if (!error && (got & OS_POLL_WRITE) == 0)
+        return got & ~OS_POLL_ERROR;
+    gs.connecting = false;
+    gs.pending_error = error;
+    return error ? OS_POLL_ERROR : OS_POLL_WRITE;
+}
+
 void w_select(X86 *c) {
-    wsa_call_failed(c, "select", WSAENETDOWN_);
+    if (sockets_offline(c, "select", WSAENETDOWN_))
+        return;
+    const uint32_t sets[3] = {arg(c, 1), arg(c, 2), arg(c, 3)};
+    const int kinds[3] = {OS_POLL_READ, OS_POLL_WRITE, OS_POLL_ERROR};
+    uint32_t tv = arg(c, 4);
+    std::vector<uint32_t> handles;
+    std::vector<int> want;
+    for (int k = 0; k < 3; ++k) {
+        if (!sets[k])
+            continue;
+        if (!gm_valid(sets[k], 4) || rd32(sets[k]) > 64 ||
+            !gm_valid(sets[k], 4 + 4 * rd32(sets[k])))
+            return wsa_fail(c, WSAEFAULT_);
+        for (uint32_t i = 0, n = rd32(sets[k]); i < n; ++i) {
+            uint32_t h = rd32(sets[k] + 4 + 4 * i);
+            if (!g_sockets.count(h))
+                return wsa_fail(c, WSAENOTSOCK_);
+            size_t at = std::find(handles.begin(), handles.end(), h) - handles.begin();
+            if (at == handles.size()) {
+                handles.push_back(h);
+                want.push_back(0);
+            }
+            want[at] |= kinds[k];
+        }
+    }
+    if (handles.empty())
+        return wsa_fail(c, WSAEINVAL_);
+    int timeout_ms = -1;
+    if (tv) {
+        if (!gm_valid(tv, 8))
+            return wsa_fail(c, WSAEFAULT_);
+        int64_t ms = (int64_t)(int32_t)rd32(tv) * 1000 + ((int32_t)rd32(tv + 4) + 999) / 1000;
+        timeout_ms = (int)std::clamp<int64_t>(ms, 0, 0x7fffffff);
+    }
+    const uint64_t start = os_monotonic_ns();
+    std::vector<int> got;
+    for (;;) {
+        std::vector<OsSocket> host;
+        for (uint32_t h : handles) {
+            auto it = g_sockets.find(h);
+            if (it == g_sockets.end())
+                return wsa_fail(c, WSAEINTR_);
+            host.push_back(it->second.host);
+        }
+        int left = timeout_ms;
+        if (timeout_ms > 0)
+            left = (int)std::max<int64_t>(0, timeout_ms -
+                                                 (int64_t)((os_monotonic_ns() - start) / 1000000));
+        int ready = socket_wait(host, want, got, left);
+        if (ready < 0)
+            return wsa_fail(c, os_socket_error());
+        int count = 0;
+        for (size_t i = 0; i < handles.size(); ++i) {
+            auto it = g_sockets.find(handles[i]);
+            if (it == g_sockets.end())
+                return wsa_fail(c, WSAEINTR_);
+            if (got[i])
+                got[i] = socket_ready(it->second, got[i]) & want[i];
+            count += __builtin_popcount((unsigned)got[i]);
+        }
+        if (count || left == 0)
+            break;
+    }
+    int total = 0;
+    for (int k = 0; k < 3; ++k) {
+        if (!sets[k])
+            continue;
+        uint32_t kept = 0;
+        for (uint32_t i = 0, n = rd32(sets[k]); i < n; ++i) {
+            uint32_t h = rd32(sets[k] + 4 + 4 * i);
+            size_t at = std::find(handles.begin(), handles.end(), h) - handles.begin();
+            if (got[at] & kinds[k])
+                wr32(sets[k] + 4 + 4 * kept++, h);
+        }
+        wr32(sets[k], kept);
+        total += (int)kept;
+    }
+    set_eax(c, (uint32_t)total);
 }
+
 void w_shutdown(X86 *c) {
-    wsa_call_failed(c, "shutdown", WSAENETDOWN_);
+    if (sockets_offline(c, "shutdown", WSAENETDOWN_))
+        return;
+    GuestSocket *gs = guest_socket(c, arg(c, 0));
+    if (!gs)
+        return;
+    if (arg(c, 1) > 2)
+        return wsa_fail(c, WSAEINVAL_);
+    if (os_socket_shutdown(gs->host, (int)arg(c, 1)) != 0)
+        return wsa_fail(c, os_socket_error());
+    set_eax(c, 0);
 }
+
 void w_closesocket(X86 *c) {
-    wsa_call_failed(c, "closesocket", WSAENOTSOCK_);
+    if (sockets_offline(c, "closesocket", WSAENOTSOCK_))
+        return;
+    uint32_t handle = arg(c, 0);
+    GuestSocket *gs = guest_socket(c, handle);
+    if (!gs)
+        return;
+    OsSocket host = gs->host;
+    g_sockets.erase(handle);
+    if (os_socket_close(host) != 0)
+        return wsa_fail(c, os_socket_error());
+    set_eax(c, 0);
 }
+
 void w_ioctlsocket(X86 *c) {
-    wsa_call_failed(c, "ioctlsocket", WSAENOTSOCK_);
+    if (sockets_offline(c, "ioctlsocket", WSAENOTSOCK_))
+        return;
+    GuestSocket *gs = guest_socket(c, arg(c, 0));
+    uint32_t cmd = arg(c, 1), argp = arg(c, 2);
+    if (!gs)
+        return;
+    if (!argp || !gm_valid(argp, 4))
+        return wsa_fail(c, WSAEFAULT_);
+    switch (cmd) {
+    case 0x8004667eu: // FIONBIO
+        if (gs->connecting && !rd32(argp))
+            return wsa_fail(c, WSAEINVAL_);
+        gs->nonblocking = rd32(argp) != 0;
+        break;
+    case 0x4004667fu: { // FIONREAD
+        uint32_t bytes = 0;
+        if (os_socket_readable_bytes(gs->host, &bytes) != 0)
+            return wsa_fail(c, os_socket_error());
+        wr32(argp, bytes);
+        break;
+    }
+    case 0x40047307u: // SIOCATMARK: out-of-band data is never pending
+        wr32(argp, 1);
+        break;
+    default:
+        log_once("ioctlsocket.cmd", "WSOCK32!ioctlsocket: command 0x%08x unsupported", cmd);
+        return wsa_fail(c, WSAEINVAL_);
+    }
+    set_eax(c, 0);
 }
-void w_getsockopt(X86 *c) {
-    wsa_call_failed(c, "getsockopt", WSAENOTSOCK_);
+
+static bool socket_option(uint32_t level, uint32_t name, OsSocketOption *option) {
+    if (level == 6 && name == 1) {
+        *option = OS_SOCKOPT_NODELAY;
+        return true;
+    }
+    if (level != 0xffff)
+        return false;
+    switch (name) {
+    case 0x0004:
+        *option = OS_SOCKOPT_REUSEADDR;
+        return true;
+    case 0x0008:
+        *option = OS_SOCKOPT_KEEPALIVE;
+        return true;
+    case 0x0020:
+        *option = OS_SOCKOPT_BROADCAST;
+        return true;
+    case 0x0080:
+        *option = OS_SOCKOPT_LINGER;
+        return true;
+    case 0x1001:
+        *option = OS_SOCKOPT_SNDBUF;
+        return true;
+    case 0x1002:
+        *option = OS_SOCKOPT_RCVBUF;
+        return true;
+    case 0x1007:
+        *option = OS_SOCKOPT_ERROR;
+        return true;
+    case 0x1008:
+        *option = OS_SOCKOPT_TYPE;
+        return true;
+    default:
+        return false;
+    }
 }
+
 void w_setsockopt(X86 *c) {
-    wsa_call_failed(c, "setsockopt", WSAENOTSOCK_);
+    if (sockets_offline(c, "setsockopt", WSAENOTSOCK_))
+        return;
+    GuestSocket *gs = guest_socket(c, arg(c, 0));
+    uint32_t level = arg(c, 1), name = arg(c, 2), val = arg(c, 3), len = arg(c, 4);
+    if (!gs)
+        return;
+    if (!val || (int32_t)len < 1 || !gm_valid(val, len))
+        return wsa_fail(c, WSAEFAULT_);
+    uint32_t value = len >= 4 ? rd32(val) : len >= 2 ? rd16(val) : rd8(val);
+    if (level == 0xffff && (name == 0x1005 || name == 0x1006)) { // SO_SNDTIMEO, SO_RCVTIMEO
+        (name == 0x1005 ? gs->send_timeout_ms : gs->recv_timeout_ms) = value;
+        return set_eax(c, 0);
+    }
+    OsSocketOption option;
+    int host_value = (int)value;
+    if (level == 0xffff && name == 0xffffff7fu) { // SO_DONTLINGER
+        option = OS_SOCKOPT_LINGER;
+        host_value = value ? -1 : 0;
+    } else if (!socket_option(level, name, &option)) {
+        log_once("setsockopt.option", "WSOCK32!setsockopt: level 0x%x option 0x%x unsupported",
+                 level, name);
+        return wsa_fail(c, WSAENOPROTOOPT_);
+    } else if (option == OS_SOCKOPT_LINGER) {
+        if (len < 4)
+            return wsa_fail(c, WSAEFAULT_);
+        host_value = rd16(val) ? rd16(val + 2) : -1;
+    }
+    if (os_socket_set_option(gs->host, option, host_value) != 0)
+        return wsa_fail(c, os_socket_error());
+    set_eax(c, 0);
 }
+
+void w_getsockopt(X86 *c) {
+    if (sockets_offline(c, "getsockopt", WSAENOTSOCK_))
+        return;
+    GuestSocket *gs = guest_socket(c, arg(c, 0));
+    uint32_t level = arg(c, 1), name = arg(c, 2), val = arg(c, 3), lenp = arg(c, 4);
+    if (!gs)
+        return;
+    if (!val || !lenp || !gm_valid(lenp, 4) || (int32_t)rd32(lenp) < 1 ||
+        !gm_valid(val, rd32(lenp)))
+        return wsa_fail(c, WSAEFAULT_);
+    uint32_t len = rd32(lenp);
+    int value = 0;
+    OsSocketOption option;
+    if (level == 0xffff && (name == 0x1005 || name == 0x1006)) {
+        value = (int)(name == 0x1005 ? gs->send_timeout_ms : gs->recv_timeout_ms);
+    } else if (!socket_option(level, name, &option)) {
+        log_once("getsockopt.option", "WSOCK32!getsockopt: level 0x%x option 0x%x unsupported",
+                 level, name);
+        return wsa_fail(c, WSAENOPROTOOPT_);
+    } else if (option == OS_SOCKOPT_ERROR && gs->pending_error) {
+        value = gs->pending_error;
+        gs->pending_error = 0;
+    } else if (os_socket_get_option(gs->host, option, &value) != 0) {
+        return wsa_fail(c, os_socket_error());
+    } else if (option == OS_SOCKOPT_LINGER) {
+        if (len < 4)
+            return wsa_fail(c, WSAEFAULT_);
+        wr16(val, value >= 0);
+        wr16(val + 2, (uint16_t)std::max(value, 0));
+        wr32(lenp, 4);
+        return set_eax(c, 0);
+    }
+    if (len >= 4) {
+        wr32(val, (uint32_t)value);
+        wr32(lenp, 4);
+    } else {
+        wr8(val, (uint8_t)(value != 0));
+        wr32(lenp, 1);
+    }
+    set_eax(c, 0);
+}
+
+static void socket_name(X86 *c, bool peer) {
+    GuestSocket *gs = guest_socket(c, arg(c, 0));
+    if (!gs)
+        return;
+    uint32_t addr = 0;
+    uint16_t port = 0;
+    if (os_socket_name(gs->host, peer, &addr, &port) != 0)
+        return wsa_fail(c, os_socket_error());
+    if (!arg(c, 1))
+        return wsa_fail(c, WSAEFAULT_);
+    if (sockaddr_write(c, arg(c, 1), arg(c, 2), addr, port))
+        set_eax(c, 0);
+}
+
 void w_getpeername(X86 *c) {
-    wsa_call_failed(c, "getpeername", WSAENOTSOCK_);
+    if (!sockets_offline(c, "getpeername", WSAENOTSOCK_))
+        socket_name(c, true);
 }
 void w_getsockname(X86 *c) {
-    wsa_call_failed(c, "getsockname", WSAENOTSOCK_);
+    if (!sockets_offline(c, "getsockname", WSAENOTSOCK_))
+        socket_name(c, false);
 }
 void w_WSAIoctl(X86 *c) {
     wsa_call_failed(c, "WSAIoctl", WSAENETDOWN_);
@@ -3106,6 +3622,7 @@ const ImportShim g_misc_shims[] = {
     {"ADVAPI32.dll", "RegDeleteKeyA", 2, a_RegDeleteKeyA},
     {"ADVAPI32.dll", "RegDeleteKeyW", 2, a_RegDeleteKeyW},
     {"ADVAPI32.dll", "RegDeleteValueW", 2, a_RegDeleteValueW},
+    {"ADVAPI32.dll", "RegDeleteValueA", 2, a_RegDeleteValueA},
     {"ADVAPI32.dll", "RegFlushKey", 1, a_RegFlushKey},
     // Thread tokens have no runtime equivalent; fail with the import named.
     {"ADVAPI32.dll", "OpenThreadToken", 4, imports_unsupported},

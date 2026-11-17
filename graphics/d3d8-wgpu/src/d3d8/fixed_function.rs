@@ -207,6 +207,30 @@ impl FvfLayout {
                     },
                 ],
             }),
+            // XYZRHW | TEX1: screen-space textured vertices without a colour;
+            // `vs_rhw_white_main` supplies the default white diffuse.
+            0x104 => Ok(Self {
+                stride: 24,
+                texcoord_sets: 1,
+                pre_transformed: true,
+                attributes: vec![
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 16,
+                        shader_location: 2,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 16,
+                        shader_location: 3,
+                    },
+                ],
+            }),
             // XYZRHW | DIFFUSE: screen-space color-only vertices. No texture
             // or specular inputs may be read beyond the 20-byte record.
             0x44 => Ok(Self {
@@ -533,6 +557,16 @@ struct VertexInputRhwNoSpecular {
 @vertex
 fn vs_rhw_nospec_main(in: VertexInputRhwNoSpecular) -> VertexOutput {
     return rhw_vertex(VertexInputRhw(in.position, in.color, 0u));
+}
+
+struct VertexInputRhwPosition {
+    @location(0) position: vec4<f32>,
+};
+
+// A layout without D3DFVF_DIFFUSE takes D3D's default opaque white.
+@vertex
+fn vs_rhw_white_main(in: VertexInputRhwPosition) -> VertexOutput {
+    return rhw_vertex(VertexInputRhw(in.position, 0xffffffffu, 0u));
 }
 
 // D3DFOG_* table fog factor. `d` is the eye-space depth. The result is
@@ -1124,6 +1158,18 @@ struct VertexInputRhwColor {
 @vertex
 fn vs_rhw_color_main(in: VertexInputRhwColor) -> VertexOutput {
     return rhw_vertex(VertexInputRhw(in.position, in.color, vec2<f32>(0.0), vec2<f32>(0.0), 0u));
+}
+
+struct VertexInputRhwTex {
+    @location(0) position: vec4<f32>,
+    @location(2) uv0: vec2<f32>,
+    @location(3) uv1: vec2<f32>,
+};
+
+// A layout without D3DFVF_DIFFUSE takes D3D's default opaque white.
+@vertex
+fn vs_rhw_white_main(in: VertexInputRhwTex) -> VertexOutput {
+    return rhw_vertex(VertexInputRhw(in.position, 0xffffffffu, in.uv0, in.uv1, 0u));
 }
 
 // D3DTA_*: low nibble 0 DIFFUSE, 1 CURRENT, 2 TEXTURE, 3 TFACTOR; bit 0x10 is

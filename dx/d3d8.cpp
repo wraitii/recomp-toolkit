@@ -1052,6 +1052,26 @@ void Dev_SetTransform(X86 *c) {
     }
     com_ret(c, D8_ERR_INVALIDCALL);
 }
+// (this, Bytes). Managed resources live in guest memory and host caches the
+// presenter rebuilds on demand, so there is nothing to evict.
+void Dev_ResourceManagerDiscardBytes(X86 *c) {
+    ComObj *dev = d8_dev(c);
+    com_ret(c, dev && dev->d3d8_device ? D8_OK : D8_ERR_INVALIDCALL);
+}
+void Dev_GetTransform(X86 *c) {
+    ComObj *dev = d8_dev(c);
+    uint32_t matrix = arg(c, 2);
+    if (dev && dev->d3d8_device && matrix && gm_valid(matrix, 64)) {
+        std::array<float, 16> value{};
+        auto status = recomp::d3d::get_transform(*dev->d3d8_device->value, arg(c, 1),
+                                                 rust::Slice<float>(value.data(), value.size()));
+        if (d3d_bridge_ok(status))
+            memcpy(gm_ptr(matrix), value.data(), 64);
+        com_ret(c, bridge_result(c, status));
+        return;
+    }
+    com_ret(c, D8_ERR_INVALIDCALL);
+}
 void Dev_SetViewport(X86 *c) {
     ComObj *dev = d8_dev(c);
     uint32_t vp = arg(c, 1);
@@ -1194,6 +1214,31 @@ void Dev_SetTextureStageState(X86 *c) {
         auto status = recomp::d3d::set_texture_stage_state(*dev->d3d8_device->value, arg(c, 1),
                                                            arg(c, 2), arg(c, 3));
         com_ret(c, bridge_result(c, status));
+        return;
+    }
+    com_ret(c, D8_ERR_INVALIDCALL);
+}
+void Dev_GetRenderState(X86 *c) {
+    ComObj *dev = d8_dev(c);
+    uint32_t out = arg(c, 2);
+    if (dev && dev->d3d8_device && out && gm_valid(out, 4)) {
+        auto result = recomp::d3d::get_render_state(*dev->d3d8_device->value, arg(c, 1));
+        if (d3d_bridge_ok(result.status))
+            wr32(out, result.value);
+        com_ret(c, bridge_result(c, result.status));
+        return;
+    }
+    com_ret(c, D8_ERR_INVALIDCALL);
+}
+void Dev_GetTextureStageState(X86 *c) {
+    ComObj *dev = d8_dev(c);
+    uint32_t out = arg(c, 3);
+    if (dev && dev->d3d8_device && out && gm_valid(out, 4)) {
+        auto result =
+            recomp::d3d::get_texture_stage_state(*dev->d3d8_device->value, arg(c, 1), arg(c, 2));
+        if (d3d_bridge_ok(result.status))
+            wr32(out, result.value);
+        com_ret(c, bridge_result(c, result.status));
         return;
     }
     com_ret(c, D8_ERR_INVALIDCALL);

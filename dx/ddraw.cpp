@@ -78,6 +78,8 @@ static const uint8_t IID_IDirectDrawClipper_[16] =
     IID_BYTES(0x6C14DB85, 0xA733, 0x11CE, 0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60);
 static const uint8_t IID_IDirectDrawColorControl_[16] =
     IID_BYTES(0x4B9F0EE0, 0x0D7E, 0x11D0, 0x9B, 0x06, 0x00, 0xA0, 0xC9, 0x03, 0xA3, 0xB8);
+static const uint8_t IID_IDirectDrawGammaControl_[16] =
+    IID_BYTES(0x69C11C3E, 0xB46B, 0x11D1, 0xAD, 0x7A, 0x00, 0xC0, 0x4F, 0xC2, 0x9B, 0x4E);
 static const uint8_t IID_IDirectDrawSurface7_[16] =
     IID_BYTES(0x06675A80, 0x3B9B, 0x11D2, 0xB9, 0x2F, 0x00, 0x60, 0x97, 0x97, 0xEA, 0x5B);
 // The Direct3D 7 object is not implemented yet, but its IID is registered so
@@ -4510,6 +4512,55 @@ const ComMethod g_colorcontrol[] = {
 };
 
 // ===========================================================================
+// IDirectDrawGammaControl
+//
+// Like the colour controls, an interface on the primary surface. DDGAMMARAMP
+// is three 256-entry WORD ramps (red, green, blue). The ramp is stored and read
+// back; the presenter does not apply it, which is logged once when a game sets
+// a ramp other than the identity.
+// ===========================================================================
+constexpr uint32_t DDGAMMARAMP_SIZE = 3 * 256 * 2;
+
+void GC_GetGammaRamp(X86 *c) {
+    ComObj *s = this_surface(c);
+    uint32_t p = arg(c, 2);
+    if (!s || !p || !gm_valid(p, DDGAMMARAMP_SIZE)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    for (uint32_t i = 0; i < 768; ++i)
+        wr16(p + i * 2, s->gamma_ramp.empty() ? (uint16_t)((i % 256) * 257) : s->gamma_ramp[i]);
+    com_ret(c, DD_OK);
+}
+
+void GC_SetGammaRamp(X86 *c) {
+    ComObj *s = this_surface(c);
+    uint32_t p = arg(c, 2);
+    if (!s || !p || !gm_valid(p, DDGAMMARAMP_SIZE)) {
+        com_ret(c, DDERR_INVALIDPARAMS);
+        return;
+    }
+    s->gamma_ramp.resize(768);
+    bool identity = true;
+    for (uint32_t i = 0; i < 768; ++i) {
+        s->gamma_ramp[i] = rd16(p + i * 2);
+        identity &= s->gamma_ramp[i] >> 8 == i % 256;
+    }
+    if (!identity)
+        log_once("ddraw.gamma", "ddraw: IDirectDrawGammaControl::SetGammaRamp stores the ramp; "
+                                "the presenter does not apply it");
+    com_ret(c, DD_OK);
+}
+
+const ComMethod g_gammacontrol[] = {
+    {"QueryInterface", 3, com_QueryInterface},
+    {"AddRef", 1, com_AddRef},
+    {"Release", 1, com_Release},
+    {"GetGammaRamp", 3, GC_GetGammaRamp},
+    {"SetGammaRamp", 3, GC_SetGammaRamp},
+};
+
+// ===========================================================================
 // IDirectDraw
 // ===========================================================================
 void DD_Compact(X86 *c) {
@@ -5497,6 +5548,7 @@ void ddraw_register() {
     com_define_checked<IF_DDPALETTE, g_palette>("DDRAW.dll", "IDirectDrawPalette");
     com_define_checked<IF_DDCLIPPER, g_clipper>("DDRAW.dll", "IDirectDrawClipper");
     com_define_checked<IF_DDCOLORCONTROL, g_colorcontrol>("DDRAW.dll", "IDirectDrawColorControl");
+    com_define_checked<IF_DDGAMMACONTROL, g_gammacontrol>("DDRAW.dll", "IDirectDrawGammaControl");
 
     com_bind(IF_DIRECTDRAW, K_DDRAW);
     com_bind(IF_DIRECTDRAW2, K_DDRAW);
@@ -5510,6 +5562,7 @@ void ddraw_register() {
     com_bind(IF_DDPALETTE, K_PALETTE);
     com_bind(IF_DDCLIPPER, K_CLIPPER);
     com_bind(IF_DDCOLORCONTROL, K_SURFACE);
+    com_bind(IF_DDGAMMACONTROL, K_SURFACE);
 
     com_register_iid(IF_DIRECTDRAW, IID_IDirectDraw_);
     com_register_iid(IF_DIRECTDRAW2, IID_IDirectDraw2_);
@@ -5526,6 +5579,7 @@ void ddraw_register() {
     com_register_iid(IF_DDPALETTE, IID_IDirectDrawPalette_);
     com_register_iid(IF_DDCLIPPER, IID_IDirectDrawClipper_);
     com_register_iid(IF_DDCOLORCONTROL, IID_IDirectDrawColorControl_);
+    com_register_iid(IF_DDGAMMACONTROL, IID_IDirectDrawGammaControl_);
 
     com_set_destructor(K_SURFACE, surface_destroy);
     com_set_destructor(K_DDRAW, ddraw_destroy);
