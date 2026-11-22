@@ -588,6 +588,54 @@ fn build_bodies(
             })
             .collect(),
     };
+    if !settings.direct_variants && stack_return_report.is_none() {
+        let pass1: Vec<std::result::Result<(Addr, FunctionIr, bool), BodyRow>> = sources
+            .into_par_iter()
+            .map(|(addr, ir)| {
+                let Some(ir) = ir else {
+                    return Err((addr, trap_body(program, addr, None), None, None));
+                };
+                match plan_one(&ctx, &ir) {
+                    Ok(planned) => Ok((addr, ir, planned.ssa.return_slot.is_ok())),
+                    Err(error) => Err(error_row(&ctx, addr, &ir, &error)),
+                }
+            })
+            .collect();
+        let mut proven_returns = BTreeSet::new();
+        let mut deferred = Vec::with_capacity(pass1.len());
+        for item in pass1 {
+            match item {
+                Err(row) => deferred.push(Err(row)),
+                Ok((addr, ir, proven)) => {
+                    if proven {
+                        proven_returns.insert(addr);
+                    }
+                    deferred.push(Ok((addr, ir)));
+                }
+            }
+        }
+        let ctx2 = make_ctx(proven_returns, direct_arguments.clone());
+        let phase2: Vec<BodyRow> = deferred
+            .into_par_iter()
+            .map(|item| match item {
+                Err(row) => row,
+                Ok((addr, ir)) => match plan_one(&ctx2, &ir) {
+                    Ok(planned) => emit_row(&ctx2, addr, &ir, &planned),
+                    Err(error) => error_row(&ctx2, addr, &ir, &error),
+                },
+            })
+            .collect();
+        let mut stats = EmitStats {
+            direct_arguments,
+            ..EmitStats::default()
+        };
+        let mut bodies = Vec::new();
+        for row in phase2 {
+            account(&mut stats, row, &mut bodies);
+        }
+        bodies.sort_by_key(|body| body.addr);
+        return Ok((bodies, stats, direct_targets));
+    }
     let planning_started = std::time::Instant::now();
     let prepared: Vec<Prepared> = sources
         .into_par_iter()
