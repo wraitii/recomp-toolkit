@@ -580,6 +580,13 @@ uint32_t wstrlen(uint32_t p) {
 void k_lstrlenW(X86 *c) {
     set_eax(c, wstrlen(arg(c, 0)));
 }
+
+void k_lstrcmpW(X86 *c) {
+    uint32_t left = arg(c, 0), right = arg(c, 1);
+    int comparison =
+        left && right ? gm_wstr(left).compare(gm_wstr(right)) : (left != 0) - (right != 0);
+    set_eax(c, (uint32_t)((comparison > 0) - (comparison < 0)));
+}
 void k_lstrcatW(X86 *c) {
     uint32_t dest = arg(c, 0), src = arg(c, 1), n = wstrlen(dest), extra = wstrlen(src);
     if (dest && gm_valid(dest, n * 2) && extra < (GUEST_SIZE - dest) / 2 - n) {
@@ -1188,6 +1195,7 @@ static const ImportShim g_kernel32_wide[] = {
     {"KERNEL32.dll", "GetConsoleOutputCP", 0, k_GetConsoleOutputCP},
 
     {"KERNEL32.dll", "lstrlenW", 1, k_lstrlenW},
+    {"KERNEL32.dll", "lstrcmpW", 2, k_lstrcmpW},
     {"KERNEL32.dll", "lstrcatW", 2, k_lstrcatW},
     {"KERNEL32.dll", "FormatMessageW", 7, k_FormatMessageW},
     {"KERNEL32.dll", "OutputDebugStringW", 1, k_OutputDebugStringW},

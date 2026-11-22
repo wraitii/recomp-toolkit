@@ -1163,6 +1163,13 @@ void get_module_handle_named(X86 *c, const std::string &module_name) {
     }
     // Registered DLLs are already available to static imports. Materialize
     // their pseudo handles through the same path as an explicit LoadLibrary.
+    // Anything else is not loaded in this process; GetModuleHandle must not
+    // try to load an unloaded DLL from disk.
+    if (!imports_has_dll(name.c_str())) {
+        set_last_error(126); // ERROR_MOD_NOT_FOUND
+        set_eax(c, 0);
+        return;
+    }
     load_library_named(c, module_name);
 }
 
@@ -1707,6 +1714,37 @@ void k_GetSystemDirectoryA(X86 *c) {
     set_eax(c, len);
 }
 
+void k_GetWindowsDirectoryA(X86 *c) {
+    static const char dir[] = "C:\\Windows";
+    uint32_t buf = arg(c, 0), size = arg(c, 1);
+    uint32_t len = sizeof dir - 1;
+    if (!buf || size <= len) {
+        set_eax(c, len + 1);
+        return;
+    }
+    memcpy(g_mem + buf, dir, len + 1);
+    set_eax(c, len);
+}
+
+void k_lstrcmpiA(X86 *c) {
+    std::string a = gm_str(arg(c, 0)), b = gm_str(arg(c, 1));
+    const unsigned char *pa = (const unsigned char *)a.c_str();
+    const unsigned char *pb = (const unsigned char *)b.c_str();
+    while (*pa && *pb) {
+        int ca = std::tolower(*pa++);
+        int cb = std::tolower(*pb++);
+        if (ca != cb) {
+            set_eax(c, (uint32_t)(ca - cb));
+            return;
+        }
+    }
+    set_eax(c, (uint32_t)(std::tolower(*pa) - std::tolower(*pb)));
+}
+
+void k_AllocConsole(X86 *c) {
+    set_eax(c, 1);
+}
+
 // GetTempPathA(nBufferLength, lpBuffer). The guest sees a virtual
 // "C:\Windows\Temp\" (trailing backslash, as Windows returns it), like
 // GetSystemDirectoryA's virtual System32: files the guest then creates there go
@@ -1958,8 +1996,8 @@ void k_GetLongPathNameA(X86 *c) {
     set_eax(c, gm_put_str(buf, path.c_str(), len));
 }
 // The same virtual volume GetDiskFreeSpaceA describes: 4 GiB free of 8 GiB.
-void k_GetDiskFreeSpaceExA(X86 *c) {
-    log_once("GetDiskFreeSpaceExA", "GetDiskFreeSpaceExA: reporting a fixed virtual volume");
+void k_GetDiskFreeSpaceEx(X86 *c) {
+    log_once("GetDiskFreeSpaceEx", "GetDiskFreeSpaceEx: reporting a fixed virtual volume");
     const uint64_t free_bytes = 8ull * 512 * 0x00100000, total = 8ull * 512 * 0x00200000;
     const uint64_t values[] = {free_bytes, total, free_bytes};
     for (int i = 0; i < 3; ++i) {
@@ -5985,7 +6023,8 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "FatalAppExitA", 2, k_FatalAppExitA},
     {"KERNEL32.dll", "GetDateFormatA", 6, k_GetDateFormatA},
     {"KERNEL32.dll", "GetTimeFormatA", 6, k_GetTimeFormatA},
-    {"KERNEL32.dll", "GetDiskFreeSpaceExA", 4, k_GetDiskFreeSpaceExA},
+    {"KERNEL32.dll", "GetDiskFreeSpaceExA", 4, k_GetDiskFreeSpaceEx},
+    {"KERNEL32.dll", "GetDiskFreeSpaceExW", 4, k_GetDiskFreeSpaceEx},
     {"KERNEL32.dll", "GetLongPathNameA", 3, k_GetLongPathNameA},
     {"KERNEL32.dll", "GetOverlappedResult", 4, imports_unsupported},
     {"KERNEL32.dll", "HeapValidate", 3, k_HeapValidate},
@@ -6078,6 +6117,10 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "GetUserDefaultLCID", 0, k_GetUserDefaultLCID},
     {"KERNEL32.dll", "GetUserDefaultLangID", 0, k_GetUserDefaultLangID},
     {"KERNEL32.dll", "GetSystemDefaultLCID", 0, k_GetUserDefaultLCID},
+    {"KERNEL32.dll", "GetSystemDefaultLangID", 0, k_GetUserDefaultLangID},
+    {"KERNEL32.dll", "GetWindowsDirectoryA", 2, k_GetWindowsDirectoryA},
+    {"KERNEL32.dll", "lstrcmpiA", 2, k_lstrcmpiA},
+    {"KERNEL32.dll", "AllocConsole", 0, k_AllocConsole},
     {"KERNEL32.dll", "IsValidCodePage", 1, k_IsValidCodePage},
     {"KERNEL32.dll", "IsValidLocale", 2, k_IsValidLocale},
     {"KERNEL32.dll", "EnumSystemLocalesA", 2, k_EnumSystemLocalesA},

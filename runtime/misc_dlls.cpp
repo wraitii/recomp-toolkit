@@ -1,9 +1,11 @@
 // Small DLL probes for a runtime with no printer, workstation service or tray.
 #include "imports.h"
+#include "memory.h"
 #include "user32_internal.h"
 #include "win32.h"
 #include "../platform/os.h"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -31,6 +33,69 @@ void zero(X86 *c) {
 // early, and the output calls are accepted and dropped, as on a run with no
 // debugger attached.
 void hapdbg_noop(X86 *c) {
+    set_eax(c, 0);
+}
+
+uint32_t g_uuid_seq = 1;
+void rpc_uuid_create(X86 *c) {
+    uint32_t p = arg(c, 0);
+    if (!p || !gm_valid(p, 16)) {
+        set_eax(c, 1734u); // RPC_S_INVALID_BOUND
+        return;
+    }
+    uint64_t t = os_monotonic_ns();
+    uint32_t s = g_uuid_seq++;
+    uint8_t u[16];
+    for (int i = 0; i < 8; ++i)
+        u[i] = (uint8_t)((t >> (i * 8)) & 0xff);
+    for (int i = 0; i < 4; ++i)
+        u[8 + i] = (uint8_t)((s >> (i * 8)) & 0xff);
+    u[12] = 0x52;
+    u[13] = 0x4b;
+    u[14] = (uint8_t)(s & 0xff);
+    u[15] = (uint8_t)((t >> 8) & 0xff);
+    u[6] = (uint8_t)((u[6] & 0x0f) | 0x40);
+    u[8] = (uint8_t)((u[8] & 0x3f) | 0x80);
+    memcpy(g_mem + p, u, 16);
+    set_eax(c, 0); // RPC_S_OK
+}
+
+void rpc_uuid_to_string_a(X86 *c) {
+    uint32_t p = arg(c, 0), out = arg(c, 1);
+    if (!p || !out || !gm_valid(p, 16) || !gm_valid(out, 4)) {
+        set_eax(c, 87u);
+        return;
+    }
+    uint32_t d1 = rd32(p);
+    uint16_t d2 = rd16(p + 4), d3 = rd16(p + 6);
+    const uint8_t *b = g_mem + p + 8;
+    char text[40];
+    std::snprintf(text, sizeof text, "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x", d1, d2,
+                  d3, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+    uint32_t buf = heap_alloc(40, true);
+    if (!buf) {
+        wr32(out, 0);
+        set_eax(c, 14u); // RPC_S_OUT_OF_MEMORY
+        return;
+    }
+    memcpy(g_mem + buf, text, std::strlen(text) + 1);
+    wr32(out, buf);
+    set_eax(c, 0);
+}
+
+void rpc_string_free_a(X86 *c) {
+    uint32_t pp = arg(c, 0);
+    if (pp && gm_valid(pp, 4)) {
+        uint32_t s = rd32(pp);
+        if (s)
+            heap_free(s);
+        wr32(pp, 0);
+    }
+    set_eax(c, 0);
+}
+
+void wininet_offline(X86 *c) {
+    set_last_error(12007u); // ERROR_INTERNET_NAME_NOT_RESOLVED
     set_eax(c, 0);
 }
 
@@ -447,6 +512,20 @@ const ImportShim shims[] = {
      "?OutputToErrConsole@hapdbg@@YAXAAV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@"
      "std@@@Z",
      ARGC_CDECL, hapdbg_noop},
+    {"RPCRT4.dll", "UuidCreate", 1, rpc_uuid_create},
+    {"RPCRT4.dll", "UuidCreateSequential", 1, rpc_uuid_create},
+    {"RPCRT4.dll", "UuidToStringA", 2, rpc_uuid_to_string_a},
+    {"RPCRT4.dll", "RpcStringFreeA", 1, rpc_string_free_a},
+    {"WININET.dll", "InternetOpenA", 5, wininet_offline},
+    {"WININET.dll", "InternetConnectA", 8, wininet_offline},
+    {"WININET.dll", "HttpOpenRequestA", 8, wininet_offline},
+    {"WININET.dll", "HttpSendRequestA", 5, wininet_offline},
+    {"WININET.dll", "HttpQueryInfoA", 5, wininet_offline},
+    {"WININET.dll", "InternetReadFile", 4, wininet_offline},
+    {"WININET.dll", "InternetQueryOptionA", 4, wininet_offline},
+    {"WININET.dll", "InternetSetOptionA", 4, wininet_offline},
+    {"WININET.dll", "InternetSetStatusCallback", 2, wininet_offline},
+    {"WININET.dll", "InternetCloseHandle", 1, yes},
 };
 } // namespace
 void misc_dlls_register() {

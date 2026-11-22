@@ -53,7 +53,7 @@ static const uint8_t GUID_RecompPlayback_[16] =
 static const uint8_t IID_IDirectSound_[16] =
     IID_BYTES(0x279AFA83, 0x4981, 0x11CE, 0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60);
 static const uint8_t IID_IDirectSound8_[16] =
-    IID_BYTES(0xC50A7E93, 0xF395, 0x4834, 0x9E, 0xF6, 0x7F, 0xA9, 0x9D, 0xE5, 0x09, 0xE6);
+    IID_BYTES(0xC50A7E93, 0xF395, 0x4834, 0x9E, 0xF6, 0x7F, 0xA9, 0x9D, 0xE5, 0x09, 0x66);
 static const uint8_t IID_IDirectSoundBuffer_[16] =
     IID_BYTES(0x279AFA85, 0x4981, 0x11CE, 0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60);
 static const uint8_t IID_IDirectSoundBuffer8_[16] =
@@ -2353,6 +2353,8 @@ const ImportShim g_dsound_exports[] = {
     {"DSOUND.dll", "DirectSoundCreate8", 3, DirectSoundCreate8},
     {"DSOUND.dll", "ord6", 3, DirectSoundCaptureCreate},
     {"DSOUND.dll", "DirectSoundCaptureCreate", 3, DirectSoundCaptureCreate},
+    {"DSOUND.dll", "ord12", 3, DirectSoundCaptureCreate},
+    {"DSOUND.dll", "DirectSoundCaptureCreate8", 3, DirectSoundCaptureCreate},
     {"DSOUND.dll", "ord7", 2, DirectSoundCaptureEnumerateA},
     {"DSOUND.dll", "DirectSoundCaptureEnumerateA", 2, DirectSoundCaptureEnumerateA},
     {"DSOUND.dll", "ord9", 2, DirectSoundGetDeviceID},

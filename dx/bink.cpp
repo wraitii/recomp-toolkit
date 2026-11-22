@@ -562,15 +562,38 @@ void BinkDoFrame(X86 *c) {
     write_frame_count(rec, *p);
 }
 
+bool bink_seek_frame(BinkPlayer &p, uint32_t frame) {
+    for (AVPacket *packet : p.video_packets)
+        av_packet_free(&packet);
+    p.video_packets.clear();
+    p.pending.clear();
+    p.pending_pos = 0;
+    p.eof = false;
+    p.flushed = false;
+    avcodec_flush_buffers(p.video);
+    if (p.audio)
+        avcodec_flush_buffers(p.audio);
+    AVStream *stream = p.input->streams[p.video_index];
+    int64_t ts = av_rescale_q((int64_t)(frame - 1), av_inv_q(p.fps), stream->time_base);
+    int rc = av_seek_frame(p.input, p.video_index, ts, AVSEEK_FLAG_BACKWARD);
+    p.failed = rc < 0;
+    return !p.failed || decoder_error("seek video frame", rc);
+}
+
 void BinkNextFrame(X86 *c) {
     uint32_t rec = arg(c, 0);
     if (BinkPlayer *p = player_for(rec)) {
         if (host_close_requested()) {
             p->current = p->count;
             p->displayed = p->count;
-        } else if (p->current < UINT32_MAX) {
+        } else if (!p->failed) {
             p->displayed = p->current;
-            ++p->current;
+            if (p->current < p->count) {
+                ++p->current;
+            } else if (bink_seek_frame(*p, 1)) {
+                p->current = 1;
+                p->t0 = p->paused ? p->paused_at : host_millis();
+            }
         }
         write_frame_count(rec, *p);
         service_audio(rec, *p);
@@ -693,23 +716,8 @@ void BinkGoto(X86 *c) {
         frame = 1;
     if (frame > p->count)
         frame = p->count;
-    for (AVPacket *packet : p->video_packets)
-        av_packet_free(&packet);
-    p->video_packets.clear();
-    p->pending.clear();
-    p->pending_pos = 0;
-    p->eof = false;
-    p->flushed = false;
-    p->failed = false;
     p->have_frame = false;
-    avcodec_flush_buffers(p->video);
-    if (p->audio)
-        avcodec_flush_buffers(p->audio);
-    AVStream *stream = p->input->streams[p->video_index];
-    int64_t ts = av_rescale_q((int64_t)(frame - 1), av_inv_q(p->fps), stream->time_base);
-    int rc = av_seek_frame(p->input, p->video_index, ts, AVSEEK_FLAG_BACKWARD);
-    if (rc < 0) {
-        p->failed = !decoder_error("seek video frame", rc);
+    if (!bink_seek_frame(*p, frame)) {
         p->displayed = p->count;
     } else {
         p->displayed = p->current;
@@ -803,6 +811,59 @@ void BinkCopyToBuffer(X86 *c) {
                 memmove(dest + x * 2 * bpp, dest + x * bpp, bpp);
                 memcpy(dest + (x * 2 + 1) * bpp, dest + x * 2 * bpp, bpp);
             }
+    }
+    p->blit_ms += host_millis() - blit_start;
+}
+
+void BinkCopyToBufferRect(X86 *c) {
+    set_eax(c, 0);
+    BinkPlayer *p = player_for(arg(c, 0));
+    if (!p || !p->have_frame || p->failed)
+        return;
+    uint32_t dst_buf = arg(c, 1), dst_h = arg(c, 3);
+    int64_t pitch = (int32_t)arg(c, 2);
+    uint32_t dst_x = arg(c, 4), dst_y = arg(c, 5);
+    uint32_t src_x = arg(c, 6), src_y = arg(c, 7), src_w = arg(c, 8), src_h = arg(c, 9);
+    uint32_t flags = arg(c, 10);
+    uint32_t type = flags & 0xff;
+    if (type == 1) // BINKSURFACE24
+        type = VIDEO_BGR24;
+    if (type != VIDEO_RGB565 && type != VIDEO_RGB555 && type != VIDEO_XRGB8888 &&
+        type != VIDEO_BGR24)
+        return;
+    uint32_t fw = (uint32_t)p->frame->width, fh = (uint32_t)p->frame->height;
+    if (src_x >= fw || src_y >= fh || !src_w || !src_h)
+        return;
+    uint32_t copy_w = std::min(src_w, fw - src_x);
+    uint32_t copy_h = std::min(src_h, std::min(fh - src_y, dst_h > dst_y ? dst_h - dst_y : 0u));
+    if (!copy_w || !copy_h)
+        return;
+    int64_t bpp = type == VIDEO_XRGB8888 ? 4 : type == VIDEO_BGR24 ? 3 : 2;
+    int64_t xbytes = (int64_t)dst_x * bpp;
+    int64_t row_bytes = (int64_t)copy_w * bpp;
+    if (!dst_buf || xbytes + row_bytes > (pitch < 0 ? -pitch : pitch)) {
+        video_error("copy rect destination is outside guest memory or pitch");
+        return;
+    }
+    int64_t first_row = pitch < 0 ? (dst_h - 1 - dst_y) * -pitch : dst_y * pitch;
+    int64_t last_row = first_row + (copy_h - 1) * pitch;
+    uint64_t low = (uint64_t)dst_buf + xbytes + std::min(first_row, last_row);
+    uint64_t high = (uint64_t)dst_buf + xbytes + std::max(first_row, last_row);
+    if (high > UINT32_MAX || high - low + row_bytes > UINT32_MAX ||
+        !gm_valid((uint32_t)low, (uint32_t)(high - low + row_bytes))) {
+        video_error("copy rect destination is outside guest memory or pitch");
+        return;
+    }
+    int64_t start = dst_buf + first_row + xbytes;
+    uint32_t blit_start = host_millis();
+    for (uint32_t row = 0; row < copy_h; ++row) {
+        uint32_t sy = src_y + row;
+        uint8_t *dest = g_mem + start + row * pitch;
+        video_frame_convert_row(
+            dest, p->frame->data[0] + (ptrdiff_t)sy * p->frame->linesize[0] + src_x,
+            p->frame->data[1] + (ptrdiff_t)(sy / 2) * p->frame->linesize[1] + src_x / 2,
+            p->frame->data[2] + (ptrdiff_t)(sy / 2) * p->frame->linesize[2] + src_x / 2, copy_w,
+            (VideoSurfaceType)type);
     }
     p->blit_ms += host_millis() - blit_start;
 }
@@ -945,6 +1006,9 @@ void BinkService(X86 *c) {
 void BinkCopyToBuffer(X86 *c) {
     ret0(c);
 }
+void BinkCopyToBufferRect(X86 *c) {
+    ret0(c);
+}
 void BinkSetVolume(X86 *c) {
     ret0(c);
 }
@@ -1023,6 +1087,9 @@ const ImportShim g_video_shims[] = {
     BINK(NextFrame, 4, BinkNextFrame),
     BINK(Wait, 4, BinkWait),
     BINK(CopyToBuffer, 28, BinkCopyToBuffer),
+    BINK(CopyToBufferRect, 44, BinkCopyToBufferRect),
+    BINK(SetSoundTrack, 8, ret0),
+    BINK(SetPan, 12, ret0),
     BINK(ShouldSkip, 4, BinkShouldSkip),
     BINK(Service, 4, BinkService),
     BINK(GetError, 0, BinkGetError),

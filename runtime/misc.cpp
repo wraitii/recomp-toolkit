@@ -1903,7 +1903,16 @@ uint32_t mmio_read_at(MmioFile &f, uint32_t offset, void *dst, uint32_t n) {
     return (uint32_t)fread(dst, 1, n, f.fp);
 }
 
-void m_mmioOpenA(X86 *c) {
+bool mmio_seek_absolute(MmioFile &f, uint64_t offset) {
+    if (offset > INT32_MAX)
+        return false;
+    if (!f.memory)
+        return fseek(f.fp, (long)offset, SEEK_SET) == 0;
+    f.pos = (uint32_t)offset;
+    return true;
+}
+
+void mmio_open_impl(X86 *c, bool wide) {
     uint32_t name_ptr = arg(c, 0);
     uint32_t pinfo = arg(c, 1), flags = arg(c, 2);
     bool write = (flags & 0x00000001) != 0;     // MMIO_WRITE
@@ -1938,7 +1947,7 @@ void m_mmioOpenA(X86 *c) {
         return;
     }
 
-    std::string name = gm_str(name_ptr, 260);
+    std::string name = wide ? gm_wstr(name_ptr, 260) : gm_str(name_ptr, 260);
     std::string host = win32_host_path(name, write || readwrite || create);
     if (recomp_env("TRACE_FILES"))
         LOGW("file: mmioOpen \"%s\" -> \"%s\"", name.c_str(), host.c_str());
@@ -1971,6 +1980,14 @@ void m_mmioOpenA(X86 *c) {
     g_next_mmio += 4;
     mmios()[h] = f;
     set_eax(c, h);
+}
+
+void m_mmioOpenA(X86 *c) {
+    mmio_open_impl(c, false);
+}
+
+void m_mmioOpenW(X86 *c) {
+    mmio_open_impl(c, true);
 }
 
 // Direct buffer access for FOURCC_MEM. All cursors remain guest addresses.
@@ -2163,7 +2180,21 @@ void m_mmioDescend(X86 *c) {
     MmioFile &f = it->second;
     uint32_t want_ckid = rd32(pck + MMCKINFO_OFF_ckid);
     uint32_t want_fcc = rd32(pck + MMCKINFO_OFF_fccType);
-    uint32_t start = f.pos, end = f.length;
+    uint64_t start = f.pos, end = f.length;
+    if (!f.memory) {
+        long position = ftell(f.fp);
+        if (position < 0 || fseek(f.fp, 0, SEEK_END) != 0) {
+            set_eax(c, MMIOERR_CANNOTSEEK);
+            return;
+        }
+        long length = ftell(f.fp);
+        if (fseek(f.fp, position, SEEK_SET) != 0 || length < 0) {
+            set_eax(c, MMIOERR_CANNOTSEEK);
+            return;
+        }
+        start = (uint64_t)position;
+        end = std::min<uint64_t>((uint64_t)length, INT32_MAX);
+    }
     if (parent && gm_valid(parent, MMCKINFO_SIZE)) {
         uint32_t poff = rd32(parent + MMCKINFO_OFF_dwDataOffset);
         uint32_t psize = rd32(parent + MMCKINFO_OFF_cksize);
@@ -2171,17 +2202,20 @@ void m_mmioDescend(X86 *c) {
         // For a RIFF/LIST parent dwDataOffset points at its form type; the
         // children begin after it. cksize includes the form type, so the
         // bound is dwDataOffset + cksize.
-        start = (pckid == FOURCC_RIFF || pckid == FOURCC_LIST) ? poff + 4 : poff;
-        end = poff + psize;
+        uint64_t first_child =
+            (uint64_t)poff + (pckid == FOURCC_RIFF || pckid == FOURCC_LIST ? 4 : 0);
+        start = std::max(start, first_child);
+        end = std::min(end, (uint64_t)poff + psize);
     }
-    while (start + 8 <= end && start + 8 <= f.length) {
+    while (start + 8 <= end) {
         uint32_t hdr[2];
-        if (mmio_read_at(f, start, hdr, 8) != 8)
+        if (mmio_read_at(f, (uint32_t)start, hdr, 8) != 8)
             break;
         uint32_t ckid = hdr[0], cksize = hdr[1];
         bool form = ckid == FOURCC_RIFF || ckid == FOURCC_LIST;
         uint32_t fcc = 0;
-        if (form && mmio_read_at(f, start + 8, &fcc, 4) != 4)
+        if (form && (cksize < 4 || start + 12 > end ||
+                     mmio_read_at(f, (uint32_t)(start + 8), &fcc, 4) != 4))
             break;
         bool match;
         if (flags & MMIO_FINDRIFF)
@@ -2193,20 +2227,19 @@ void m_mmioDescend(X86 *c) {
         else
             match = true;
         if (match) {
+            if (!mmio_seek_absolute(f, start + (form ? 12 : 8))) {
+                set_eax(c, MMIOERR_CANNOTSEEK);
+                return;
+            }
             wr32(pck + MMCKINFO_OFF_ckid, ckid);
             wr32(pck + MMCKINFO_OFF_cksize, cksize);
-            if (form)
-                wr32(pck + MMCKINFO_OFF_fccType, fcc);
-            wr32(pck + MMCKINFO_OFF_dwDataOffset, start + 8);
+            wr32(pck + MMCKINFO_OFF_fccType, fcc);
+            wr32(pck + MMCKINFO_OFF_dwDataOffset, (uint32_t)(start + 8));
             wr32(pck + MMCKINFO_OFF_dwFlags, 0);
-            f.pos = start + 8;
             set_eax(c, 0);
             return;
         }
-        uint32_t step = 8 + ((cksize + 1) & ~1u);
-        if (step < 8 || start + step <= start)
-            break;
-        start += step;
+        start += 8 + (uint64_t)cksize + (cksize & 1u);
     }
     set_eax(c, MMIOERR_CHUNKNOTFOUND);
 }
@@ -2222,7 +2255,10 @@ void m_mmioAscend(X86 *c) {
     }
     uint32_t off = rd32(pck + MMCKINFO_OFF_dwDataOffset);
     uint32_t size = rd32(pck + MMCKINFO_OFF_cksize);
-    it->second.pos = off + ((size + 1) & ~1u);
+    if (!mmio_seek_absolute(it->second, (uint64_t)off + size + (size & 1u))) {
+        set_eax(c, MMIOERR_CANNOTSEEK);
+        return;
+    }
     wr32(pck + MMCKINFO_OFF_dwFlags, rd32(pck + MMCKINFO_OFF_dwFlags) & ~MMIO_DIRTY);
     set_eax(c, 0);
 }
@@ -3233,6 +3269,7 @@ const ImportShim g_misc_shims[] = {
     {"WINMM.dll", "timeBeginPeriod", 1, m_timeBeginPeriod},
     {"WINMM.dll", "timeEndPeriod", 1, m_timeEndPeriod},
     {"WINMM.dll", "mmioOpenA", 3, m_mmioOpenA},
+    {"WINMM.dll", "mmioOpenW", 3, m_mmioOpenW},
     {"WINMM.dll", "mmioGetInfo", 3, m_mmioGetInfo},
     {"WINMM.dll", "mmioSetInfo", 3, m_mmioSetInfo},
     {"WINMM.dll", "mmioAdvance", 3, m_mmioAdvance},
@@ -3309,6 +3346,7 @@ const ImportShim g_misc_shims[] = {
     {"WS2_32.dll", "ord115", 2, w_WSAStartup},
     {"WS2_32.dll", "WSACleanup", 0, w_WSACleanup},
     {"WS2_32.dll", "ord116", 0, w_WSACleanup},
+    {"WS2_32.dll", "WSACancelBlockingCall", 0, w_WSACleanup},
     {"WS2_32.dll", "WSAGetLastError", 0, w_WSAGetLastError},
     {"WS2_32.dll", "ord111", 0, w_WSAGetLastError},
     {"WS2_32.dll", "WSASetLastError", 1, w_WSASetLastError},

@@ -55,6 +55,8 @@ static const uint8_t IID_IDirectInput7A_[16] =
     IID_BYTES(0x9A4CB684, 0x236D, 0x11D3, 0x8E, 0x9D, 0x00, 0xC0, 0x4F, 0x68, 0x44, 0xAE);
 static const uint8_t IID_IDirectInputDevice7A_[16] =
     IID_BYTES(0x57D7C6BC, 0x2356, 0x11D3, 0x8E, 0x9D, 0x00, 0xC0, 0x4F, 0x68, 0x44, 0xAE);
+static const uint8_t IID_IDirectInput8W_[16] =
+    IID_BYTES(0xBF798031, 0x483A, 0x4DA2, 0xAA, 0x99, 0x5D, 0x64, 0xED, 0x36, 0x97, 0x00);
 
 static const uint8_t GUID_SysMouse_[16] =
     IID_BYTES(0x6F1D2B60, 0xD5A0, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
@@ -324,11 +326,42 @@ void Device_GetCapabilities(X86 *c) {
     com_ret(c, DI_OK);
 }
 
+void write_input_object(const ComObj *d, uint32_t out, uint32_t size, const uint8_t *guid,
+                        uint32_t offset, uint32_t type, const char *name) {
+    gm_zero(out, size);
+    wr32(out, size);
+    memcpy(gm_ptr(out + DIDOI_OFF_guidType), guid, 16);
+    wr32(out + DIDOI_OFF_dwOfs, offset);
+    wr32(out + DIDOI_OFF_dwType, type);
+    if (d->di_wide)
+        di_put_wide(out + DIDOI_OFF_tszName, name, DIDOI_NAME_CHARS);
+    else
+        gm_put_str(out + DIDOI_OFF_tszName, name, DIDOI_NAME_CHARS);
+}
+
+void write_keyboard_object(const ComObj *d, uint32_t out, uint32_t size, uint32_t dik,
+                           const char *name) {
+    static const uint8_t GUID_Key_[16] =
+        IID_BYTES(0x55728220, 0xD33C, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+    write_input_object(d, out, size, GUID_Key_, dik, DIDFT_PSHBUTTON | (dik << 8), name);
+}
+
+JoyObject mouse_object(uint32_t index) {
+    const auto &objects = joy_objects();
+    if (index < 3) {
+        JoyObject axis = objects[index];
+        axis.type = DIDFT_RELAXIS | (index << 8);
+        return axis;
+    }
+    uint32_t button = index - 3;
+    JoyObject object = objects[JOY_AXES + JOY_POVS + button];
+    object.ofs = DIMOFS_BUTTON0 + button;
+    return object;
+}
+
 // The keyboard lists one push button per key DIPROP_KEYNAME names, at its DIK
 // offset. A game may size its key table from the highest code it is shown.
 uint32_t keyboard_enum_objects(X86 *c, ComObj *d, uint32_t cb, uint32_t ref, uint32_t flags) {
-    static const uint8_t GUID_Key_[16] =
-        IID_BYTES(0x55728220, 0xD33C, 0x11CF, 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
     if (!cb)
         return DIERR_INVALIDPARAM;
     uint32_t bits = flags & DIDFT_TYPEMASK;
@@ -342,34 +375,46 @@ uint32_t keyboard_enum_objects(X86 *c, ComObj *d, uint32_t cb, uint32_t ref, uin
         uint32_t a = di_scratch(size);
         if (!a)
             return E_OUTOFMEMORY;
-        gm_zero(a, size);
-        wr32(a, size);
-        memcpy(gm_ptr(a + DIDOI_OFF_guidType), GUID_Key_, 16);
-        wr32(a + DIDOI_OFF_dwOfs, dik);
-        wr32(a + DIDOI_OFF_dwType, DIDFT_PSHBUTTON | (dik << 8));
-        if (d->di_wide)
-            di_put_wide(a + DIDOI_OFF_tszName, name.c_str(), DIDOI_NAME_CHARS);
-        else
-            gm_put_str(a + DIDOI_OFF_tszName, name.c_str(), DIDOI_NAME_CHARS);
+        write_keyboard_object(d, a, size, dik, name.c_str());
         if (guest_call(c, cb, a, ref) != 1 /* DIENUM_CONTINUE */)
             break;
     }
     return DI_OK;
 }
 
-// EnumObjects(callback, ref, dwFlags). The mouse keeps the old silent success.
 void Device_EnumObjects(X86 *c) {
     ComObj *d = this_device(c);
-    if (d && is_joystick(d)) {
-        com_ret(c, joy_enum_objects(c, d, arg(c, 1), arg(c, 2), arg(c, 3)));
+    uint32_t cb = arg(c, 1), ref = arg(c, 2), flags = arg(c, 3);
+    if (!d || !cb) {
+        com_ret(c, DIERR_INVALIDPARAM);
         return;
     }
-    if (d && d->dev_type == DIDEVTYPE_KEYBOARD) {
-        com_ret(c, keyboard_enum_objects(c, d, arg(c, 1), arg(c, 2), arg(c, 3)));
+    if (is_joystick(d)) {
+        com_ret(c, joy_enum_objects(c, d, cb, ref, flags));
         return;
     }
-    log_once("dx.Device_EnumObjects",
-             "dx: Device_EnumObjects on the mouse is not implemented; returning DI_OK");
+    if (d->dev_type == DIDEVTYPE_KEYBOARD) {
+        com_ret(c, keyboard_enum_objects(c, d, cb, ref, flags));
+        return;
+    }
+    if (!(flags & 0x1F000000u)) {
+        uint32_t size = d->di_wide ? DIDEVICEOBJECTINSTANCEW_SIZE : DIDEVICEOBJECTINSTANCEA_SIZE;
+        uint32_t buttons = d->data_format_size == DIMOUSESTATE2_SIZE ? 8 : 4;
+        uint32_t types = flags & DIDFT_TYPEMASK;
+        for (uint32_t index = 0; index < 3 + buttons; ++index) {
+            JoyObject object = mouse_object(index);
+            if (types && !(types & object.type))
+                continue;
+            uint32_t out = di_scratch(size);
+            if (!out) {
+                com_ret(c, E_OUTOFMEMORY);
+                return;
+            }
+            write_input_object(d, out, size, object.guid, object.ofs, object.type, object.name);
+            if (guest_call(c, cb, out, ref) != 1)
+                break;
+        }
+    }
     com_ret(c, DI_OK);
 }
 
@@ -706,17 +751,46 @@ void Device_SetCooperativeLevel(X86 *c) {
 // GetObjectInfo(pdidoi, dwObj, dwHow).
 void Device_GetObjectInfo(X86 *c) {
     ComObj *d = this_device(c);
-    uint32_t out = arg(c, 1);
-    if (!out || !gm_valid(out, 4)) {
+    uint32_t out = arg(c, 1), object = arg(c, 2), how = arg(c, 3);
+    if (!d || !out || !gm_valid(out, 4)) {
         com_ret(c, DIERR_INVALIDPARAM);
         return;
     }
-    if (d && is_joystick(d)) {
-        com_ret(c, joy_get_object_info(d, out, arg(c, 2), arg(c, 3)));
+    if (is_joystick(d)) {
+        com_ret(c, joy_get_object_info(d, out, object, how));
         return;
     }
-    log_once("dinput.objectinfo", "dinput: GetObjectInfo is not supported");
-    com_ret(c, DIERR_UNSUPPORTED);
+    uint32_t size = rd32(out);
+    bool valid_size =
+        d->di_wide
+            ? size == DIDEVICEOBJECTINSTANCEW_SIZE || size == DIDEVICEOBJECTINSTANCE_DX3W_SIZE
+            : size == DIDEVICEOBJECTINSTANCEA_SIZE || size == DIDEVICEOBJECTINSTANCE_DX3A_SIZE;
+    if (!valid_size || !gm_valid(out, size) || (how != DIPH_BYOFFSET && how != DIPH_BYID)) {
+        com_ret(c, DIERR_INVALIDPARAM);
+        return;
+    }
+    if (d->dev_type == DIDEVTYPE_KEYBOARD) {
+        uint32_t dik = how == DIPH_BYID ? didft_instance(object) : object;
+        const std::string name = dik < 256 ? guest_key_name(dik) : std::string{};
+        if (!name.empty() &&
+            (how == DIPH_BYOFFSET || (object & DIDFT_TYPEMASK) == DIDFT_PSHBUTTON)) {
+            write_keyboard_object(d, out, size, dik, name.c_str());
+            com_ret(c, DI_OK);
+            return;
+        }
+    } else if (d->dev_type == DIDEVTYPE_MOUSE) {
+        uint32_t buttons = d->data_format_size == DIMOUSESTATE2_SIZE ? 8 : 4;
+        for (uint32_t index = 0; index < 3 + buttons; ++index) {
+            JoyObject candidate = mouse_object(index);
+            if (object == (how == DIPH_BYOFFSET ? candidate.ofs : candidate.type)) {
+                write_input_object(d, out, size, candidate.guid, candidate.ofs, candidate.type,
+                                   candidate.name);
+                com_ret(c, DI_OK);
+                return;
+            }
+        }
+    }
+    com_ret(c, DIERR_OBJECTNOTFOUND);
 }
 
 void Device_GetDeviceInfo(X86 *c) {
@@ -1167,6 +1241,7 @@ void direct_input_create(X86 *c, uint32_t version, uint32_t out, uint32_t outer,
 
 void DirectInput8Create(X86 *c) {
     uint32_t version = arg(c, 1);
+    uint32_t riid = arg(c, 2);
     uint32_t out = arg(c, 3);
     uint32_t outer = arg(c, 4);
     if (!out || !gm_valid(out, 4)) {
@@ -1183,6 +1258,8 @@ void DirectInput8Create(X86 *c) {
     // type codes, so the object remembers at least version 8 whatever number
     // it was handed. Nothing else reads di_version.
     di->di_version = version < DIRECTINPUT_VERSION_8 ? DIRECTINPUT_VERSION_8 : version;
+    di->di_wide = riid && gm_valid(riid, sizeof IID_IDirectInput8W_) &&
+                  memcmp(gm_ptr(riid), IID_IDirectInput8W_, sizeof IID_IDirectInput8W_) == 0;
     uint32_t view = com_view(di, IF_DINPUT8);
     if (!view) {
         com_release(di);
