@@ -47,12 +47,13 @@ impl SurfacePresenter {
             return Err("surface: adapter does not support drawable copy destinations".into());
         }
         config.usage = usage;
-        config.format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|format| *format == wgpu::TextureFormat::Bgra8Unorm)
-            .unwrap_or(config.format);
+        config.format = [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ]
+        .into_iter()
+        .find(|format| caps.formats.contains(format))
+        .unwrap_or(config.format);
         if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
             config.present_mode = wgpu::PresentMode::Fifo;
         }

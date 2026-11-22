@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-from cargo_build import build_static_library, native_target_args
+from cargo_build import android_cross_env, build_static_library, native_target_args, rust_host_target
 
 
 def main():
@@ -22,20 +22,26 @@ def main():
         target_args = native_target_args(args.target)
     except ValueError as error:
         parser.error(str(error))
-    build_env = dict(os.environ, CARGO_TARGET_DIR=str(args.target_dir), CXX=args.cxx)
+    build_env = android_cross_env(
+        dict(os.environ, CARGO_TARGET_DIR=str(args.target_dir), CXX=args.cxx),
+        args.target,
+        args.cxx,
+    )
     if args.deployment_target:
         build_env["MACOSX_DEPLOYMENT_TARGET"] = args.deployment_target
+    extra_args = ["--no-default-features"] if args.target and "android" in args.target else []
     try:
         output_dir = build_static_library(args.cargo, args.crate, target_args, build_env,
-                                          "d3d8_wgpu", args.native_libs)
+                                          "d3d8_wgpu", args.native_libs, extra_cargo_args=extra_args)
     except RuntimeError as error:
         parser.exit(1, str(error) + "\n")
-    corpus = subprocess.run(
-        [args.cargo, "build", "--release", "--locked", "--manifest-path",
-         str(args.crate / "Cargo.toml"), "--bin", "shader-corpus", *target_args],
-        env=build_env)
-    if corpus.returncode:
-        parser.exit(corpus.returncode, "D3D8 shader corpus CLI build failed\n")
+    if not args.target or args.target == rust_host_target():
+        corpus = subprocess.run(
+            [args.cargo, "build", "--release", "--locked", "--manifest-path",
+             str(args.crate / "Cargo.toml"), "--bin", "shader-corpus", *target_args],
+            env=build_env)
+        if corpus.returncode:
+            parser.exit(corpus.returncode, "D3D8 shader corpus CLI build failed\n")
     if output_dir is None:
         parser.exit(1, "Cargo did not report the D3D8 bridge output directory\n")
     generated = (

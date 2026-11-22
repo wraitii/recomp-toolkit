@@ -112,7 +112,8 @@ const D3DSWAPEFFECT_DISCARD: u32 = 1;
 const D3DSWAPEFFECT_FLIP: u32 = 2;
 const D3DSWAPEFFECT_COPY: u32 = 3;
 
-const D3DPRESENTFLAG_KNOWN: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004 | 0x0000_0010;
+const D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL: u32 = 0x0000_0002;
+const D3DPRESENTFLAG_KNOWN: u32 = 0x0000_0001 | D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL | 0x0000_0004 | 0x0000_0010;
 
 const D3DPRESENT_INTERVAL_DEFAULT: u32 = 0x0000_0000;
 const D3DPRESENT_INTERVAL_ONE: u32 = 0x0000_0001;
@@ -407,6 +408,7 @@ pub struct DeviceRequest {
     pub adapter: u32,
     pub device_type: u32,
     pub behavior_flags: u32,
+    pub full_detail_mips: bool,
     pub present: PresentParams,
     pub display_mode: DisplayMode,
 }
@@ -1481,10 +1483,11 @@ fn validate_present_params(
             format!("unknown D3DPRESENTFLAG(s) {unknown_flags:#x}"),
         ));
     }
-    if present.flags != 0 {
+    let unsupported_flags = present.flags & !D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL;
+    if unsupported_flags != 0 {
         return Err(RenderError::new(
             "D3DPRESENT_PARAMETERS",
-            format!("D3DPRESENTFLAG(s) {:#x} are not implemented", present.flags),
+            format!("D3DPRESENTFLAG(s) {unsupported_flags:#x} are not implemented"),
         ));
     }
     if present.enable_auto_depth_stencil != 0 {
@@ -1610,6 +1613,7 @@ pub fn d3d9_create_device(
         adapter: request.adapter,
         device_type: request.device_type,
         behavior_flags: request.behavior_flags,
+        full_detail_mips: request.full_detail_mips,
         present: request.present.into(),
         display_mode: request.display_mode.into(),
     };
@@ -1768,6 +1772,7 @@ fn create_device(
     device.features = gpu.device.features();
     device.limits = gpu.device.limits();
     let mut d3d9_gpu = D3d9Gpu::from_context_with_loss(&gpu, loss.as_ref().clone());
+    d3d9_gpu.full_detail_mips = request.full_detail_mips;
     d3d9_gpu.shader_mode = config.shader_mode.clone();
     d3d9_gpu.shader_mode_error = config.shader_mode_error.clone();
     d3d9_gpu.tint = config.tint;
@@ -2088,8 +2093,11 @@ fn reset_validation(
     }
     if device
         .resources
-        .values()
-        .any(|registration| registration.pool == resource::D3DPOOL_DEFAULT)
+        .iter()
+        .any(|(id, registration)| {
+            registration.pool == resource::D3DPOOL_DEFAULT
+                && !request.binding_only_resources.contains(id)
+        })
     {
         return Err(status(
             StatusCode::InvalidArgument,
@@ -2179,6 +2187,7 @@ pub fn d3d9_reset(device: &mut D3d9Device, request: &D3d9ResetRequest) -> D3d9Re
     let expected: BTreeMap<u32, u32> = device
         .resources
         .iter()
+        .filter(|(id, _)| !request.binding_only_resources.contains(id))
         .map(|(id, registration)| (*id, registration.pool))
         .collect();
     if physical {
@@ -2207,6 +2216,7 @@ pub fn d3d9_reset(device: &mut D3d9Device, request: &D3d9ResetRequest) -> D3d9Re
             d3d9_gpu.shader_mode = previous.shader_mode.clone();
             d3d9_gpu.shader_mode_error = previous.shader_mode_error.clone();
             d3d9_gpu.tint = previous.tint;
+            d3d9_gpu.full_detail_mips = previous.full_detail_mips;
         }
         if let Err(error) = draw::uber::prepare(&d3d9_gpu) {
             device.replacement = Some((gpu, loss));

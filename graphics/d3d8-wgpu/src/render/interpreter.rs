@@ -343,7 +343,7 @@ impl PreparedInterpreter {
                     depth: d.depth.clone(),
                     multisample: d.multisample,
                 }
-                .create(device, "d3d9-interpreter");
+                .create(device, "d3d9-interpreter", None);
                 if trace {
                     eprintln!(
                         "[d3d9-uber] prepare-pipeline index={index} ms={:.3} descriptor={d:?}",

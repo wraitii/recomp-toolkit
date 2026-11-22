@@ -83,6 +83,7 @@ struct Layout {
     double scale = 1.0;     // sizes only (not offsets); the "size" setting multiplies it
     bool safe_inset = true; // anchors resolve inside the safe area
     std::vector<Group> groups;
+    double offset_scale = 1.0;
 };
 
 // Parses a layout JSON document into *out. Unknown top-level and control

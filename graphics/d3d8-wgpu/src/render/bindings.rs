@@ -22,10 +22,19 @@ impl DrawParameters {
         }
     }
 
+    pub(crate) fn sampler_lod_bias(&mut self, slot: u32, value: u32) {
+        let offset = PIXEL_RASTER_PARAMETER_BYTES + 4 * slot as usize;
+        self.pixel[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
     pub(crate) fn interpreter_flags(&mut self, opaque: u32, unbound: u32, tint: bool) {
-        self.pixel[48..52].copy_from_slice(&opaque.to_le_bytes());
-        self.pixel[52..56].copy_from_slice(&u32::from(tint).to_le_bytes());
-        self.pixel[56..60].copy_from_slice(&unbound.to_le_bytes());
+        let flags = &mut self.pixel[PIXEL_PARAMETER_BYTES..];
+        for (bytes, value) in flags
+            .chunks_exact_mut(4)
+            .zip([opaque, u32::from(tint), unbound])
+        {
+            bytes.copy_from_slice(&value.to_le_bytes());
+        }
         self.pixel_size = INTERPRETER_PARAMETER_BYTES;
     }
 

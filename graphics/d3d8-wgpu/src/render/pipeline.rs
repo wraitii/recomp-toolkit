@@ -54,7 +54,12 @@ pub(crate) struct PreparedPipeline {
 }
 
 impl PreparedPipeline {
-    pub(crate) fn create(&self, device: &wgpu::Device, label: &str) -> wgpu::RenderPipeline {
+    pub(crate) fn create(
+        &self,
+        device: &wgpu::Device,
+        label: &str,
+        cache: Option<&wgpu::PipelineCache>,
+    ) -> wgpu::RenderPipeline {
         let layouts = [Some(&self.layout.uniforms), self.layout.material.as_ref()];
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(label),
@@ -98,7 +103,7 @@ impl PreparedPipeline {
             depth_stencil: self.depth.clone(),
             multisample: self.multisample,
             multiview_mask: None,
-            cache: None,
+            cache,
         })
     }
 }
@@ -246,7 +251,7 @@ impl PipelineRecipe {
                 });
             let pipeline = self
                 .prepare(modules.clone(), layout.clone())
-                .create(device, "specialization-worker");
+                .create(device, "specialization-worker", None);
             Ok(CompiledPipeline {
                 pipeline,
                 modules,

@@ -439,10 +439,14 @@ static std::vector<recomp::d3d::D3d9DisplayMode> d3d9_display_modes() {
         {1600, 1200}, {1680, 1050}, {1920, 1080}, {1920, 1200}, {1920, 1440}, {2048, 1536},
         {2560, 1440}, {2560, 1600}, {2560, 1920},
     };
-    for (const auto &m : kStandard)
-        add_display_mode(modes, m[0], m[1]);
     int32_t host_w = 0, host_h = 0;
-    if (host_display_screen(&host_w, &host_h) && host_w > 0 && host_h > 0)
+    const bool has_host_mode = host_display_screen(&host_w, &host_h);
+    const char *limit = os_getenv("RECOMP_D3D9_LIMIT_DISPLAY_MODES");
+    const bool limit_modes = has_host_mode && limit && strcmp(limit, "1") == 0;
+    for (const auto &m : kStandard)
+        if (!limit_modes || (m[0] <= uint32_t(host_w) && m[1] <= uint32_t(host_h)))
+            add_display_mode(modes, m[0], m[1]);
+    if (has_host_mode)
         add_display_mode(modes, (uint32_t)host_w, (uint32_t)host_h);
     return modes;
 }
@@ -595,6 +599,16 @@ void D9_CheckDeviceFormatConversion(X86 *c) {
     com_ret(c, bridge_result(c, recomp::d3d::d3d9_check_device_format_conversion(request)));
 }
 
+static void write_device_caps(uint32_t out, const recomp::d3d::D3d9CapsResult &result) {
+    constexpr uint32_t pixel_shader_version = 204;
+    constexpr uint32_t pixel_shader_20_caps = 264;
+    memcpy(gm_ptr(out), result.caps.data(), 304);
+    if (!RECOMP_D3D9_ADVERTISE_PIXEL_SHADERS) {
+        wr32(out + pixel_shader_version, 0);
+        memset(gm_ptr(out + pixel_shader_20_caps), 0, 5 * sizeof(uint32_t));
+    }
+}
+
 void D9_GetDeviceCaps(X86 *c) {
     uint32_t out = arg(c, 3);
     if (!this_d3d9(c) || arg(c, 1) != 0 || arg(c, 2) < D3DDEVTYPE_HAL || arg(c, 2) > 3 || !out ||
@@ -611,7 +625,7 @@ void D9_GetDeviceCaps(X86 *c) {
         com_ret(c, bridge_result(c, result.status));
         return;
     }
-    memcpy(gm_ptr(out), result.caps.data(), 304);
+    write_device_caps(out, result);
     com_ret(c, D3D_OK9);
 }
 void D9_GetAdapterMonitor(X86 *c) {
@@ -642,6 +656,7 @@ void D9_CreateDevice(X86 *c) {
     request.adapter = arg(c, 1);
     request.device_type = arg(c, 2);
     request.behavior_flags = arg(c, 4);
+    request.full_detail_mips = RECOMP_D3D9_FULL_DETAIL_MIPS;
     request.present.width = rd32(present + 0);
     request.present.height = rd32(present + 4);
     request.present.format = rd32(present + 8);
@@ -759,29 +774,35 @@ void Dev_SetScissorRect(X86 *c) {
 static ComObj *device_backbuffer(ComObj *dev);
 static ComObj *device_depthbuffer(ComObj *dev);
 
-static void d3d9_reset_transaction(ComObj *dev, const recomp::d3d::D3d9ResetRequest &request,
+static void d3d9_reset_transaction(ComObj *dev, recomp::d3d::D3d9ResetRequest &request,
                                    recomp::d3d::D3d9ResetResult &result) {
-    result = dev->d3d9_device->reset(request);
-    if (result.status.code != recomp::d3d::StatusCode::Ok)
-        return;
     recomp::d3d::ValuesResult ids = dev->d3d9_device->registered_resource_ids();
     if (ids.status.code != recomp::d3d::StatusCode::Ok) {
-        dev->d3d9_device->abort_reset();
+        result.present = request.present;
         result.status = ids.status;
         return;
     }
+    const auto &bindings = dev->d3d9_device->live_bindings;
+    std::vector<ComObj *> retained;
     for (uint32_t id : ids.values) {
         ComObj *o = com_get(id);
         if (!o || !o->d3d9_resource || o->d3d9_parent || o->d3d9_implicit ||
             o->dev_d3d != dev->id) {
-            dev->d3d9_device->abort_reset();
             LOGW("d3d9: reset holder %u is not a root resource of this device", id);
+            result.present = request.present;
             result.status.code = recomp::d3d::StatusCode::InvalidArgument;
             return;
         }
+        if (o->refs == o->internal_refs &&
+            o->refs == std::count(bindings.begin(), bindings.end(), id))
+            request.binding_only_resources.push_back(id);
+        else
+            retained.push_back(o);
     }
-    for (uint32_t id : ids.values) {
-        ComObj *o = com_get(id);
+    result = dev->d3d9_device->reset(request);
+    if (result.status.code != recomp::d3d::StatusCode::Ok)
+        return;
+    for (ComObj *o : retained) {
         recomp::d3d::Status prepared =
             dev->d3d9_device->prepare_resource_reset(o->id, *o->d3d9_resource);
         if (prepared.code != recomp::d3d::StatusCode::Ok) {
@@ -796,8 +817,8 @@ static void d3d9_reset_transaction(ComObj *dev, const recomp::d3d::D3d9ResetRequ
         result.status = ready;
         return;
     }
-    for (uint32_t id : ids.values)
-        dev->d3d9_device->commit_resource_reset(id, *com_get(id)->d3d9_resource);
+    for (ComObj *o : retained)
+        dev->d3d9_device->commit_resource_reset(o->id, *o->d3d9_resource);
     result = dev->d3d9_device->finish_reset();
     d3d9_refresh_bindings(dev);
 }
@@ -892,6 +913,30 @@ void Dev_TestCooperativeLevel(X86 *c) {
     }
     com_ret(c, D3D_OK9);
 }
+
+void Dev_ValidateDevice(X86 *c) {
+    ComObj *dev = this_device9(c);
+    uint32_t passes = arg(c, 1);
+    if (!dev || !dev->d3d9_device || (passes && !gm_valid(passes, 4))) {
+        com_ret(c, D3DERR_INVALIDCALL);
+        return;
+    }
+    auto result = dev->d3d9_device->test_cooperative_level();
+    if (result.status.code != recomp::d3d::StatusCode::Ok) {
+        com_ret(c, bridge_result(c, result.status));
+        return;
+    }
+    if (result.value != 0) {
+        com_ret(c, D3DERR_DEVICELOST);
+        return;
+    }
+    // The renderer implements supported texture blending in a single pass.
+    // Detailed state validation occurs when building the draw pipeline.
+    if (passes)
+        wr32(passes, 1);
+    com_ret(c, D3D_OK9);
+}
+
 void Dev_GetAvailableTextureMem(X86 *c) {
     ComObj *dev = this_device9(c);
     if (!dev || !dev->d3d9_device) {
@@ -901,6 +946,13 @@ void Dev_GetAvailableTextureMem(X86 *c) {
     recomp::d3d::ValueResult result = dev->d3d9_device->available_texture_mem();
     if (result.status.code != recomp::d3d::StatusCode::Ok) {
         std::string message(result.status.message.data(), result.status.message.size());
+        if (result.status.code == recomp::d3d::StatusCode::Unsupported ||
+            message.find("only on the Metal backend") != std::string::npos) {
+            log_once("d3d9.available_texture_mem.fallback",
+                     "d3d9: GetAvailableTextureMem fallback (512 MB) on non-Metal backend");
+            set_eax(c, 512u * 1024u * 1024u);
+            return;
+        }
         LOGW("d3d9: GetAvailableTextureMem: %s", message.c_str());
         imports_unsupported(c);
         return;
@@ -994,11 +1046,24 @@ void Dev_GetDeviceCaps(X86 *c) {
         return;
     }
     if (result.caps.size() >= 304)
-        memcpy(gm_ptr(out), result.caps.data(), 304);
+        write_device_caps(out, result);
     com_ret(c, D3D_OK9);
 }
 void Dev_EvictManagedResources(X86 *c) {
     com_ret(c, this_device9(c) ? D3D_OK9 : D3DERR_INVALIDCALL);
+}
+void Dev_SetSoftwareVertexProcessing(X86 *c) {
+    ComObj *dev = this_device9(c);
+    if (!dev || !dev->d3d9_device) {
+        com_ret(c, D3DERR_INVALIDCALL);
+        return;
+    }
+    dev->d3d9_software_vp = arg(c, 1) != 0;
+    com_ret(c, D3D_OK9);
+}
+void Dev_GetSoftwareVertexProcessing(X86 *c) {
+    ComObj *dev = this_device9(c);
+    com_ret(c, (dev && dev->d3d9_software_vp) ? 1u : 0u);
 }
 void Dev_BeginScene(X86 *c) {
     ComObj *dev = this_device9(c);
@@ -1140,8 +1205,11 @@ void Dev_Present(X86 *c) {
                                 (int)result.height, fullscreen, !fullscreen);
         }
     }
-    const uint32_t interval = dev->d3d9_device->effective_present().presentation_interval;
-    if (interval != 0x80000000u) {
+    const uint32_t immediate = 0x80000000u;
+    uint32_t interval = present_params.presentation_interval;
+    if (RECOMP_D3D9_PACE_FULLSCREEN_PRESENT && fullscreen && interval == immediate)
+        interval = 1;
+    if (interval != immediate) {
         const int refreshes = interval >= 8u ? 4 : interval >= 4u ? 3 : interval == 2u ? 2 : 1;
         const double delay = host_present_refresh_delay(refreshes);
         if (delay > 0)
@@ -4724,6 +4792,17 @@ void Dev_CreateQuery(X86 *c) {
         com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
+    if (out && !gm_valid(out, 4)) {
+        com_ret(c, D3DERR_INVALIDCALL);
+        return;
+    }
+    if (type != 8 && type != 9) {
+        log_once("d3d9.create_query.unavailable",
+                 "d3d9: CreateQuery type %u not supported by driver; returning D3DERR_NOTAVAILABLE",
+                 type);
+        com_ret(c, D3DERR_NOTAVAILABLE);
+        return;
+    }
     recomp::d3d::ValueResult result = dev->d3d9_device->create_query(type);
     if (!out) {
         if (result.status.code == recomp::d3d::StatusCode::Ok && result.value) {
@@ -4732,12 +4811,6 @@ void Dev_CreateQuery(X86 *c) {
         } else {
             com_ret(c, D3DERR_NOTAVAILABLE);
         }
-        return;
-    }
-    if (!gm_valid(out, 4)) {
-        if (result.status.code == recomp::d3d::StatusCode::Ok && result.value)
-            dev->d3d9_device->destroy_query(result.value);
-        com_ret(c, D3DERR_INVALIDCALL);
         return;
     }
     if (result.status.code != recomp::d3d::StatusCode::Ok) {
@@ -6804,6 +6877,7 @@ static void d3d9_device_destroy(ComObj *o) {
     }
     o->dev_d3d = 0;
     o->d3d9_focus_window = 0;
+    o->d3d9_software_vp = false;
 }
 
 static void d3d9_child_refs_changed(ComObj *o) {

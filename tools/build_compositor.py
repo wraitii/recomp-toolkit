@@ -2,7 +2,7 @@
 import argparse
 import os
 from pathlib import Path
-from cargo_build import build_static_library, native_target_args
+from cargo_build import android_cross_env, build_static_library, native_target_args
 
 
 def main():
@@ -14,7 +14,7 @@ def main():
     parser.add_argument("--target")
     parser.add_argument("--deployment-target")
     args = parser.parse_args()
-    env = dict(os.environ, CARGO_TARGET_DIR=str(args.target_dir))
+    env = android_cross_env(dict(os.environ, CARGO_TARGET_DIR=str(args.target_dir)), args.target)
     if args.deployment_target:
         env["MACOSX_DEPLOYMENT_TARGET"] = args.deployment_target
     try:

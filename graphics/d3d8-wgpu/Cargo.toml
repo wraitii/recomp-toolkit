@@ -47,7 +47,7 @@ pollster.workspace = true
 raw-window-handle = "0.6"
 recomp-gpu = { path = "../gpu" }
 recomp-compositor = { path = "../compositor", default-features = false, features = ["gpu"] }
-smallvec = { version = "1", features = ["union"] }
+smallvec = { version = "1", features = ["const_generics", "union"] }
 texpresso = "2"
 wgpu.workspace = true
 winit = { version = "0.30", optional = true }

@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         adapter: 1,
         device_type: 0,
         behavior_flags: 0,
+        full_detail_mips: false,
         present,
         display_mode: DisplayMode::default(),
     })

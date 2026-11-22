@@ -348,13 +348,69 @@ impl Drop for PendingWork {
     }
 }
 
+pub(crate) struct DriverPipelineCache {
+    pub(crate) handle: wgpu::PipelineCache,
+    path: std::path::PathBuf,
+    state: Mutex<(std::time::Instant, bool)>,
+}
+
+impl DriverPipelineCache {
+    const MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+    pub(crate) fn open(device: &wgpu::Device, path: std::path::PathBuf) -> Self {
+        let data = std::fs::metadata(&path)
+            .ok()
+            .filter(|metadata| metadata.len() <= Self::MAX_BYTES)
+            .and_then(|_| std::fs::read(&path).ok());
+        // The Android host supplies the application's private directory.
+        // Its only writer stores bytes returned by this cache API.
+        let handle = unsafe {
+            device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                label: Some("D3D9 driver pipeline cache"),
+                data: data.as_deref(),
+                fallback: true,
+            })
+        };
+        eprintln!("[d3d9] driver pipeline cache loaded {} bytes", data.as_ref().map_or(0, Vec::len));
+        Self {
+            handle,
+            path,
+            state: Mutex::new((std::time::Instant::now(), false)),
+        }
+    }
+
+    pub(crate) fn end_frame(&self, compiled_pipelines: bool) {
+        let mut state = self.state.lock().unwrap();
+        state.1 |= compiled_pipelines;
+        if !state.1 || state.0.elapsed() < std::time::Duration::from_secs(10) {
+            return;
+        }
+        state.0 = std::time::Instant::now();
+        let Some(data) = self.handle.get_data() else {
+            return;
+        };
+        if data.len() as u64 > Self::MAX_BYTES {
+            return;
+        }
+        let temporary = self.path.with_extension("tmp");
+        match std::fs::write(&temporary, &data)
+            .and_then(|_| std::fs::rename(&temporary, &self.path))
+        {
+            Ok(()) => state.1 = false,
+            Err(error) => eprintln!("[d3d9] could not save driver pipeline cache: {error}"),
+        }
+    }
+}
+
 pub struct D3d9Gpu {
     pub device: wgpu::Device,
+    pub(crate) driver_cache: Option<Arc<DriverPipelineCache>>,
     limits: Arc<wgpu::Limits>,
     pub(crate) backend: wgpu::Backend,
     pub(crate) shader_mode: Option<String>,
     pub(crate) shader_mode_error: Option<String>,
     pub(crate) tint: bool,
+    pub(crate) full_detail_mips: bool,
     pub(crate) interpreter:
         Arc<std::sync::OnceLock<crate::render::interpreter::PreparedInterpreter>>,
     queue: wgpu::Queue,
@@ -368,11 +424,13 @@ impl Clone for D3d9Gpu {
     fn clone(&self) -> Self {
         Self {
             device: self.device.clone(),
+            driver_cache: self.driver_cache.clone(),
             limits: Arc::clone(&self.limits),
             backend: self.backend,
             shader_mode: self.shader_mode.clone(),
             shader_mode_error: self.shader_mode_error.clone(),
             tint: self.tint,
+            full_detail_mips: self.full_detail_mips,
             interpreter: Arc::clone(&self.interpreter),
             queue: self.queue.clone(),
             pending: Arc::clone(&self.pending),
@@ -413,11 +471,13 @@ impl D3d9Gpu {
     pub(crate) fn from_context_with_loss(gpu: &GpuContext, loss: D3d9Loss) -> Self {
         Self {
             device: gpu.device.clone(),
+            driver_cache: gpu.d3d9_driver_cache.clone(),
             limits: Arc::new(gpu.device.limits()),
             backend: gpu.adapter_info.backend,
             shader_mode: None,
             shader_mode_error: None,
             tint: false,
+            full_detail_mips: false,
             interpreter: Arc::new(std::sync::OnceLock::new()),
             queue: gpu.queue.clone(),
             pending: pending_work(gpu),

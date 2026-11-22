@@ -38,6 +38,7 @@ struct Gen<'a> {
     stages: BTreeSet<u32>,
     failed: Option<String>,
     seq: u32,
+    texm_rows: Vec<(u32, String)>,
 }
 
 impl<'a> Gen<'a> {
@@ -49,6 +50,7 @@ impl<'a> Gen<'a> {
             stages: BTreeSet::new(),
             failed: None,
             seq: 0,
+            texm_rows: Vec::new(),
         }
     }
 
@@ -284,8 +286,14 @@ impl<'a> Gen<'a> {
         } else {
             format!("({c}).xy")
         };
-        let sampled = if bias {
-            format!("textureSampleBias(tx{stage}, sm{stage}, {lookup}, ({coord}).w)")
+        let sampled = if self.p.pixel {
+            let sampler_bias = format!("psp.lod_bias[{}][{}]", stage / 4, stage % 4);
+            let bias = if bias {
+                format!("{sampler_bias} + ({coord}).w")
+            } else {
+                sampler_bias
+            };
+            format!("textureSampleBias(tx{stage}, sm{stage}, {lookup}, {bias})")
         } else {
             format!("textureSample(tx{stage}, sm{stage}, {lookup})")
         };
@@ -476,6 +484,95 @@ impl<'a> Gen<'a> {
         self.write(&inst.dst, &sampled);
     }
 
+    fn texreg2rgb(&mut self, inst: &Inst) {
+        let n = inst.dst.index;
+        let src = self.s(inst, 0);
+        let coord = format!("vec4<f32>(({src}).xyz, 1.0)");
+        let sampled = self.sample(n, &coord, false, false);
+        self.write(&inst.dst, &sampled);
+    }
+
+    fn texdp3(&mut self, inst: &Inst, sample: bool) {
+        let n = inst.dst.index;
+        let src = self.s(inst, 0);
+        let d = format!("dot(tc[{n}].xyz, ({src}).xyz)");
+        if sample {
+            let coord = format!("vec4<f32>({d}, 0.0, 0.0, 1.0)");
+            let sampled = self.sample(n, &coord, false, false);
+            self.write(&inst.dst, &sampled);
+        } else {
+            self.write(&inst.dst, &format!("vec4<f32>({d})"));
+        }
+    }
+
+    fn texm_pad(&mut self, inst: &Inst) {
+        let n = inst.dst.index;
+        let src = self.s(inst, 0);
+        let id = self.seq;
+        self.seq += 1;
+        let name = format!("texm{id}");
+        self.body += &format!("let {name}: f32 = dot(tc[{n}].xyz, ({src}).xyz);\n");
+        self.texm_rows.push((n, name));
+    }
+
+    fn texm3x2tex(&mut self, inst: &Inst) {
+        if self.texm_rows.len() != 1 {
+            self.fail("TEXM3x2TEX requires 1 preceding TEXM3x2PAD");
+            return;
+        }
+        let (_, u) = self.texm_rows.remove(0);
+        let n = inst.dst.index;
+        let src = self.s(inst, 0);
+        let coord = format!("vec4<f32>({u}, dot(tc[{n}].xyz, ({src}).xyz), 0.0, 1.0)");
+        let sampled = self.sample(n, &coord, false, false);
+        self.write(&inst.dst, &sampled);
+    }
+
+    fn texm3x3(&mut self, inst: &Inst, mode: u32) {
+        if self.texm_rows.len() != 2 {
+            self.fail("TEXM3x3* requires 2 preceding TEXM3x3PAD instructions");
+            return;
+        }
+        let (d0, u) = self.texm_rows.remove(0);
+        let (d1, v) = self.texm_rows.remove(0);
+        let n = inst.dst.index;
+        let src = self.s(inst, 0);
+        let id = self.seq;
+        self.seq += 1;
+        let vname = format!("texm_v{id}");
+        self.body += &format!(
+            "let {vname}: vec3<f32> = vec3<f32>({u}, {v}, dot(tc[{n}].xyz, ({src}).xyz));\n"
+        );
+        match mode {
+            0 => {
+                // TEXM3x3: store vector directly without sampling
+                self.write(&inst.dst, &format!("vec4<f32>({vname}, 1.0)"));
+            }
+            1 => {
+                // TEXM3x3TEX: sample stage n with (u, v, w)
+                let sampled = self.sample(n, &format!("vec4<f32>({vname}, 1.0)"), false, false);
+                self.write(&inst.dst, &sampled);
+            }
+            2 | 3 => {
+                // 2 = TEXM3x3SPEC (eye in src1), 3 = TEXM3x3VSPEC (eye in tc[d0].w, tc[d1].w, tc[n].w)
+                let eye = if mode == 2 {
+                    format!("({}).xyz", self.s(inst, 1))
+                } else {
+                    format!("vec3<f32>(tc[{d0}].w, tc[{d1}].w, tc[{n}].w)")
+                };
+                let rid = self.seq;
+                self.seq += 1;
+                let rname = format!("texm_r{rid}");
+                self.body += &format!(
+                    "let {rname}: vec3<f32> = 2.0 * (dot({vname}, {eye}) / max(dot({vname}, {vname}), 1e-12)) * {vname} - {eye};\n"
+                );
+                let sampled = self.sample(n, &format!("vec4<f32>({rname}, 1.0)"), false, false);
+                self.write(&inst.dst, &sampled);
+            }
+            _ => unreachable!(),
+        }
+    }
+
     fn tex(&mut self, inst: &Inst) {
         if self.p.major >= 2 {
             let sampler = inst.src[1];
@@ -509,6 +606,15 @@ impl<'a> Gen<'a> {
             OP_TEX => self.tex(inst),
             OP_TEXREG2AR => self.texreg(inst, 3, 0),
             OP_TEXREG2GB => self.texreg(inst, 1, 2),
+            OP_TEXREG2RGB => self.texreg2rgb(inst),
+            OP_TEXDP3 => self.texdp3(inst, false),
+            OP_TEXDP3TEX => self.texdp3(inst, true),
+            OP_TEXM3X2PAD | OP_TEXM3X3PAD => self.texm_pad(inst),
+            OP_TEXM3X2TEX => self.texm3x2tex(inst),
+            OP_TEXM3X3 => self.texm3x3(inst, 0),
+            OP_TEXM3X3TEX => self.texm3x3(inst, 1),
+            OP_TEXM3X3SPEC => self.texm3x3(inst, 2),
+            OP_TEXM3X3VSPEC => self.texm3x3(inst, 3),
             _ => {
                 if let Some(v) = self.pure(inst) {
                     self.write(&inst.dst, &v);

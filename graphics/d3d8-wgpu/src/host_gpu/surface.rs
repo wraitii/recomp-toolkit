@@ -33,8 +33,9 @@ impl SurfaceState {
         native_surface: *mut c_void,
     ) -> Result<wgpu::Surface<'static>, String> {
         use raw_window_handle::{
-            RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
-            Win32WindowHandle, WindowsDisplayHandle, XlibDisplayHandle, XlibWindowHandle,
+            AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle,
+            WaylandDisplayHandle, WaylandWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
+            XlibDisplayHandle, XlibWindowHandle,
         };
         use std::num::NonZeroIsize;
         use std::ptr::NonNull;
@@ -75,6 +76,13 @@ impl SurfaceState {
                 (
                     RawDisplayHandle::Xlib(XlibDisplayHandle::new(Some(display), desc.screen)),
                     RawWindowHandle::Xlib(XlibWindowHandle::new(window)),
+                )
+            }
+            4 => {
+                let window = NonNull::new(desc.window).ok_or("surface: null Android window")?;
+                (
+                    RawDisplayHandle::Android(AndroidDisplayHandle::new()),
+                    RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(window)),
                 )
             }
             _ => return Err("surface: unsupported SDL window handle".into()),

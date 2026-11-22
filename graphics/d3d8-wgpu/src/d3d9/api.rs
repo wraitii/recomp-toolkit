@@ -663,6 +663,7 @@ impl Device {
                 display_mode: display_mode.into(),
                 implicit_external_refs: false,
                 window_valid: true,
+                binding_only_resources: Vec::new(),
             },
         );
         check(result.status)?;

@@ -543,18 +543,6 @@ fn append_f32_le(out: &mut Vec<u8>, values: &[f32]) {
     }
 }
 
-fn append_u32_le(out: &mut Vec<u8>, values: &[u32]) {
-    if cfg!(target_endian = "little") {
-        out.extend_from_slice(bytemuck::cast_slice(values));
-    } else {
-        let start = out.len();
-        out.resize(start + values.len() * 4, 0);
-        for (destination, value) in out[start..].chunks_exact_mut(4).zip(values) {
-            destination.copy_from_slice(&value.to_le_bytes());
-        }
-    }
-}
-
 fn flat_to_u8(values: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(values.len().saturating_mul(4));
     append_f32_le(&mut out, values);
@@ -1105,26 +1093,24 @@ fn ff_op(op: u32, a: &str, b: &str, c: &str) -> Result<String, RenderError> {
         }
     })
 }
+fn ff_stages<'a>(
+    state: &'a D3d9State,
+    textures: &'a [BoundTexture],
+) -> impl Iterator<Item = (u32, Option<&'a BoundTexture>)> {
+    (0..8)
+        .map(move |stage| (stage, textures.iter().find(|t| t.stage == stage)))
+        .take_while(move |&(stage, bound)| {
+            tss(state, stage, 1) != 1 && (bound.is_some() || tss(state, stage, 2) & 15 != 2)
+        })
+}
+
 fn ff_fragment_source(state: &D3d9State, textures: &[BoundTexture]) -> Result<String, RenderError> {
     let mut source = String::from(V2F);
     source += &shader_interface::pixel_parameters(false);
-    source += "@group(0) @binding(3) var<uniform> psp:PSP;\n";
-    let mut body = format!(
-        "var current=vin.d0;var temp=vec4<f32>(0.0);let tfactor=vec4<f32>({},{},{},{});\n",
-        color(rs(state, 60))[0],
-        color(rs(state, 60))[1],
-        color(rs(state, 60))[2],
-        color(rs(state, 60))[3]
-    );
-    for stage in 0..8 {
+    source += "@group(0) @binding(2) var<uniform> tfactor:vec4<f32>;\n@group(0) @binding(3) var<uniform> psp:PSP;\n";
+    let mut body = String::from("var current=vin.d0;var temp=vec4<f32>(0.0);\n");
+    for (stage, bound) in ff_stages(state, textures) {
         let op = tss(state, stage, 1);
-        if op == 1 {
-            break;
-        }
-        let bound = textures.iter().find(|t| t.stage == stage);
-        if bound.is_none() && tss(state, stage, 2) & 15 == 2 {
-            break;
-        }
         let alpha_op = tss(state, stage, 4);
         if alpha_op == 1 {
             return Err(unsupported(
@@ -1164,10 +1150,7 @@ fn ff_fragment_source(state: &D3d9State, textures: &[BoundTexture]) -> Result<St
             tss(state, stage, 6),
             tss(state, stage, 27),
         );
-        let texture = textures
-            .iter()
-            .find(|t| t.stage == stage)
-            .filter(|_| needs_texture);
+        let texture = bound.filter(|_| needs_texture);
         if needs_texture && texture.is_none() {
             return Err(unsupported(
                 "Draw",
@@ -1217,8 +1200,10 @@ fn ff_fragment_source(state: &D3d9State, textures: &[BoundTexture]) -> Result<St
                 coord = format!("({coord}/{coord}.{component})");
             }
             let sample = format!(
-                "textureSample(tx{stage},sm{stage},({coord}).{})",
-                if t.cube || t.volume { "xyz" } else { "xy" }
+                "textureSampleBias(tx{stage},sm{stage},({coord}).{},psp.lod_bias[{}][{}])",
+                if t.cube || t.volume { "xyz" } else { "xy" },
+                stage / 4,
+                stage % 4
             );
             body += &format!(
                 "let tex={};\n",
@@ -1289,6 +1274,7 @@ fn stencil_op(value: u32) -> wgpu::StencilOperation {
 fn depth_state(
     state: &D3d9State,
     depth: Option<&SurfaceView>,
+    topology: wgpu::PrimitiveTopology,
 ) -> Result<Option<wgpu::DepthStencilState>, RenderError> {
     let Some(depth) = depth else {
         return Ok(None);
@@ -1322,15 +1308,31 @@ fn depth_state(
     } else {
         wgpu::StencilState::default()
     };
-    let bias = f32::from_bits(rs(state, 195));
-    if bias != 0.0 {
-        return Err(unsupported(
-            "Draw",
-            "constant depth bias conversion is deferred",
-        ));
-    }
+    let format = depth.texture.format();
+    // D3D9 applies depth bias only to triangles, including wireframe triangles.
+    let bias = if matches!(
+        topology,
+        wgpu::PrimitiveTopology::TriangleList | wgpu::PrimitiveTopology::TriangleStrip
+    ) {
+        // Convert normalized D3D9 depth to WebGPU depth units. Floating-point
+        // units vary with the primitive, so use the spacing just below 1.0.
+        let depth_units = match format {
+            wgpu::TextureFormat::Depth16Unorm => 65_535.0,
+            wgpu::TextureFormat::Depth24Plus | wgpu::TextureFormat::Depth24PlusStencil8 => {
+                16_777_215.0
+            }
+            _ => 16_777_216.0,
+        };
+        wgpu::DepthBiasState {
+            constant: (f64::from(f32::from_bits(rs(state, 195))) * depth_units).round() as i32,
+            slope_scale: f32::from_bits(rs(state, 175)),
+            clamp: 0.0,
+        }
+    } else {
+        wgpu::DepthBiasState::default()
+    };
     Ok(Some(wgpu::DepthStencilState {
-        format: depth.texture.format(),
+        format,
         depth_write_enabled: Some(rs(state, 7) != 0 && rs(state, 14) != 0),
         depth_compare: Some(if rs(state, 7) != 0 {
             compare(rs(state, 23))
@@ -1338,11 +1340,7 @@ fn depth_state(
             wgpu::CompareFunction::Always
         }),
         stencil,
-        bias: wgpu::DepthBiasState {
-            constant: 0,
-            slope_scale: f32::from_bits(rs(state, 175)),
-            clamp: 0.0,
-        },
+        bias,
     }))
 }
 fn blend_factor(v: u32, alpha: bool) -> Result<wgpu::BlendFactor, RenderError> {
@@ -1489,17 +1487,15 @@ fn sampler(
             }
         })
     };
-    if ss(state, t.stage, 8) != 0 {
-        return Err(unsupported("Draw", "sampler LOD bias is not implemented"));
-    }
     if ss(state, t.stage, 11) != 0 {
         return Err(unsupported(
             "Draw",
             "sRGB texture sampling views are not implemented",
         ));
     }
+    let resource_lod = if gpu.full_detail_mips { 0 } else { t.lod };
     let lod_min = ss(state, t.stage, 9)
-        .max(t.lod)
+        .max(resource_lod)
         .min(t.levels.saturating_sub(1)) as f32;
     let lod_max = if ss(state, t.stage, 7) == 0 {
         lod_min
@@ -2037,6 +2033,9 @@ impl D3d9DrawState {
     pub(crate) fn end_frame(&mut self, gpu: &D3d9Gpu) {
         stats::end_frame();
         self.memo_capture.end_frame(self.frame);
+        if let Some(cache) = &gpu.driver_cache {
+            cache.end_frame(self.pipeline_ms != 0.0);
+        }
         if uber::hybrid(gpu) {
             if let Some(compiler) = &mut self.compiler {
                 compiler.end_frame(self.frame);
@@ -2362,7 +2361,11 @@ impl D3d9DrawState {
     ) -> wgpu::RenderPipeline {
         let pipeline = recipe
             .prepare(key.modules.clone(), key.layout.clone())
-            .create(&gpu.device, "d3d9-cached");
+            .create(
+                &gpu.device,
+                "d3d9-cached",
+                gpu.driver_cache.as_ref().map(|cache| &cache.handle),
+            );
         self.cache_pipeline(
             recipe,
             CompiledPipeline {
@@ -2504,35 +2507,33 @@ fn fixed_function_key(
     state: &D3d9State,
     textures: &[BoundTexture],
 ) -> ShaderVariantKey {
-    let head = [rs(state, 9), rs(state, 29), rs(state, 60)];
     if !pixel {
         return ShaderVariantKey {
             pixel,
             shader: ShaderOrigin::FixedFunction,
-            state: KeyWords::from_slice(&head),
+            state: KeyWords::from_slice(&[rs(state, 9)]),
         };
     }
-    let mut values = Vec::with_capacity(92 + textures.len() * 5);
-    values.extend_from_slice(&head);
-    values.push(u32::from(state.shader(false) != 0));
-    for stage in 0..8 {
+    let mut values: SmallVec<[u32; 52]> = smallvec![
+        rs(state, 9),
+        u32::from(rs(state, 29) != 0),
+        u32::from(state.shader(false) != 0),
+    ];
+    for (stage, texture) in ff_stages(state, textures) {
         for id in [1, 2, 3, 4, 5, 6, 24, 26, 27, 28, 32] {
             values.push(tss(state, stage, id));
         }
-    }
-    for texture in textures {
-        values.extend_from_slice(&[
-            texture.stage,
-            texture.format,
-            texture.depth as u32,
-            texture.cube as u32,
-            texture.volume as u32,
-        ]);
+        values.push(texture.map_or(0, |texture| {
+            1 | (u32::from(opaque_format(texture.format)) << 1)
+                | (u32::from(texture.depth) << 2)
+                | (u32::from(texture.cube) << 3)
+                | (u32::from(texture.volume) << 4)
+        }));
     }
     ShaderVariantKey {
         pixel,
         shader: ShaderOrigin::FixedFunction,
-        state: KeyWords::Heap(values),
+        state: KeyWords::from_slice(&values),
     }
 }
 
@@ -2773,6 +2774,7 @@ fn pipeline_descriptor(
         blend: blend_state(state, opaque_format(snapshot.target.format))?,
         write_mask: wgpu::ColorWrites::from_bits_truncate(rs(state, 168)),
     };
+    let depth = depth_state(state, snapshot.depth.as_ref(), topology)?;
     Ok(PipelineDescriptor {
         entry_points: ["vs_main", "ps_main"],
         target: Some(target),
@@ -2784,7 +2786,7 @@ fn pipeline_descriptor(
             polygon_mode: fill_mode(gpu, state)?,
             ..Default::default()
         },
-        depth: depth_state(state, snapshot.depth.as_ref())?,
+        depth,
         multisample: wgpu::MultisampleState {
             mask: u64::from(rs(state, 162)),
             ..Default::default()
@@ -3243,7 +3245,7 @@ pub(crate) fn execute(
                 tss(state, texture.stage, 6)
             );
             eprintln!(
-                "[d3d9-trace] stage={} coord_index={:#x} transform_flags={:#x} matrix={:?} address={:?}",
+                "[d3d9-trace] stage={} coord_index={:#x} transform_flags={:#x} matrix={:?} address={:?} filters={:?} max_mip={} lod_bias={}",
                 texture.stage,
                 tss(state, texture.stage, 11),
                 tss(state, texture.stage, 24),
@@ -3252,7 +3254,10 @@ pub(crate) fn execute(
                     ss(state, texture.stage, 1),
                     ss(state, texture.stage, 2),
                     ss(state, texture.stage, 3)
-                ]
+                ],
+                [5, 6, 7].map(|id| ss(state, texture.stage, id)),
+                ss(state, texture.stage, 9),
+                f32::from_bits(ss(state, texture.stage, 8)),
             );
         }
         eprintln!(
@@ -3401,30 +3406,35 @@ pub(crate) fn execute(
         [1.0 / vp.width as f32, -1.0 / vp.height as f32, 0.0, 0.0],
         psp_words,
     );
+    let lod_bias = |stage| {
+        let bias = ss(state, stage, 8);
+        if gpu.full_detail_mips && f32::from_bits(bias) > 0.0 {
+            0
+        } else {
+            bias
+        }
+    };
     if interpreted {
-        let (opaque, unbound) = ps
+        let mapping = &ps
             .unwrap()
             .interpreter
             .as_ref()
             .map_err(|why| unsupported("InterpreterDraw", why.to_string()))?
-            .sampler_mapping
-            .iter()
-            .copied()
-            .fold(
-                (0, 0),
-                |(opaque, unbound), (guest, physical)| match snapshot
-                    .textures
-                    .iter()
-                    .find(|t| t.stage == guest)
-                {
-                    Some(texture) => (
-                        opaque | (u32::from(opaque_format(texture.format)) << physical),
-                        unbound,
-                    ),
-                    None => (opaque, unbound | (1 << physical)),
-                },
-            );
+            .sampler_mapping;
+        let (mut opaque, mut unbound) = (0, 0);
+        for &(guest, physical) in mapping {
+            if let Some(texture) = snapshot.textures.iter().find(|t| t.stage == guest) {
+                opaque |= u32::from(opaque_format(texture.format)) << physical;
+                parameters.sampler_lod_bias(physical, lod_bias(guest));
+            } else {
+                unbound |= 1 << physical;
+            }
+        }
         parameters.interpreter_flags(opaque, unbound, uber::tint_enabled(gpu));
+    } else {
+        for texture in &snapshot.textures {
+            parameters.sampler_lod_bias(texture.stage, lod_bias(texture.stage));
+        }
     }
     let has_attributes = !vertices.attributes.is_empty();
     let buffers = match native_geometry.as_ref() {
@@ -3536,13 +3546,20 @@ pub(crate) fn execute(
     {
         flush(gpu, draw, queries)?;
     }
+    // Fixed-function draws use the pixel constant slot for D3DRS_TEXTUREFACTOR.
+    let texture_factor = color(rs(state, 60)).map(f32::to_le_bytes);
+    let pixel_constants = if ps.is_some() {
+        state.constants_f_bytes(true, memo.ps_count)?
+    } else {
+        texture_factor.as_flattened()
+    };
     let uniform_values = parameters.values(
         if ff_key.is_some() {
             bytemuck::cast_slice(&ff_uniforms)
         } else {
             state.constants_f_bytes(false, memo.vs_count)?
         },
-        state.constants_f_bytes(true, memo.ps_count)?,
+        pixel_constants,
     );
     if interpreted {
         draw.interpreter_frame.uniform_bytes += uniform_values
@@ -3557,7 +3574,7 @@ pub(crate) fn execute(
             memo.vs_count,
             memo.ps_count,
             uniform_values.map(|v| self::fingerprint(&v)),
-            depth_state(state, snapshot.depth.as_ref())?,
+            depth_state(state, snapshot.depth.as_ref(), topology)?,
             blend_state(state, opaque_format(snapshot.target.format))?,
             self::fingerprint(&vertices.bytes)
         );
@@ -4031,7 +4048,6 @@ fn flush_inner(
         .map(|pending| u64::from(pending.viewport.width) * u64::from(pending.viewport.height))
         .max()
         .unwrap_or(0);
-    let segment = queries.open_segment(area)?;
     let needed = draw.batch.data.len().max(4) as u64;
     if needed > gpu.limits().max_buffer_size || needed > u32::MAX as u64 {
         return Err(RenderError::out_of_memory(
@@ -4039,6 +4055,7 @@ fn flush_inner(
             "draw upload exceeds the device buffer limit",
         ));
     }
+    let segment = queries.open_segment(gpu, area)?;
     let recorder = Arc::clone(&draw.recorder);
     let mut spare = recorder
         .try_lock()

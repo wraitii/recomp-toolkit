@@ -158,18 +158,14 @@ impl Poller {
                         break;
                     }
                 } else if matches!(
-                    receiver.try_recv(),
-                    Err(std::sync::mpsc::TryRecvError::Disconnected)
+                    receiver.recv_timeout(std::time::Duration::from_millis(2)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
                 ) {
                     break;
                 }
                 if active.load(std::sync::atomic::Ordering::Acquire) != 0 {
-                    match context.device.poll(wgpu::PollType::Wait {
-                        submission_index: None,
-                        timeout: Some(std::time::Duration::from_millis(10)),
-                    }) {
-                        Ok(_) | Err(wgpu::PollError::Timeout) => (),
-                        Err(error) => eprintln!("host GPU completion polling: {error}"),
+                    if let Err(error) = context.device.poll(wgpu::PollType::Poll) {
+                        eprintln!("host GPU completion polling: {error}");
                     }
                 }
             }

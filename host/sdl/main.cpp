@@ -213,6 +213,36 @@ HostWindowSize viewport_window_size_for(int gw, int gh) {
 // itself, which keeps clear of a camera notch, or else the window's display.
 std::atomic<int> g_screen_w{0}, g_screen_h{0};
 std::atomic<double> g_screen_refresh_rate{60.0};
+void limit_guest_render_size(int &w, int &h) {
+#ifdef __ANDROID__
+    static const int render_height = [] {
+        const char *value = recomp_env("ANDROID_RENDER_HEIGHT");
+        if (value && *value) {
+            char *end = nullptr;
+            const long parsed = strtol(value, &end, 10);
+            if (*end == '\0' && parsed == 0)
+                return 0;
+            if (*end == '\0' && parsed >= 480 && parsed <= 2160) {
+                os_setenv("RECOMP_D3D9_LIMIT_DISPLAY_MODES", "1");
+                return int(parsed);
+            }
+        }
+        os_setenv("RECOMP_D3D9_LIMIT_DISPLAY_MODES", "1");
+        return 720;
+    }();
+    if (w < h)
+        std::swap(w, h);
+    const int short_side = h;
+    if (render_height && short_side > render_height) {
+        w = int((int64_t(w) * render_height + short_side / 2) / short_side);
+        h = int((int64_t(h) * render_height + short_side / 2) / short_side);
+    }
+#else
+    (void)w;
+    (void)h;
+#endif
+}
+
 void note_screen_size() {
     SDL_DisplayID display = g_window ? SDL_GetDisplayForWindow(g_window) : SDL_GetPrimaryDisplay();
     double refresh_rate = 0.0;
@@ -236,10 +266,12 @@ void note_screen_size() {
     }
     if (const SDL_DisplayMode *mode = SDL_GetDesktopDisplayMode(display)) {
         refresh_rate = std::max(refresh_rate, double(mode->refresh_rate));
-        const int pw = int(std::lround(mode->w * mode->pixel_density));
-        const int ph = int(std::lround(mode->h * mode->pixel_density));
-        if (pw > 0 && ph > 0)
+        int pw = int(std::lround(mode->w * mode->pixel_density));
+        int ph = int(std::lround(mode->h * mode->pixel_density));
+        if (pw > 0 && ph > 0) {
+            limit_guest_render_size(pw, ph);
             host_display_set_screen(pw, ph);
+        }
     }
     if (refresh_rate <= 1.0)
         refresh_rate = 60.0;
@@ -247,6 +279,7 @@ void note_screen_size() {
         fprintf(stderr, "[host] display maximum refresh rate %.3f Hz\n", refresh_rate);
     if (w <= 0 || h <= 0)
         return;
+    limit_guest_render_size(w, h);
     g_screen_w.store(w);
     g_screen_h.store(h);
 }
@@ -1688,6 +1721,8 @@ void fit_borderless_window() {
 // window events; another setting can supersede it meanwhile.
 void apply_window_mode() {
     int request = host_display_take_window();
+    if (!platform_ui_pointer_capture_supported())
+        return;
     if (request >= 0)
         g_wanted_window_mode = request;
     if (!g_window || g_viewport_active || !g_game_window_shown || g_fullscreen_transition)
@@ -2262,6 +2297,9 @@ int main(int argc, char **argv) {
 #endif
 #ifdef __ANDROID__
     platform_ui_init_hints(); // stdout and stderr reach logcat from here on
+    if (const char *internal = SDL_GetAndroidInternalStoragePath(); internal && *internal)
+        os_setenv("RECOMP_D3D9_PIPELINE_CACHE",
+                  (std::string(internal) + "/d3d9-pipelines.bin").c_str());
     (void)exe_flag;           // The mobile app always uses its own external data root.
     // SDL's Java glue has initialized the app-specific external files path
     // before SDL_main. Resolve it before host_layout caches a profile path.

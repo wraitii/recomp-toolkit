@@ -218,6 +218,7 @@ pub mod ffi {
         adapter: u32,
         device_type: u32,
         behavior_flags: u32,
+        full_detail_mips: bool,
         present: D3d9PresentParams,
         display_mode: D3d9DisplayMode,
     }
@@ -244,6 +245,7 @@ pub mod ffi {
         display_mode: D3d9DisplayMode,
         implicit_external_refs: bool,
         window_valid: bool,
+        binding_only_resources: Vec<u32>,
     }
 
     struct D3d9ResetResult {

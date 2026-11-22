@@ -303,6 +303,10 @@ void WgpuDevice::release_drawable(Swapchain s, Texture t) {
 }
 void WgpuDevice::present(CommandBuffer cb, Swapchain s, Texture t, double duration,
                          std::function<void(double)> fn) {
+    if (!fn) {
+        host_gpu_swapchain_present(gpu_, cb.id, s.id, t.id, duration, nullptr, nullptr);
+        return;
+    }
     using Callback = std::function<void(double)>;
     auto *callback = new Callback(std::move(fn));
     host_gpu_swapchain_present(

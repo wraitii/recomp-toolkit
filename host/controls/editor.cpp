@@ -375,7 +375,7 @@ void Editor::set_moving_rect(const Rect &r, bool reanchor) {
     if (!selection_valid())
         return;
     Rect area = anchor_area(layout_, screen_);
-    double scale = screen_.scale > 0 ? screen_.scale : 1.0;
+    const double scale = (screen_.scale > 0 ? screen_.scale : 1.0) * layout_.offset_scale;
     Group &g = layout_.groups[sel_group_];
     Anchor *anchor;
     double *x, *y;

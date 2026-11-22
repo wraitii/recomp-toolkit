@@ -31,7 +31,9 @@ pub fn source() -> String {
     for slot in 0..TEXTURE_SLOTS {
         let components = if slot < TEXTURES_2D { "xy" } else { "xyz" };
         source += &format!(
-            "case {slot}u: {{ value = textureSample(tx{slot}, sm{slot}, coord.{components}); }}\n"
+            "case {slot}u: {{ value = textureSampleBias(tx{slot}, sm{slot}, coord.{components}, psp.lod_bias[{}][{}]); }}\n",
+            slot / 4,
+            slot % 4
         );
     }
     source += "default: {} } if ((psp.texture_flags.x & (1u << slot)) != 0u) { value = vec4<f32>(value.rgb, 1.0); } return value; }\n";

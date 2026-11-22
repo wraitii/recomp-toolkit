@@ -129,7 +129,17 @@ fn operand_count(op: u32, major: u32, minor: u32, pixel: bool) -> Option<u32> {
             }
         }
         OP_TEXKILL => 1,
-        OP_TEXREG2AR | OP_TEXREG2GB => 2,
+        OP_TEXREG2AR
+        | OP_TEXREG2GB
+        | OP_TEXREG2RGB
+        | OP_TEXM3X2PAD
+        | OP_TEXM3X2TEX
+        | OP_TEXM3X3PAD
+        | OP_TEXM3X3TEX
+        | OP_TEXM3X3VSPEC
+        | OP_TEXM3X3
+        | OP_TEXDP3TEX => 2,
+        OP_TEXM3X3SPEC => 3,
         OP_TEX => {
             if major >= 2 {
                 3
@@ -637,7 +647,15 @@ impl Program {
         p.sampled_slots = p.code.iter().fold(0, |slots, inst| {
             let stage = match inst.op {
                 OP_TEX if p.major >= 2 => Some(inst.src[1].index),
-                OP_TEX | OP_TEXREG2AR | OP_TEXREG2GB => Some(inst.dst.index),
+                OP_TEX
+                | OP_TEXREG2AR
+                | OP_TEXREG2GB
+                | OP_TEXREG2RGB
+                | OP_TEXM3X2TEX
+                | OP_TEXM3X3TEX
+                | OP_TEXM3X3SPEC
+                | OP_TEXM3X3VSPEC
+                | OP_TEXDP3TEX => Some(inst.dst.index),
                 _ => None,
             };
             slots | stage.and_then(|stage| 1u16.checked_shl(stage)).unwrap_or(0)

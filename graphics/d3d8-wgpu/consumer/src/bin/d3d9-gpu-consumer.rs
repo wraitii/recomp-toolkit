@@ -333,6 +333,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         adapter: 0,
         device_type: 1,
         behavior_flags: 0x40,
+        full_detail_mips: false,
         present,
         display_mode: DisplayMode::default(),
     };

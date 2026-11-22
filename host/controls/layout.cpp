@@ -565,8 +565,8 @@ Rect group_rect(const Layout &l, int group, const Screen &s) {
         int pitch = int(lround((key_pt + grp.grid.gap) * s.scale));
         int w = pitch * grp.grid.cols;
         int h = pitch * grp.grid.rows;
-        int ox = px(grp.x, s);
-        int oy = px(grp.y, s);
+        int ox = px(grp.x * l.offset_scale, s);
+        int oy = px(grp.y * l.offset_scale, s);
         return place(area, w, h, grp.anchor, ox, oy);
     }
     // Non-grid group: the union of its controls' rects.
@@ -612,8 +612,8 @@ Rect control_rect(const Layout &l, int group, int control, const Screen &s) {
 
     int w = int(lround(c.w * l.scale * s.scale));
     int h = int(lround(c.h * l.scale * s.scale));
-    int ox = px(c.x, s);
-    int oy = px(c.y, s);
+    int ox = px(c.x * l.offset_scale, s);
+    int oy = px(c.y * l.offset_scale, s);
     Rect r = place(area, w, h, c.anchor, ox, oy);
 
     if (!c.stack_on.empty()) {

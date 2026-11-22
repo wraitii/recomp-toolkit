@@ -22,8 +22,11 @@ WindowSurface *make_surface(SDL_Window *window, bool owned) {
         return nullptr;
     auto props = SDL_GetWindowProperties(window);
     auto *surface = new WindowSurface{};
-    surface->window = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
-    if (surface->window) {
+    if ((surface->window =
+             SDL_GetPointerProperty(props, SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr))) {
+        surface->kind = 4;
+    } else if ((surface->window =
+                    SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr))) {
         surface->kind = 1;
         surface->display =
             SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER, nullptr);

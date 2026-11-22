@@ -1,5 +1,6 @@
 pub(crate) const VERTEX_PARAMETER_BYTES: usize = 272;
-pub(crate) const PIXEL_PARAMETER_BYTES: usize = 48;
+pub(crate) const PIXEL_RASTER_PARAMETER_BYTES: usize = 48;
+pub(crate) const PIXEL_PARAMETER_BYTES: usize = PIXEL_RASTER_PARAMETER_BYTES + 16 * 4;
 pub(crate) const INTERPRETER_PARAMETER_BYTES: usize = PIXEL_PARAMETER_BYTES + 16;
 pub(crate) const TEXTURE_BINDING: u32 = 4;
 pub(crate) const SAMPLER_BINDING: u32 = 20;
@@ -14,6 +15,6 @@ pub(crate) fn pixel_parameters(interpreted: bool) -> String {
         ""
     };
     format!(
-        "struct PSP {{ alpha_ref: f32, alpha_func: i32, fog_mode: i32, pad0: i32, fog_color: vec4<f32>, fog_start: f32, fog_end: f32, fog_density: f32, pad1: f32{flags} }}\n"
+        "struct PSP {{ alpha_ref: f32, alpha_func: i32, fog_mode: i32, pad0: i32, fog_color: vec4<f32>, fog_start: f32, fog_end: f32, fog_density: f32, pad1: f32, lod_bias: array<vec4<f32>, 4>{flags} }}\n"
     )
 }

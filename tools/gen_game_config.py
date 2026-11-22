@@ -155,6 +155,11 @@ def render_cmake(cfg):
     lines.append("set(RECOMP_STORE_HOOKS %d)" % int(game["store_hooks"]))
     lines.append("set(RECOMP_CALL_HOOKS %d)" % int(game["call_hooks"]))
     lines.append("set(RECOMP_AUDIO_MIDI %d)" % int(cfg["audio"]["midi"]))
+    lines.append("set(RECOMP_D3D9_ADVERTISE_PIXEL_SHADERS %d)" %
+                 int(cfg["render"]["d3d9_advertise_pixel_shaders"]))
+    lines.append("set(RECOMP_D3D9_PACE_FULLSCREEN_PRESENT %d)" %
+                 int(cfg["render"]["d3d9_pace_fullscreen_present"]))
+    lines.append("set(RECOMP_D3D9_FULL_DETAIL_MIPS %d)" % int(cfg["render"]["d3d9_full_detail_mips"]))
     # The generated sources include this header before they define FN_<addr>,
     # which is how a game replaces one translated function with a native one.
     lines.append('set(RECOMP_OVERRIDE_HEADER "%s")'

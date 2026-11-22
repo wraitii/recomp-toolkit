@@ -152,7 +152,6 @@ bool g_have_layout = false; // g_layout holds a layout the router drives
 std::string g_loaded_name;
 Form g_loaded_form = Form::Tablet;
 double g_file_scale = 1.0;
-int g_size = -1;
 bool g_enabled = false;
 LayoutContent g_content = LayoutContent::Keys; // g_layout's, for auto-hide
 
@@ -165,7 +164,17 @@ uint64_t g_published_revision = 0;
 double size_factor() {
     int size = mods_controls_value(CONTROLS_SIZE_ROW);
     size = size < 0 ? 0 : size > 2 ? 2 : size;
+    if (size == 2 && platform_ui_touch_device() && g_screen.dw >= g_screen.dh &&
+        g_screen.safe.w >= 1500.0 * g_screen.scale &&
+        g_screen.safe.h >= 650.0 * g_screen.scale)
+        return 60.0 / 36.0;
     return kSizePt[size] / 36.0;
+}
+
+void apply_size() {
+    const double factor = size_factor();
+    g_layout.scale = g_file_scale * factor;
+    g_layout.offset_scale = factor > kSizePt[2] / 36.0 ? factor : 1.0;
 }
 
 // The groups the player has hidden, as the settings row stores them: bit i
@@ -270,7 +279,6 @@ void reload(const std::string &name, Form form) {
     g_loaded_form = form;
     g_have_layout = false;
     g_layout = Layout();
-    g_size = -1;
     if (name.empty())
         return;
     Layout fresh;
@@ -385,9 +393,7 @@ void open_editor() {
     g_rumble.stop();
     // A reload just before this (a reset, a switch) left the file's own
     // scale; the editor shows what the player sees, size setting included.
-    g_size = mods_controls_value(CONTROLS_SIZE_ROW);
-    g_size = g_size < 0 ? 0 : g_size > 2 ? 2 : g_size;
-    g_layout.scale = g_file_scale * size_factor();
+    apply_size();
     g_editor.set_screen(g_screen);
     g_editor.set_names(g_store.names());
     g_editor.open(g_layout, g_loaded_form, mods_controls_value(CONTROLS_SNAP_ROW) != 0);
@@ -686,12 +692,7 @@ void host_pump(uint64_t now) {
     }
 
     if (g_have_layout) {
-        int size = mods_controls_value(CONTROLS_SIZE_ROW);
-        size = size < 0 ? 0 : size > 2 ? 2 : size;
-        if (size != g_size) {
-            g_size = size;
-            g_layout.scale = g_file_scale * size_factor();
-        }
+        apply_size();
         // The hidden groups follow the row whoever set it: a toggle writes it
         // (group_visibility_changed), and a settings load or reset may too.
         // The row is per form factor, since one name's forms need not have the

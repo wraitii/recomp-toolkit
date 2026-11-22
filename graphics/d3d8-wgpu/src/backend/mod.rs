@@ -119,6 +119,7 @@ pub struct GpuContext {
     pub(crate) d3d9_pending:
         std::sync::OnceLock<Arc<std::sync::Mutex<crate::d3d9::gpu::PendingWork>>>,
     shared: Arc<recomp_gpu::SharedContext>,
+    pub(crate) d3d9_driver_cache: Option<Arc<crate::d3d9::gpu::DriverPipelineCache>>,
     /// Present surface, or `None` for a headless context.
     surface: Option<wgpu::Surface<'static>>,
     /// Window backing `surface`, kept so `present` can size the swapchain to the
@@ -266,6 +267,7 @@ impl GpuContext {
         );
         Ok(Self {
             d3d9_pending: Default::default(),
+            d3d9_driver_cache: None,
             shared,
             surface: None,
             #[cfg(feature = "windowing")]
@@ -366,7 +368,17 @@ impl GpuContext {
         // Optional features are intersected with the adapter. A guest that
         // selects a feature the adapter lacks fails with a named error later
         // instead of stopping the whole device from opening.
-        let required_features = adapter.features() & requested_features;
+        let cache_path = if cfg!(target_os = "android")
+            && adapter.features().contains(wgpu::Features::PIPELINE_CACHE)
+        {
+            std::env::var_os("RECOMP_D3D9_PIPELINE_CACHE").map(std::path::PathBuf::from)
+        } else {
+            None
+        };
+        let mut required_features = adapter.features() & requested_features;
+        if cache_path.is_some() {
+            required_features |= wgpu::Features::PIPELINE_CACHE;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("d3d8-wgpu"),
@@ -392,6 +404,8 @@ impl GpuContext {
             adapter_info.device
         );
 
+        let d3d9_driver_cache = cache_path
+            .map(|path| Arc::new(crate::d3d9::gpu::DriverPipelineCache::open(&device, path)));
         let shared = Arc::new(
             recomp_gpu::SharedContext::new(adapter, device, queue)
                 .map_err(|message| RenderError::invalid("GpuContext", message))?,
@@ -404,6 +418,7 @@ impl GpuContext {
             });
         Ok(Self {
             d3d9_pending: Default::default(),
+            d3d9_driver_cache,
             shared,
             surface,
             #[cfg(feature = "windowing")]

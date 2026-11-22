@@ -43,16 +43,17 @@ impl Readback {
                 }
             })
             .sum();
-        drop(data);
-        self.buffer.unmap();
         Ok(total.min(u64::from(u32::MAX)) as u32)
     }
 }
 
 enum Occlusion {
     Idle,
-    Recording(Vec<u64>),
-    Pending(Readback),
+    Recording {
+        areas: Vec<u64>,
+        chunks: Vec<Readback>,
+    },
+    Pending(Vec<Readback>),
     Done(u32),
 }
 
@@ -67,23 +68,53 @@ struct QueryRecord {
 struct OcclusionPool {
     set: wgpu::QuerySet,
     boolean: bool,
-    next: u32,
-    outstanding: u32,
     active: Option<u32>,
 }
 
 impl OcclusionPool {
-    fn release(&mut self, occlusion: &Occlusion) {
-        if matches!(occlusion, Occlusion::Pending(_)) {
-            self.outstanding -= 1;
-        }
-        self.retire();
-    }
-
-    fn retire(&mut self) {
-        if self.outstanding == 0 && self.active.is_none() {
-            self.next = 0;
-        }
+    // The resolve and copy are queued before subsequent draws. The guest can
+    // keep the result buffer alive without holding any slots in the query set.
+    fn resolve(&self, gpu: &D3d9Gpu, areas: &mut Vec<u64>) -> Result<Readback, RenderError> {
+        let count = areas.len() as u32;
+        let size = u64::from(count) * OCCLUSION_STRIDE;
+        let readback = gpu.validate("ResolveOcclusion", || {
+            let resolve = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("d3d9-occlusion-resolve"),
+                size,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("d3d9-occlusion-readback"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            gpu.record(|encoder, _| {
+                encoder.resolve_query_set(&self.set, 0..count, &resolve, 0);
+                encoder.copy_buffer_to_buffer(&resolve, 0, &readback, 0, size);
+            });
+            Ok(readback)
+        })?;
+        let mapped = Arc::new(OnceLock::new());
+        let map_target = readback.clone();
+        let flag = Arc::clone(&mapped);
+        let physical = gpu.loss().physical_loss();
+        gpu.submit_then(move |_| {
+            if physical.is_lost() {
+                let _ = flag.set(false);
+                return;
+            }
+            map_target.map_async(wgpu::MapMode::Read, .., move |result| {
+                let _ = flag.set(result.is_ok());
+            });
+        });
+        Ok(Readback {
+            buffer: readback,
+            mapped,
+            areas: std::mem::take(areas),
+            boolean: self.boolean,
+        })
     }
 }
 
@@ -144,23 +175,19 @@ impl D3d9Queries {
         self.occlusion = Some(OcclusionPool {
             set,
             boolean: cfg!(target_vendor = "apple"),
-            next: 0,
-            outstanding: 0,
             active: None,
         });
         Ok(())
     }
 
     pub fn destroy(&mut self, handle: u32) -> Result<(), RenderError> {
-        let record = self
-            .records
+        self.records
             .remove(&handle)
             .ok_or_else(|| RenderError::invalid("DestroyQuery", "unknown query handle"))?;
         if let Some(pool) = self.occlusion.as_mut() {
             if pool.active == Some(handle) {
                 pool.active = None;
             }
-            pool.release(&record.occlusion);
         }
         Ok(())
     }
@@ -189,7 +216,7 @@ impl D3d9Queries {
         let kind = self.kind(handle, "Issue")?;
         match kind {
             D3DQUERYTYPE_EVENT => self.issue_event(gpu, handle, begin),
-            D3DQUERYTYPE_OCCLUSION if begin => self.begin_occlusion(handle),
+            D3DQUERYTYPE_OCCLUSION if begin => self.begin_occlusion(gpu, handle),
             D3DQUERYTYPE_OCCLUSION => self.end_occlusion(gpu, handle),
             _ => Err(RenderError::new("Issue", "query type is not implemented")),
         }
@@ -242,7 +269,8 @@ impl D3d9Queries {
         Ok(())
     }
 
-    fn begin_occlusion(&mut self, handle: u32) -> Result<(), RenderError> {
+    fn begin_occlusion(&mut self, gpu: &D3d9Gpu, handle: u32) -> Result<(), RenderError> {
+        self.ensure_occlusion_pool(gpu)?;
         let pool = self
             .occlusion
             .as_mut()
@@ -257,9 +285,10 @@ impl D3d9Queries {
             .records
             .get_mut(&handle)
             .ok_or_else(|| RenderError::invalid("Issue", "unknown query handle"))?;
-        let previous = std::mem::replace(&mut record.occlusion, Occlusion::Idle);
-        pool.release(&previous);
-        record.occlusion = Occlusion::Recording(Vec::new());
+        record.occlusion = Occlusion::Recording {
+            areas: Vec::new(),
+            chunks: Vec::new(),
+        };
         pool.active = Some(handle);
         Ok(())
     }
@@ -275,95 +304,54 @@ impl D3d9Queries {
                 "D3DISSUE_END without a matching D3DISSUE_BEGIN",
             ));
         }
-        pool.active = None;
         let record = self
             .records
             .get_mut(&handle)
             .ok_or_else(|| RenderError::invalid("Issue", "unknown query handle"))?;
-        let Occlusion::Recording(areas) = std::mem::replace(&mut record.occlusion, Occlusion::Idle)
-        else {
+        let Occlusion::Recording { areas, chunks } = &mut record.occlusion else {
             return Err(RenderError::invalid(
                 "Issue",
                 "occlusion query is not recording",
             ));
         };
-        if areas.is_empty() {
-            record.occlusion = Occlusion::Done(0);
-            pool.retire();
-            return Ok(());
+        if !areas.is_empty() {
+            chunks.push(pool.resolve(gpu, areas)?);
         }
-        let first = pool.next - areas.len() as u32;
-        let size = areas.len() as u64 * OCCLUSION_STRIDE;
-        let readback = gpu.validate("Issue", || {
-            let resolve = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("d3d9-occlusion-resolve"),
-                size,
-                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-            let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("d3d9-occlusion-readback"),
-                size,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            gpu.record(|encoder, _| {
-                encoder.resolve_query_set(&pool.set, first..pool.next, &resolve, 0);
-                encoder.copy_buffer_to_buffer(&resolve, 0, &readback, 0, size);
-            });
-            Ok(readback)
-        })?;
-        let mapped = Arc::new(OnceLock::new());
-        let map_target = readback.clone();
-        let flag = Arc::clone(&mapped);
-        let physical = gpu.loss().physical_loss();
-        gpu.submit_then(move |_| {
-            if physical.is_lost() {
-                let _ = flag.set(false);
-                return;
-            }
-            map_target.map_async(wgpu::MapMode::Read, .., move |result| {
-                let _ = flag.set(result.is_ok());
-            });
-        });
-        record.occlusion = Occlusion::Pending(Readback {
-            buffer: readback,
-            mapped,
-            areas,
-            boolean: pool.boolean,
-        });
-        pool.outstanding += 1;
+        record.occlusion = if chunks.is_empty() {
+            Occlusion::Done(0)
+        } else {
+            Occlusion::Pending(std::mem::take(chunks))
+        };
+        pool.active = None;
         Ok(())
     }
 
-    pub(crate) fn open_segment(&mut self, area: u64) -> Result<Option<u32>, RenderError> {
-        let Some(pool) = self.occlusion.as_mut() else {
+    pub(crate) fn open_segment(
+        &mut self,
+        gpu: &D3d9Gpu,
+        area: u64,
+    ) -> Result<Option<u32>, RenderError> {
+        let Some(pool) = self.occlusion.as_ref() else {
             return Ok(None);
         };
         let Some(handle) = pool.active else {
             return Ok(None);
         };
-        if pool.next >= OCCLUSION_SLOTS {
-            return Err(RenderError::new(
-                "DrawFlush",
-                "occlusion query slots are exhausted",
-            ));
-        }
-        let index = pool.next;
-        pool.next += 1;
-        match self
+        let Some(Occlusion::Recording { areas, chunks }) = self
             .records
             .get_mut(&handle)
             .map(|record| &mut record.occlusion)
-        {
-            Some(Occlusion::Recording(areas)) => areas.push(area),
-            _ => {
-                return Err(RenderError::invalid(
-                    "DrawFlush",
-                    "occlusion query is not recording",
-                ));
-            }
+        else {
+            return Err(RenderError::invalid(
+                "DrawFlush",
+                "occlusion query is not recording",
+            ));
+        };
+        if areas.len() == OCCLUSION_SLOTS as usize {
+            chunks.push(pool.resolve(gpu, areas)?);
         }
+        let index = areas.len() as u32;
+        areas.push(area);
         Ok(Some(index))
     }
 
@@ -432,7 +420,7 @@ impl D3d9Queries {
             .ok_or_else(|| RenderError::invalid("GetData", "unknown query handle"))?;
         match record.occlusion {
             Occlusion::Idle => return Ok(QueryPoll::Ready(0)),
-            Occlusion::Recording(_) => return Ok(QueryPoll::Pending),
+            Occlusion::Recording { .. } => return Ok(QueryPoll::Pending),
             Occlusion::Done(value) => return Ok(QueryPoll::Ready(value)),
             Occlusion::Pending(_) => {}
         }
@@ -446,24 +434,28 @@ impl D3d9Queries {
             .records
             .get_mut(&handle)
             .ok_or_else(|| RenderError::invalid("GetData", "unknown query handle"))?;
-        let Occlusion::Pending(readback) = &record.occlusion else {
+        let Occlusion::Pending(chunks) = &record.occlusion else {
             return Ok(QueryPoll::Pending);
         };
-        match readback.mapped.get() {
-            None => return Ok(QueryPoll::Pending),
-            Some(false) => {
-                return Err(RenderError::new(
-                    "GetData",
-                    "occlusion readback buffer failed to map",
-                ));
+        for chunk in chunks {
+            match chunk.mapped.get() {
+                None => return Ok(QueryPoll::Pending),
+                Some(false) => {
+                    return Err(RenderError::new(
+                        "GetData",
+                        "occlusion readback buffer failed to map",
+                    ));
+                }
+                Some(true) => {}
             }
-            Some(true) => {}
         }
-        let value = readback.count()?;
-        let previous = std::mem::replace(&mut record.occlusion, Occlusion::Done(value));
-        if let Some(pool) = self.occlusion.as_mut() {
-            pool.release(&previous);
+        let value = chunks.iter().try_fold(0u32, |total, chunk| {
+            chunk.count().map(|count| total.saturating_add(count))
+        })?;
+        for chunk in chunks {
+            chunk.buffer.unmap();
         }
+        record.occlusion = Occlusion::Done(value);
         Ok(QueryPoll::Ready(value))
     }
 
@@ -472,10 +464,6 @@ impl D3d9Queries {
             record.generation = 0;
             record.occlusion = Occlusion::Idle;
         }
-        if let Some(pool) = self.occlusion.as_mut() {
-            pool.active = None;
-            pool.outstanding = 0;
-            pool.next = 0;
-        }
+        self.occlusion = None;
     }
 }

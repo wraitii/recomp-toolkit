@@ -501,6 +501,7 @@ struct ComObj {
 
     std::shared_ptr<D3d9HostDevice> d3d9_device;
     uint32_t d3d9_focus_window = 0;
+    bool d3d9_software_vp = false;
     std::shared_ptr<D3d9HostResource> d3d9_resource;
     bool d3d9_owner_retained = false;
     uint32_t d3d9_parent = 0; // owning texture/volume texture for a level view
