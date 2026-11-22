@@ -622,13 +622,15 @@ pub(crate) fn correct_cmpxchg8b(
     Ok(out)
 }
 
-pub(crate) fn correct_bsr(
+fn correct_bit_scan(
+    forward: bool,
     ops: &[PcodeOp],
     regs: &Registers,
     fresh: &mut dyn FnMut(u32) -> Varnode,
 ) -> Result<Vec<PcodeOp>, Reason> {
+    let name = if forward { "BSF" } else { "BSR" };
     let unsupported = || Reason::Unsupported {
-        detail: "unsupported BSR p-code shape".into(),
+        detail: format!("unsupported {name} p-code shape"),
     };
     let zf = regs.arch().x86.zf;
     let at = ops
@@ -657,8 +659,17 @@ pub(crate) fn correct_bsr(
     let changed = fresh(dst.size);
     let selected = fresh(dst.size);
     let mut out = ops[..=at].to_vec();
+    let scan_src = if forward {
+        let neg = fresh(dst.size);
+        let isolated = fresh(dst.size);
+        out.push(op(OpCode::Int2Comp, neg, vec![source]));
+        out.push(op(OpCode::IntAnd, isolated, vec![source, neg]));
+        isolated
+    } else {
+        source
+    };
     out.extend([
-        op(OpCode::LzCount, leading, vec![source]),
+        op(OpCode::LzCount, leading, vec![scan_src]),
         op(
             OpCode::IntSub,
             index,
@@ -678,6 +689,22 @@ pub(crate) fn correct_bsr(
         op(OpCode::IntXor, dst, vec![dst, selected]),
     ]);
     Ok(out)
+}
+
+pub(crate) fn correct_bsr(
+    ops: &[PcodeOp],
+    regs: &Registers,
+    fresh: &mut dyn FnMut(u32) -> Varnode,
+) -> Result<Vec<PcodeOp>, Reason> {
+    correct_bit_scan(false, ops, regs, fresh)
+}
+
+pub(crate) fn correct_bsf(
+    ops: &[PcodeOp],
+    regs: &Registers,
+    fresh: &mut dyn FnMut(u32) -> Varnode,
+) -> Result<Vec<PcodeOp>, Reason> {
+    correct_bit_scan(true, ops, regs, fresh)
 }
 
 fn without_flags(ops: Vec<PcodeOp>, regs: &Registers, live: &[Varnode]) -> Vec<PcodeOp> {

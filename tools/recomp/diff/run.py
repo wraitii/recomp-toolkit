@@ -194,7 +194,8 @@ class Image:
 
 class Native:
     def __init__(self, dylib, image):
-        self.lib = C.CDLL(str(dylib), mode=C.RTLD_GLOBAL)
+        mode = C.RTLD_GLOBAL if sys.platform == "darwin" else C.RTLD_LOCAL
+        self.lib = C.CDLL(str(dylib), mode=mode)
         self.lib.harness_mem.restype = C.c_void_p
         self.lib.diff_run.restype = C.c_char_p
         self.lib.diff_run.argtypes = [C.c_uint32, C.POINTER(State), C.c_uint32]

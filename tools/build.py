@@ -696,7 +696,7 @@ def build_translator_harness(gen, out):
                                     "-I", str(objects), "-I", str(ROOT), "-c", str(source), "-o", str(obj)])
         built.append(str(obj))
     whole = (["-dynamiclib", "-lc++", "-framework", "CoreFoundation", "-framework", "CoreServices"]
-             if darwin else ["-shared", "-lm"])
+             if darwin else ["-shared", "-lstdc++", "-lm"])
     stubs = host_entry_stubs(gen, objects / "host_entries.c")
     subprocess.check_call(cc + ["-O1", "-ffp-contract=off", "-std=c11", "-w", "-fPIC",
                                 "-I", str(gen), "-I", str(ROOT), "-I", str(ROOT / "runtime"),
@@ -745,7 +745,8 @@ def build_diff_harness(build_root, out):
     whole = (["-dynamiclib", "-Wl,-force_load," + str(archive)] + [str(p) for p in pieces] + [
                "-Wl,-rpath," + str(archive.parent.parent), "-lc++",
                "-framework", "CoreFoundation", "-framework", "CoreServices"] if darwin else
-             ["-shared", "-Wl,--whole-archive", str(archive), "-Wl,--no-whole-archive", "-lm"])
+             ["-shared", "-Wl,-Bsymbolic", "-Wl,--whole-archive", str(archive),
+              "-Wl,--no-whole-archive", "-lstdc++", "-lm"])
     stubs = host_entry_stubs(gen, out.with_name("host_entries.c"))
     subprocess.check_call(cc + ["-O1", "-ffp-contract=off", "-std=c11", "-w", "-fPIC",
                                 "-I", str(gen), "-I", str(ROOT), "-I", str(ROOT / "runtime"),

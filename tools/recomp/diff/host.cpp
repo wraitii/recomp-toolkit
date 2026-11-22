@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "runtime/imports.h"
 #include "runtime/x86.h"
 
 extern "C" void harness_escape(const char *reason, uint32_t addr);
@@ -53,6 +54,12 @@ extern "C" bool imports_dispatch(X86 *c, uint32_t target) {
     harness_escape("import", target);
     return false;
 }
+
+uint32_t imports_resolve(const char *, const char *) {
+    harness_escape("import", 0);
+    return 0;
+}
+
 extern "C" int recomp_module_region_has_target(uint32_t target) {
     (void)target;
     return 0;

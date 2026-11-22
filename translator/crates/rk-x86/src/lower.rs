@@ -7,7 +7,8 @@ use rk_ir::{
 };
 
 use crate::correct::{
-    correct_bsr, correct_div_cg, correct_extra, correct_sar, correct_shift, correct_sse, lazy_flags,
+    correct_bsf, correct_bsr, correct_div_cg, correct_extra, correct_sar, correct_shift,
+    correct_sse, lazy_flags,
 };
 use crate::flags::flag_op;
 use crate::string;
@@ -457,6 +458,7 @@ impl IsaLowering for Lowering<'_> {
                 (None, "SHL" | "SHR") => correct_shift(&mnem, &ops, regs, &mut |size| cx.fresh(size)),
                 (None, "SAR") => correct_sar(&ops, regs, &mut |size| cx.fresh(size)),
                 (None, "BSR") => correct_bsr(&ops, regs, &mut |size| cx.fresh(size)),
+                (None, "BSF") => correct_bsf(&ops, regs, &mut |size| cx.fresh(size)),
                 (None, _) => Ok(ops.clone()),
             }?;
             Ok(corrected)
@@ -559,6 +561,7 @@ const SUPPORTED: &[&str] = &[
     "NOT",
     "BSWAP",
     "BSR",
+    "BSF",
     "LEAVE",
     "LEA",
     "PUSH",

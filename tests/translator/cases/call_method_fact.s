@@ -24,8 +24,8 @@ call_method_fact:
     jne skip
     push ecx
     push eax
-    push offset object_va
     mov edx, offset object_va
+    push edx
     mov edx, [edx]
 method_site:
     call dword ptr [edx + 8]
