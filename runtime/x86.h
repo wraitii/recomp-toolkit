@@ -255,7 +255,14 @@ static inline double rdf80(uint32_t a) {
 static inline void wrf80(uint32_t a, double v) {
     uint64_t m;
     uint16_t se;
-    if (isnan(v)) {
+    // A normal binary64 significand fits exactly in the x87 explicit significand.
+    uint64_t bits;
+    RECOMP_BITCOPY(&bits, &v, sizeof(bits));
+    unsigned exponent = (unsigned)((bits >> 52) & 0x7ffu);
+    if (exponent > 0 && exponent < 0x7ffu) {
+        m = (bits << 11) | (UINT64_C(1) << 63);
+        se = (uint16_t)((bits >> 48 & 0x8000u) | (exponent + 16383 - 1023));
+    } else if (isnan(v)) {
         m = 0xc000000000000000ull;
         se = 0x7fffu;
     } else if (isinf(v)) {
