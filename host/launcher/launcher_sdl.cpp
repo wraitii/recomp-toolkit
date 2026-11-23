@@ -9,6 +9,7 @@
 #include "../input_touch.h"
 #include "../preferences.h"
 #include "../sdl/keymap.h"
+#include "../sdl/platform_ui.h"
 
 #include <algorithm>
 #include <cmath>
@@ -58,12 +59,21 @@ void draw_controller_page(Canvas &canvas, const controls::ControlsView &view) {
         const Rect r = rect(d.rect);
         canvas.fill(r, d.lit ? selected : button);
         canvas.frame(r, 1, d.focused ? focus : border);
-        int scale = std::max(1, d.text_scale);
-        std::string label = d.label;
-        while (!label.empty() && Canvas::text_width(label, scale) > r.w - 8)
-            label.pop_back();
-        canvas.text(r.x + (r.w - Canvas::text_width(label, scale)) / 2,
-                    r.y + (r.h - Canvas::text_height(scale)) / 2, label, scale, text);
+        const int scale = std::max(1, d.text_scale);
+        const int line_h = Canvas::text_height(scale) + scale;
+        const int visible = std::max(1, (r.h + scale) / line_h);
+        auto lines = Canvas::wrap(d.label, r.w - 8, scale);
+        if (int(lines.size()) > visible) {
+            lines.resize(visible);
+            std::string &last = lines.back();
+            const int max_chars = std::max(0, (r.w - 8) / (6 * scale) - 3);
+            last = last.substr(0, max_chars) + "...";
+        }
+        int y = r.y + (r.h - int(lines.size()) * line_h + scale) / 2;
+        for (const auto &line : lines) {
+            canvas.text(r.x + (r.w - Canvas::text_width(line, scale)) / 2, y, line, scale, text);
+            y += line_h;
+        }
     };
     canvas.clear(background);
     for (const auto &m : view.meters) {
@@ -189,6 +199,8 @@ ConfigureActions preferences_actions() {
         out->clear();
         for (std::size_t i = 0; i < count; ++i) {
             const host_preferences::SettingInfo &info = infos[i];
+            if (info.touch_only && !platform_ui_touch_device())
+                continue;
             ConfigureSetting setting;
             setting.id = info.id;
             setting.label = info.label;
@@ -261,7 +273,20 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
     auto screen = [&] {
         SDL_GetWindowSizeInPixels(window, &dw, &dh);
         SDL_GetWindowSize(window, &bw, &bh);
-        return controls::Screen{dw, dh, bw > 0 ? double(dw) / bw : 1.0, {0, 0, dw, dh}, {}};
+        const double density = bw > 0 ? double(dw) / bw : 1.0;
+        SDL_Rect bounds{0, 0, bw, bh};
+        SDL_GetWindowSafeArea(window, &bounds);
+        const auto px = [density](int value) { return int(std::lround(value * density)); };
+        return controls::Screen{
+            dw, dh, density, {px(bounds.x), px(bounds.y), px(bounds.w), px(bounds.h)}, {}};
+    };
+    const auto menu_scale = [](const controls::Screen &display) {
+        if (!platform_ui_touch_device())
+            return std::max(1, std::min(display.dw / 640, display.dh / 520));
+        const int size = host_preferences::get(host_preferences::Setting::ConfigureSize);
+        const int requested = int(std::lround(std::min(display.dw, display.dh) * size / 56000.0));
+        return std::clamp(requested, 1,
+                          std::max(1, std::min(display.safe.w / 230, display.safe.h / 170)));
     };
     bool redraw = true;
     auto to_canvas = [&](float x, float y, int *cx, int *cy) {
@@ -276,7 +301,6 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
                 controller.set_device(controller_description(), controls::gamepad_connected());
                 controller.observe_input(controls::host_mapper_raw_state());
                 if (controller.is_open()) {
-                    controller.set_screen(screen());
                     switch (event.type) {
                     case SDL_EVENT_MOUSE_MOTION: {
                         int x, y;
@@ -286,7 +310,8 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
                     }
                     case SDL_EVENT_MOUSE_BUTTON_DOWN:
                     case SDL_EVENT_MOUSE_BUTTON_UP:
-                        if (event.button.button == SDL_BUTTON_LEFT) {
+                        if (event.button.button == SDL_BUTTON_LEFT &&
+                            event.button.which != SDL_TOUCH_MOUSEID) {
                             int x, y;
                             to_canvas(event.button.x, event.button.y, &x, &y);
                             controller.pointer(x, y,
@@ -334,7 +359,8 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
                     break;
                 case SDL_EVENT_MOUSE_BUTTON_DOWN:
                 case SDL_EVENT_MOUSE_BUTTON_UP:
-                    if (event.button.button == SDL_BUTTON_LEFT) {
+                    if (event.button.button == SDL_BUTTON_LEFT &&
+                        event.button.which != SDL_TOUCH_MOUSEID) {
                         int x, y;
                         to_canvas(event.button.x, event.button.y, &x, &y);
                         ui.pointer(x, y, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
@@ -444,7 +470,8 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
             presenter.resize(dw, dh);
             const bool bgra = presenter.format == gpu::Format::BGRA8;
             canvas.resize(dw, dh, bgra);
-            const int scale = std::max(1, std::min(dw / 640, dh / 520));
+            const int scale = menu_scale(controller_screen);
+            const auto bounds = controller_screen.safe;
             if (controller.is_open()) {
                 controls::PadMapper preview;
                 controls::PadState calibrated, guest;
@@ -455,12 +482,11 @@ bool run_configure_ui(SDL_Window *window, gpu::Device *device, void *native_surf
                     preview.process(raw, &calibrated, &guest);
                 else
                     status = "Invalid controller profile draft: " + error;
-                controller.set_screen(controller_screen);
                 const auto view =
-                    controller.view(controller_screen, raw, calibrated, guest, status);
+                    controller.view(controller_screen, raw, calibrated, guest, status, scale);
                 draw_controller_page(canvas, view);
             } else {
-                ui.draw(canvas, scale);
+                ui.draw(canvas, scale, {bounds.x, bounds.y, bounds.w, bounds.h});
             }
             presenter.show(canvas);
         }

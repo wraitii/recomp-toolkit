@@ -555,18 +555,31 @@ Rect anchor_area(const Layout &l, const Screen &s) {
     return Rect{0, 0, s.dw, s.dh};
 }
 
+double touch_control_scale(const Layout &l, const Control &c) {
+    switch (c.kind) {
+    case Kind::Key:
+        return l.touch_keys;
+    case Kind::Stick:
+    case Kind::Dpad:
+    case Kind::Button:
+        return l.touch_pad;
+    default:
+        return c.stack_on.empty() ? std::max(l.touch_keys, l.touch_pad) : l.touch_keys;
+    }
+}
+
 Rect group_rect(const Layout &l, int group, const Screen &s) {
     if (group < 0 || group >= int(l.groups.size()))
         return Rect();
     const Group &grp = l.groups[group];
     Rect area = anchor_area(l, s);
     if (grp.has_grid) {
-        int key_pt = int(lround(grp.grid.key * l.scale));
+        int key_pt = int(lround(grp.grid.key * l.scale * l.touch_keys));
         int pitch = int(lround((key_pt + grp.grid.gap) * s.scale));
         int w = pitch * grp.grid.cols;
         int h = pitch * grp.grid.rows;
-        int ox = px(grp.x, s);
-        int oy = px(grp.y, s);
+        int ox = px(grp.x * l.offset_scale * l.touch_keys, s);
+        int oy = px(grp.y * l.offset_scale * l.touch_keys, s);
         return place(area, w, h, grp.anchor, ox, oy);
     }
     // Non-grid group: the union of its controls' rects.
@@ -599,7 +612,7 @@ Rect control_rect(const Layout &l, int group, int control, const Screen &s) {
 
     if (grp.has_grid && c.col >= 0 && c.row >= 0) {
         Rect box = group_rect(l, group, s);
-        int key_pt = int(lround(grp.grid.key * l.scale));
+        int key_pt = int(lround(grp.grid.key * l.scale * l.touch_keys));
         int pitch = int(lround((key_pt + grp.grid.gap) * s.scale));
         int gap = int(lround(grp.grid.gap * s.scale));
         Rect r;
@@ -610,10 +623,11 @@ Rect control_rect(const Layout &l, int group, int control, const Screen &s) {
         return r;
     }
 
-    int w = int(lround(c.w * l.scale * s.scale));
-    int h = int(lround(c.h * l.scale * s.scale));
-    int ox = px(c.x, s);
-    int oy = px(c.y, s);
+    const double touch_scale = touch_control_scale(l, c);
+    int w = int(lround(c.w * l.scale * s.scale * touch_scale));
+    int h = int(lround(c.h * l.scale * s.scale * touch_scale));
+    int ox = px(c.x * l.offset_scale * touch_scale, s);
+    int oy = px(c.y * l.offset_scale * touch_scale, s);
     Rect r = place(area, w, h, c.anchor, ox, oy);
 
     if (!c.stack_on.empty()) {
@@ -636,6 +650,55 @@ Rect control_rect(const Layout &l, int group, int control, const Screen &s) {
         }
     }
     return r;
+}
+
+void fit_touch_sizes(Layout &l, const Screen &s, double keys, double pad) {
+    l.touch_keys = l.touch_pad = 1.0;
+    const Rect area = anchor_area(l, s);
+    if (area.empty() || (keys == 1.0 && pad == 1.0))
+        return;
+    std::vector<Rect> original, adjusted;
+    const auto collect = [&](std::vector<Rect> &rects) {
+        rects.clear();
+        for (int g = 0; g < int(l.groups.size()); ++g)
+            for (int c = 0; c < int(l.groups[g].controls.size()); ++c)
+                rects.push_back(control_rect(l, g, c, s));
+    };
+    const auto contains = [](const Rect &a, const Rect &b) {
+        return b.x >= a.x && b.y >= a.y && b.x + b.w <= a.x + a.w && b.y + b.h <= a.y + a.h;
+    };
+    const auto overlaps = [](const Rect &a, const Rect &b) {
+        return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+    };
+    collect(original);
+    adjusted.reserve(original.size());
+    const auto fits = [&] {
+        collect(adjusted);
+        for (size_t i = 0; i < adjusted.size(); ++i) {
+            if (contains(area, original[i]) && !contains(area, adjusted[i]))
+                return false;
+            for (size_t j = 0; j < i; ++j)
+                if (overlaps(adjusted[i], adjusted[j]) && !overlaps(original[i], original[j]))
+                    return false;
+        }
+        return true;
+    };
+    const auto limit = [&](double &factor, double requested) {
+        factor = requested;
+        if (requested <= 1.0 || fits())
+            return;
+        double low = 1.0, high = requested;
+        for (int i = 0; i < 9; ++i) {
+            factor = (low + high) / 2;
+            if (fits())
+                low = factor;
+            else
+                high = factor;
+        }
+        factor = low;
+    };
+    limit(l.touch_keys, keys);
+    limit(l.touch_pad, pad);
 }
 
 Rect controls_area_below(int dw, int dh, const Rect &game, int safe_bottom) {

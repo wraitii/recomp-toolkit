@@ -33,7 +33,7 @@ class ConfigureUi {
     bool take_controller_request();
     void key(Key key);
     void pointer(int x, int y, bool pressed);
-    void draw(Canvas &canvas, int scale);
+    void draw(Canvas &canvas, int scale, Rect bounds);
 
   private:
     void change(int delta);
@@ -46,6 +46,7 @@ class ConfigureUi {
     std::vector<Rect> buttons_;
     std::string message_;
     int focus_ = 0;
+    int first_row_ = 0, page_rows_ = 1;
     int pressed_ = -1;
     bool ready_ = false;
     bool dirty_ = true;

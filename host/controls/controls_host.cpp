@@ -5,6 +5,7 @@
 #include "../../mods/mods_internal.h"
 #include "../../platform/os.h"
 #include "../../runtime/layout.h"
+#include "../preferences.h"
 #include "../present.h"
 #include "../sdl/platform_ui.h"
 #include "editor.h"
@@ -18,6 +19,7 @@
 #include "router.h"
 #include "vpad.h"
 
+#include <array>
 #include <filesystem>
 #include <set>
 #include <mutex>
@@ -152,7 +154,6 @@ bool g_have_layout = false; // g_layout holds a layout the router drives
 std::string g_loaded_name;
 Form g_loaded_form = Form::Tablet;
 double g_file_scale = 1.0;
-int g_size = -1;
 bool g_enabled = false;
 LayoutContent g_content = LayoutContent::Keys; // g_layout's, for auto-hide
 
@@ -166,6 +167,31 @@ double size_factor() {
     int size = mods_controls_value(CONTROLS_SIZE_ROW);
     size = size < 0 ? 0 : size > 2 ? 2 : size;
     return kSizePt[size] / 36.0;
+}
+
+std::array<double, 6> g_sizing{};
+bool g_size_current = false;
+
+void apply_size() {
+    const double factor = size_factor();
+    g_layout.scale = g_file_scale * factor;
+    if (!platform_ui_touch_device())
+        return;
+    using host_preferences::Setting;
+    const double keys = g_content == LayoutContent::Pad
+                            ? 1.0
+                            : host_preferences::get(Setting::TouchKeyboardSize) / 100.0;
+    const double pad = g_content == LayoutContent::Keys
+                           ? 1.0
+                           : host_preferences::get(Setting::TouchPadSize) / 100.0;
+    const Rect area = anchor_area(g_layout, g_screen);
+    const std::array<double, 6> current{
+        keys, pad, g_layout.scale, g_screen.scale, double(area.w), double(area.h)};
+    if (g_size_current && current == g_sizing)
+        return;
+    g_sizing = current;
+    g_size_current = true;
+    fit_touch_sizes(g_layout, g_screen, keys, pad);
 }
 
 // The groups the player has hidden, as the settings row stores them: bit i
@@ -241,6 +267,7 @@ class HostSink : public ControlsSink {
             (void)mods_controls_set(CONTROLS_LAYOUT_ROW, index);
     }
     void group_visibility_changed() override {
+        g_size_current = false;
         mods_controls_set_hidden_groups(settings_form(g_loaded_form), hidden_bits(g_layout));
     }
     // A light tick on each press, when the haptics row is on.
@@ -269,8 +296,8 @@ void reload(const std::string &name, Form form) {
     g_loaded_name = name;
     g_loaded_form = form;
     g_have_layout = false;
+    g_size_current = false;
     g_layout = Layout();
-    g_size = -1;
     if (name.empty())
         return;
     Layout fresh;
@@ -385,9 +412,7 @@ void open_editor() {
     g_rumble.stop();
     // A reload just before this (a reset, a switch) left the file's own
     // scale; the editor shows what the player sees, size setting included.
-    g_size = mods_controls_value(CONTROLS_SIZE_ROW);
-    g_size = g_size < 0 ? 0 : g_size > 2 ? 2 : g_size;
-    g_layout.scale = g_file_scale * size_factor();
+    apply_size();
     g_editor.set_screen(g_screen);
     g_editor.set_names(g_store.names());
     g_editor.open(g_layout, g_loaded_form, mods_controls_value(CONTROLS_SNAP_ROW) != 0);
@@ -454,6 +479,10 @@ void host_mapper_load() {
 void host_set_screen(const Screen &s, const Rect &game, int safe_bottom) {
     g_screen = s;
     g_screen.controls_area = controls_area_below(s.dw, s.dh, game, safe_bottom);
+    if (!g_screen.controls_area.empty() && !s.safe.empty()) {
+        g_screen.controls_area.x = s.safe.x;
+        g_screen.controls_area.w = s.safe.w;
+    }
     g_router.set_screen(g_screen);
     g_router.set_claim_area(g_screen.controls_area);
 }
@@ -661,9 +690,11 @@ void host_pump(uint64_t now) {
         next = apply_editor_results(g_editor, g_editor_host, g_editor_name, &g_editor_renamed);
     const std::string name = mods_controls_layout_name();
     mods_controls_set_layout_available(g_have_layout && !name.empty());
-    const Form form = g_screen.dw > 0 && g_screen.dh > 0
-                          ? form_for(g_screen.dw, g_screen.dh, g_screen.scale)
-                          : g_loaded_form;
+    Form form = g_screen.dw > 0 && g_screen.dh > 0
+                    ? form_for(g_screen.dw, g_screen.dh, g_screen.scale)
+                    : g_loaded_form;
+    if (platform_ui_touch_device() && g_screen.dw > 0 && g_screen.dh > g_screen.dw * 1.65)
+        form = Form::PhonePortrait;
     // The editor wrote or removed a file under the layout's feet, so the
     // active layout is read again even when its name did not change.
     if (next != EditorNext::Keep)
@@ -686,12 +717,6 @@ void host_pump(uint64_t now) {
     }
 
     if (g_have_layout) {
-        int size = mods_controls_value(CONTROLS_SIZE_ROW);
-        size = size < 0 ? 0 : size > 2 ? 2 : size;
-        if (size != g_size) {
-            g_size = size;
-            g_layout.scale = g_file_scale * size_factor();
-        }
         // The hidden groups follow the row whoever set it: a toggle writes it
         // (group_visibility_changed), and a settings load or reset may too.
         // The row is per form factor, since one name's forms need not have the
@@ -700,8 +725,11 @@ void host_pump(uint64_t now) {
         // file has fewer groups never trims the other's.
         const uint32_t bits =
             hidden_bits_for(g_layout, mods_controls_hidden_groups(settings_form(g_loaded_form)));
-        if (bits != hidden_bits(g_layout))
+        if (bits != hidden_bits(g_layout)) {
+            g_size_current = false;
             apply_hidden_bits(g_layout, bits);
+        }
+        apply_size();
     }
 
     const int mobile = mods_controls_value(CONTROLS_MOBILE_ROW);

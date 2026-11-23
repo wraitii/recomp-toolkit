@@ -375,11 +375,16 @@ void Editor::set_moving_rect(const Rect &r, bool reanchor) {
     if (!selection_valid())
         return;
     Rect area = anchor_area(layout_, screen_);
-    double scale = screen_.scale > 0 ? screen_.scale : 1.0;
+    const bool grid = selection_is_grid();
+    const double touch_scale =
+        grid ? layout_.touch_keys
+             : touch_control_scale(layout_, layout_.groups[sel_group_].controls[sel_control_]);
+    const double scale =
+        (screen_.scale > 0 ? screen_.scale : 1.0) * layout_.offset_scale * touch_scale;
     Group &g = layout_.groups[sel_group_];
     Anchor *anchor;
     double *x, *y;
-    if (selection_is_grid()) {
+    if (grid) {
         anchor = &g.anchor;
         x = &g.x;
         y = &g.y;

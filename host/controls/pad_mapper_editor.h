@@ -23,7 +23,7 @@ class PadMapperEditor {
     bool is_open() const;
     const PadMapperProfile &profile() const;
     ControlsView view(const Screen &screen, const PadState &raw, const PadState &calibrated,
-                      const PadState &guest_preview, const std::string &status);
+                      const PadState &guest_preview, const std::string &status, int menu_scale);
     void pointer(double px, double py, int state);
     void wheel(double notches);
     void escape();
@@ -48,6 +48,7 @@ class PadMapperEditor {
     PadMapperProfile profile_;
     std::string original_;
     Screen screen_;
+    int menu_scale_ = 1;
     Page page_ = Page::Overview;
     Popup popup_ = Popup::None;
     Capture capture_ = Capture::None;

@@ -12,7 +12,10 @@ enum class Setting {
     WindowMode,
     PerformanceOverlay,
     ReportedGpu,
-    PresentationFilter
+    PresentationFilter,
+    TouchKeyboardSize,
+    TouchPadSize,
+    ConfigureSize
 };
 
 enum class KeyboardNames { System = 0, US = 1 };
@@ -28,6 +31,7 @@ struct SettingInfo {
     int step;
     int recommended;
     const char *choices;
+    bool touch_only = false;
 };
 
 const SettingInfo *settings(std::size_t *count);

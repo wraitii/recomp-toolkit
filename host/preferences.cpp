@@ -11,6 +11,13 @@ namespace host_preferences {
 namespace {
 
 constexpr SettingInfo kSettings[] = {
+    {Setting::TouchKeyboardSize, "touch_keyboard_size", "Touch keyboard size",
+     "Larger keys and labels. Fits the available screen space.", 75, 250, 25, 150, nullptr, true},
+    {Setting::TouchPadSize, "touch_pad_size", "Touch gamepad size",
+     "Larger buttons and sticks. Fits the available screen space.", 75, 250, 25, 150, nullptr,
+     true},
+    {Setting::ConfigureSize, "configure_size", "Configure menu size",
+     "Adjust text and buttons in Configure.", 75, 250, 25, 150, nullptr, true},
     {Setting::KeyboardNames, "keyboard_names", "Keyboard key names",
      "Name keys using your system keyboard layout or US labels.", 0, 1, 1,
      RECOMP_INPUT_KEYBOARD_NAMES, "System|US"},

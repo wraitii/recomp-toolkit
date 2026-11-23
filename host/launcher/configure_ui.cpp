@@ -20,6 +20,9 @@ const Color kError{242, 170, 162, 255};
 constexpr int kRestore = 0;
 constexpr int kDone = 1;
 constexpr int kController = 2;
+constexpr int kPreviousPage = 3;
+constexpr int kNextPage = 4;
+constexpr int kButtonCount = 5;
 } // namespace
 
 ConfigureUi::ConfigureUi(std::string game, ConfigureActions actions)
@@ -83,6 +86,11 @@ void ConfigureUi::action(int id) {
         } else {
             message_ = "Recommended settings restored.";
         }
+    } else if (id == kPreviousPage || id == kNextPage) {
+        const int direction = id == kPreviousPage ? -1 : 1;
+        const int row = first_row_ + direction * page_rows_;
+        if (row >= 0 && row < int(settings_.size()))
+            focus_ = first_row_ = row;
     } else if (id == kController) {
         controller_requested_ = true;
     } else if (id == kDone) {
@@ -94,9 +102,9 @@ void ConfigureUi::action(int id) {
 void ConfigureUi::key(Key key) {
     if (done_)
         return;
-    const int count = int(settings_.size()) + 3;
-    if (count == 0)
-        return;
+    const int count = int(settings_.size()) + kPreviousPage;
+    if (focus_ >= count)
+        focus_ = first_row_;
     switch (key) {
     case Key::Up:
     case Key::Previous:
@@ -180,57 +188,69 @@ void ConfigureUi::pointer(int x, int y, bool pressed) {
         pressed_ = -1;
 }
 
-void ConfigureUi::draw(Canvas &canvas, int scale) {
+void ConfigureUi::draw(Canvas &canvas, int scale, Rect bounds) {
     scale = std::max(1, scale);
+    if (bounds.w <= 0 || bounds.h <= 0)
+        bounds = {0, 0, canvas.width(), canvas.height()};
     dirty_ = false;
-    const int w = canvas.width(), h = canvas.height(), margin = 24 * scale;
+    const int margin = 14 * scale;
+    const int left = bounds.x + margin;
+    const int width = bounds.w - 2 * margin;
     const int title_size = 2 * scale;
     canvas.clear(kBackground);
-    std::string title = "Configure " + game_;
-    const size_t title_chars = size_t(std::max(1, (w - 2 * margin) / (6 * title_size)));
-    if (title.size() > title_chars)
-        title = title.substr(0, title_chars > 3 ? title_chars - 3 : 1) + "...";
-    canvas.text(margin, margin, title, title_size, kText);
-    int y = margin + Canvas::text_height(title_size) + 8 * scale;
-    canvas.text(margin, y, "Changes are saved automatically. Used next time you play.", scale,
-                kDim);
-    y += Canvas::text_height(scale) + 12 * scale;
-    canvas.fill({margin, y, w - 2 * margin, scale}, kLine);
-    y += 12 * scale;
+    const std::string title = "Configure " + game_;
+    const int title_chars = std::max(1, width / (6 * title_size));
+    canvas.text(left, bounds.y + margin, title.substr(0, title_chars), title_size, kText);
+    int y = bounds.y + margin + Canvas::text_height(title_size) + 10 * scale;
 
     rows_.assign(settings_.size(), {});
     previous_.assign(settings_.size(), {});
-    const int value_w = std::min(145 * scale, w / 3);
-    const int row_h =
-        std::max(34 * scale, (h - y - 72 * scale) / std::max(1, int(settings_.size())));
-    for (size_t i = 0; i < settings_.size(); ++i) {
-        const Rect row{margin, y, w - 2 * margin, row_h - 6 * scale};
+    const int row_h = 41 * scale;
+    const int button_h = 28 * scale;
+    const int button_gap = 6 * scale;
+    const int button_y = bounds.y + bounds.h - margin - button_h;
+    const int page_y = button_y - button_h - button_gap;
+    const int status_y = page_y - 13 * scale;
+    page_rows_ = std::max(1, (status_y - y) / row_h);
+    if (focus_ < int(settings_.size()))
+        first_row_ = focus_ / page_rows_ * page_rows_;
+    first_row_ =
+        std::min(first_row_, std::max(0, (int(settings_.size()) - 1) / page_rows_) * page_rows_);
+    const int end = std::min(first_row_ + page_rows_, int(settings_.size()));
+    const int value_w = std::min(122 * scale, width / 2);
+    for (int i = first_row_; i < end; ++i) {
+        const Rect row{left, y, width, row_h - 4 * scale};
         rows_[i] = row;
         const bool focused = int(i) == focus_;
         canvas.fill(row, focused ? kButtonHot : kPanel);
         canvas.frame(row, scale, focused ? kFocus : kLine);
         const int value_x = row.x + row.w - value_w;
         const ConfigureSetting &setting = settings_[i];
-        canvas.text(row.x + 9 * scale, row.y + 6 * scale, setting.label, scale, kText);
-        const int description_y = row.y + 18 * scale;
-        const int description_w = std::max(1, value_x - row.x - 18 * scale);
-        canvas.paragraph(row.x + 9 * scale, description_y, description_w, setting.description,
-                         scale, kDim);
-        const Rect value_area{value_x, row.y, value_w, row.h};
+        const int description_w = std::max(1, value_x - row.x - 14 * scale);
+        const auto label = Canvas::wrap(setting.label, description_w, scale);
+        const int label_lines = std::min<int>(2, label.size());
+        for (int line = 0; line < label_lines; ++line)
+            canvas.text(row.x + 7 * scale, row.y + (5 + 10 * line) * scale, label[line], scale,
+                        kText);
+        if (label_lines == 1) {
+            const auto description = Canvas::wrap(setting.description, description_w, scale);
+            for (int line = 0; line < std::min<int>(2, description.size()); ++line)
+                canvas.text(row.x + 7 * scale, row.y + (15 + 10 * line) * scale, description[line],
+                            scale, kDim);
+        }
         canvas.fill({value_x, row.y + scale, value_w - scale, row.h - 2 * scale}, kBackground);
         canvas.fill({value_x, row.y, scale, row.h}, focused ? kFocus : kLine);
-        const Rect prev{value_area.x, row.y, 20 * scale, row.h};
-        const Rect next{row.x + row.w - 20 * scale, row.y, 20 * scale, row.h};
+        const int arrow_w = std::min(24 * scale, value_w / 3);
+        const Rect prev{value_x, row.y, arrow_w, row.h};
+        const Rect next{row.x + row.w - arrow_w, row.y, arrow_w, row.h};
         previous_[i] = prev;
         canvas.text(prev.x + 6 * scale, row.y + (row.h - Canvas::text_height(scale)) / 2, "<",
                     scale, kFocus);
         const std::string value = setting.value >= 0 && setting.value < int(setting.values.size())
                                       ? setting.values[size_t(setting.value)]
                                       : "?";
-        const std::string clipped =
-            value.size() * size_t(6 * scale) > size_t(value_w - 48 * scale)
-                ? value.substr(0, size_t(std::max(1, value_w / (6 * scale) - 8))) + "..."
-                : value;
+        const int value_chars = std::max(1, (value_w - 2 * arrow_w) / (6 * scale));
+        const std::string clipped = value.substr(0, value_chars);
         const int tw = Canvas::text_width(clipped, scale);
         canvas.text(value_x + (value_w - tw) / 2, row.y + (row.h - Canvas::text_height(scale)) / 2,
                     clipped, scale, kText);
@@ -239,36 +259,42 @@ void ConfigureUi::draw(Canvas &canvas, int scale) {
         y += row_h;
     }
 
-    const int button_h = 24 * scale;
-    const int button_gap = 8 * scale;
-    const int button_w = (w - 2 * margin - 2 * button_gap) / 3;
-    const int button_y = std::max(y + 3 * scale, h - 40 * scale);
-    const char *labels[] = {"Restore recommended", "Done", "Controller setup"};
-    buttons_.resize(3);
-    for (int i = 0; i < 3; ++i) {
-        const int x = margin + i * (button_w + button_gap);
-        const Rect rect{x, button_y, button_w, button_h};
-        buttons_[size_t(i)] = rect;
+    const int button_w = (width - 2 * button_gap) / 3;
+    const char *labels[] = {"Restore defaults", "Done", "Controller setup", "Previous", "Next"};
+    buttons_.assign(kButtonCount, {});
+    for (int i = 0; i < kButtonCount; ++i) {
+        if ((i == kPreviousPage && first_row_ == 0) ||
+            (i == kNextPage && end == int(settings_.size())))
+            continue;
+        const int column = i == kPreviousPage ? 0 : i == kNextPage ? 2 : i;
+        const int x = left + column * (button_w + button_gap);
+        const Rect rect{x, i < kPreviousPage ? button_y : page_y, button_w, button_h};
+        buttons_[i] = rect;
         const int index = int(settings_.size()) + i;
         const bool focused = focus_ == index;
         const bool hot = focused || pressed_ == index;
         canvas.fill(rect,
                     i == kDone ? (hot ? kPrimaryHot : kPrimary) : (hot ? kButtonHot : kButton));
         canvas.frame(rect, scale, focused ? kFocus : i == kDone ? kPrimaryLine : kLine);
-        std::string label = labels[i];
-        const int max_chars = std::max(1, button_w / (6 * scale));
-        if (int(label.size()) > max_chars)
-            label.resize(size_t(max_chars));
-        const int tw = Canvas::text_width(label, scale);
-        canvas.text(x + (button_w - tw) / 2, button_y + (button_h - Canvas::text_height(scale)) / 2,
-                    label, scale, kText);
+        const auto lines = Canvas::wrap(labels[i], button_w - 4 * scale, scale);
+        for (int line = 0; line < std::min<int>(2, lines.size()); ++line) {
+            const auto &label = lines[line];
+            const int tx = x + (button_w - Canvas::text_width(label, scale)) / 2;
+            const int ty =
+                rect.y + (button_h - 10 * scale * int(lines.size())) / 2 + 10 * scale * line;
+            canvas.text(tx, ty, label, scale, kText);
+        }
     }
-    const int status_y =
-        std::min(h - Canvas::text_height(scale) - 4 * scale, button_y + button_h + 5 * scale);
+    if (page_rows_ < int(settings_.size())) {
+        const std::string page =
+            std::to_string(first_row_ / page_rows_ + 1) + " / " +
+            std::to_string((int(settings_.size()) + page_rows_ - 1) / page_rows_);
+        canvas.text(left + (width - Canvas::text_width(page, scale)) / 2,
+                    page_y + (button_h - Canvas::text_height(scale)) / 2, page, scale, kDim);
+    }
     const Color status_color = message_.find("Could not") == 0 || !ready_ ? kError : kDim;
     if (!message_.empty())
-        canvas.text(margin, status_y,
-                    message_.substr(0, size_t(std::max(1, (w - 2 * margin) / (6 * scale)))), scale,
+        canvas.text(left, status_y, message_.substr(0, std::max(1, width / (6 * scale))), scale,
                     status_color);
 }
 

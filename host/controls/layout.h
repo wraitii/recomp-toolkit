@@ -83,6 +83,8 @@ struct Layout {
     double scale = 1.0;     // sizes only (not offsets); the "size" setting multiplies it
     bool safe_inset = true; // anchors resolve inside the safe area
     std::vector<Group> groups;
+    double offset_scale = 1.0;
+    double touch_keys = 1.0, touch_pad = 1.0;
 };
 
 // Parses a layout JSON document into *out. Unknown top-level and control
@@ -126,6 +128,8 @@ Rect anchor_area(const Layout &l, const Screen &s);
 // A grid group's box, or the union of a non-grid group's controls.
 Rect group_rect(const Layout &l, int group, const Screen &s);
 Rect control_rect(const Layout &l, int group, int control, const Screen &s);
+double touch_control_scale(const Layout &l, const Control &c);
+void fit_touch_sizes(Layout &l, const Screen &s, double keys, double pad);
 
 struct Hit {
     int group = -1, control = -1;

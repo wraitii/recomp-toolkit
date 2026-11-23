@@ -192,7 +192,8 @@ bool Router::finger_down(int64_t id, double px, double py, uint64_t now_ns, Cont
         // The knob's travel is its own radius (points), scaled like any
         // other length; the rect (w/h) is only the zone: hit test and, for
         // a floating stick, the base's clamp.
-        const double radius = std::lround(c.radius * layout_->scale * screen_.scale);
+        const double radius = std::lround(c.radius * layout_->scale * screen_.scale *
+                                          touch_control_scale(*layout_, c));
         double bx, by;
         if (c.floating) {
             bx = std::clamp(px, double(r.x), double(r.x + r.w));
@@ -240,7 +241,8 @@ bool Router::finger_motion(int64_t id, double px, double py, uint64_t, ControlsS
             ++generation_;
         }
     } else if (c.kind == Kind::Stick) {
-        const double radius = std::lround(c.radius * layout_->scale * screen_.scale);
+        const double radius = std::lround(c.radius * layout_->scale * screen_.scale *
+                                          touch_control_scale(*layout_, c));
         ControlState &cs = states_[o.group][o.control];
         float ox, oy;
         stick_output(px - cs.base_x, py - cs.base_y, radius, c.deadzone, &ox, &oy);

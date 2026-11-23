@@ -133,26 +133,26 @@ const char *kPadTablet = R"JSON({
       "id": "sticks",
       "controls": [
         {"kind": "stick", "stick": "left", "mode": "floating", "anchor": "bottom-left",
-         "x": 24, "y": 24, "radius": 110},
+         "x": 24, "y": 48, "radius": 110},
         {"kind": "stick", "stick": "right", "mode": "floating", "anchor": "bottom-right",
-         "x": 250, "y": 24, "radius": 90}
+         "x": 250, "y": 48, "radius": 90}
       ]
     },
     {
       "id": "buttons",
       "controls": [
-        {"kind": "dpad", "anchor": "bottom-left", "x": 250, "y": 40, "size": 130},
-        {"kind": "button", "button": "triangle", "anchor": "bottom-right", "x": 92, "y": 164, "size": 64},
-        {"kind": "button", "button": "circle", "anchor": "bottom-right", "x": 24, "y": 96, "size": 64},
-        {"kind": "button", "button": "cross", "anchor": "bottom-right", "x": 92, "y": 28, "size": 64},
-        {"kind": "button", "button": "square", "anchor": "bottom-right", "x": 160, "y": 96, "size": 64},
+        {"kind": "dpad", "anchor": "bottom-left", "x": 250, "y": 48, "size": 130},
+        {"kind": "button", "button": "triangle", "anchor": "bottom-right", "x": 92, "y": 184, "size": 64},
+        {"kind": "button", "button": "circle", "anchor": "bottom-right", "x": 24, "y": 116, "size": 64},
+        {"kind": "button", "button": "cross", "anchor": "bottom-right", "x": 92, "y": 48, "size": 64},
+        {"kind": "button", "button": "square", "anchor": "bottom-right", "x": 160, "y": 116, "size": 64},
         {"kind": "button", "button": "l1", "anchor": "top-left", "x": 24, "y": 24, "w": 110, "h": 44},
         {"kind": "button", "button": "l2", "anchor": "top-left", "x": 24, "y": 76, "w": 110, "h": 44},
         {"kind": "button", "button": "r1", "anchor": "top-right", "x": 24, "y": 24, "w": 110, "h": 44},
         {"kind": "button", "button": "r2", "anchor": "top-right", "x": 24, "y": 76, "w": 110, "h": 44},
-        {"kind": "button", "button": "select", "anchor": "bottom-center", "x": -70, "y": 16, "w": 70, "h": 30},
-        {"kind": "button", "button": "ps", "anchor": "bottom-center", "x": 0, "y": 12, "size": 40},
-        {"kind": "button", "button": "start", "anchor": "bottom-center", "x": 70, "y": 16, "w": 70, "h": 30}
+        {"kind": "button", "button": "select", "anchor": "bottom-center", "x": -70, "y": 4, "w": 70, "h": 30},
+        {"kind": "button", "button": "ps", "anchor": "bottom-center", "x": 0, "y": 4, "size": 40},
+        {"kind": "button", "button": "start", "anchor": "bottom-center", "x": 70, "y": 4, "w": 70, "h": 30}
       ]
     },
     {
@@ -236,26 +236,26 @@ const char *kPadPhoneLandscape = R"JSON({
       "id": "sticks",
       "controls": [
         {"kind": "stick", "stick": "left", "mode": "floating", "anchor": "bottom-left",
-         "x": 24, "y": 24, "radius": 70},
+         "x": 24, "y": 36, "radius": 70},
         {"kind": "stick", "stick": "right", "mode": "floating", "anchor": "bottom-right",
-         "x": 24, "y": 24, "radius": 70}
+         "x": 24, "y": 36, "radius": 70}
       ]
     },
     {
       "id": "buttons",
       "controls": [
-        {"kind": "dpad", "anchor": "bottom-left", "x": 170, "y": 24, "size": 100},
-        {"kind": "button", "button": "triangle", "anchor": "bottom-right", "x": 231, "y": 123, "size": 48},
-        {"kind": "button", "button": "circle", "anchor": "bottom-right", "x": 180, "y": 72, "size": 48},
-        {"kind": "button", "button": "cross", "anchor": "bottom-right", "x": 231, "y": 21, "size": 48},
-        {"kind": "button", "button": "square", "anchor": "bottom-right", "x": 282, "y": 72, "size": 48},
+        {"kind": "dpad", "anchor": "bottom-left", "x": 170, "y": 36, "size": 100},
+        {"kind": "button", "button": "triangle", "anchor": "bottom-right", "x": 231, "y": 138, "size": 48},
+        {"kind": "button", "button": "circle", "anchor": "bottom-right", "x": 180, "y": 87, "size": 48},
+        {"kind": "button", "button": "cross", "anchor": "bottom-right", "x": 231, "y": 36, "size": 48},
+        {"kind": "button", "button": "square", "anchor": "bottom-right", "x": 282, "y": 87, "size": 48},
         {"kind": "button", "button": "l1", "anchor": "top-left", "x": 24, "y": 12, "w": 80, "h": 34},
         {"kind": "button", "button": "l2", "anchor": "top-left", "x": 24, "y": 52, "w": 80, "h": 34},
         {"kind": "button", "button": "r1", "anchor": "top-right", "x": 24, "y": 12, "w": 80, "h": 34},
         {"kind": "button", "button": "r2", "anchor": "top-right", "x": 24, "y": 52, "w": 80, "h": 34},
-        {"kind": "button", "button": "select", "anchor": "bottom-center", "x": -58, "y": 8, "w": 56, "h": 26},
-        {"kind": "button", "button": "ps", "anchor": "bottom-center", "x": 0, "y": 8, "w": 56, "h": 26},
-        {"kind": "button", "button": "start", "anchor": "bottom-center", "x": 58, "y": 8, "w": 56, "h": 26}
+        {"kind": "button", "button": "select", "anchor": "bottom-center", "x": -58, "y": 4, "w": 56, "h": 26},
+        {"kind": "button", "button": "ps", "anchor": "bottom-center", "x": 0, "y": 4, "w": 56, "h": 26},
+        {"kind": "button", "button": "start", "anchor": "bottom-center", "x": 58, "y": 4, "w": 56, "h": 26}
       ]
     },
     {

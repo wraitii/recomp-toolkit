@@ -139,9 +139,9 @@ void PadMapperEditor::add_key(int x, int y, int w, int h, const std::string &lab
                               int id) {
     DrawControl d;
     d.kind = Kind::Key;
-    d.rect = {x, y, w, h};
+    d.rect = {x + screen_.safe.x, y + screen_.safe.y, w, h};
     d.label = label;
-    d.text_scale = std::max(1, int(std::lround(screen_.scale)));
+    d.text_scale = menu_scale_;
     d.lit = lit;
     d.focused = focus_ == id;
     frame_.toolbar.push_back(d);
@@ -149,12 +149,12 @@ void PadMapperEditor::add_key(int x, int y, int w, int h, const std::string &lab
 }
 void PadMapperEditor::add_text(int x, int y, int w, int h, const std::string &text, bool muted,
                                int scale) {
-    frame_.text.push_back({{x, y, w, h}, text, scale, muted});
+    frame_.text.push_back({{x + screen_.safe.x, y + screen_.safe.y, w, h}, text, scale, muted});
 }
 void PadMapperEditor::add_meter(int x, int y, int w, int h, const std::string &label, float value,
                                 bool bipolar) {
     frame_.meters.push_back(
-        {{x, y, w, h}, label, value, bipolar, std::max(1, int(std::lround(screen_.scale)))});
+        {{x + screen_.safe.x, y + screen_.safe.y, w, h}, label, value, bipolar, menu_scale_});
 }
 
 void PadMapperEditor::observe_input(const PadState &raw) {
@@ -185,8 +185,11 @@ void PadMapperEditor::observe_input(const PadState &raw) {
 
 ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
                                    const PadState &calibrated, const PadState &guest_preview,
-                                   const std::string &status) {
+                                   const std::string &status, int menu_scale) {
     set_screen(screen);
+    if (screen_.safe.empty())
+        screen_.safe = {0, 0, screen.dw, screen.dh};
+    menu_scale_ = std::max(1, menu_scale);
     observe_input(raw);
     if (center_capture_ && connected_) {
         center_sum_ += axis(raw, selected_);
@@ -215,23 +218,25 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
     frame_.dh = screen.dh;
     frame_.layers.push_back({{0, 0, screen.dw, screen.dh}, ++revision_});
     widget_ids_.clear();
-    const double scale = std::max(0.75, screen.scale);
+    const int w = screen_.safe.w, h = screen_.safe.h;
+    const double scale = std::max(0.5, std::min({double(menu_scale_), w / 470.0, h / 310.0}));
     const auto px = [scale](int v) { return int(std::lround(v * scale)); };
-    const int w = screen.dw, h = screen.dh, m = px(18), gap = px(8), row = px(30);
-    const int text_scale = std::max(1, int(std::lround(scale)));
+    const int m = px(14), gap = px(6), row = px(28);
+    const int text_scale = menu_scale_;
     const auto text = [&](int x, int y, int width, int height, const std::string &s,
                           bool muted = true) {
         add_text(x, y, width, height, s, muted, text_scale);
     };
-    add_text(m, m, w - 2 * m, px(24), "Controller setup", false, 2 * text_scale);
-    text(m, px(46), w - 2 * m, px(22), connected_ ? device_ : "No controller connected");
+    add_text(m, m, w - 2 * m, std::max(px(24), 16 * text_scale), "Controller setup", false,
+             2 * text_scale);
+    text(m, px(42), w - 2 * m, px(17), connected_ ? device_ : "No controller connected");
     const int tab_w = std::min(px(148), (w - 2 * m - 2 * gap) / 3);
     const char *tabs[] = {"Overview", "Mapping", "Calibration"};
     for (int i = 0; i < 3; ++i)
-        add_key(m + i * (tab_w + gap), px(76), tab_w, row, tabs[i], int(page_) == i, i + 1);
-    const int top = px(154), bottom = h - px(76), body_h = bottom - top;
+        add_key(m + i * (tab_w + gap), px(62), tab_w, row, tabs[i], int(page_) == i, i + 1);
+    const int top = px(116), bottom = h - px(48), body_h = bottom - top;
     const bool dirty = serialize_pad_mapper_profile(profile_) != original_;
-    const int footer_y = h - px(52), button_w = px(100);
+    const int footer_y = h - px(42), button_w = px(100);
     add_key(w - m - 2 * button_w - gap, footer_y, button_w, row, "Cancel", false, 11);
     add_key(w - m - button_w, footer_y, button_w, row, "Save", dirty, 10);
     if (dirty)
@@ -247,36 +252,35 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
         message = "Move this input through its full travel, then choose Finish range. Cancel "
                   "capture restores it.";
     if (!message.empty())
-        text(m, px(114), w - 2 * m, px(34), message, false);
+        text(m, px(95), w - 2 * m, px(20), message, false);
 
     if (page_ == Page::Overview) {
         const int col = (w - 2 * m - gap) / 2, right = m + col + gap;
-        text(m, top, col, px(22), "Controller mappings", false);
-        text(m, top + px(30), col, px(46),
-             "Change controller outputs and add keyboard keys in Mapping.");
-        add_key(m, top + px(112), px(148), row, "Presets...", false, 12);
-        add_key(m, top + px(152), px(148), row, "Test rumble", false, 14);
-        add_key(m, top + px(192), col, row,
+        text(m, top, col, px(20), "Controller mappings", false);
+        const int action_w = std::min(px(150), (col - gap) / 2);
+        add_key(m, top + px(24), action_w, row, "Presets...", false, 12);
+        add_key(m + action_w + gap, top + px(24), action_w, row, "Test rumble", false, 14);
+        add_key(m, top + px(60), col, row,
                 std::string("DirectInput force feedback as rumble: ") +
                     (profile_.directinput_rumble ? "On" : "Off"),
                 profile_.directinput_rumble, 15);
-        text(m, top + px(230), col, px(46),
+        text(m, top + px(94), col, std::max(0, body_h - px(94)),
              "Approximate older games' force effects using controller vibration. "
              "Off hides rumble-based force feedback from games.");
-        text(right, top, col, px(22), "Test controller", false);
+        text(right, top, col, px(20), "Test controller", false);
         for (int i = 0; i < 6; ++i)
-            add_meter(right, top + px(26) + i * px(28), col, px(22), axes[i], axis(raw, i), i < 4);
+            add_meter(right, top + px(22) + i * px(18), col, px(16), axes[i], axis(raw, i), i < 4);
 
         std::string held;
         for (int i = 6; i < 23; ++i)
             if (active(raw, i))
                 held += (held.empty() ? "" : ", ") + source_name(i);
-        text(right, top + px(204), col, std::max(px(22), body_h - px(204)),
+        text(right, top + px(132), col, std::max(0, body_h - px(132)),
              held.empty() ? "Press a button or move a stick to test." : held, false);
     } else {
         const int side_w = std::min(px(208), (w - 2 * m) / 3), x = m + side_w + gap,
                   content_w = w - m - x;
-        sidebar_edge_ = x;
+        sidebar_edge_ = x + screen_.safe.x;
         const int first = page_ == Page::Calibration ? 0 : group_ == 0 ? 0 : group_ == 1 ? 6 : 19;
         const int count = page_ == Page::Calibration || group_ == 0 ? 6 : group_ == 1 ? 13 : 4;
         if (page_ == Page::Mapping) {
@@ -422,7 +426,8 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
                                                                                     : 480;
         const int pw = std::min(w - 2 * m, px(560)), ph = std::min(h - 2 * m, px(popup_height));
         const int x = (w - pw) / 2, y = (h - ph) / 2;
-        frame_.picker = {x - gap, y - gap, pw + 2 * gap, ph + 2 * gap};
+        frame_.picker = {x + screen_.safe.x - gap, y + screen_.safe.y - gap, pw + 2 * gap,
+                         ph + 2 * gap};
         const size_t text_start = frame_.text.size();
         const size_t toolbar_start = frame_.toolbar.size();
         const bool preset_popup = popup_ == Popup::Preset;
@@ -457,7 +462,9 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
                 }
         } else {
             const int count = popup_ == Popup::Axis ? 7 : popup_ == Popup::Button ? 18 : 14;
-            const int cw = (pw - gap) / 2;
+            const int rows = std::max(1, (y + ph - row - gap - at) / (row + gap));
+            const int columns = std::max(2, (count + rows - 1) / rows);
+            const int cw = (pw - (columns - 1) * gap) / columns;
             for (int i = 0; i < count; ++i) {
                 const std::string label =
                     popup_ == Popup::Axis ? (i ? axes[i - 1] : "None") : output_name(i);
@@ -474,8 +481,8 @@ ControlsView PadMapperEditor::view(const Screen &screen, const PadState &raw,
                                                              : binding.positive_guest_buttons,
                                                          0});
                 }
-                add_key(x + (i % 2) * (cw + gap), at + (i / 2) * (row + gap), cw, row, label,
-                        selected, 400 + i);
+                add_key(x + (i % columns) * (cw + gap), at + (i / columns) * (row + gap), cw, row,
+                        label, selected, 400 + i);
             }
         }
         if (!discard_popup)

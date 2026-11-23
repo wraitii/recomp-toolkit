@@ -66,6 +66,7 @@ Rect drawn_rect(const DrawControl &d) {
 void hash_control(Hash &h, const DrawControl &d) {
     h.num(int(d.kind));
     h.rect(d.rect);
+    h.num(d.text_scale);
     if (d.kind == Kind::Key) {
         h.str(d.label);
         h.num(d.lit ? 1 : 0);
@@ -126,6 +127,8 @@ ControlsView make_view(const Layout &l, const Router &r, const Screen &s, double
             DrawControl d;
             d.kind = ctl.kind;
             d.rect = control_rect(l, g, c, s);
+            if (touch_control_scale(l, ctl) > 1.0)
+                d.text_scale = std::clamp((d.rect.h + 10) / 16, 1, 6);
             d.label = ctl.label;
             d.pressed = st.pressed;
             d.lit = ctl.kind == Kind::Key && (r.lit() & keypad_modifier_bit(ctl.scancode)) != 0;
@@ -140,7 +143,8 @@ ControlsView make_view(const Layout &l, const Router &r, const Screen &s, double
             // Scaled like the router's own travel (router.cpp), so the knob
             // quad lands where the stick's output says it is.
             if (ctl.kind == Kind::Stick)
-                d.radius_px = int(std::lround(ctl.radius * l.scale * s.scale));
+                d.radius_px =
+                    int(std::lround(ctl.radius * l.scale * touch_control_scale(l, ctl) * s.scale));
             if (ctl.kind == Kind::Toggle) {
                 const int target = group_named(l, ctl.target);
                 d.group_visible = target < 0 || l.groups[target].visible;
@@ -236,12 +240,15 @@ ControlsView make_view(const Editor &e, const Screen &s) {
             DrawControl d;
             d.kind = ctl.kind;
             d.rect = control_rect(l, g, c, cs);
+            if (touch_control_scale(l, ctl) > 1.0)
+                d.text_scale = std::clamp((d.rect.h + 10) / 16, 1, 6);
             d.label = ctl.label;
             d.button = ctl.button;
             d.floating = ctl.floating;
             d.layer = 0;
             if (ctl.kind == Kind::Stick)
-                d.radius_px = int(std::lround(ctl.radius * l.scale * cs.scale));
+                d.radius_px =
+                    int(std::lround(ctl.radius * l.scale * touch_control_scale(l, ctl) * cs.scale));
             if (ctl.kind == Kind::Toggle) {
                 const int target = group_named(l, ctl.target);
                 d.group_visible = target < 0 || l.groups[target].visible;

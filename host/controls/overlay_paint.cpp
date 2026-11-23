@@ -17,6 +17,13 @@ Paint flat(int r, int g, int b, int a) {
     return p;
 }
 
+void paint_label(Canvas &c, const char *label, int x, int y, int w, int h, Rgba color, int scale) {
+    while (scale > 1 && c.text_width(label, scale) > w - 4)
+        --scale;
+    c.text(x + (w - c.text_width(label, scale)) / 2, y + (h - 8 * scale) / 2, label, color, scale,
+           true);
+}
+
 // One control, wherever it is drawn: the play overlay's layers and the
 // editor's layer draw an untouched control identically.
 void paint_one(Canvas &c, const DrawControl &d, const Rect &r) {
@@ -32,19 +39,18 @@ void paint_one(Canvas &c, const DrawControl &d, const Rect &r) {
             c.rect(x, y, w, h, flat(40, 48, 64, 200));
         const char *label = d.label.c_str();
         const Rgba text_color = d.lit ? Rgba{10, 12, 20, 255} : Rgba{235, 242, 255, 255};
-        // A label too wide for a small key (inside a 2px margin each side)
-        // drops to the 1x font.
-        const int scale = c.text_width(label, 2) > w - 4 ? 1 : 2;
-        c.text(x + (w - c.text_width(label, scale)) / 2, y + (h - 8 * scale) / 2, label, text_color,
-               scale, true);
+        paint_label(c, label, x, y, w, h, text_color, d.text_scale ? d.text_scale : 2);
         break;
     }
     case Kind::Toggle: {
         c.rect(x, y, w, h, flat(6, 9, 15, 150));
         c.rect(x + 2, y + 2, w - 4, h - 4, flat(40, 48, 64, 200));
         const char *label = d.group_visible ? d.label.c_str() : d.label_off.c_str();
-        c.text(x + (w - c.text_width(label)) / 2, y + (h - 16) / 2, label, Rgba{235, 242, 255, 255},
-               2, true);
+        const Rgba color{235, 242, 255, 255};
+        if (d.text_scale)
+            paint_label(c, label, x, y, w, h, color, d.text_scale);
+        else
+            c.text(x + (w - c.text_width(label)) / 2, y + (h - 16) / 2, label, color, 2, true);
         break;
     }
     default:
