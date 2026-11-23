@@ -28,7 +28,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     sourceSets.named("main") {
-        // Use the SDL version fetched by the native build; no copied Java sources.
+        // Use the SDL Java sources staged by the native packaging step.
         java.srcDirs("src/main/java", "@sdl_java_dir@")
         jniLibs.srcDirs("src/main/jniLibs")
     }

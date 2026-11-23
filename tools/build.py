@@ -170,15 +170,30 @@ def install_and_launch(app, bundle_id, device, console):
 def android_project(build_root, cfg, *, gen_dir):
     """Render the Gradle project without building it; gen_dir is the CMake binary directory.
 
-    SDL's Java sources stay in that build's FetchContent checkout. Gradle
-    only packages the native library built by CMake, never invokes CMake.
+    Stage the SDL Java sources from the native build's FetchContent checkout.
+    Gradle packages the native library built by CMake.
     """
     template = ROOT / "platform/android"
     out = Path(build_root) / "android"
     shutil.copytree(template, out, dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns(".gradle", "build", ".gitignore", "local.properties"))
     values = {key: cfg["game"][key] for key in ("app_name", "bundle_id", "id")}
-    values["sdl_java_dir"] = (Path(gen_dir).resolve() / "_deps/sdl3-src/android-project/app/src/main/java").as_posix()
+    sdl_java = Path(gen_dir) / "_deps/sdl3-src/android-project/app/src/main/java"
+    staged_sdl_java = out / "sdl-java"
+    if staged_sdl_java.exists():
+        shutil.rmtree(staged_sdl_java)
+    shutil.copytree(sdl_java, staged_sdl_java)
+    activity = staged_sdl_java / "org/libsdl/app/SDLActivity.java"
+    activity_source = activity.read_text(encoding="utf-8")
+    thread = 'new Thread(new SDLMain(), "SDLThread")'
+    if activity_source.count(thread) != 1:
+        raise RuntimeError("Could not find the SDL main thread constructor in %s" % activity)
+    # Translated guest calls use the SDL thread's native stack. Large recursive
+    # functions in debug builds can exhaust Android's default Java thread stack.
+    activity.write_text(activity_source.replace(
+        thread, 'new Thread(null, new SDLMain(), "SDLThread", 8L * 1024 * 1024)'),
+        encoding="utf-8")
+    values["sdl_java_dir"] = "../sdl-java"
     for original in template.rglob("*.in"):
         source = out / original.relative_to(template)
         text = source.read_text()
