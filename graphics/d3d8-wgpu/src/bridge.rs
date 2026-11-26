@@ -2871,11 +2871,14 @@ pub fn create_shader(
         }
     };
     let parsed_program = if function.is_empty() {
+        // DIVERGENCE(original): a declaration the fixed-function path cannot
+        // draw (e.g. indexed vertex blending under software processing) is
+        // still created, since engines create every shader up front; its
+        // draws are skipped with a warning (see `Device::skip_unsupported_declaration`).
         if let Err(error) = parsed_declaration.as_ref().unwrap().fixed_fvf() {
-            return ShaderHandleResult {
-                status: status_from_error(error),
-                handle: 0,
-            };
+            eprintln!(
+                "d3d8: creating a declaration-only shader whose draws will be skipped: {error}"
+            );
         }
         Program {
             pixel: false,

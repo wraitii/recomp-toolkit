@@ -89,6 +89,7 @@ def render_header(cfg):
     lines.append("#define RECOMP_INPUT_MOUSE_SENSITIVITY %d" % input_config["mouse_sensitivity"])
     lines.append("#define RECOMP_INPUT_MOUSE_ACCELERATION %d" % int(input_config["mouse_acceleration"]))
     lines.append("#define RECOMP_CD_AUDIO_TRACKS %s" % c_string_list(cfg.get("media", {}).get("cd_tracks", [])))
+    lines.append("#define RECOMP_DISC_LABEL %s" % c_string(cfg.get("media", {}).get("disc_label", "")))
     lines.append("#define RECOMP_AUX_MODULE_COUNT %d" % len(cfg["aux_modules"]))
     lines.append("#define RECOMP_AUX_MODULES {%s}" % ", ".join(
         "{%s, %s, %s, %s, %s, %s}" % (c_string(m["name"]), c_string(m["path"].as_posix()),

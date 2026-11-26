@@ -2033,6 +2033,20 @@ impl<'a> Emitter<'a> {
             }
             return self.edge(Some(current), target_block);
         }
+        // `JMP $+n` to the very next instruction (e.g. `EB 00`, used to flush the prefetch
+        // queue after self-modifying stores) is a no-op when that instruction continues the
+        // same block: the code that follows is emitted right here.
+        let at = self.s.value_addr[value as usize];
+        if let Some(index) = self.ctx.ir.index_of(at) {
+            let insns = &self.ctx.ir.insns;
+            let index = index as usize;
+            if insns[index].end() == target
+                && insns.get(index + 1).is_some_and(|next| next.addr == target)
+                && (index + 1) < self.s.blocks[current].end as usize
+            {
+                return Ok(());
+            }
+        }
         self.publish(value)?;
         if self.ctx.known_entries.contains(&target) && !self.reloc_internal(target) {
             self.declare_raw(target);
@@ -2158,7 +2172,12 @@ impl<'a> Emitter<'a> {
             return Ok(());
         }
         self.publish(value)?;
-        if !self.ctx.ir.intra_call_returns.is_empty()
+        // A RET can continue inside the body: after an internal CALL, or at a
+        // constant the body pushed as a return address before jumping to a
+        // shared helper. Taking those edges as jumps keeps the host stack flat
+        // for loops built from PUSH/JMP/RET; any other address is a real return.
+        if (!self.ctx.ir.intra_call_returns.is_empty()
+            || !self.ctx.ir.pushed_continuations.is_empty())
             && !self.ctx.effect_returns.contains(&self.s.addr)
         {
             let current = self.block_of(value);
@@ -2167,10 +2186,9 @@ impl<'a> Emitter<'a> {
                 .iter()
                 .copied()
                 .filter(|target| {
-                    self.ctx
-                        .ir
-                        .intra_call_returns
-                        .contains(&self.plan.block_addrs[*target])
+                    let addr = self.plan.block_addrs[*target];
+                    self.ctx.ir.intra_call_returns.contains(&addr)
+                        || self.ctx.ir.pushed_continuations.contains(&addr)
                 })
                 .collect();
             if !targets.is_empty() {

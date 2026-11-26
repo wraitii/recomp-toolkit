@@ -259,6 +259,11 @@ pub struct FunctionIr {
     pub intra_calls: BTreeMap<u32, Addr>,
     #[serde(default)]
     pub intra_call_returns: BTreeSet<Addr>,
+    /// Constants pushed as return addresses inside the function (`PUSH imm;
+    /// JMP helper` ... `RET`). A RET whose popped address is one of these
+    /// continues inside the body instead of returning to the host caller.
+    #[serde(default)]
+    pub pushed_continuations: BTreeSet<Addr>,
     #[serde(default)]
     pub seh: BTreeMap<u32, Vec<SehEffect>>,
     #[serde(default)]

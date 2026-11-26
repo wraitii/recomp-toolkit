@@ -52,7 +52,7 @@ fn evaluate_lighting(position: vec3<f32>, input_normal: vec3<f32>,
         if (light.position_type.w != 3.0) {
             let delta = light.position_type.xyz - view_position;
             let distance = sqrt(dot(delta, delta));
-            if (distance > light.attenuation_range.w) { continue; }
+            if (!(distance <= light.attenuation_range.w)) { continue; }
             direction = lighting_normalize(delta);
             let a = light.attenuation_range;
             attenuation = 1.0 / (a.x + a.y * distance + a.z * distance * distance);

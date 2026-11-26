@@ -642,6 +642,11 @@ def load(game_dir, build_root=None):
     tracks = cfg.setdefault("media", {}).setdefault("cd_tracks", [])
     if not isinstance(tracks, list) or not all(isinstance(v, str) for v in tracks):
         raise ValueError("%s: [media] cd_tracks must be a list of strings" % source)
+    # A retail disc the game checks for: when set, the runtime presents drive D:
+    # as a CD-ROM with this volume label (file system CDFS). Its files resolve
+    # like any other drive's, against the game directory.
+    if not isinstance(cfg["media"].setdefault("disc_label", ""), str):
+        raise ValueError("%s: [media] disc_label must be a string" % source)
     if not isinstance(cfg.setdefault("audio", {}).setdefault("midi", True), bool):
         raise ValueError("%s: [audio] midi must be a boolean" % source)
     cfg.setdefault("hooks", {})

@@ -197,10 +197,62 @@ impl Declaration {
                 }
             }
         }
-        Err(fail(
-            "declaration-only shader layout has no supported fixed-function FVF",
-        ))
+        if let Some(fvf) = self.truncated_fvf() {
+            return Ok(fvf);
+        }
+        let offsets: Vec<_> = self.layout.attributes.iter().map(|a| a.offset).collect();
+        Err(fail(format!(
+            "declaration-only shader layout has no supported fixed-function FVF \
+             (fields {:?}, offsets {:?}, stride {}, streams {})",
+            self.fields, offsets, self.layout.stride, self.stream_count
+        )))
     }
+    /// A declaration whose leading fields are exactly a supported FVF's
+    /// packed layout, followed only by extra texture-coordinate sets the
+    /// fixed-function pipeline cannot sample (registers 8..15 beyond the
+    /// FVF's own sets). Draws then keep each vertex's first `stride` bytes.
+    /// DIVERGENCE(original): the extra sets are dropped; a stage that selects
+    /// them reads what the reduced FVF supplies for a missing set.
+    fn truncated_fvf(&self) -> Option<u32> {
+        if self.stream_count != 1 {
+            return None;
+        }
+        for (fvf, expected) in [
+            (0x112u32, &[(0u32, 2u32), (3, 2), (7, 1)][..]),
+            (0x152, &[(0, 2), (3, 2), (5, 4), (7, 1)][..]),
+        ] {
+            let n = expected.len();
+            if self.fields.len() <= n || self.fields[..n] != *expected {
+                continue;
+            }
+            if !self.fields[n..]
+                .iter()
+                .all(|&(reg, _)| (8..16).contains(&reg))
+            {
+                continue;
+            }
+            let layout = FvfLayout::decode(fvf).ok()?;
+            let mut offset = 0;
+            let packed = self.layout.attributes[..n].iter().all(|a| {
+                let ok = a.offset == offset;
+                offset += a.format.size();
+                ok
+            });
+            if packed && offset == layout.stride {
+                return Some(fvf);
+            }
+        }
+        None
+    }
+
+    /// Byte count of each vertex that a truncated FVF keeps, if this
+    /// declaration resolves to one (see [`Self::truncated_fvf`]).
+    pub fn truncated_stride(&self) -> Option<u64> {
+        let fvf = self.truncated_fvf()?;
+        let stride = FvfLayout::decode(fvf).ok()?.stride;
+        (stride < self.layout.stride).then_some(stride)
+    }
+
     fn inputs(&self) -> (String, String) {
         let mut fields = String::from("struct VertexInput {\n");
         let mut loads = String::new();
@@ -319,6 +371,9 @@ impl Program {
         let mut cube_reflection = false;
         let mut matrix_rows: Vec<(u32, u32)> = Vec::new();
         let mut seq = 0;
+        // Stores of the latest instruction, held back so a co-issued
+        // successor computes its result from the same pre-pair registers.
+        let mut pending = String::new();
         while i < words.len() {
             let ins = words[i];
             i += 1;
@@ -330,6 +385,7 @@ impl Program {
                 if i != words.len() {
                     return Err(fail("trailing shader tokens"));
                 }
+                body += &pending;
                 return Ok(Self {
                     pixel,
                     declaration_only: false,
@@ -345,8 +401,19 @@ impl Program {
                 }
                 continue;
             }
-            if ins & !0xffff != 0 {
-                return Err(fail(format!("instruction flags/coissue {ins:#010x}")));
+            // ps.1.x co-issue (`+`): both instructions of the pair read the
+            // registers as they were before the pair.
+            let coissue = pixel && ins & 0x40000000 != 0;
+            if ins & !0xffff & !if pixel { 0x40000000 } else { 0 } != 0 {
+                return Err(fail(format!("instruction flags {ins:#010x}")));
+            }
+            if coissue {
+                if pending.is_empty() || !(1..=24).contains(&op) && op != 80 {
+                    return Err(fail("co-issue needs a preceding arithmetic instruction"));
+                }
+            } else {
+                body += &pending;
+                pending.clear();
             }
             if !matrix_rows.is_empty() && op != 73 && op != 77 {
                 return Err(fail(
@@ -548,7 +615,7 @@ impl Program {
                     } else {
                         format!("result{seq}.{c}")
                     };
-                    body += &format!("{name}.{c} = {value};\n");
+                    pending += &format!("{name}.{c} = {value};\n");
                 }
             }
             seq += 1;
@@ -564,7 +631,11 @@ pub struct Uniform {
     pub pc: [[f32; 4]; 8],
     pub bump: [[f32; 4]; 4],
     pub lum: [[f32; 4]; 4],
+    /// `lod[stage]`: x LOD bias; y texture set, 8 none or 9 camera-space
+    /// position; z the generated coordinate's divisor component (3 z, 4 w).
     pub lod: [[f32; 4]; 4],
+    /// Per-stage `D3DTS_TEXTUREn` for camera-space generation.
+    pub texm: [[[f32; 4]; 4]; 4],
 }
 impl Default for Uniform {
     fn default() -> Self {
@@ -602,7 +673,7 @@ pub fn compose(vs: Option<(&Declaration, &Program)>, ps: Option<&Program>, lit: 
     } else {
         TEXTURED_WGSL.into()
     };
-    s += "\nstruct ProgramUniform { vc: array<vec4<f32>,96>, pc: array<vec4<f32>,8>, bump: array<vec4<f32>,4>, lum: array<vec4<f32>,4>, lod: array<vec4<f32>,4>, };\n@group(0) @binding(4) var<uniform> program: ProgramUniform;\n@group(1) @binding(4) var stage2_tex: texture_2d<f32>;\n@group(1) @binding(5) var stage2_sampler: sampler;\n@group(1) @binding(6) var stage3_tex: texture_2d<f32>;\n@group(1) @binding(7) var stage3_sampler: sampler;\n";
+    s += "\nstruct ProgramUniform { vc: array<vec4<f32>,96>, pc: array<vec4<f32>,8>, bump: array<vec4<f32>,4>, lum: array<vec4<f32>,4>, lod: array<vec4<f32>,4>, texm: array<mat4x4<f32>,4>, };\n@group(0) @binding(4) var<uniform> program: ProgramUniform;\n@group(1) @binding(4) var stage2_tex: texture_2d<f32>;\n@group(1) @binding(5) var stage2_sampler: sampler;\n@group(1) @binding(6) var stage3_tex: texture_2d<f32>;\n@group(1) @binding(7) var stage3_sampler: sampler;\n";
     s=s.replace("    out.specular = vec3<f32>(\n", "    out.specular_alpha = f32((in.specular >> 24u) & 255u) / 255.0;\n    out.specular = vec3<f32>(\n");
     let out = "    @location(7) uv2: vec2<f32>,\n    @location(8) uv3: vec2<f32>,\n    @location(9) specular_alpha: f32,\n";
     s = s.replace(
@@ -641,7 +712,7 @@ pub fn compose(vs: Option<(&Declaration, &Program)>, ps: Option<&Program>, lit: 
             for stage in 0..4 {
                 let init = format!("t[{stage}]=vec4<f32>(in.uv{stage},0.0,1.0);");
                 let replace = format!(
-                    "t[{stage}]=vec4<f32>(0.0,0.0,0.0,1.0);if(program.lod[{stage}].y==0.0){{t[{stage}]=vec4<f32>(in.uv0,0.0,1.0);}}else if(program.lod[{stage}].y==1.0){{t[{stage}]=vec4<f32>(in.uv1,0.0,1.0);}}"
+                    "t[{stage}]=vec4<f32>(0.0,0.0,0.0,1.0);if(program.lod[{stage}].y==0.0){{t[{stage}]=vec4<f32>(in.uv0,0.0,1.0);}}else if(program.lod[{stage}].y==1.0){{t[{stage}]=vec4<f32>(in.uv1,0.0,1.0);}}else if(program.lod[{stage}].y==9.0){{let g=program.texm[{stage}]*in.cam_pos;var q=1.0;if(program.lod[{stage}].z==3.0){{q=g.z;}}else if(program.lod[{stage}].z==4.0){{q=g.w;}}t[{stage}]=vec4<f32>(g.xy/q,0.0,1.0);}}"
                 );
                 body = body.replace(&init, &replace);
             }
@@ -695,6 +766,86 @@ mod tests {
         assert_eq!(d.constants[0].1[3].to_bits(), 4);
         assert!(Declaration::parse(&[0x20000010, 0x40020000, u32::MAX]).is_err());
         assert!(Declaration::parse(&[0x20000000, 0x40020000, 0x40020000, u32::MAX]).is_err());
+    }
+    #[test]
+    fn coissued_pair_reads_registers_from_before_the_pair() {
+        // ps.1.1: mov r0.rgb, c0 / +mov r0.a, r0 / mov r0, r0
+        let words = [
+            0xffff0101,
+            1,
+            dst(0, 0, 7),
+            src(2, 0),
+            0x40000001,
+            dst(0, 0, 8),
+            src(0, 0),
+            1,
+            dst(0, 0, 15),
+            src(0, 0),
+            0xffff,
+        ];
+        let p = Program::parse(&words, true).unwrap();
+        let second = p.body.find("let result1").unwrap();
+        let first_store = p.body.find("r[0].x = result0.x").unwrap();
+        assert!(second < first_store, "{}", p.body);
+        assert!(p.body.find("r[0].w = result1.w").unwrap() < p.body.find("let result2").unwrap());
+        // Co-issue needs a preceding arithmetic instruction.
+        assert!(
+            Program::parse(
+                &[0xffff0101, 0x40000001, dst(0, 0, 8), src(2, 0), 0xffff],
+                true
+            )
+            .is_err()
+        );
+        // Vertex shaders have no co-issue.
+        assert!(
+            Program::parse(
+                &[
+                    0xfffe0101,
+                    1,
+                    dst(0, 0, 15),
+                    src(2, 0),
+                    0x40000001,
+                    dst(0, 1, 15),
+                    src(2, 0),
+                    0xffff
+                ],
+                false
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn extra_texture_sets_truncate_to_a_supported_fvf() {
+        // XYZ, NORMAL, TEX0..1 float2, TEX2..3 float3: stride 64.
+        let d = Declaration::parse(&[
+            0x20000000,
+            0x40020000,
+            0x40020003,
+            0x40010007,
+            0x40010008,
+            0x40020009,
+            0x4002000a,
+            u32::MAX,
+        ])
+        .unwrap();
+        assert_eq!(d.layout.stride, 64);
+        assert_eq!(d.fixed_fvf().unwrap(), 0x112);
+        assert_eq!(d.truncated_stride(), Some(32));
+        // An exact 0x112 declaration needs no truncation.
+        let exact = Declaration::parse(&[0x20000000, 0x40020000, 0x40020003, 0x40010007, u32::MAX])
+            .unwrap();
+        assert_eq!(exact.truncated_stride(), None);
+        // A trailing field that is not a texture set still fails.
+        let bad = Declaration::parse(&[
+            0x20000000,
+            0x40020000,
+            0x40020003,
+            0x40010007,
+            0x40040005,
+            u32::MAX,
+        ])
+        .unwrap();
+        assert!(bad.fixed_fvf().is_err());
     }
     #[test]
     fn compose_stages_independently_and_water_instructions() {

@@ -24,6 +24,107 @@ void zero(X86 *c) {
     set_eax(c, 0);
 }
 
+// ANSI path helpers from SHLWAPI that edit a guest string in place.
+uint32_t ansi_extension(uint32_t path) {
+    // PathFindExtension: the last '.' after the last separator, or the end.
+    uint32_t dot = 0, at = path;
+    for (;; ++at) {
+        uint8_t ch = rd8(at);
+        if (!ch)
+            break;
+        if (ch == '\\' || ch == '/' || ch == ':' || ch == ' ')
+            dot = 0;
+        else if (ch == '.')
+            dot = at;
+    }
+    return dot ? dot : at;
+}
+void s_PathRemoveExtensionA(X86 *c) {
+    uint32_t path = arg(c, 0);
+    if (path)
+        wr8(ansi_extension(path), 0);
+    set_eax(c, 0);
+}
+void s_PathAddExtensionA(X86 *c) {
+    uint32_t path = arg(c, 0), ext = arg(c, 1);
+    if (!path) {
+        set_eax(c, 0);
+        return;
+    }
+    uint32_t end = ansi_extension(path);
+    if (rd8(end)) { // already has an extension
+        set_eax(c, 1);
+        return;
+    }
+    std::string add = ext ? gm_str(ext) : std::string(".exe");
+    if (end - path + add.size() >= 260) {
+        set_eax(c, 0);
+        return;
+    }
+    for (char ch : add)
+        wr8(end++, (uint8_t)ch);
+    wr8(end, 0);
+    set_eax(c, 1);
+}
+void s_PathStripPathA(X86 *c) {
+    uint32_t path = arg(c, 0);
+    set_eax(c, 0);
+    if (!path)
+        return;
+    std::string text = gm_str(path);
+    size_t cut = text.find_last_of("\\/:");
+    if (cut == std::string::npos)
+        return;
+    std::string name = text.substr(cut + 1);
+    for (size_t i = 0; i <= name.size(); ++i)
+        wr8(path + (uint32_t)i, i < name.size() ? (uint8_t)name[i] : 0);
+}
+
+// PtInRect(const RECT *, POINT): the POINT is passed by value as two dwords.
+void u_PtInRect(X86 *c) {
+    uint32_t rect = arg(c, 0);
+    int32_t x = (int32_t)arg(c, 1), y = (int32_t)arg(c, 2);
+    if (!rect || !gm_valid(rect, 16)) {
+        set_eax(c, 0);
+        return;
+    }
+    int32_t l = (int32_t)rd32(rect), t = (int32_t)rd32(rect + 4);
+    int32_t r = (int32_t)rd32(rect + 8), b = (int32_t)rd32(rect + 12);
+    set_eax(c, x >= l && x < r && y >= t && y < b);
+}
+
+// No dialog templates are modelled, so a radio group has no buttons to check.
+void u_CheckRadioButton(X86 *c) {
+    set_eax(c, 1);
+}
+
+// The device context is always MM_TEXT with top-left text alignment.
+void g_SetMapMode(X86 *c) {
+    set_eax(c, 1); // previous mode MM_TEXT
+}
+void g_SetTextAlign(X86 *c) {
+    set_eax(c, 0); // previous alignment TA_TOP | TA_LEFT
+}
+
+// winmm joystick API: no joystick driver. Controllers reach games through
+// DirectInput and XInput instead.
+void joy_no_devices(X86 *c) {
+    set_eax(c, 0);
+}
+void joy_unplugged(X86 *c) {
+    set_eax(c, 167); // JOYERR_UNPLUGGED
+}
+
+// NovaLogic's in-game web browser (IBrowse.dll) and its companion client
+// (APIClient.dll) serve the online lobby. Both export __cdecl functions, so
+// the dispatcher leaves the arguments for the caller. Every call declines:
+// the browser never initializes, and InitDll returns false (in AL), which
+// skips client registration.
+void novalogic_decline(X86 *c) {
+    log_once("novalogic.online", "IBrowse/APIClient: no online services in this build; declining");
+    set_eax(c, 0);
+}
+
 // HAP Debugger: a developer-only remote debug console that owns its own
 // sockets and Python interpreter. Its imports are __cdecl (mangled names with
 // no @N), so the dispatcher must leave the arguments for the caller to pop.
@@ -417,6 +518,34 @@ const ImportShim shims[] = {
     {"SHELL32.dll", "Shell_NotifyIconW", 2, yes},
     {"SHELL32.dll", "SHAppBarMessage", 2, zero},
     {"SHELL32.dll", "ShellExecuteW", 6, zero},
+    {"SHLWAPI.dll", "PathRemoveExtensionA", 1, s_PathRemoveExtensionA},
+    {"SHLWAPI.dll", "PathAddExtensionA", 2, s_PathAddExtensionA},
+    {"SHLWAPI.dll", "PathStripPathA", 1, s_PathStripPathA},
+    {"USER32.dll", "PtInRect", 3, u_PtInRect},
+    {"USER32.dll", "CheckRadioButton", 4, u_CheckRadioButton},
+    {"GDI32.dll", "SetMapMode", 2, g_SetMapMode},
+    {"GDI32.dll", "SetTextAlign", 2, g_SetTextAlign},
+    {"WINMM.dll", "joyGetNumDevs", 0, joy_no_devices},
+    {"WINMM.dll", "joyGetDevCapsA", 3, joy_unplugged},
+    {"WINMM.dll", "joyGetPosEx", 2, joy_unplugged},
+    {"APIClient.dll", "InitDll", ARGC_CDECL, novalogic_decline},
+    {"APIClient.dll", "RegisterClient", ARGC_CDECL, novalogic_decline},
+    {"APIClient.dll", "GetActiveCover", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_Sleep", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_InitEx2", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_SetCallback", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_Wake", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_OnKeyDown", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_OnChar", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_OnKeyUp", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_GetTitle", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_GetMetaValue", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_OpenURL", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_EnableRender", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_Render", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_GetCookieValue", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_GetCookieBufferData", ARGC_CDECL, novalogic_decline},
+    {"IBrowse.dll", "ibrowse_OnMouse", ARGC_CDECL, novalogic_decline},
     {"SHLWAPI.dll", "StrCmpW", 2, s_StrCmpW},
     {"SHLWAPI.dll", "StrCmpNIW", 3, s_StrCmpNIW},
     {"SHLWAPI.dll", "StrToIntW", 1, s_StrToIntW},

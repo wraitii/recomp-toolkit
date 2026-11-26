@@ -46,38 +46,76 @@ fn inverse3(m: Mat4) -> Result<[[f32; 3]; 3], RenderError> {
 /// Guest vertex layout consumed by [`DeviceState::light_vertices`] and
 /// [`DeviceState::process_vertices`].
 ///
-/// `light_vertices` always writes the fixed 36-byte lit layout from
-/// [`lit_layout`](super::fixed_function::lit_layout): XYZ at 0, float RGBA
-/// diffuse at 12 and the 2-float texture coordinate at 28.
+/// `light_vertices` always writes the fixed [`LIT_RECORD`]-byte lit layout
+/// from [`lit_layout`](super::fixed_function::lit_layout): XYZ at 0, float
+/// RGBA diffuse at 12 and texture coordinate sets 0 and 1 at 28 and 36.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LitInput {
     /// Bytes between consecutive input vertices.
     pub stride: usize,
-    /// Byte offset of the 3-float normal.
-    pub normal_offset: usize,
+    /// Byte offset of the 3-float normal, or `None` when the FVF has none.
+    /// D3D8 then lights with a zero normal: only the ambient and emissive
+    /// terms contribute.
+    pub normal_offset: Option<usize>,
     /// Byte offset of the `D3DCOLOR` diffuse, or `None` when the FVF has no
     /// COLOR1 and the material supplies it.
     pub diffuse_offset: Option<usize>,
     /// Byte offset of the 2-float texture coordinate.
     pub uv_offset: usize,
+    /// Byte offset of texture set 1, or `None` to repeat set 0.
+    pub uv1_offset: Option<usize>,
 }
+
+/// Bytes per vertex written by [`DeviceState::light_vertices`].
+pub const LIT_RECORD: usize = 44;
 
 impl LitInput {
     /// `XYZ | NORMAL | DIFFUSE | TEX1` (0x152): diffuse at 24, UV at 28.
     pub const XYZ_NORMAL_DIFFUSE_TEX1: Self = Self {
         stride: 36,
-        normal_offset: 12,
+        normal_offset: Some(12),
         diffuse_offset: Some(24),
         uv_offset: 28,
+        uv1_offset: None,
     };
 
     /// `XYZ | NORMAL | TEX1` (0x112): no per-vertex diffuse, UV at 24.
     pub const XYZ_NORMAL_TEX1: Self = Self {
         stride: 32,
-        normal_offset: 12,
+        normal_offset: Some(12),
         diffuse_offset: None,
         uv_offset: 24,
+        uv1_offset: None,
     };
+
+    /// `XYZ | NORMAL | TEX2` (0x212): 0x112 with a second UV set at 32.
+    pub const XYZ_NORMAL_TEX2: Self = Self {
+        stride: 40,
+        normal_offset: Some(12),
+        diffuse_offset: None,
+        uv_offset: 24,
+        uv1_offset: Some(32),
+    };
+
+    /// The normal-less FVFs a game may draw with `D3DRS_LIGHTING` on:
+    /// XYZ | DIFFUSE | TEX1/TEX2 (0x142/0x242) and the same with SPECULAR
+    /// (0x1C2/0x2C2), whose texture sets start 4 bytes later.
+    pub(crate) fn without_normal(fvf: u32) -> Option<Self> {
+        let (stride, uv_offset, uv1_offset) = match fvf {
+            0x0142 => (24, 16, None),
+            0x0242 => (32, 16, Some(24)),
+            0x01C2 => (28, 20, None),
+            0x02C2 => (36, 20, Some(28)),
+            _ => return None,
+        };
+        Some(Self {
+            stride,
+            normal_offset: None,
+            diffuse_offset: Some(12),
+            uv_offset,
+            uv1_offset,
+        })
+    }
 
     /// The lit FVFs `ProcessVertices` accepts as a source. Other FVFs would
     /// need a lighting path the engine does not ask for here, so they are
@@ -86,9 +124,10 @@ impl LitInput {
         match fvf {
             0x0152 => Ok(Self::XYZ_NORMAL_DIFFUSE_TEX1),
             0x0112 => Ok(Self::XYZ_NORMAL_TEX1),
+            0x0212 => Ok(Self::XYZ_NORMAL_TEX2),
             other => Err(RenderError::new(
                 "ProcessVertices",
-                format!("source FVF {other:#06x} is not 0x152 or 0x112"),
+                format!("source FVF {other:#06x} is not 0x152, 0x112 or 0x212"),
             )),
         }
     }
@@ -185,18 +224,20 @@ impl LightingSetup<'_> {
                 material_source(s.diffuse_material_source, material.diffuse, color);
             let source_specular =
                 material_source(s.specular_material_source, material.specular, color);
-            let normal = [
-                float(layout.normal_offset),
-                float(layout.normal_offset + 4),
-                float(layout.normal_offset + 8),
-            ];
-            let mut normal = self
-                .normal_matrix
-                .expect("normal matrix prepared with lighting")
-                .map(|row| dot(row, normal));
-            if s.normalize_normals {
-                normal = normalize(normal);
-            }
+            let normal = match layout.normal_offset {
+                Some(at) => {
+                    let normal = [float(at), float(at + 4), float(at + 8)];
+                    let mut normal = self
+                        .normal_matrix
+                        .expect("normal matrix prepared with lighting")
+                        .map(|row| dot(row, normal));
+                    if s.normalize_normals {
+                        normal = normalize(normal);
+                    }
+                    normal
+                }
+                None => [0.0; 3],
+            };
             let view_position = transform(self.world_view, position, 1.0);
             // Camera at the view-space origin. `D3DRS_LOCALVIEWER` selects the
             // per-vertex eye vector; otherwise the viewer is at infinity.
@@ -229,7 +270,9 @@ impl LightingSetup<'_> {
                     let light_position = transform(self.state.view, light.position, 1.0);
                     let delta = std::array::from_fn(|c| light_position[c] - view_position[c]);
                     let distance = dot(delta, delta).sqrt();
-                    if distance > light.range {
+                    // DIVERGENCE(original): a light at a non-finite position
+                    // contributes nothing instead of NaN colour.
+                    if !(distance <= light.range) {
                         continue;
                     }
                     let denominator = light.attenuation0
@@ -422,8 +465,8 @@ impl DeviceState {
             || !self
                 .lights
                 .iter()
-                .zip(self.light_enabled)
-                .any(|(l, enabled)| enabled && l.light_type != 3)
+                .zip(&self.light_enabled)
+                .any(|(l, enabled)| *enabled && l.light_type != 3)
         {
             return true;
         }
@@ -441,11 +484,14 @@ impl DeviceState {
 
     fn lighting_setup(&self) -> Result<LightingSetup<'_>, RenderError> {
         let s = &self.states;
+        // DIVERGENCE(original): past MAX_LIGHTS enabled lights, the lowest
+        // indices light the draw; drivers differ on which they keep.
         let enabled: Vec<_> = self
             .lights
             .iter()
-            .zip(self.light_enabled)
+            .zip(&self.light_enabled)
             .filter_map(|(light, on)| on.then_some(light))
+            .take(MAX_LIGHTS)
             .collect();
         if s.lighting {
             for light in &enabled {
@@ -520,7 +566,7 @@ impl DeviceState {
     /// 0x152: XYZ at 0, NORMAL at 12, D3DCOLOR at 24, float2 UV at 28.
     /// 0x112: XYZ at 0, NORMAL at 12, float2 UV at 24, material diffuse.
     /// Evaluate in camera space and keep floating diffuse until rasterization.
-    /// Writes exactly `(end - start) * 36` bytes into `out`, packing the
+    /// Writes exactly `(end - start) * LIT_RECORD` bytes into `out`, packing the
     /// `start..end` vertex range from output slot zero. The caller-owned scratch
     /// buffer lets a draw loop reuse one allocation; `resize` only zero-fills the first
     /// time a larger draw grows it.
@@ -533,16 +579,18 @@ impl DeviceState {
         out: &mut Vec<u8>,
     ) -> Result<(), RenderError> {
         let setup = self.lighting_setup()?;
-        out.resize((end - start) * 36, 0);
+        out.resize((end - start) * LIT_RECORD, 0);
         for index in start..end {
             let begin = index * layout.stride;
             let vertex = &bytes[begin..begin + layout.stride];
             let lit = setup.evaluate(vertex, layout)?;
             let slot = index - start;
-            let dst = &mut out[slot * 36..(slot + 1) * 36];
+            let dst = &mut out[slot * LIT_RECORD..(slot + 1) * LIT_RECORD];
             dst[..12].copy_from_slice(&vertex[..12]);
             dst[12..28].copy_from_slice(bytemuck::bytes_of(&lit.diffuse));
             dst[28..36].copy_from_slice(&vertex[layout.uv_offset..layout.uv_offset + 8]);
+            let uv1 = layout.uv1_offset.unwrap_or(layout.uv_offset);
+            dst[36..44].copy_from_slice(&vertex[uv1..uv1 + 8]);
         }
         Ok(())
     }
@@ -850,6 +898,35 @@ mod tests {
         state
     }
     #[test]
+    fn normal_less_vertices_light_with_a_zero_normal() {
+        // XYZ | DIFFUSE | TEX2 (0x242): the directional light adds nothing,
+        // so the vertex colour reaches the output only through the ambient
+        // term (AMBIENTMATERIALSOURCE = COLOR1, global ambient white).
+        let mut state = directional();
+        state.set_render_state(139, 0xffff_ffff).unwrap(); // D3DRS_AMBIENT
+        state.set_render_state(147, 1).unwrap(); // AMBIENTMATERIALSOURCE COLOR1
+        let mut vertex = Vec::new();
+        for v in [1.0f32, 2.0, 3.0] {
+            vertex.extend(v.to_le_bytes());
+        }
+        vertex.extend(0x80ff_8000u32.to_le_bytes());
+        for v in [0.25f32, 0.5, 4.0, 8.0] {
+            vertex.extend(v.to_le_bytes());
+        }
+        let layout = LitInput::without_normal(0x242).unwrap();
+        let mut out = Vec::new();
+        state
+            .light_vertices(&vertex, 0, 1, layout, &mut out)
+            .unwrap();
+        assert_eq!(out.len(), LIT_RECORD);
+        let f = |at: usize| f32::from_le_bytes(out[at..at + 4].try_into().unwrap());
+        assert_eq!([f(12), f(16), f(20)], [1.0, 128.0 / 255.0, 0.0]);
+        assert_eq!([f(28), f(32), f(36), f(40)], [0.25, 0.5, 4.0, 8.0]);
+        // Without lighting these FVFs keep the unlit path.
+        assert!(LitInput::without_normal(0x112).is_none());
+    }
+
+    #[test]
     fn gpu_uniform_layout_and_cpu_fallback_keep_diagnostics() {
         assert_eq!(std::mem::size_of::<GpuLight>(), 96);
         assert_eq!(std::mem::size_of::<LightingUniform>(), 960);
@@ -974,7 +1051,7 @@ mod tests {
                 let unpacked: Vec<u8> = remapped
                     .iter()
                     .flat_map(|i| {
-                        lit[*i as usize * 36..(*i as usize + 1) * 36]
+                        lit[*i as usize * LIT_RECORD..(*i as usize + 1) * LIT_RECORD]
                             .iter()
                             .copied()
                     })
@@ -1038,7 +1115,7 @@ mod tests {
         state
             .light_vertices(&two, 0, 2, LitInput::XYZ_NORMAL_DIFFUSE_TEX1, &mut scratch)
             .unwrap();
-        assert_eq!(scratch.len(), 72);
+        assert_eq!(scratch.len(), 2 * LIT_RECORD);
         let one = vertex([0.0, 0.0, -1.0], 0xff00ff00);
         state
             .light_vertices(&one, 0, 1, LitInput::XYZ_NORMAL_DIFFUSE_TEX1, &mut scratch)
@@ -1048,7 +1125,7 @@ mod tests {
             .light_vertices(&one, 0, 1, LitInput::XYZ_NORMAL_DIFFUSE_TEX1, &mut fresh)
             .unwrap();
         assert_eq!(scratch, fresh);
-        assert_eq!(scratch.len(), 36);
+        assert_eq!(scratch.len(), LIT_RECORD);
     }
 
     #[test]
@@ -1072,7 +1149,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(packed, fresh);
-        assert_eq!(packed.len(), 36);
+        assert_eq!(packed.len(), LIT_RECORD);
     }
 
     #[test]
@@ -1101,7 +1178,7 @@ mod tests {
                 &mut out112,
             )
             .unwrap();
-        assert_eq!(out112.len(), 36);
+        assert_eq!(out112.len(), LIT_RECORD);
         assert_eq!(&out112[..12], &out152[..12]);
         assert_eq!(&out112[12..28], &out152[12..28]);
         let uv = [0.25f32, 0.5]

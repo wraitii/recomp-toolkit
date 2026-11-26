@@ -2,7 +2,7 @@ set(RECOMP_DX_SOURCES
   com.cpp dx.cpp host_api.cpp display_stubs.cpp ddraw.cpp d3d.cpp d3d7.cpp d3d11.cpp dxgi.cpp d3dcompiler.cpp
   d3dx10.cpp dsound.cpp dshow.cpp mp3_source.cpp dinput.cpp dinput_joystick.cpp xinput.cpp qmixer.cpp
   mss32.cpp redbook.cpp avi.cpp waveout.cpp fmod.cpp soundlib.cpp galaxy_stub.cpp riff.cpp wav_source.cpp bink.cpp video_frame.cpp mf_media.cpp
-  mf.cpp weanetr.cpp d3d9.cpp d3dx9_compile.cpp
+  mf.cpp weanetr.cpp dplayx.cpp d3d9.cpp d3dx9_compile.cpp
   d3dx9.cpp d3d8.cpp)
 
 include(${CMAKE_SOURCE_DIR}/cmake/Vkd3dShader.cmake)

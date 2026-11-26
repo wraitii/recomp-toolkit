@@ -20,6 +20,7 @@
 #include "loader.h"
 
 #include <errno.h>
+#include <initializer_list>
 #include "../platform/os.h"
 
 #include <setjmp.h>
@@ -4729,7 +4730,8 @@ void k_EnumSystemLocalesA(X86 *c) {
 // caches for.  A quarter of half a gigabyte is in use; the virtual space is a
 // 32-bit process's 2 GB less the reserved top pages.
 // SetErrorMode(mode) returns the previous mode; nothing here shows a critical-
-// error box either way.  GetLogicalDrives: one fixed disk, C:.
+// error box either way.  GetLogicalDrives: one fixed disk, C:, and the disc
+// drive D: when the game has one.
 static uint32_t g_error_mode = 0;
 void k_SetErrorMode(X86 *c) {
     uint32_t prev = g_error_mode;
@@ -4737,7 +4739,7 @@ void k_SetErrorMode(X86 *c) {
     set_eax(c, prev);
 }
 void k_GetLogicalDrives(X86 *c) {
-    set_eax(c, 0x4);
+    set_eax(c, RECOMP_DISC_LABEL[0] ? 0xc : 0x4);
 }
 
 static uint32_t g_execution_state = 0;
@@ -5406,28 +5408,38 @@ bool win32_crt_findclose(uint32_t handle) {
     return true;
 }
 
+// The retail disc a game checks for ([media] disc_label): drive D: is a CD-ROM
+// with that label. Its paths resolve like every other drive's, against the
+// game directory, so the disc's files sit there under their disc spelling.
+static bool has_disc() {
+    return RECOMP_DISC_LABEL[0] != 0;
+}
+static bool is_disc_root(const std::string &root) {
+    return has_disc() && root.size() >= 2 && root[1] == ':' && (root[0] == 'D' || root[0] == 'd');
+}
+
 void volume_information_named(X86 *c, const std::string &root, bool wide) {
-    (void)root;
     auto put = [wide](uint32_t p, const char *s, uint32_t n) {
         return wide ? gm_put_wstr(p, s, n) : gm_put_str(p, s, n);
     };
-    // No CD check is modelled: report a fixed volume with no label. If the
-    // game turns out to key off the volume name this must come from the trace.
+    const bool disc = is_disc_root(root);
+    // Every other drive is a fixed volume with no label.
     uint32_t namebuf = arg(c, 1), namelen = arg(c, 2), pserial = arg(c, 3);
     uint32_t pmaxcomp = arg(c, 4), pflags = arg(c, 5);
     uint32_t fsbuf = arg(c, 6), fslen = arg(c, 7);
     if (namebuf && namelen)
-        put(namebuf, "", namelen);
+        put(namebuf, disc ? RECOMP_DISC_LABEL : "", namelen);
     if (pserial)
         wr32(pserial, 0x1a2b3c4d);
     if (pmaxcomp)
         wr32(pmaxcomp, 255);
     if (pflags)
-        wr32(pflags, 0);
+        wr32(pflags, disc ? 0x00080000u : 0); // FILE_READ_ONLY_VOLUME
     if (fsbuf && fslen)
-        put(fsbuf, "FAT32", fslen);
-    log_once("GetVolumeInformationA",
-             "GetVolumeInformationA: reporting an unlabelled FAT32 volume");
+        put(fsbuf, disc ? "CDFS" : "FAT32", fslen);
+    if (!disc)
+        log_once("GetVolumeInformationA",
+                 "GetVolumeInformationA: reporting an unlabelled FAT32 volume");
     set_eax(c, 1);
 }
 
@@ -5447,24 +5459,30 @@ void disk_free_space(X86 *c) {
 }
 
 void drive_type_named(X86 *c, const std::string &root) {
-    (void)root;
-    set_eax(c, 3); // DRIVE_FIXED
+    set_eax(c, is_disc_root(root) ? 5 : 3); // DRIVE_CDROM : DRIVE_FIXED
 }
 
 void logical_drive_strings(X86 *c, bool wide) {
-    static const char drives[] = "C:\\\0";
+    const char *roots[] = {"C:\\", has_disc() ? "D:\\" : nullptr};
     uint32_t len = arg(c, 0), buf = arg(c, 1);
-    uint32_t need = sizeof drives; // includes both NULs
+    uint32_t need = 1; // the final NUL
+    for (const char *r : roots)
+        need += r ? 4 : 0;
     if (!buf || len < need) {
         set_eax(c, need);
         return;
     }
-    if (wide) {
-        gm_put_wstr(buf, "C:\\", len);
-        wr16(buf + 8, 0);
-    } else {
-        memcpy(g_mem + buf, drives, need);
-    }
+    auto put_char = [wide, buf](uint32_t at, char ch) {
+        if (wide)
+            wr16(buf + at * 2, (uint8_t)ch);
+        else
+            g_mem[buf + at] = (uint8_t)ch;
+    };
+    uint32_t at = 0;
+    for (const char *r : roots)
+        for (int i = 0; r && i < 4; ++i)
+            put_char(at++, r[i]);
+    put_char(at, 0);
     set_eax(c, need - 1);
 }
 
@@ -5846,6 +5864,122 @@ void k_SleepEx(X86 *c) {
     set_eax(c, sched_sleep_ex(c, arg(c, 0), arg(c, 1) != 0));
 }
 
+// -------------------------------------------------------------------------
+// The 16-bit-era file API (_lopen, _lread, ...). Each forwards to the Win32
+// shim it is defined in terms of: the arguments are rewritten into a scratch
+// frame below the guest's ESP, the Win32 shim runs against that frame, and
+// ESP is restored before the caller's own stdcall cleanup. HFILE_ERROR is -1,
+// the same bits as INVALID_HANDLE_VALUE.
+// -------------------------------------------------------------------------
+static const uint32_t HFILE_ERROR_ = 0xffffffffu;
+
+static uint32_t lfile_forward(X86 *c, void (*shim)(X86 *), std::initializer_list<uint32_t> args) {
+    uint32_t saved = c->r[R_ESP];
+    // Leave room below the live stack: a return-address slot plus the arguments.
+    uint32_t frame = (saved - 64u - 4u * (uint32_t)args.size()) & ~3u;
+    uint32_t at = frame + 4;
+    for (uint32_t value : args) {
+        wr32(at, value);
+        at += 4;
+    }
+    c->r[R_ESP] = frame;
+    shim(c);
+    c->r[R_ESP] = saved;
+    return c->r[R_EAX];
+}
+
+static void lfile_open(X86 *c, uint32_t path, uint32_t access, uint32_t share, uint32_t disposition,
+                       uint32_t attributes) {
+    lfile_forward(c, k_CreateFileA, {path, access, share, 0, disposition, attributes, 0});
+}
+
+// _lopen(LPCSTR path, int mode): OF_READ 0, OF_WRITE 1, OF_READWRITE 2; the
+// OF_SHARE_* bits only restrict other openers and are not modelled.
+void k__lopen(X86 *c) {
+    uint32_t mode = arg(c, 1) & 3u;
+    uint32_t access = mode == 1 ? 0x40000000u : mode == 2 ? 0xc0000000u : 0x80000000u;
+    lfile_open(c, arg(c, 0), access, 3, 3 /* OPEN_EXISTING */, 0x80);
+}
+
+// _lcreat(LPCSTR path, int attributes): create or truncate, opened read/write.
+void k__lcreat(X86 *c) {
+    uint32_t attributes = arg(c, 1) & 0x27u;
+    lfile_open(c, arg(c, 0), 0xc0000000u, 3, 2 /* CREATE_ALWAYS */, attributes ? attributes : 0x80);
+}
+
+// _lread/_hread(HFILE, LPVOID, count): bytes read, or HFILE_ERROR.
+void k__lread(X86 *c) {
+    uint32_t h = arg(c, 0), buf = arg(c, 1), count = arg(c, 2);
+    uint32_t saved = c->r[R_ESP];
+    uint32_t got = (saved - 128u) & ~3u;
+    wr32(got, 0);
+    uint32_t ok = lfile_forward(c, k_ReadFile, {h, buf, count, got, 0});
+    set_eax(c, ok ? rd32(got) : HFILE_ERROR_);
+}
+
+// _lwrite/_hwrite(HFILE, LPCSTR, count): bytes written, or HFILE_ERROR. A
+// zero count truncates the file at the current position in Win32; here it
+// writes nothing.
+void k__lwrite(X86 *c) {
+    uint32_t h = arg(c, 0), buf = arg(c, 1), count = arg(c, 2);
+    if (!count) {
+        set_eax(c, 0);
+        return;
+    }
+    uint32_t saved = c->r[R_ESP];
+    uint32_t wrote = (saved - 128u) & ~3u;
+    wr32(wrote, 0);
+    uint32_t ok = lfile_forward(c, k_WriteFile, {h, buf, count, wrote, 0});
+    set_eax(c, ok ? rd32(wrote) : HFILE_ERROR_);
+}
+
+// _llseek(HFILE, LONG offset, int origin): new position, or HFILE_ERROR.
+void k__llseek(X86 *c) {
+    lfile_forward(c, k_SetFilePointer, {arg(c, 0), arg(c, 1), 0, arg(c, 2)});
+}
+
+// OpenFile(LPCSTR path, LPOFSTRUCT info, UINT style): the OFSTRUCT records
+// the path it was given; OF_EXIST closes the file again and reports success.
+void k_OpenFile(X86 *c) {
+    uint32_t path = arg(c, 0), info = arg(c, 1), style = arg(c, 2);
+    if (info && gm_valid(info, 136)) {
+        wr8(info, 136);    // cBytes
+        wr8(info + 1, 0);  // fFixedDisk
+        wr16(info + 2, 0); // nErrCode
+        std::string name = path ? gm_str(path, 127) : std::string();
+        for (size_t i = 0; i <= name.size(); ++i)
+            wr8(info + 8 + (uint32_t)i, i < name.size() ? (uint8_t)name[i] : 0);
+    }
+    if (style & 0x0200u) { // OF_DELETE
+        uint32_t ok = lfile_forward(c, k_DeleteFileA, {path});
+        set_eax(c, ok ? 1 : HFILE_ERROR_);
+        return;
+    }
+    if (style & 0x1000u) // OF_CREATE
+        lfile_open(c, path, 0xc0000000u, 3, 2 /* CREATE_ALWAYS */, 0x80);
+    else {
+        uint32_t mode = style & 3u;
+        uint32_t access = mode == 1 ? 0x40000000u : mode == 2 ? 0xc0000000u : 0x80000000u;
+        lfile_open(c, path, access, 3, 3 /* OPEN_EXISTING */, 0x80);
+    }
+    uint32_t handle = c->r[R_EAX];
+    if (handle == HFILE_ERROR_) {
+        if (info && gm_valid(info, 136))
+            wr16(info + 2, 2); // ERROR_FILE_NOT_FOUND
+        return;
+    }
+    if (style & 0x4000u) { // OF_EXIST: open, close, succeed
+        lfile_forward(c, k_CloseHandle, {handle});
+        set_eax(c, 1);
+    }
+}
+
+// _lclose(HFILE): 0 on success, HFILE_ERROR otherwise.
+void k__lclose(X86 *c) {
+    uint32_t ok = lfile_forward(c, k_CloseHandle, {arg(c, 0)});
+    set_eax(c, ok ? 0 : HFILE_ERROR_);
+}
+
 const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "DosDateTimeToFileTime", 3, imports_unsupported},
     {"KERNEL32.dll", "GetConsoleMode", 2, imports_unsupported},
@@ -5881,6 +6015,15 @@ const ImportShim g_kernel32_shims[] = {
     {"KERNEL32.dll", "GetFileInformationByHandle", 2, k_GetFileInformationByHandle},
     {"KERNEL32.dll", "GetFileSize", 2, k_GetFileSize},
     {"KERNEL32.dll", "CloseHandle", 1, k_CloseHandle},
+    {"KERNEL32.dll", "_lopen", 2, k__lopen},
+    {"KERNEL32.dll", "_lcreat", 2, k__lcreat},
+    {"KERNEL32.dll", "_lread", 3, k__lread},
+    {"KERNEL32.dll", "_hread", 3, k__lread},
+    {"KERNEL32.dll", "_lwrite", 3, k__lwrite},
+    {"KERNEL32.dll", "_hwrite", 3, k__lwrite},
+    {"KERNEL32.dll", "_llseek", 3, k__llseek},
+    {"KERNEL32.dll", "_lclose", 1, k__lclose},
+    {"KERNEL32.dll", "OpenFile", 3, k_OpenFile},
     {"KERNEL32.dll", "FlushFileBuffers", 1, k_FlushFileBuffers},
     {"KERNEL32.dll", "SetEndOfFile", 1, k_SetEndOfFile},
     {"KERNEL32.dll", "GetFileType", 1, k_GetFileType},

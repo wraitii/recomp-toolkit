@@ -141,9 +141,10 @@ impl<'a> VertexBuffer<'a> {
     }
 }
 
-/// Pack a nonindexed strip/fan into independent triangles, retaining complete
-/// vertex records and alternating strip winding. Bounds and allocation are
-/// checked before any source copy; the caller retains/reuses the scratch bytes.
+/// Pack a nonindexed line strip into a line list, or a triangle strip/fan into
+/// independent triangles, retaining complete vertex records and alternating
+/// strip winding. Bounds and allocation are checked before any source copy;
+/// the caller retains/reuses the scratch bytes.
 pub fn expand_nonindexed_into(
     output: &mut Vec<u8>,
     vertices: &VertexBuffer,
@@ -152,26 +153,27 @@ pub fn expand_nonindexed_into(
     primitive_count: u32,
 ) -> Result<(), RenderError> {
     let invalid = |why| RenderError::invalid("DrawPrimitive", why);
-    if !matches!(topology, 5 | 6) {
+    if !matches!(topology, 3 | 5 | 6) {
         return Err(RenderError::new(
             "DrawPrimitive",
-            "expected TRIANGLESTRIP (5) or TRIANGLEFAN (6)",
+            "expected LINESTRIP (3), TRIANGLESTRIP (5) or TRIANGLEFAN (6)",
         ));
     }
     if primitive_count == 0 {
         output.clear();
         return Ok(());
     }
+    let (extra, per) = if topology == 3 { (1, 2) } else { (2, 3) };
     let end = start_vertex
         .checked_add(primitive_count)
-        .and_then(|n| n.checked_add(2))
+        .and_then(|n| n.checked_add(extra))
         .ok_or_else(|| invalid("vertex range overflow"))?;
     let stride = vertices.stride;
     if u64::from(end) * u64::from(stride) > vertices.bytes().len() as u64 {
         return Err(invalid("vertex range exceeds buffer"));
     }
     let size = primitive_count
-        .checked_mul(3)
+        .checked_mul(per)
         .and_then(|n| n.checked_mul(stride))
         .ok_or_else(|| invalid("expanded vertex size overflow"))? as usize;
     output.clear();
@@ -179,6 +181,13 @@ pub fn expand_nonindexed_into(
         RenderError::out_of_memory("DrawPrimitive", "triangle expansion allocation failed")
     })?;
     for triangle in 0..primitive_count {
+        if topology == 3 {
+            for index in [triangle, triangle + 1] {
+                let begin = (u64::from(start_vertex + index) * u64::from(stride)) as usize;
+                output.extend_from_slice(&vertices.bytes()[begin..begin + stride as usize]);
+            }
+            continue;
+        }
         let indices = if topology == 6 {
             [0, triangle + 1, triangle + 2]
         } else if triangle & 1 == 0 {
@@ -246,7 +255,7 @@ pub fn expand_indexed_into(
                 .ok_or_else(|| invalid("index count overflow"))?,
             draw.primitive_count,
         ),
-        2 | 6 => (
+        5 | 6 => (
             draw.primitive_count
                 .checked_add(2)
                 .ok_or_else(|| invalid("index count overflow"))?,
@@ -255,7 +264,7 @@ pub fn expand_indexed_into(
         _ => {
             return Err(RenderError::new(
                 "DrawIndexedPrimitive",
-                "unsupported topology; expected TRIANGLELIST (4), TRIANGLESTRIP (2) or TRIANGLEFAN (6)",
+                "unsupported topology; expected TRIANGLELIST (4), TRIANGLESTRIP (5) or TRIANGLEFAN (6)",
             ));
         }
     };
@@ -311,13 +320,18 @@ pub fn expand_indexed_into(
         .checked_mul(draw.stride)
         .ok_or_else(|| invalid("expanded size overflow"))?;
     // The source position of output triangle vertex `t`: a list is in order, a
-    // strip is windowed (i, i+1, i+2), and a fan pins vertex 0.
+    // strip is windowed (i, i+1, i+2) with odd triangles as (i+1, i, i+2) so
+    // every triangle keeps the strip's winding, and a fan pins vertex 0.
     let source = |t: usize| -> usize {
         match draw.topology {
             4 => t,
-            2 => {
+            5 => {
                 let i = t / 3;
-                i + t % 3
+                match (i & 1, t % 3) {
+                    (1, 0) => i + 1,
+                    (1, 1) => i,
+                    (_, k) => i + k,
+                }
             }
             _ => {
                 let i = t / 3;
@@ -656,7 +670,7 @@ mod tests {
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>();
         let strip = IndexedDraw {
-            topology: 2,
+            topology: 5,
             index_format: 101,
             stride: 1,
             base_vertex: 0,
@@ -667,7 +681,7 @@ mod tests {
         };
         assert_eq!(
             expand_indexed(&vertices, &indices, strip).unwrap(),
-            [11, 12, 13, 12, 13, 14]
+            [11, 12, 13, 13, 12, 14]
         );
         let fan = IndexedDraw {
             topology: 6,

@@ -13,6 +13,7 @@
 #include "../runtime/display_seam.h"
 #include "../runtime/win32.h"
 #include "../platform/os.h"
+#include <map>
 #include <unordered_set>
 #include <cstdio>
 #include <cstdlib>
@@ -946,6 +947,35 @@ void Dev_ValidateDevice(X86 *c) {
 // The renderer stores this as its texture-memory budget (Ghidra 0x007c70b0
 // reads IDirect3DDevice8 slot 4 into renderer +4/+8). Return the modeled
 // available texture memory rather than a fabricated GPU size.
+// (this, pMode): the mode of the display the device presents to. The host
+// presents the device's back buffer as the game's whole display, so that is
+// the mode a fullscreen game sees, with the 32-bit display format.
+void Dev_GetDisplayMode(X86 *c) {
+    ComObj *dev = d8_dev(c);
+    uint32_t out = arg(c, 1);
+    if (!dev || !out || !gm_valid(out, 16)) {
+        com_ret(c, D8_ERR_INVALIDCALL);
+        return;
+    }
+    write_display_mode(out, {dev->d3d8_width, dev->d3d8_height, 0, D3DFMT_X8R8G8B8});
+    com_ret(c, D8_OK);
+}
+// Cube textures are not implemented (TextureCaps leaves out CUBEMAP), but some
+// engines create them regardless and check the result. Refuse the call so the
+// caller takes its failure path.
+//
+// DIVERGENCE(original): the reference adapter created the cube texture.
+void Dev_CreateCubeTexture(X86 *c) {
+    uint32_t out = arg(c, 6);
+    if (out && gm_valid(out, 4))
+        wr32(out, 0);
+    static bool reported;
+    if (!reported) {
+        reported = true;
+        fprintf(stderr, "d3d8: CreateCubeTexture refused (cube textures are not implemented)\n");
+    }
+    com_ret(c, D8_ERR_INVALIDCALL);
+}
 void Dev_GetAvailableTextureMem(X86 *c) {
     com_ret(c, D8_AVAILABLE_TEXTURE_MEM);
 }
@@ -1038,6 +1068,10 @@ void Dev_Clear(X86 *c) {
     }
     com_ret(c, D8_ERR_INVALIDCALL);
 }
+static std::map<const ComObj *, std::map<uint32_t, std::array<float, 16>>> &d8_transforms() {
+    static std::map<const ComObj *, std::map<uint32_t, std::array<float, 16>>> transforms;
+    return transforms;
+}
 void Dev_SetTransform(X86 *c) {
     ComObj *dev = d8_dev(c);
     uint32_t matrix = arg(c, 2);
@@ -1047,10 +1081,29 @@ void Dev_SetTransform(X86 *c) {
         auto status =
             recomp::d3d::set_transform(*dev->d3d8_device->value, arg(c, 1),
                                        rust::Slice<const float>(value.data(), value.size()));
+        if (d3d_bridge_ok(status))
+            d8_transforms()[dev][arg(c, 1)] = value;
         com_ret(c, bridge_result(c, status));
         return;
     }
     com_ret(c, D8_ERR_INVALIDCALL);
+}
+// The renderer keeps the transforms it draws with; this copy answers
+// GetTransform with exactly what the guest last set. Unset states read as
+// identity, D3D8's default for every transform.
+void Dev_GetTransform(X86 *c) {
+    ComObj *dev = d8_dev(c);
+    uint32_t matrix = arg(c, 2);
+    if (!dev || !matrix || !gm_valid(matrix, 64)) {
+        com_ret(c, D8_ERR_INVALIDCALL);
+        return;
+    }
+    std::array<float, 16> value{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    auto &known = d8_transforms()[dev];
+    if (auto found = known.find(arg(c, 1)); found != known.end())
+        value = found->second;
+    memcpy(gm_ptr(matrix), value.data(), 64);
+    com_ret(c, D8_OK);
 }
 void Dev_SetViewport(X86 *c) {
     ComObj *dev = d8_dev(c);

@@ -157,6 +157,90 @@ impl FvfLayout {
                     },
                 ],
             }),
+            // XYZ | DIFFUSE | SPECULAR | TEX1: 0x142 with a specular word at
+            // 16; set 1 aliases set 0 as in 0x142. The vertex specular reads
+            // as zero, as for 0x2C2 below.
+            0x1C2 => Ok(Self {
+                stride: 28,
+                texcoord_sets: 1,
+                pre_transformed: false,
+                attributes: vec![
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Uint32,
+                        offset: 12,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 20,
+                        shader_location: 2,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 20,
+                        shader_location: 3,
+                    },
+                ],
+            }),
+            // XYZ | DIFFUSE | SPECULAR | TEX2: the 0x242 inputs with a
+            // specular word at 16, so both texture sets move up by 4.
+            // DIVERGENCE(original): the transformed vertex entry has no
+            // specular input, so the vertex specular reads as zero.
+            0x2C2 => Ok(Self {
+                stride: 36,
+                texcoord_sets: 2,
+                pre_transformed: false,
+                attributes: vec![
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Uint32,
+                        offset: 12,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 20,
+                        shader_location: 2,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 28,
+                        shader_location: 3,
+                    },
+                ],
+            }),
+            // XYZ | NORMAL | TEX2: 0x112 with a second texture set at 32.
+            0x212 => Ok(Self {
+                stride: 40,
+                texcoord_sets: 2,
+                pre_transformed: false,
+                attributes: vec![
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 24,
+                        shader_location: 2,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 32,
+                        shader_location: 3,
+                    },
+                ],
+            }),
             FVF_XYZ_NORMAL_TEX1 => Ok(Self {
                 stride: 32,
                 texcoord_sets: 1,
@@ -328,7 +412,7 @@ impl FvfLayout {
             _ => Err(RenderError::new(
                 "FvfLayout::decode",
                 format!(
-                    "unsupported FVF 0x{raw:08X}; only D3DFVF_XYZ | D3DFVF_DIFFUSE (0x{FVF_XYZ_DIFFUSE:08X}), D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1 (0x{FVF_XYZ_DIFFUSE_TEX1:08X}), D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX2 (0x{FVF_XYZ_DIFFUSE_TEX2:08X}), XYZ | NORMAL | TEX1 (0x00000112), XYZ | NORMAL | DIFFUSE | TEX1 (0x00000152) and XYZRHW | DIFFUSE | TEX1 (0x00000144) or with SPECULAR | TEX1/2 (0x000001C4/0x000002C4) are implemented"
+                    "unsupported FVF 0x{raw:08X}; only D3DFVF_XYZ | D3DFVF_DIFFUSE (0x{FVF_XYZ_DIFFUSE:08X}), D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1 (0x{FVF_XYZ_DIFFUSE_TEX1:08X}), D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX2 (0x{FVF_XYZ_DIFFUSE_TEX2:08X}) or with SPECULAR (0x000001C2/0x000002C2), XYZ | NORMAL | TEX1/TEX2 (0x00000112/0x00000212), XYZ | NORMAL | DIFFUSE | TEX1 (0x00000152) and XYZRHW | DIFFUSE | TEX1 (0x00000144) or with SPECULAR | TEX1/2 (0x000001C4/0x000002C4) are implemented"
                 ),
             )),
         }
@@ -1126,8 +1210,13 @@ fn vs_rhw_color_main(in: VertexInputRhwColor) -> VertexOutput {
     return rhw_vertex(VertexInputRhw(in.position, in.color, vec2<f32>(0.0), vec2<f32>(0.0), 0u));
 }
 
-// D3DTA_*: low nibble 0 DIFFUSE, 1 CURRENT, 2 TEXTURE, 3 TFACTOR; bit 0x10 is
-// D3DTA_COMPLEMENT and bit 0x20 is D3DTA_ALPHAREPLICATE.
+// D3DTA_SPECULAR: the interpolated vertex specular, set by `fs_main`.
+// DIVERGENCE(original): its alpha reads as 1; the specular alpha carries
+// the vertex fog factor in this pipeline.
+var<private> stage_specular: vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+
+// D3DTA_*: low nibble 0 DIFFUSE, 1 CURRENT, 2 TEXTURE, 3 TFACTOR, 4 SPECULAR;
+// bit 0x10 is D3DTA_COMPLEMENT and bit 0x20 is D3DTA_ALPHAREPLICATE.
 fn stage_arg(
     selector: u32,
     diffuse: vec4<f32>,
@@ -1141,6 +1230,7 @@ fn stage_arg(
         case 1u: { v = current; }
         case 2u: { v = texel; }
         case 3u: { v = tfactor; }
+        case 4u: { v = stage_specular; }
         default: { v = vec4<f32>(1.0, 1.0, 1.0, 1.0); }
     }
     if ((selector & 0x10u) != 0u) { v = vec4<f32>(1.0, 1.0, 1.0, 1.0) - v; }
@@ -1161,6 +1251,7 @@ fn stage_arg_a(
         case 1u: { v = current.a; }
         case 2u: { v = texel.a; }
         case 3u: { v = tfactor.a; }
+        case 4u: { v = stage_specular.a; }
         default: { v = 1.0; }
     }
     if ((selector & 0x10u) != 0u) { v = 1.0 - v; }
@@ -1369,6 +1460,7 @@ fn alpha_test_pass(alpha: f32) -> bool {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse = in.color;
+    stage_specular = vec4<f32>(in.specular, 1.0);
     let r0 = eval_stage(stages.stages[0], diffuse, diffuse, in.uv0, in.uv1, in.cam_pos, stage0_tex, stage0_sampler);
     let r1 = eval_stage(stages.stages[1], r0, diffuse, in.uv0, in.uv1, in.cam_pos, stage1_tex, stage1_sampler);
     if (!alpha_test_pass(r1.a)) {
@@ -1424,6 +1516,44 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn decode_xyz_normal_tex2_and_its_gpu_lit_layout() {
+        let layout = FvfLayout::decode(0x212).unwrap();
+        assert_eq!(layout.stride, 40);
+        assert_eq!(
+            layout
+                .attributes
+                .iter()
+                .map(|a| (a.shader_location, a.offset))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (2, 24), (3, 32)]
+        );
+        let lit = gpu_lit_layout(0x212);
+        assert!(
+            lit.attributes
+                .iter()
+                .any(|a| a.shader_location == 4 && a.offset == 12)
+        );
+    }
+
+    #[test]
+    fn decode_xyz_diffuse_specular_tex2_skips_the_specular_word() {
+        let layout = FvfLayout::decode(0x2C2).unwrap();
+        assert_eq!(layout.stride, 36);
+        assert!(!layout.pre_transformed);
+        assert_eq!(
+            layout
+                .attributes
+                .iter()
+                .map(|a| (a.shader_location, a.offset))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (1, 12), (2, 20), (3, 28)]
+        );
+        let one = FvfLayout::decode(0x1C2).unwrap();
+        assert_eq!(one.stride, 28);
+        assert_eq!(one.attributes[2].offset, 20);
     }
 
     #[test]
@@ -1987,6 +2117,9 @@ pub fn lit_layout() -> FvfLayout {
     let mut layout = FvfLayout::decode(0x152).unwrap();
     layout.attributes[1].format = wgpu::VertexFormat::Float32x4;
     layout.attributes[1].offset = 12;
+    // Texture set 1 follows set 0 (see `LIT_RECORD`).
+    layout.attributes[3].offset = 36;
+    layout.stride = 44;
     layout
 }
 

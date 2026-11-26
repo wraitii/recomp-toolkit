@@ -711,6 +711,7 @@ pub(crate) fn finalize(
         call_returns,
         intra_calls: raw.intra_calls,
         intra_call_returns: raw.intra_call_returns,
+        pushed_continuations: raw.pushed_continuations,
         seh,
         seh_handlers: raw.seh_sites,
         seh_unwind_only,

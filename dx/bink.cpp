@@ -11,6 +11,8 @@
 #include "../platform/os.h"
 
 #include <algorithm>
+#include <cstring>
+#include <vector>
 #include <cmath>
 #include <errno.h>
 #include <string.h>
@@ -807,6 +809,56 @@ void BinkCopyToBuffer(X86 *c) {
     p->blit_ms += host_millis() - blit_start;
 }
 
+// _BinkCopyToBufferRect@44(HBINK, dest, destpitch, destheight, destx, desty,
+// srcx, srcy, srcw, srch, flags): BinkCopyToBuffer restricted to a source
+// rectangle, which lands at (destx, desty). Each source row is converted
+// whole into a scratch row and the requested columns copied out of it.
+void BinkCopyToBufferRect(X86 *c) {
+    set_eax(c, 0);
+    BinkPlayer *p = player_for(arg(c, 0));
+    if (!p || !p->have_frame || p->failed)
+        return;
+    uint32_t flags = arg(c, 10);
+    uint32_t type = flags & 0xff;
+    if (flags & 0x70000000) {
+        video_error("unsupported BinkCopyToBufferRect scaling mode");
+        return;
+    }
+    if (type != VIDEO_RGB565 && type != VIDEO_RGB555 && type != VIDEO_XRGB8888)
+        return;
+    uint64_t bpp = type == VIDEO_XRGB8888 ? 4 : 2;
+    uint64_t width = (uint64_t)p->frame->width, height = (uint64_t)p->frame->height;
+    uint64_t srcx = arg(c, 6), srcy = arg(c, 7), srcw = arg(c, 8), srch = arg(c, 9);
+    if (srcx >= width || srcy >= height)
+        return;
+    srcw = std::min(srcw, width - srcx);
+    srch = std::min(srch, height - srcy);
+    uint64_t pitch = arg(c, 2), xbytes = (uint64_t)arg(c, 4) * bpp;
+    uint64_t rows = std::min<uint64_t>(srch, arg(c, 3) > arg(c, 5) ? arg(c, 3) - arg(c, 5) : 0);
+    uint64_t row_bytes = srcw * bpp;
+    if (!rows || !row_bytes)
+        return;
+    uint64_t start = (uint64_t)arg(c, 1) + (uint64_t)arg(c, 5) * pitch + xbytes;
+    uint64_t span = (rows - 1) * pitch + row_bytes;
+    if (!arg(c, 1) || xbytes + row_bytes > pitch || start > UINT32_MAX || span > UINT32_MAX ||
+        !gm_valid((uint32_t)start, (uint32_t)span)) {
+        video_error("copy destination is outside guest memory or pitch");
+        return;
+    }
+    uint32_t blit_start = host_millis();
+    std::vector<uint8_t> scratch((size_t)(width * bpp));
+    for (uint64_t row = 0; row < rows; ++row) {
+        uint64_t src_row = srcy + row;
+        video_frame_convert_row(
+            scratch.data(), p->frame->data[0] + (ptrdiff_t)src_row * p->frame->linesize[0],
+            p->frame->data[1] + (ptrdiff_t)(src_row / 2) * p->frame->linesize[1],
+            p->frame->data[2] + (ptrdiff_t)(src_row / 2) * p->frame->linesize[2], (uint32_t)width,
+            (VideoSurfaceType)type);
+        memcpy(g_mem + start + row * pitch, scratch.data() + srcx * bpp, (size_t)row_bytes);
+    }
+    p->blit_ms += host_millis() - blit_start;
+}
+
 void BinkClose(X86 *c) {
     uint32_t rec = arg(c, 0);
     if (g_players.erase(rec))
@@ -945,6 +997,9 @@ void BinkService(X86 *c) {
 void BinkCopyToBuffer(X86 *c) {
     ret0(c);
 }
+void BinkCopyToBufferRect(X86 *c) {
+    ret0(c);
+}
 void BinkSetVolume(X86 *c) {
     ret0(c);
 }
@@ -1023,6 +1078,7 @@ const ImportShim g_video_shims[] = {
     BINK(NextFrame, 4, BinkNextFrame),
     BINK(Wait, 4, BinkWait),
     BINK(CopyToBuffer, 28, BinkCopyToBuffer),
+    BINK(CopyToBufferRect, 44, BinkCopyToBufferRect),
     BINK(ShouldSkip, 4, BinkShouldSkip),
     BINK(Service, 4, BinkService),
     BINK(GetError, 0, BinkGetError),
